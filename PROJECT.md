@@ -165,8 +165,12 @@ npm run build      # 生产构建
    该目录已加入 `.gitignore`。
 2. **Google Fonts 不可达**。
    → 不使用 `next/font/google`，改用系统字体栈，构建可完全离线完成。
-3. **`github.com` 连接不稳定**（首次探测超时，后续推送成功）。
-   → 若 `git push` 超时，稍后重试即可，本地 commit 不受影响。
+3. **`github.com` 连接不稳定**（首次探测超时，推送时偶发 `Connection reset by peer`）。
+   → 若 `git push` 失败，改用 HTTP/1.1 重试（已实测有效）：
+
+   ```bash
+   git -c http.version=HTTP/1.1 push origin main
+   ```
 
 ## 10. Git
 
