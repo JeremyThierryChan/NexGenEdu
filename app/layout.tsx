@@ -1,18 +1,22 @@
 import type { Metadata } from "next";
+import { getSiteBrand } from "@/lib/data/site";
 import "./globals.css";
 
 /**
- * 站点级 metadata。
- * TODO(Phase 2): 改为从 data/site/settings.md 读取，当前为占位常量。
+ * 站点级 metadata 从 data/site/site.md 读取，
+ * 因此你修改品牌名 / 描述 / 关键词后无需改代码。
  */
-export const metadata: Metadata = {
-  title: {
-    default: "NexGenEdu 新径教育",
-    template: "%s | NexGenEdu 新径教育",
-  },
-  description:
-    "NexGenEdu 新径教育 —— 小班教学 · 个性化辅导 · 持续反馈。提供初高中学科辅导与升学规划。",
-};
+export function generateMetadata(): Metadata {
+  const brand = getSiteBrand();
+  return {
+    title: {
+      default: `${brand.homeTitle} | ${brand.titleSuffix}`,
+      template: `%s | ${brand.titleSuffix}`,
+    },
+    description: brand.description,
+    keywords: brand.keywords,
+  };
+}
 
 /**
  * 根布局：只负责 html/body 与全局样式。

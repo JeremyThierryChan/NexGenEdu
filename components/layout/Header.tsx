@@ -6,7 +6,8 @@ import { useEffect, useState } from "react";
 import { Logo } from "@/components/layout/Logo";
 import { ButtonLink } from "@/components/ui/Button";
 import { Container } from "@/components/ui/Container";
-import { MAIN_NAV } from "@/lib/site/nav";
+import { HEADER_CTA, MAIN_NAV } from "@/lib/site/nav";
+import type { SiteBrand } from "@/lib/types/site";
 import { cn } from "@/lib/utils/cn";
 
 /** 判断导航项是否处于选中态（首页精确匹配，其余匹配子路径）。 */
@@ -15,8 +16,12 @@ function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+type HeaderProps = {
+  brand: SiteBrand;
+};
+
 /** 宣传网站顶部导航：桌面完整展示，移动端折叠。 */
-export function Header() {
+export function Header({ brand }: HeaderProps) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -28,7 +33,7 @@ export function Header() {
   return (
     <header className="sticky top-0 z-40 border-b border-ink-200 bg-white/90 backdrop-blur">
       <Container className="flex h-16 items-center justify-between gap-6">
-        <Logo />
+        <Logo brand={brand} />
 
         <nav className="hidden items-center gap-1 lg:flex" aria-label="主导航">
           {MAIN_NAV.map((item) => (
@@ -49,8 +54,8 @@ export function Header() {
         </nav>
 
         <div className="flex items-center gap-2">
-          <ButtonLink href="/contact" size="sm" className="hidden sm:inline-flex">
-            预约试听
+          <ButtonLink href={HEADER_CTA.href} size="sm" className="hidden sm:inline-flex">
+            {HEADER_CTA.label}
           </ButtonLink>
           <button
             type="button"

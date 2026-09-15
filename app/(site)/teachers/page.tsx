@@ -1,36 +1,75 @@
 import type { Metadata } from "next";
-import { EmptyState } from "@/components/site/EmptyState";
 import { PageHeader } from "@/components/site/PageHeader";
-import { ButtonLink } from "@/components/ui/Button";
+import { TeacherCard } from "@/components/teachers/TeacherCard";
 import { Container } from "@/components/ui/Container";
+import { PlaceholderNotice } from "@/components/ui/PlaceholderNotice";
 import { Section } from "@/components/ui/Section";
+import { getTeachersPage } from "@/lib/data/site";
+import { renderMarkdown } from "@/lib/markdown";
 
-export const metadata: Metadata = {
-  title: "教师团队",
-  description: "授课教师的科目、教学经验与教学风格。",
-};
+/** 教师页内容来自 data/site/teachers.md。 */
+export function generateMetadata(): Metadata {
+  const { heading } = getTeachersPage();
+  return { title: heading.title, description: heading.description };
+}
 
-/** 教师列表：Phase 3 接入 lib/data 后读取 data/teachers/*.md。 */
 export default function TeachersPage() {
+  const { heading, teachers, placeholder } = getTeachersPage();
+
   return (
     <>
       <PageHeader
-        eyebrow="教师"
-        title="负责的教师团队"
-        description="所有授课教师均具备三年以上一线教学经验，熟悉本地中高考命题方向。"
+        eyebrow={heading.eyebrow}
+        title={heading.title}
+        description={heading.description}
       />
 
       <Container>
+        {/* 教师列表：可点击跳转到下方对应详情 */}
         <Section>
-          <EmptyState
-            title="教师数据待接入"
-            description="教师资料将以 Markdown 维护在 data/teachers 下，Phase 3 完成后在此展示姓名、教授科目与教学简介。"
-            action={
-              <ButtonLink href="/contact" variant="outline" size="sm">
-                咨询教师安排
-              </ButtonLink>
-            }
-          />
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {teachers.map((teacher) => (
+              <TeacherCard
+                key={teacher.id}
+                teacher={teacher}
+                href={`#${encodeURIComponent(teacher.id)}`}
+              />
+            ))}
+          </div>
+          {placeholder && (
+            <PlaceholderNotice
+              className="mt-6 max-w-2xl"
+              source="data/site/teachers.md"
+              detail="以下教师均为虚构占位信息"
+            />
+          )}
+        </Section>
+
+        {/* 教师详情 */}
+        <Section className="border-t border-ink-200">
+          <div className="space-y-12">
+            {teachers.map((teacher) => (
+              <article
+                key={teacher.id}
+                id={teacher.id}
+                className="scroll-mt-24 border-b border-ink-100 pb-12 last:border-0 last:pb-0"
+              >
+                <h2 className="text-xl font-medium text-ink-900">{teacher.name}</h2>
+                <p className="mt-1 text-sm text-ink-500">
+                  {[teacher.role, teacher.subjects.join(" · "), teacher.years]
+                    .filter((part) => part !== "")
+                    .join(" ｜ ")}
+                </p>
+                {teacher.bio !== "" && (
+                  <div
+                    className="mt-4 max-w-2xl leading-relaxed text-ink-600 [&_p]:mt-3 [&_strong]:font-medium [&_strong]:text-ink-800"
+                    // 内容来自项目自己的 Markdown 文件，renderMarkdown 内部已做 HTML 转义。
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(teacher.bio) }}
+                  />
+                )}
+              </article>
+            ))}
+          </div>
         </Section>
       </Container>
     </>

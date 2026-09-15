@@ -76,6 +76,8 @@
   html {
     -webkit-text-size-adjust: 100%;
     scroll-behavior: smooth;
+    /* 锚点跳转时为吸顶页头预留空间（课程 / 教师详情使用 #id 定位） */
+    scroll-padding-top: 5rem;
   }
 
   body {

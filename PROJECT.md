@@ -59,24 +59,90 @@ app/
 │   ├── courses/          #   /courses
 │   ├── teachers/         #   /teachers
 │   └── contact/          #   /contact
-└── admin/                # B. 教务后台（Phase 4 起逐步实现）
+└── admin/                # B. 教务后台（布局已搭建，业务待 Phase 4）
 
 components/
-├── ui/                   # Button / Card / Badge / Container / Section
-├── layout/               # Logo / Header / Footer /（后续 AdminSidebar / AdminHeader）
-├── site/                 # 宣传网站专用区块组件
-├── students/ teachers/ classrooms/ lessons/ dashboard/   # 后台业务组件（Phase 4+）
+├── ui/                   # Button / Card / Badge / Container / Section / PageHeading / PlaceholderNotice
+├── layout/               # Logo / Header / Footer / AdminSidebar
+├── site/                 # 宣传网站区块组件（PageHeader / FeatureCard / EmptyState）
+├── courses/              # CourseCard
+├── teachers/             # TeacherCard
+└── students/ classrooms/ lessons/ dashboard/   # 后台业务组件（Phase 4+）
 
 lib/
-├── site/                 # 站点配置与导航（config.ts / nav.ts）
-├── types/                # 领域类型（Phase 2）
-├── data/                 # 数据访问层，页面唯一的数据入口（Phase 2）
+├── data/
+│   ├── site.ts           # 数据访问层：页面唯一的数据入口
+│   └── sections.ts       # 正文小节解析（## 名称 | 值 结构）
+├── markdown.ts           # frontmatter / Markdown 极简解析与渲染
+├── types/site.ts         # 内容类型定义
+├── site/nav.ts           # 导航与页头 CTA 的结构配置
 ├── scheduling/           # 排课与冲突检测（Phase 5）
-└── utils/                # 通用工具（cn.ts）
+└── utils/cn.ts
 
-data/                     # Markdown「伪数据库」（Phase 2）
-├── students/ teachers/ classrooms/ lessons/ site/
+data/site/                # 内容数据（Markdown「伪数据库」）
+├── site.md               # 品牌与联系方式（全站共用）
+├── home.md               # 首页全部内容
+├── courses.md            # 课程页全部内容
+├── teachers.md           # 教师页全部内容（含教师名单）
+├── about.md              # 关于我们全部内容
+└── contact.md            # 联系我们全部内容
 ```
+
+## 4.1 内容数据层（可自定义内容全部外置）
+
+所有面向访客的文案、数字、联系方式都放在 `data/site/*.md`，改 Markdown 即改网站，
+不需要动代码。每个「可自定义的部分」对应**一个完整文件**：
+
+| 文件 | 覆盖范围 | 页面显示位置 |
+| --- | --- | --- |
+| `site.md` | 品牌名、标语、描述、关键词、联系方式、页脚 | 全站标题 / 页头 / 页脚 |
+| `home.md` | 首屏、首屏数据、教学特色、课程卡片、教室格位、底部 CTA | 首页 |
+| `courses.md` | 课程页文案 + 每门课程的介绍 | `/courses` |
+| `teachers.md` | 教师页文案 + 每位教师的科目 / 职务 / 教龄 / 简介 / 详细介绍 | `/teachers`、首页教师卡片 |
+| `about.md` | 教学理念、校区数据、校区介绍 | `/about` |
+| `contact.md` | 联系方式清单、到校路线、预约按钮文案 | `/contact` |
+
+### 文件格式约定
+
+```markdown
+---
+# frontmatter：短字段，一行一个
+title: 让学习真正发生
+placeholder: true
+---
+
+# 正文：用于列表与长文本
+
+## 首屏数据
+格式为「标签 | 数值」。这段说明文字不会显示在页面上。
+
+## 班级规模 | 4–8 人
+## 师生比 | 1 : 6
+```
+
+- **短字段**写在 frontmatter（`key: value`），支持数组（`- 项`）。
+- **列表项**写成 `## 名称 | 值`：名称是标题，值是内容。
+  分组标题（无 `|`）之后、下一个分组标题之前的所有条目属于该组。
+- **长文本**（课程介绍、教师详细介绍）直接写在标题下方，支持 `**粗体**`、`- 列表`。
+- **教师字段**用 `### 字段: 值`（`科目` / `职务` / `教龄` / `简介`），字段之后的文字是详细介绍。
+- 解析实现在 `lib/markdown.ts` 与 `lib/data/sections.ts`，只支持上述子集，零依赖。
+
+### 占位信息机制
+
+Markdown 里所有由 AI 生成、需要人工替换的内容都标注为**（占位信息）**：
+
+- 文件内：正文开头有一段「（占位信息）」说明，逐条列出需要确认的内容。
+- 页面上：对应区块旁显示黄色虚线角标「（占位信息）来源：data/site/xxx.md」，
+  提醒访客与管理员此处待替换。
+- 控制开关：frontmatter 的 `placeholder: true|false`。
+  **把内容改成真实信息后改为 `false`，页面角标自动消失。**
+
+### 页面读取方式
+
+页面只调用 `lib/data/site.ts` 的函数（`getSiteBrand` / `getHomeContent` /
+`getCoursesPage` / `getTeachersPage` / `getAboutContent` / `getContactContent` 等），
+不直接读文件、不解析 Markdown。数据读取为构建期同步读取（6 个小文件），
+未来替换为数据库实现时页面无需修改。
 
 ## 5. 数据模型（Phase 2 落地）
 

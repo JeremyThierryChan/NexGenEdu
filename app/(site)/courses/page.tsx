@@ -1,36 +1,69 @@
 import type { Metadata } from "next";
-import { EmptyState } from "@/components/site/EmptyState";
+import { CourseCard } from "@/components/courses/CourseCard";
 import { PageHeader } from "@/components/site/PageHeader";
-import { ButtonLink } from "@/components/ui/Button";
 import { Container } from "@/components/ui/Container";
+import { PlaceholderNotice } from "@/components/ui/PlaceholderNotice";
 import { Section } from "@/components/ui/Section";
+import { getCoursesPage } from "@/lib/data/site";
+import { renderMarkdown } from "@/lib/markdown";
 
-export const metadata: Metadata = {
-  title: "课程",
-  description: "数学、英语、物理、化学等学科课程设置与适合年级。",
-};
+/** 课程页内容来自 data/site/courses.md。 */
+export function generateMetadata(): Metadata {
+  const { heading } = getCoursesPage();
+  return { title: heading.title, description: heading.description };
+}
 
-/** 课程列表：Phase 3 接入 lib/data 后替换为 data/site/courses/*.md 的真实内容。 */
 export default function CoursesPage() {
+  const { heading, courses, placeholder } = getCoursesPage();
+
   return (
     <>
       <PageHeader
-        eyebrow="课程"
-        title="按学科与学段设置的课程"
-        description="每个学科按基础巩固、同步提高、考前冲刺三个阶段组织内容，学生按测评结果进入合适阶段。"
+        eyebrow={heading.eyebrow}
+        title={heading.title}
+        description={heading.description}
       />
 
       <Container>
-        <Section>
-          <EmptyState
-            title="课程数据待接入"
-            description="课程内容将以 Markdown 维护在 data/site/courses 下，Phase 3 完成后在此自动呈现课程名称、适合年级与教学内容。"
-            action={
-              <ButtonLink href="/contact" variant="outline" size="sm">
-                咨询课程安排
-              </ButtonLink>
-            }
-          />
+        {/* 快速跳转：课程较多时方便直接定位 */}
+        <Section className="pb-0">
+          <div className="flex flex-wrap gap-2">
+            {courses.map((course) => (
+              <CourseCard
+                key={course.id}
+                title={course.nameZh}
+                href={`#${encodeURIComponent(course.id)}`}
+                linkLabel="查看详情"
+                className="w-40 p-4"
+              />
+            ))}
+          </div>
+          {placeholder && (
+            <PlaceholderNotice
+              className="mt-6 max-w-2xl"
+              source="data/site/courses.md"
+              detail="以下课程内容均为占位"
+            />
+          )}
+        </Section>
+
+        <Section className="border-t border-ink-200">
+          <div className="space-y-12">
+            {courses.map((course) => (
+              <article
+                key={course.id}
+                id={course.id}
+                className="scroll-mt-24 border-b border-ink-100 pb-12 last:border-0 last:pb-0"
+              >
+                <h2 className="text-xl font-medium text-ink-900">{course.nameZh}</h2>
+                <div
+                  className="mt-4 max-w-2xl leading-relaxed text-ink-600 [&_li]:mt-1.5 [&_p]:mt-3 [&_strong]:font-medium [&_strong]:text-ink-800 [&_ul]:mt-3 [&_ul]:list-disc [&_ul]:pl-5"
+                  // 内容来自项目自己的 Markdown 文件，renderMarkdown 内部已做 HTML 转义。
+                  dangerouslySetInnerHTML={{ __html: renderMarkdown(course.content) }}
+                />
+              </article>
+            ))}
+          </div>
         </Section>
       </Container>
     </>

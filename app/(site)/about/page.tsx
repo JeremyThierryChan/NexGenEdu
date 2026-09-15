@@ -2,71 +2,94 @@ import type { Metadata } from "next";
 import { PageHeader } from "@/components/site/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Container } from "@/components/ui/Container";
+import { PlaceholderNotice } from "@/components/ui/PlaceholderNotice";
 import { Section } from "@/components/ui/Section";
-import { SITE } from "@/lib/site/config";
+import { getAboutContent, getSiteBrand } from "@/lib/data/site";
 
-export const metadata: Metadata = {
-  title: "关于我们",
-  description: `${SITE.nameZh}的教学理念、师资构成与校区情况。`,
-};
+/** 关于我们页面内容来自 data/site/about.md。 */
+export function generateMetadata(): Metadata {
+  const about = getAboutContent();
+  const brand = getSiteBrand();
+  return {
+    title: about.title,
+    description: `${brand.brandNameZh}的教学理念、师资构成与校区情况。${about.description}`,
+  };
+}
 
-/** 关于我们：Phase 3 改为读取 data/site/about.md。 */
 export default function AboutPage() {
+  const about = getAboutContent();
+  const brand = getSiteBrand();
+
   return (
     <>
       <PageHeader
-        eyebrow="关于我们"
-        title="把每一节课的准备与跟进做扎实"
-        description="我们相信学习效果来自稳定的教学动作，而不是更多的课程数量。"
+        eyebrow={about.eyebrow}
+        title={about.title}
+        description={about.description}
       />
 
       <Container>
         <Section
-          title="教学理念"
-          contentClassName="grid gap-5 sm:grid-cols-3"
-          description="三条原则贯穿从排课到课后反馈的每个环节。"
+          title={about.philosophy.title}
+          description={about.philosophy.description}
         >
-          <Card title="因材施教">
-            <p className="text-sm leading-relaxed text-ink-600">
-              入学前先做学科测评，明确薄弱点后再制定学习计划，避免用统一进度套所有学生。
-            </p>
-          </Card>
-          <Card title="过程可见">
-            <p className="text-sm leading-relaxed text-ink-600">
-              每节课记录掌握情况，每 4 次课输出阶段反馈，让家长看到具体进步而非模糊评价。
-            </p>
-          </Card>
-          <Card title="持续跟进">
-            <p className="text-sm leading-relaxed text-ink-600">
-              课后作业与错题由授课教师跟进，问题在下一节课前解决，不积压到考前。
-            </p>
-          </Card>
+          <div className="grid gap-5 sm:grid-cols-3">
+            {about.principles.map((principle) => (
+              <Card key={principle.title} title={principle.title}>
+                <p className="text-sm leading-relaxed text-ink-600">{principle.value}</p>
+              </Card>
+            ))}
+          </div>
         </Section>
 
         <Section
-          title="校区信息"
+          title={about.campusTitle}
           className="border-t border-ink-200"
           contentClassName="grid gap-8 sm:grid-cols-2"
         >
           <dl className="space-y-4 text-sm">
             <div>
               <dt className="text-ink-500">校区地址</dt>
-              <dd className="mt-1 text-ink-800">{SITE.contact.address}</dd>
+              <dd className="mt-1 text-ink-800">{brand.contact.address}</dd>
             </div>
             <div>
               <dt className="text-ink-500">营业时间</dt>
-              <dd className="mt-1 text-ink-800">{SITE.contact.businessHours}</dd>
+              <dd className="mt-1 text-ink-800">{brand.contact.businessHours}</dd>
             </div>
           </dl>
+
           <div className="rounded-lg border border-ink-200 bg-ink-50 p-6">
             <h3 className="text-sm font-medium text-ink-900">校区规模</h3>
-            <ul className="mt-4 space-y-2 text-sm text-ink-600">
-              <li>小班教室 6 间，每间容纳 6–8 人</li>
-              <li>独立自习区，开放至 21:00</li>
-              <li>在读学员 200 余人，覆盖初高中各年级</li>
-            </ul>
+            <dl className="mt-4 space-y-2 text-sm text-ink-600">
+              {about.facts.map((fact) => (
+                <div key={fact.title} className="flex justify-between gap-4">
+                  <dt>{fact.title}</dt>
+                  <dd className="tabular text-ink-800">{fact.value}</dd>
+                </div>
+              ))}
+            </dl>
           </div>
         </Section>
+
+        {about.campusParagraphs.length > 0 && (
+          <Section>
+            <ul className="max-w-2xl space-y-2 text-sm leading-relaxed text-ink-600">
+              {about.campusParagraphs.map((paragraph) => (
+                <li key={paragraph}>{paragraph}</li>
+              ))}
+            </ul>
+          </Section>
+        )}
+
+        {about.placeholder && (
+          <Section className="pt-0">
+            <PlaceholderNotice
+              className="max-w-2xl"
+              source="data/site/about.md"
+              detail="教学理念、校区规模等均为占位内容"
+            />
+          </Section>
+        )}
       </Container>
     </>
   );
