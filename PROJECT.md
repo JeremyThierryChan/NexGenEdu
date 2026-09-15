@@ -106,7 +106,7 @@ data/                     # Markdown「伪数据库」（Phase 2）
 | Phase 4 | 后台：Dashboard / 学生 / 教师 / 教室 / 课程 / 日历 | 待开始 |
 | Phase 5 | 核心业务：排课 / 冲突检测 / 课程状态 / 课时扣减 / 搜索 | 待开始 |
 | Phase 6 | 响应式与 UI Polish | 待开始 |
-| Phase 7 | 部署 | 待开始 |
+| Phase 7 | 部署：GitHub Actions → GitHub Pages | ✅ 已完成（提前） |
 
 ### Phase 1 交付说明
 
@@ -132,6 +132,36 @@ npm run build      # 生产构建
 - **npm 必须带本地 cache**：`npm install --cache ./.npm-cache`（原因见第 9 节）。
   构建 / 运行（`dev` / `build` / `start`）**不需要**额外的 cache 参数，可直接 `npm run dev`。
 - 若需在非交互环境验证页面，可用 `npx next start -p <端口>` 配合 `curl` 做冒烟测试。
+
+## 7.1 部署（GitHub Pages）
+
+线上地址：**https://jeremythierrychan.github.io/NexGenEdu/**
+
+| 项 | 值 |
+| --- | --- |
+| 方式 | GitHub Actions 自动部署 |
+| 工作流 | `.github/workflows/deploy-pages.yml` |
+| 触发 | push 到 `main`，或手动 `workflow_dispatch` |
+| Pages 配置 | `build_type: workflow`（已通过 API 设置，`https_enforced: true`） |
+| 产物 | 静态导出 `out/`（`output: "export"`） |
+
+### 静态导出与子路径
+
+- `next.config.ts` 设置 `output: "export"` + `trailingSlash: true`，导出目录形式的 URL
+  （`/courses/` → `courses/index.html`），并关闭 `next/image` 优化（静态托管无优化服务）。
+- 项目站点位于 `/<repo>/` 子路径，前缀通过 `NEXT_PUBLIC_BASE_PATH` 在**构建时**注入：
+  `NEXT_PUBLIC_BASE_PATH=/NexGenEdu npm run build`。CI 中使用
+  `${{ github.event.repository.name }}` 动态取得仓库名，fork 后无需修改。
+- **本地开发绝对不要设置该变量**，否则 `localhost:3000` 会被重定向到 `/NexGenEdu`。
+- 产物中的 `_next/` 目录以 `_` 开头，会被 GitHub Pages 的 Jekyll 处理忽略，
+  因此工作流会写入 `out/.nojekyll`。
+
+### 静态导出的架构含义
+
+所有数据必须在构建时可得。这与发展方向一致：Markdown 数据层（Phase 2）在构建期读取，
+未来接入 PostgreSQL 时数据层签名不变。需要注意的是，**后台的写操作（排课 / 课时扣减）
+在静态站点上无法跨设备共享**，这属于本阶段的已知限制，也是第 8 节中
+「运行时数据用 localStorage」方案的另一面。
 
 ## 8. 关键设计决策记录
 

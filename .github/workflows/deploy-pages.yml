@@ -1,0 +1,78 @@
+name: Deploy to GitHub Pages
+
+# 仅在工作流文件本身或源代码变化时触发，避免一次 push 触发多次部署。
+on:
+  push:
+    branches: [main]
+  # 允许在 Actions 页面手动触发，便于排查部署问题。
+  workflow_dispatch:
+
+# 同一时间只允许一个部署任务，新的一次推送取消进行中的旧任务。
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build static site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build static export
+        # 项目站点部署在 https://<user>.github.io/<repo>/，必须注入仓库名作为子路径前缀。
+        # 用 ${{ github.event.repository.name }} 而非写死仓库名，fork 后无需修改。
+        run: npm run build
+        env:
+          NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
+
+      - name: Disable Jekyll processing
+        # GitHub Pages 默认用 Jekyll 处理静态文件，会忽略以 _ 开头的目录
+        # （Next 导出的 _next/ 正好命中），必须放置 .nojekyll 跳过该步骤。
+        run: touch out/.nojekyll
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        # 不自动启用 Pages：若仓库尚未在 Settings 中把 Source 设为
+        # "GitHub Actions"，这里会明确失败并给出提示，而不是静默改动仓库设置。
+        with:
+          enablement: false
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

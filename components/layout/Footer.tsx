@@ -59,9 +59,11 @@ export function Footer() {
         <p>
           © {year} {SITE.nameZh}（{SITE.name}）. 保留所有权利.
         </p>
-        <Link href="/admin" className="transition-colors hover:text-brand-700">
-          教务后台
-        </Link>
+        {/*
+          后台入口（“教务后台” → /admin）暂不展示：
+          静态导出时 /admin 页面尚未实现（Phase 4），链接会指向 404。
+          Phase 4 完成 /admin 后在此处恢复该链接，届时用 <Link href="/admin">。
+        */}
       </Container>
     </footer>
   );

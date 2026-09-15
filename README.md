@@ -1,6 +1,11 @@
 # NexGenEdu · 新径教育
 
+[![Deploy to GitHub Pages](https://github.com/JeremyThierryChan/NexGenEdu/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/JeremyThierryChan/NexGenEdu/actions/workflows/deploy-pages.yml)
+[![Site](https://img.shields.io/badge/site-online-2c5c7d)](https://jeremythierrychan.github.io/NexGenEdu/)
+
 > 辅导机构轻量化管理系统 V1 —— 对外宣传网站 + 轻量教务后台
+
+在线预览：**https://jeremythierrychan.github.io/NexGenEdu/**
 
 面向中小型辅导机构的管理系统。目标很具体：**管理员打开系统，10 秒内知道今天谁上课、在哪里上课、老师是谁，以及每个学生还剩多少课时。**
 
@@ -16,6 +21,7 @@
 - [当前状态](#当前状态)
 - [技术栈](#技术栈)
 - [快速开始](#快速开始)
+- [部署](#部署)
 - [可用命令](#可用命令)
 - [项目结构](#项目结构)
 - [架构设计](#架构设计)
@@ -103,6 +109,38 @@ npm run dev
 | `npm run typecheck` | TypeScript 类型检查（`tsc --noEmit`） |
 
 每个阶段完成后固定执行：`lint` → `typecheck` → `build`。
+
+## 部署
+
+宣传网站通过 **GitHub Actions 自动部署到 GitHub Pages**，推送到 `main` 即触发。
+
+- 工作流：`.github/workflows/deploy-pages.yml`
+- 线上地址：https://jeremythierrychan.github.io/NexGenEdu/
+- 站点为**纯静态导出**产物（`output: "export"` → `out/`），不使用任何服务端运行时
+
+### 子路径是怎么处理的
+
+项目站点部署在 `/<repo>/` 子路径下，前缀只能在构建时注入，因此 CI 里设置了环境变量：
+
+```bash
+NEXT_PUBLIC_BASE_PATH=/NexGenEdu npm run build
+```
+
+`next.config.ts` 会据此开启 `basePath` + `assetPrefix`。**本地开发不要设置该变量**，
+否则 `http://localhost:3000` 会被重定向到 `/NexGenEdu`。
+
+### 静态导出带来的约束
+
+静态导出意味着**所有数据必须在构建时可得**：Markdown 数据层（Phase 2）在构建期间读取并
+渲染为 HTML，这与「未来替换为 PostgreSQL」的规划一致 —— 届时改为在构建时或通过
+Server Actions 取数，页面代码不变。它也意味着后台的 `localStorage` 写操作无法跨设备共享，
+属于本阶段的已知限制。
+
+### 首次部署前的一次性设置
+
+仓库的 Pages 已配置为 `build_type: workflow`。若在其它 fork / 新仓库部署，需要先到
+**Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**，
+否则部署步骤会失败。
 
 ## 项目结构
 

@@ -14,8 +14,12 @@ dist/
 
 # misc
 .DS_Store
+**/.DS_Store
 *.pem
 .vercel
+
+# next.js static export output
+out/
 
 # debug
 npm-debug.log*
