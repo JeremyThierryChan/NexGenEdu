@@ -15,7 +15,7 @@ npm run dev
 
 打开 http://localhost:3000
 
-> `--cache ./.npm-cache` 是本机环境要求（`~/.npm` 不可写），详见 PROJECT.md 第 8 节。
+> `--cache ./.npm-cache` 是本机环境要求（`~/.npm` 不可写），详见 PROJECT.md 第 9 节。
 
 ## 可用命令
 

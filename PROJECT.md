@@ -34,7 +34,7 @@
 | 样式 | Tailwind CSS 4.3（CSS-first `@theme`） | 设计令牌集中在 `app/globals.css` |
 | UI | 自建小组件库（`components/ui`） | 不引入重型组件库 |
 | 数据 | Markdown + 数据访问层 | 当前阶段的「伪数据库」 |
-| 包管理 | npm（项目本地 cache：`.npm-cache/`） | 受本机权限限制，见第 8 节 |
+| 包管理 | npm（项目本地 cache：`.npm-cache/`） | 受本机权限限制，见第 9 节 |
 | 字体 | 系统字体栈 | 不依赖外部字体 CDN，构建可离线完成 |
 
 **架构主线（保证未来迁移成本低）**
@@ -127,7 +127,36 @@ npm run build      # 生产构建
 
 每个 Phase 完成后固定执行：`lint` → `typecheck` → `build` → 更新本文件 → Git commit。
 
-## 8. 本机环境约束（重要）
+### 运行命令的环境要求
+
+- **npm 必须带本地 cache**：`npm install --cache ./.npm-cache`（原因见第 9 节）。
+  构建 / 运行（`dev` / `build` / `start`）**不需要**额外的 cache 参数，可直接 `npm run dev`。
+- 若需在非交互环境验证页面，可用 `npx next start -p <端口>` 配合 `curl` 做冒烟测试。
+
+## 8. 关键设计决策记录
+
+- **不引入组件库**：UI 需求克制（卡片、按钮、徽章、表格），自建组件可保持体积与设计语言可控。
+- **宣传网站与后台共用设计语言，但信息密度不同**：`(site)` 路由组大留白、大标题；`admin` 路由组紧凑、表格优先。
+- **`app/(site)` 路由组**：让宣传网站与后台拥有各自独立的 layout，互不干扰。
+- **`cn()` 不做 Tailwind 冲突消解**：保持零依赖与可预测性，约定调用方 `className` 最后拼接。
+- **`next.config.ts` 显式设置 `outputFileTracingRoot`**：本机 HOME 下存在其它 lockfile，需固定项目根目录。
+
+### 管理后台数据变更方案（Phase 5 决策）
+
+后台的排课、课程完成、课时扣减等「写操作」需要区分两类数据：
+
+| 类别 | 来源 | 存储位置 |
+| --- | --- | --- |
+| 基础档案：学生 / 教师 / 教室 | `data/*.md` | 只读，不修改 |
+| 运行时数据：课程安排、课时流水 | 由数据层初始化 | 用户修改部分写入 `localStorage` |
+
+- 原因：Markdown 在前端运行时不可写，后台若只读就无法演示排课；而基础档案无需在 UI 中编辑。
+- 数据层对外暴露统一的 Provider 接口，`MarkdownDataProvider` 与（未来的）`PostgresDataProvider` 实现同一套函数签名。
+- 运行时数据通过 `createRuntimeStore(storageKey)` 工厂封装，为未来替换为 API 调用预留唯一改动点。
+- **`localStorage` 仅为开发阶段的临时方案，不是数据库**：不承担并发、事务、多端一致性职责，
+  校验逻辑（如排课冲突）必须在数据层重新执行一次，不能只依赖 UI。
+
+## 9. 本机环境约束（重要）
 
 开发机存在以下网络 / 权限限制，影响构建方式，**不是代码问题**：
 
@@ -138,14 +167,6 @@ npm run build      # 生产构建
    → 不使用 `next/font/google`，改用系统字体栈，构建可完全离线完成。
 3. **`github.com` 连接不稳定**（首次探测超时，后续推送成功）。
    → 若 `git push` 超时，稍后重试即可，本地 commit 不受影响。
-
-## 9. 关键设计决策记录
-
-- **不引入组件库**：UI 需求克制（卡片、按钮、徽章、表格），自建组件可保持体积与设计语言可控。
-- **宣传网站与后台共用设计语言，但信息密度不同**：`(site)` 路由组大留白、大标题；`admin` 路由组紧凑、表格优先。
-- **`app/(site)` 路由组**：让宣传网站与后台拥有各自独立的 layout，互不干扰。
-- **`cn()` 不做 Tailwind 冲突消解**：保持零依赖与可预测性，约定调用方 `className` 最后拼接。
-- **`next.config.ts` 显式设置 `outputFileTracingRoot`**：本机 HOME 下存在其它 lockfile，需固定项目根目录。
 
 ## 10. Git
 
