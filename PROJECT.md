@@ -103,7 +103,7 @@ data/                     # Markdown「伪数据库」（Phase 2）
 | Phase 1 | 项目基础：Next.js + TS + Tailwind + Layout + 基础 UI + 宣传网站骨架 | ✅ 已完成 |
 | Phase 2 | Markdown 数据层：类型 + 数据访问层 + 示例数据 | ⏳ 下一步 |
 | Phase 3 | 宣传网站内容接入 Markdown | 待开始 |
-| Phase 4 | 后台：Dashboard / 学生 / 教师 / 教室 / 课程 / 日历 | 待开始 |
+| Phase 4 | 后台：Dashboard / 学生 / 教师 / 教室 / 课程 / 日历 | 🚧 框架已搭建（仅布局 + 概览占位） |
 | Phase 5 | 核心业务：排课 / 冲突检测 / 课程状态 / 课时扣减 / 搜索 | 待开始 |
 | Phase 6 | 响应式与 UI Polish | 待开始 |
 | Phase 7 | 部署：GitHub Actions → GitHub Pages | ✅ 已完成（提前） |
