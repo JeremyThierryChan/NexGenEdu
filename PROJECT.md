@@ -129,15 +129,15 @@ npm run build      # 生产构建
 
 ## 8. 本机环境约束（重要）
 
-开发机存在两条网络 / 权限限制，影响构建方式，**不是代码问题**：
+开发机存在以下网络 / 权限限制，影响构建方式，**不是代码问题**：
 
-1. **`github.com:443` 不可达**（npm registry 正常，GitHub 超时）。
-   → 本地 commit 正常，`git push` 需在能访问 GitHub 的环境中执行，见第 10 节。
-2. **`~/.npm` 不可写**（沙箱限制在项目目录内）。
+1. **`~/.npm` 不可写**（沙箱限制在项目目录内）。
    → 所有 npm 命令使用项目本地 cache：`npm install --cache ./.npm-cache`。
    该目录已加入 `.gitignore`。
-3. **Google Fonts 不可达**。
+2. **Google Fonts 不可达**。
    → 不使用 `next/font/google`，改用系统字体栈，构建可完全离线完成。
+3. **`github.com` 连接不稳定**（首次探测超时，后续推送成功）。
+   → 若 `git push` 超时，稍后重试即可，本地 commit 不受影响。
 
 ## 9. 关键设计决策记录
 
@@ -151,8 +151,9 @@ npm run build      # 生产构建
 
 - 默认分支：`main`
 - 远端：`origin` → `https://github.com/JeremyThierryChan/NexGenEdu.git`
-- 首次推送（需在可访问 GitHub 的网络环境执行）：
+- 首次提交已推送（`f7ed6fd`），本地 `main` 与 `origin/main` 一致。
+- 后续每个 Phase 完成后 commit 并推送：
 
 ```bash
-git push -u origin main
+git push
 ```
