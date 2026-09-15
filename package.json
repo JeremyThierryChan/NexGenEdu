@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "辅导机构轻量化管理系统 V1 —— 对外宣传网站 + 轻量教务后台（纯前端阶段）",
+  "engines": {
+    "node": ">=18.18.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
