@@ -1,0 +1,124 @@
+@import "tailwindcss";
+
+/* ==========================================================================
+   NexGenEdu 设计令牌 (Design Tokens)
+   宣传网站与管理后台共享同一套品牌色、字体与设计语言。
+   修改此处即可同时影响两端，避免颜色散落在组件中。
+   ========================================================================== */
+@theme {
+  /* 品牌主色：深墨蓝，克制、专业，避免教育机构常见的花哨渐变 */
+  --color-brand-50: #f2f7fa;
+  --color-brand-100: #e3edf3;
+  --color-brand-200: #c2d8e5;
+  --color-brand-300: #92b8cd;
+  --color-brand-400: #5b92b1;
+  --color-brand-500: #3a7396;
+  --color-brand-600: #2c5c7d;
+  --color-brand-700: #254a65;
+  --color-brand-800: #1d3a50;
+  --color-brand-900: #16303f;
+  --color-brand-950: #0d1f2a;
+
+  /* 强调色：暖琥珀，仅用于 CTA 与关键状态，使用面积保持很小 */
+  --color-accent-50: #fdf8ed;
+  --color-accent-100: #f9edcf;
+  --color-accent-200: #f2d99c;
+  --color-accent-300: #e8bf62;
+  --color-accent-400: #dfa63a;
+  --color-accent-500: #c98a22;
+  --color-accent-600: #a86a1b;
+  --color-accent-700: #854e19;
+  --color-accent-800: #6d3f1b;
+
+  /* 中性色：整体偏冷的灰，保证文字层级清晰 */
+  --color-ink-50: #f8fafb;
+  --color-ink-100: #f1f4f6;
+  --color-ink-200: #e3e8ec;
+  --color-ink-300: #cbd3da;
+  --color-ink-400: #9aa7b2;
+  --color-ink-500: #6c7a87;
+  --color-ink-600: #4e5a66;
+  --color-ink-700: #3a444e;
+  --color-ink-800: #262e36;
+  --color-ink-900: #171d23;
+
+  /* 状态色：课程 / 教室 / 课时预警共用 */
+  --color-success-50: #eefaf3;
+  --color-success-100: #d5f2e2;
+  --color-success-500: #1f9d61;
+  --color-success-600: #17804e;
+  --color-warning-50: #fef8ec;
+  --color-warning-100: #fbeacb;
+  --color-warning-500: #d5941b;
+  --color-warning-600: #ad7613;
+  --color-danger-50: #fdf1f1;
+  --color-danger-100: #fadcdc;
+  --color-danger-500: #c9443d;
+  --color-danger-600: #a8352f;
+
+  /* 字体：系统字体栈。
+     不依赖外部字体 CDN（构建期与运行期都不请求），也避免自托管 CJK 字体
+     带来的 5MB+ 体积；各平台的系统中文字体质量已足够。 */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC",
+    "Source Han Sans SC", sans-serif;
+
+  /* 圆角：克制，最大 12px，不做过度圆角 */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+/* ==========================================================================
+   基础样式
+   ========================================================================== */
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-white);
+    color: var(--color-ink-800);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 中文标题行高略放宽，避免字形拥挤 */
+  h1,
+  h2,
+  h3,
+  h4 {
+    line-height: 1.25;
+    letter-spacing: -0.01em;
+    color: var(--color-ink-900);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+  }
+
+  /* 尊重用户的减少动效偏好 */
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* ==========================================================================
+   工具类：后台表格与数据密度场景复用
+   ========================================================================== */
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
