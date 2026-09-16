@@ -94,6 +94,9 @@ export type AboutContent = {
   title: string;
   description: string;
   philosophy: SectionHeading;
+  /** 服务形式区块标题与条目。 */
+  serviceTitle: string;
+  services: LabeledItem[];
   campusTitle: string;
   principles: LabeledItem[];
   facts: LabeledItem[];

@@ -32,7 +32,7 @@ export default function AboutPage() {
           title={about.philosophy.title}
           description={about.philosophy.description}
         >
-          <div className="grid gap-5 sm:grid-cols-3">
+          <div className="grid gap-5 sm:grid-cols-2">
             {about.principles.map((principle) => (
               <Card key={principle.title} title={principle.title}>
                 <p className="text-sm leading-relaxed text-ink-600">{principle.value}</p>
@@ -40,6 +40,20 @@ export default function AboutPage() {
             ))}
           </div>
         </Section>
+
+        {about.services.length > 0 && (
+          <Section
+            title={about.serviceTitle}
+            className="border-t border-ink-200"
+            contentClassName="grid gap-5 sm:grid-cols-2 lg:grid-cols-3"
+          >
+            {about.services.map((service) => (
+              <Card key={service.title} title={service.title}>
+                <p className="text-sm leading-relaxed text-ink-600">{service.value}</p>
+              </Card>
+            ))}
+          </Section>
+        )}
 
         <Section
           title={about.campusTitle}

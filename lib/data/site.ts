@@ -215,6 +215,8 @@ export function getAboutContent(): AboutContent {
       title: pageString(page, "philosophy_title"),
       description: pageString(page, "philosophy_description"),
     },
+    serviceTitle: pageString(page, "service_title"),
+    services: getGroup(page, "服务形式").items,
     campusTitle: pageString(page, "campus_title"),
     principles: getGroup(page, "教学理念").items,
     facts: getGroup(page, "校区数据").items,

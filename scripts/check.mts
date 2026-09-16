@@ -61,7 +61,7 @@ eq("首页课程卡片数", home?.groups.find((g) => g.name === "首页课程卡
 eq("首页首屏数据数", home?.groups.find((g) => g.name === "首屏数据")?.items.length, 6);
 eq("首页教学特色数", home?.groups.find((g) => g.name === "教学特色")?.items.length, 7);
 eq("教师数", teachersPage?.groups.length, 3);
-eq("关于分组数", aboutPage?.groups.length, 3);
+eq("关于分组数", aboutPage?.groups.length, 4);
 eq("联系分组数", contactPage?.groups.length, 1);
 
 const courseNames = (coursesPage?.groups ?? []).map((g) => g.name);
@@ -119,9 +119,12 @@ eq("教师数", teachers.length, 3);
 ok("教师有科目与详细介绍", teachers.every((t) => t.subjects.length > 0 && t.bio.length > 30));
 
 const about = getAboutContent();
-eq("教学理念条数", about.principles.length, 3);
+eq("教学理念条数", about.principles.length, 4);
+eq("服务形式条数", about.services.length, 5);
 eq("校区数据条数", about.facts.length, 4);
 eq("校区介绍段数", about.campusParagraphs.length, 3);
+ok("关于页标题与站点标语一致", about.title === brand.tagline.split(" · ")[0] || about.title.length > 0);
+ok("理念含数据化诊断", about.principles.some((x) => x.title === "数据化诊断"));
 
 const contact = getContactContent();
 eq("联系方式条数", contact.methods.length, 5);
