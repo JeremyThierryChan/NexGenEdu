@@ -13,14 +13,15 @@ import type { ClassType, LessonDuration, StageCourse, SubjectOption } from "@/li
  *   2. 若课时长于 1 小时，再乘时长乘数
  *   3. 手续费：1 节 +10%，其余不加收
  *      最终单价 = 课时价 × (1 + 手续费百分比)
- *   4. 合计费用 = 最终单价 × 节数
- *   5. 节数 ≥ 10 赠送 1 次试课
+ *   4. 正课总价 = 最终单价 × 节数
+ *   5. 试课：试课结束后报课满 10 节则试课免费；否则按课程原价收 1 节试课费
+ *      总价 = 正课总价 + 试课费
  */
 
 /** 报 1 节时加收的手续费百分比。 */
 const SINGLE_LESSON_FEE_PERCENT = 10;
 
-/** 达到该节数即赠送试课。 */
+/** 试课后报课达到该节数，试课免费。 */
 const FREE_TRIAL_MIN_LESSONS = 10;
 
 /** 报价输入：用户在选择区填写的内容。 */
@@ -60,10 +61,14 @@ export type QuoteResult = {
   lessons: number;
   /** 每节课时长（小时）。 */
   hours: number;
-  /** 合计费用（元）。 */
+  /** 正课总价（元，不含试课费）。 */
+  lessonsPrice: number;
+  /** 试课费用（元）：满足条件为 0。 */
+  trialFee: number;
+  /** 试课是否免费。 */
+  trialFree: boolean;
+  /** 总价（元）= 正课总价 + 试课费。 */
   totalPrice: number;
-  /** 本次是否赠送试课。 */
-  includesTrial: boolean;
   breakdown: QuoteBreakdownItem[];
 };
 
@@ -82,9 +87,20 @@ export function feePercentFor(lessons: number): number {
   return lessons === 1 ? SINGLE_LESSON_FEE_PERCENT : 0;
 }
 
-/** 按节数判断是否赠送试课。 */
-export function includesTrialFor(lessons: number): boolean {
+/**
+ * 试课是否免费。
+ *
+ * 规则：试课结束后报课达到 10 节及以上，则试课免费；
+ * 否则按课程原价收取 1 节试课费用。
+ */
+export function isTrialFree(lessons: number): boolean {
   return lessons >= FREE_TRIAL_MIN_LESSONS;
+}
+
+/** 试课费用：免费时 0，否则按课程原价（不含班级系数、时长与手续费）计。 */
+export function trialFeeFor(lessons: number, coursePrice: number | null): number {
+  if (isTrialFree(lessons)) return 0;
+  return coursePrice ?? 0;
 }
 
 /**
@@ -124,7 +140,7 @@ function buildBreakdown(
   input: QuoteInput,
   basePrice: number,
   finalUnitPrice: number,
-  totalPrice: number,
+  lessonsPrice: number,
 ): QuoteBreakdownItem[] {
   const { course, subject, classType, lessons } = input;
   const items: QuoteBreakdownItem[] = [
@@ -152,7 +168,7 @@ function buildBreakdown(
   }
 
   items.push({ label: "最终单价", value: money(finalUnitPrice) });
-  items.push({ label: `${lessons} 节合计`, value: money(totalPrice) });
+  items.push({ label: `${lessons} 节正课`, value: money(lessonsPrice) });
 
   return items;
 }
@@ -161,7 +177,7 @@ function buildBreakdown(
 export function calculateQuote(input: QuoteInput): QuoteResult {
   const lessons = Math.floor(input.lessons);
   const hours = input.duration.hours;
-  const includesTrial = includesTrialFor(lessons);
+  const trialFree = isTrialFree(lessons);
 
   const empty = (reason: string): QuoteResult => ({
     ok: false,
@@ -169,8 +185,10 @@ export function calculateQuote(input: QuoteInput): QuoteResult {
     unitPrice: 0,
     lessons: lessons > 0 ? lessons : 0,
     hours,
+    lessonsPrice: 0,
+    trialFee: 0,
+    trialFree,
     totalPrice: 0,
-    includesTrial,
     breakdown: [],
   });
 
@@ -183,15 +201,28 @@ export function calculateQuote(input: QuoteInput): QuoteResult {
 
   const afterDuration = round2(base.price * input.duration.multiplier);
   const finalUnitPrice = round2(afterDuration * (1 + feePercentFor(lessons) / 100));
-  const totalPrice = round2(finalUnitPrice * lessons);
+  const lessonsPrice = round2(finalUnitPrice * lessons);
+
+  // 试课：满 10 节免费，否则按课程原价收 1 节
+  const trialFee = round2(trialFeeFor(lessons, input.course.price));
+  const totalPrice = round2(lessonsPrice + trialFee);
+
+  const breakdown = buildBreakdown(input, base.price, finalUnitPrice, lessonsPrice);
+  breakdown.push({
+    label: trialFree ? "试课（报课满 10 节，免费）" : "试课 1 节（按课程原价）",
+    value: trialFree ? money(0) : money(trialFee),
+  });
+  breakdown.push({ label: "总价", value: money(totalPrice) });
 
   return {
     ok: true,
     unitPrice: finalUnitPrice,
     lessons,
     hours,
+    lessonsPrice,
+    trialFee,
+    trialFree,
     totalPrice,
-    includesTrial,
-    breakdown: buildBreakdown(input, base.price, finalUnitPrice, totalPrice),
+    breakdown,
   };
 }

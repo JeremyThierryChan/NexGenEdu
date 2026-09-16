@@ -229,15 +229,27 @@ export function EstimateForm({ data }: EstimateFormProps) {
             </div>
 
             {/* 总价 */}
-            <div className="mt-4 flex items-baseline justify-between gap-4 rounded-md bg-ink-50 px-4 py-3">
-              <span className="text-sm text-ink-600">{data.labels.totalLabel}</span>
-              <span className="text-lg font-medium text-ink-900 tabular">
-                ¥{result.totalPrice}
-              </span>
+            <div className="mt-4 rounded-md bg-ink-50 px-4 py-3">
+              <div className="flex items-baseline justify-between gap-4">
+                <span className="text-sm text-ink-600">{data.labels.totalLabel}</span>
+                <span className="text-lg font-medium text-ink-900 tabular">
+                  ¥{result.totalPrice}
+                </span>
+              </div>
+              <p className="mt-2 border-t border-ink-200/70 pt-2 text-xs text-ink-500">
+                {result.lessons} 节正课 ¥{result.lessonsPrice}
+                {result.trialFree ? " + 试课 免费" : ` + 试课 ¥${result.trialFee}`}
+              </p>
             </div>
 
-            {result.includesTrial && (
-              <p className="mt-3 text-sm text-success-600">含 1 次免费试课</p>
+            {result.trialFree ? (
+              <p className="mt-3 text-sm text-success-600">
+                报课满 10 节，本次试课免费
+              </p>
+            ) : (
+              <p className="mt-3 text-sm text-ink-600">
+                试课按课程原价 ¥{result.trialFee} 收取；若试课后报课满 10 节，试课费用予以免除
+              </p>
             )}
 
             <dl className="mt-6 space-y-2.5 border-t border-ink-100 pt-5 text-sm">
@@ -272,7 +284,7 @@ export function EstimateForm({ data }: EstimateFormProps) {
               <span className="text-sm text-ink-600">{data.trial.priceLabel}</span>
             </div>
             <p className="mt-1 text-xs leading-relaxed text-ink-500">
-              {data.labels.lessonsHint}
+              试课后报课满 10 节则试课免费；未满 10 节按课程原价收取。
             </p>
           </div>
         )}

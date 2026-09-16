@@ -29,7 +29,7 @@ calculator_title: 课时报价
 calculator_hint: 选择学习阶段、课程与科目，再选择班级类型与报课节数。
 other_title: 其他项目
 lessons_label: 报课节数
-lessons_hint: 手动填写要报的节数；10 节及以上赠送 1 次试课
+lessons_hint: 手动填写要报的节数；试课后报课满 10 节，试课免费，否则试课按课程原价收取
 duration_label: 每节课时长
 class_size_label: 班级人数
 class_cost_label: 教师课时总费用
@@ -217,7 +217,10 @@ class_cost_hint: 班课按「教师课时总费用 ÷ 班级人数」计算，�
 
 ## 试课
 
-试课是单独的体验产品，不参与课时公式，免费。
+试课是单独的体验产品，不参与课时公式。
+
+规则：试课结束后报课满 10 节则试课免费；未满 10 节按课程原价收取 1 节试课费用。
+该规则写在 \`lib/pricing/quote.ts\`（isTrialFree / trialFeeFor），不在此文件中配置。
 
 ### 试课
 
