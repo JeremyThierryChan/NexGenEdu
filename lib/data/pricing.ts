@@ -1,16 +1,21 @@
 import { pricingSource } from "@/data/site/pricing";
-import { parseDocument, type Group, type PageBlock } from "@/lib/data/content";
+import { parseDocument, type PageBlock, type Section } from "@/lib/data/content";
 
 /**
  * 报价页数据：读取 data/site/pricing.md。
  *
- * 与 content.md 使用同一套结构（`## 分组` / `### 条目` / `#### 字段: 值`），
- * 单独成文件是因为报价选项与价格会独立调整。
+ * 与 content.md 使用同一套结构（标题层级即数据结构）：
+ *
+ *   ## 页面: 智能报价
+ *   ## 学习阶段             ← 分组
+ *   ### 小学                ← 阶段（分组下的子节）
+ *   #### 课程: 小学课内: 150  ← 条目名「课程」，值为「课程名: 基础价」
+ *   #### 科目: 语文、数学     ← 条目名「科目」，值为科目清单
  *
  * 字段值写「暂未开放」时视为不可选（页面上显示但禁选）。
  */
 
-/** 表示「暂未开放」的标记，数据文件里直接写这个值。 */
+/** 表示「暂未开放」的标记。 */
 const UNAVAILABLE = "暂未开放";
 
 /** 学习阶段下的一个课程（含基础价，单位：元 / 节）。 */
@@ -74,7 +79,6 @@ export type TrialLesson = {
 /** 其他项目（按学期 / 按期的独立产品）。 */
 export type OtherItem = {
   name: string;
-  /** 明细，例如「小学: 6000 / 学期 / 人」。 */
   details: Array<{ title: string; value: string }>;
 };
 
@@ -97,9 +101,7 @@ export type PricingData = {
     classCostLabel: string;
     classCostHint: string;
   };
-  /** 学习阶段（含各课程基础价）。 */
   stages: PricingStage[];
-  /** 科目分组，与 stages 同名对应。 */
   subjectGroups: SubjectGroup[];
   classTypes: ClassType[];
   durations: LessonDuration[];
@@ -112,9 +114,9 @@ function toAvailability(value: string | undefined): boolean {
   return value === undefined || value.trim() !== UNAVAILABLE;
 }
 
-/** 取分组内某个字段的值。 */
-function groupField(group: Group, title: string): string | undefined {
-  return group.items.find((item) => item.title === title)?.value;
+/** 取节内某个条目名对应的第一个值。 */
+function itemValue(section: Section, title: string): string | undefined {
+  return section.items.find((item) => item.title === title)?.value;
 }
 
 /** 解析数字；不可解析时返回 fallback。 */
@@ -124,62 +126,21 @@ function toNumber(value: string | undefined, fallback: number | null = null): nu
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-/**
- * 把分组里的字段条目解析成「选项」。
- *
- * 数据文件里选项的写法是 `#### 选项名: 值`：
- * 字段名即选项名，字段值即价格（或「暂未开放」）。
- */
-function toOptions(group: Group): Array<{ name: string; value: string }> {
-  return group.items.map((item) => ({ name: item.title, value: item.value }));
-}
-
-/** 解析学习阶段：阶段 → 课程 → 基础价。 */
-function toStages(groups: Group[]): PricingStage[] {
-  return groups.map((stage) => ({
-    name: stage.name,
-    courses: toOptions(stage).map((option) => {
-      const available = toAvailability(option.value);
-      return {
-        name: option.name,
-        price: available ? toNumber(option.value) : null,
-        available,
-      };
-    }),
-  })).map((stage) => ({
-    ...stage,
-    available: stage.courses.some((course) => course.available),
-  }));
-}
-
-/** 解析科目分组。科目系数写成「<科目名>系数: 1.2」，未配置时按 1 计算。 */
-function toSubjectGroups(groups: Group[]): SubjectGroup[] {
-  return groups.map((group) => {
-    const coefficientOf = (subjectName: string): number =>
-      toNumber(groupField(group, `${subjectName}系数`), null) ??
-      toNumber(groupField(group, "系数"), null) ??
-      1;
-
-    const subjects = toOptions(group)
-      .filter((option) => !option.name.endsWith("系数") && option.name !== "系数")
-      .map((option) => ({
-        name: option.name,
-        available: toAvailability(option.value),
-        coefficient: coefficientOf(option.name),
-      }));
-
-    return { name: group.name, subjects };
-  });
+/** 从「课程名: 基础价」里拆出课程名与价格文字。 */
+function parseCourse(raw: string): { name: string; priceLabel: string } {
+  const colon = raw.search(/[:：]/);
+  if (colon === -1) return { name: raw.trim(), priceLabel: "" };
+  return { name: raw.slice(0, colon).trim(), priceLabel: raw.slice(colon + 1).trim() };
 }
 
 /** 解析班级类型。系数不是数字（如「按人数分摊」）时使用 cost-share 模式。 */
-function toClassTypes(groups: Group[]): ClassType[] {
-  return groups
-    .map((group) => {
-      const raw = groupField(group, "系数") ?? "";
+function toClassTypes(sections: Section[]): ClassType[] {
+  return sections
+    .map((section) => {
+      const raw = itemValue(section, "系数") ?? "";
       const coefficient = toNumber(raw, null);
       return {
-        name: groupField(group, "名称") ?? group.name,
+        name: itemValue(section, "名称") ?? section.name,
         available: toAvailability(raw),
         mode: coefficient === null ? ("cost-share" as const) : ("coefficient" as const),
         coefficient,
@@ -189,32 +150,32 @@ function toClassTypes(groups: Group[]): ClassType[] {
 }
 
 /** 解析课时选择（每节课时长）。 */
-function toDurations(groups: Group[]): LessonDuration[] {
-  return groups.map((group) => {
+function toDurations(sections: Section[]): LessonDuration[] {
+  return sections.map((section) => {
     // 未配置乘数时按小时数计算
-    const hours = toNumber(groupField(group, "小时"), 1) ?? 1;
+    const hours = toNumber(itemValue(section, "小时"), 1) ?? 1;
     return {
-      name: groupField(group, "名称") ?? group.name,
+      name: itemValue(section, "名称") ?? section.name,
       hours,
-      multiplier: toNumber(groupField(group, "乘数"), hours) ?? hours,
+      multiplier: toNumber(itemValue(section, "乘数"), hours) ?? hours,
     };
   });
 }
 
-/** 解析试课（独立产品，取第一个分组）。 */
-function toTrial(group: Group | undefined): TrialLesson | null {
-  if (group === undefined) return null;
+/** 解析试课（独立产品）。 */
+function toTrial(section: Section | undefined): TrialLesson | null {
+  if (section === undefined) return null;
   return {
-    name: groupField(group, "名称") ?? group.name,
-    priceLabel: groupField(group, "价格") ?? "",
+    name: itemValue(section, "名称") ?? section.name,
+    priceLabel: itemValue(section, "价格") ?? "",
   };
 }
 
 /** 解析其他项目。 */
-function toOtherItems(groups: Group[]): OtherItem[] {
-  return groups.map((group) => ({
-    name: groupField(group, "名称") ?? group.name,
-    details: group.items
+function toOtherItems(sections: Section[]): OtherItem[] {
+  return sections.map((section) => ({
+    name: itemValue(section, "名称") ?? section.name,
+    details: section.items
       .filter((item) => item.title !== "名称")
       .map((item) => ({ title: item.title, value: item.value })),
   }));
@@ -229,7 +190,7 @@ export function getPricingData(): PricingData {
   const field = (key: string): string =>
     typeof page.data[key] === "string" ? (page.data[key] as string) : "";
 
-  const named = (name: string): Group =>
+  const named = (name: string): Section =>
     page.groups.find((group) => group.name === name) ?? {
       name,
       note: "",
@@ -237,6 +198,39 @@ export function getPricingData(): PricingData {
       body: "",
       children: [],
     };
+
+  // 阶段与科目都写在 `## 学习阶段` 的子节里
+  const stages: PricingStage[] = [];
+  const subjectGroups: SubjectGroup[] = [];
+
+  for (const stage of named("学习阶段").children) {
+    const courseEntries = stage.items.filter((item) => item.title === "课程");
+    const subjectEntries = stage.items.filter((item) => item.title === "科目");
+
+    stages.push({
+      name: stage.name,
+      available: courseEntries.some(
+        (item) => toAvailability(parseCourse(item.value).priceLabel),
+      ),
+      courses: courseEntries.map((item) => {
+        const { name, priceLabel } = parseCourse(item.value);
+        const available = toAvailability(priceLabel);
+        return { name, price: available ? toNumber(priceLabel) : null, available };
+      }),
+    });
+
+    const subjects: SubjectOption[] = [];
+    for (const entry of subjectEntries) {
+      for (const subjectName of entry.value.split(/[、,，|]/).map((x) => x.trim())) {
+        if (subjectName !== "") {
+          subjects.push({ name: subjectName, available: true, coefficient: 1 });
+        }
+      }
+    }
+    if (subjects.length > 0) {
+      subjectGroups.push({ name: stage.name, subjects });
+    }
+  }
 
   return {
     labels: {
@@ -257,8 +251,8 @@ export function getPricingData(): PricingData {
       classCostLabel: field("class_cost_label"),
       classCostHint: field("class_cost_hint"),
     },
-    stages: toStages(named("学习阶段").children),
-    subjectGroups: toSubjectGroups(named("科目").children),
+    stages,
+    subjectGroups,
     classTypes: toClassTypes(named("班级类型").children),
     durations: toDurations(named("课时选择").children),
     trial: toTrial(named("试课").children[0]),

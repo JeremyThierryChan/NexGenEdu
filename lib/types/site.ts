@@ -59,11 +59,21 @@ export type SectionHeading = {
 };
 
 /** 课程（content.md 的「页面: 课程」段中一个分组） */
+/** 课程下的一个学段小节（`#### 学段｜一句话` + 正文）。 */
+export type CourseBand = {
+  /** 小节标题，例如「小学数学｜建立数学基础」。 */
+  title: string;
+  /** 小节正文（Markdown）。 */
+  content: string;
+};
+
 export type Course = {
   id: string;
   nameZh: string;
-  /** 正文原文（Markdown）。 */
-  content: string;
+  /** 导语：`### 课程名` 与第一个 `#### 学段` 之间的文字（Markdown）。 */
+  lead: string;
+  /** 学段小节。语言类课程（雅思 / 法语等）没有小节，此时为空数组。 */
+  bands: CourseBand[];
 };
 
 /** 教师（content.md 的「页面: 教师」段中一个分组） */

@@ -155,11 +155,18 @@ export function getCoursesPage(): {
 } {
   const page = getPageBlock("课程");
 
-  // 课程页的每个 `### 课程名` 分组就是一门课程，正文写在分组里。
+  // 课程页的每个 `### 课程名` 分组就是一门课程。
+  // 分组内的 `#### 学段｜一句话` 是该课程的学段小节（解析器已放进 children），
+  // 分组 body 则是学段小节之前的导语。
   const courses = page.groups.map<Course>((group) => ({
     id: group.name,
     nameZh: group.name,
-    content: group.body.trim(),
+    lead: group.body.trim(),
+    bands: group.children.map((child) => ({
+      // Group 的字段名是 name；这里转成对外的 title
+      title: child.name,
+      content: child.body.trim(),
+    })),
   }));
 
   return { heading: pageHeading(page), courses };

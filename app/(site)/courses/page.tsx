@@ -12,6 +12,13 @@ export function generateMetadata(): Metadata {
   return { title: heading.title, description: heading.description };
 }
 
+/** 课程正文的排版样式：Markdown 渲染出的 p / ul / li / strong 统一在此约束。 */
+const PROSE_CLASS =
+  "mt-3 max-w-2xl leading-relaxed text-ink-600 " +
+  "[&_li]:mt-1.5 [&_p]:mt-3 [&_p:first-child]:mt-0 " +
+  "[&_strong]:font-medium [&_strong]:text-ink-800 " +
+  "[&_ul]:mt-3 [&_ul]:list-disc [&_ul]:pl-5";
+
 export default function CoursesPage() {
   const { heading, courses } = getCoursesPage();
 
@@ -48,11 +55,33 @@ export default function CoursesPage() {
                 className="scroll-mt-24 border-b border-ink-100 pb-12 last:border-0 last:pb-0"
               >
                 <h2 className="text-xl font-medium text-ink-900">{course.nameZh}</h2>
-                <div
-                  className="mt-4 max-w-2xl leading-relaxed text-ink-600 [&_li]:mt-1.5 [&_p]:mt-3 [&_strong]:font-medium [&_strong]:text-ink-800 [&_ul]:mt-3 [&_ul]:list-disc [&_ul]:pl-5"
-                  // 内容来自项目自己的 Markdown 文件，renderMarkdown 内部已做 HTML 转义。
-                  dangerouslySetInnerHTML={{ __html: renderMarkdown(course.content) }}
-                />
+
+                {/* 导语：课程名与第一个学段小节之间的文字 */}
+                {course.lead !== "" && (
+                  <div
+                    className={PROSE_CLASS}
+                    // 内容来自项目自己的 Markdown 文件，renderMarkdown 内部已做 HTML 转义。
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(course.lead) }}
+                  />
+                )}
+
+                {/* 学段小节：小学 / 初中 / 高中各一段 */}
+                {course.bands.length > 0 && (
+                  <div className="mt-6 space-y-6">
+                    {course.bands.map((band) => (
+                      <section
+                        key={band.title}
+                        className="rounded-lg border border-ink-200 bg-white p-5"
+                      >
+                        <h3 className="text-base font-medium text-ink-900">{band.title}</h3>
+                        <div
+                          className={PROSE_CLASS}
+                          dangerouslySetInnerHTML={{ __html: renderMarkdown(band.content) }}
+                        />
+                      </section>
+                    ))}
+                  </div>
+                )}
               </article>
             ))}
           </div>

@@ -21,8 +21,12 @@ import { parseItems, parseMarkdown, readArray, readString } from "@/lib/markdown
  * 未来接入数据库时替换本文件实现即可，页面调用方式不变。
  */
 
-/** 一个列表分组：`### 分组名` 下的若干条目。 */
-export type Group = {
+/**
+ * 一个节：页面内的分组，或分组下的子节。
+ *
+ * 层级由数据文件里的井号数决定（详见 buildTree）。
+ */
+export type Section = {
   name: string;
   /** 分组标题下的说明文字，不会显示在页面上。 */
   note: string;
@@ -31,8 +35,11 @@ export type Group = {
   /** 正文段落组（长文本场景）。 */
   body: string;
   /** 该分组内部的子分组（`####` 层级）。例如报价页「科目」下的各科目项。 */
-  children: Group[];
+  children: Section[];
 };
+
+/** 兼容别名：分组与子节是同一结构。 */
+export type Group = Section;
 
 /** 一个页面的全部内容。 */
 export type PageBlock = {
@@ -40,7 +47,7 @@ export type PageBlock = {
   name: string;
   /** 该页面的短字段。 */
   data: Record<string, string | string[]>;
-  groups: Group[];
+  groups: Section[];
 };
 
 export type ContentDocument = {
@@ -56,80 +63,155 @@ export type ContentDocument = {
  *   `#### 科目: 数学, 物理`    字段用冒号
  * 冒号只作为兜底：竖线优先，因此「1 : 6」这类含冒号的数值不会被误拆。
  */
-function splitTitle(raw: string): { title: string; value: string } {
+function splitTitle(raw: string): {
+  title: string;
+  value: string;
+  /** 是否为内容小节标题（而非 `字段: 值` 形式的条目）。 */
+  isSection: boolean;
+} {
   const pipe = raw.indexOf("|");
+
   if (pipe !== -1) {
-    return { title: raw.slice(0, pipe).trim(), value: raw.slice(pipe + 1).trim() };
+    const head = raw.slice(0, pipe).trim();
+    const tail = raw.slice(pipe + 1).trim();
+
+    /**
+     * 竖线前含**全角冒号**时判定为内容小节标题：
+     *   小学数学｜建立数学基础        ← 小节标题，正文写在标题下方
+     *   小学语文｜建立阅读与表达的基础  ← 同上
+     * 而「标题 | 值」这类条目的值统一用半角冒号（`1 : 6`、`课程: 小学课内: 150`），
+     * 因此全角冒号是区分「章节标题」与「条目」的可靠信号。
+     */
+    if (head.includes("：") && !tail.includes(":")) {
+      return { title: raw.trim(), value: "", isSection: true };
+    }
+    return { title: head, value: tail, isSection: false };
   }
+
   const colon = raw.search(/[:：]/);
   if (colon !== -1) {
-    return { title: raw.slice(0, colon).trim(), value: raw.slice(colon + 1).trim() };
+    return {
+      title: raw.slice(0, colon).trim(),
+      value: raw.slice(colon + 1).trim(),
+      isSection: false,
+    };
   }
-  return { title: raw.trim(), value: "" };
-}
-
-/** 按指定层级标题把正文切成块，返回 [标题, 块内容] 列表。 */
-function splitByTitleLevel(markdown: string, level: number): Array<[string, string]> {
-  const pattern = new RegExp(`^#{${level}}\\s+(.+?)\\s*$`);
-  const blocks: Array<[string, string]> = [];
-  let currentTitle: string | null = null;
-  let buffer: string[] = [];
-
-  const flush = () => {
-    if (currentTitle !== null) blocks.push([currentTitle, buffer.join("\n").trim()]);
-    buffer = [];
-  };
-
-  for (const line of markdown.split(/\r?\n/)) {
-    const match = pattern.exec(line);
-    if (match?.[1] !== undefined) {
-      flush();
-      currentTitle = match[1];
-      continue;
-    }
-    if (currentTitle !== null) buffer.push(line);
-  }
-  flush();
-
-  return blocks;
+  return { title: raw.trim(), value: "", isSection: true };
 }
 
 /** 解析一个分组块（`### 分组名` 的内容）。 */
-function parseGroup(name: string, block: string, depth: number): Group {
-  const itemLevel = depth + 1;
-  const childLevel = depth + 1;
+/** 标题块：一段以某个层级标题开头的内容。 */
+type HeadingBlock = {
+  /** 标题层级（井号数）。 */
+  level: number;
+  /** 标题原文（未拆分）。 */
+  rawTitle: string;
+  /** 标题下的正文原文（不含子标题内容）。 */
+  text: string;
+  /** 更深层级的子标题块。 */
+  children: HeadingBlock[];
+};
 
-  // 先看这一层有没有更深一层的子分组（例如「科目」下面还有「科目：数学」）。
-  const childBlocks =
-    depth < 5 ? splitByTitleLevel(block, childLevel + 1) : [];
-  if (childBlocks.length > 0) {
-    return {
-      name,
-      note: "",
-      items: [],
-      body: "",
-      children: childBlocks.map(([childName, childBlock]) =>
-        parseGroup(childName, childBlock, depth + 1),
-      ),
-    };
+/**
+ * 把 Markdown 正文按标题层级**如实**建成树。
+ *
+ * 这里不做任何「哪一层是分组、哪一层是条目」的推断 ——
+ * 之前靠 groupLevel±1 推断层级的做法在多层结构下反复出错
+ * （`## 分组 → ### 阶段 → #### 条目` 会被压平、中间层消失）。
+ * 现在层级完全由作者写的井号数决定，数据层按名字与层级取用。
+ */
+function buildTree(markdown: string): HeadingBlock[] {
+  const root: HeadingBlock = { level: 0, rawTitle: "", text: "", children: [] };
+  // 栈顶始终是当前正在填充的块
+  const stack: HeadingBlock[] = [root];
+  const plainLines: string[] = [];
+
+  const flushPlain = () => {
+    if (plainLines.length > 0) {
+      const text = plainLines.join("\n").trim();
+      const top = stack[stack.length - 1];
+      if (top !== undefined && text !== "") {
+        top.text = top.text === "" ? text : `${top.text}\n${text}`;
+      }
+      plainLines.length = 0;
+    }
+  };
+
+  for (const line of markdown.split(/\r?\n/)) {
+    const heading = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
+    if (heading?.[1] === undefined || heading[2] === undefined) {
+      plainLines.push(line);
+      continue;
+    }
+
+    flushPlain();
+    const level = heading[1].length;
+    const block: HeadingBlock = { level, rawTitle: heading[2], text: "", children: [] };
+
+    // 弹栈直到找到层级更浅的父块
+    while (stack.length > 1) {
+      const top = stack[stack.length - 1];
+      if (top !== undefined && top.level >= level) stack.pop();
+      else break;
+    }
+    const parent = stack[stack.length - 1];
+    if (parent !== undefined) parent.children.push(block);
+    stack.push(block);
   }
+  flushPlain();
 
-  const itemBlocks = splitByTitleLevel(block, itemLevel);
-  if (itemBlocks.length > 0) {
-    const pattern = new RegExp(`^#{${itemLevel}}\\s`, "m");
-    const firstItemIndex = block.search(pattern);
+  return root.children;
+}
+
+/** 把标题块转成节（含条目与子节）。 */
+function blockToSection(block: HeadingBlock): Section {
+  const parsed = splitTitle(block.rawTitle);
+  const children = block.children.map(blockToSection);
+
+  // 子块里有内容小节（`#### 学段｜一句话` + 正文）时，整体作为子分组
+  const childItems = block.children.map((child) => {
+    const item = splitTitle(child.rawTitle);
+    return { item, child };
+  });
+  const allItems = childItems.every(({ item }) => !item.isSection);
+
+  if (childItems.length > 0 && allItems && block.children[0]?.level === block.level + 1) {
     return {
-      name,
-      note: firstItemIndex === -1 ? "" : block.slice(0, firstItemIndex).trim(),
-      items: itemBlocks.map(([title, body]) => ({ ...splitTitle(title), body })),
+      name: parsed.title,
+      note: block.text,
+      items: childItems.map(({ item, child }) => ({
+        title: item.title,
+        value: item.value,
+        body: child.text,
+      })),
       body: "",
       children: [],
     };
   }
 
-  // 既没有子分组也没有条目，则为正文组（长文本场景）。
-  return { name, note: "", items: [], body: block.trim(), children: [] };
+  return {
+    name: parsed.title,
+    note: "",
+    items: [],
+    body: block.text,
+    children,
+  };
 }
+
+/** 解析一个页面块。 */
+/**
+ * 收集页面内的分组：取页面正文里**最外层**的标题块。
+ *
+ * 层级完全由作者写的井号数决定，不做推断：
+ *   `### 分组`              → 页面级分组
+ *   `## 分组 → ### 阶段`     → 页面级分组是 `## 分组`，`### 阶段` 是它的子节
+ * 数据层按名字查找即可，需要更深的层级就继续读 children。
+ */
+function collectGroups(rest: string): Section[] {
+  return buildTree(rest).map(blockToSection);
+}
+
+/** 解析一个页面块。 */
 
 /** 解析一个页面块。 */
 function parsePage(name: string, block: string): PageBlock {
@@ -162,52 +244,6 @@ function parsePage(name: string, block: string): PageBlock {
   const { data } = parseMarkdown(`---\n${fieldSource.trim()}\n---\n`);
 
   return { name, data, groups: collectGroups(rest) };
-}
-
-/**
- * 收集页面内的分组。
- *
- * 兼容两种写法：
- *   - 页面内直接写 `### 分组名`（content.md 的约定）
- *   - 页面内写 `## 分组名`（pricing.md 的约定，与页面段落同级更直观）
- * 两种都支持是为了让数据文件按语义选择更自然的层级，解析结果一致。
- */
-function collectGroups(rest: string): Group[] {
-  const topLevel = splitByTitleLevel(rest, 2).filter(
-    ([title]) => !/^页面\s*[:：]/.test(title),
-  );
-
-  if (topLevel.length > 0) {
-    return topLevel.map(([groupName, groupBlock]) => {
-      // 分组下面若还有 `### 子项`，继续向下一层展开
-      const subGroups = splitByTitleLevel(groupBlock, 3);
-      if (subGroups.length > 0) {
-        return {
-          name: groupName,
-          note: "",
-          items: [],
-          body: "",
-          // 子分组是三级标题，因此深度传 3：其条目为四级标题（depth + 1）。
-          // 若这里传 4，就会去找五级标题，子项会全部解析为空。
-          children: subGroups.map(([childName, childBlock]) =>
-            parseGroup(childName, childBlock, 3),
-          ),
-        };
-      }
-      return parseGroup(groupName, groupBlock, 3);
-    });
-  }
-
-  return splitByTitleLevel(rest, 3)
-    .map(([groupName, groupBlock]) => parseGroup(groupName, groupBlock, 3))
-    // 只丢弃空分组。注意不能只保留「有条目或子分组」的分组：
-    // 课程分组的内容是正文（body），没有条目，那样会被整体丢掉。
-    .filter(
-      (group) =>
-        group.items.length > 0 ||
-        group.children.length > 0 ||
-        group.body.trim() !== "",
-    );
 }
 
 /**

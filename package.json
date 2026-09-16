@@ -12,7 +12,8 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "sync-content": "node scripts/sync-content.mjs"
+    "sync-content": "node scripts/sync-content.mjs",
+    "check": "node --experimental-strip-types scripts/check.mjs"
   },
   "dependencies": {
     "next": "15.5.25",
