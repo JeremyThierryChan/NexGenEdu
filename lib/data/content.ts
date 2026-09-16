@@ -1,4 +1,4 @@
-import contentSource from "@/data/site/content.md";
+import { contentSource } from "@/data/site/content";
 import { parseItems, parseMarkdown, readArray, readString } from "@/lib/markdown";
 
 /**
@@ -30,6 +30,8 @@ export type Group = {
   items: Array<{ title: string; value: string; body: string }>;
   /** 正文段落组（长文本场景）。 */
   body: string;
+  /** 该分组内部的子分组（`####` 层级）。例如报价页「科目」下的各科目项。 */
+  children: Group[];
 };
 
 /** 一个页面的全部内容。 */
@@ -93,21 +95,40 @@ function splitByTitleLevel(markdown: string, level: number): Array<[string, stri
 }
 
 /** 解析一个分组块（`### 分组名` 的内容）。 */
-function parseGroup(name: string, block: string): Group {
-  const itemBlocks = splitByTitleLevel(block, 4);
+function parseGroup(name: string, block: string, depth: number): Group {
+  const itemLevel = depth + 1;
+  const childLevel = depth + 1;
 
+  // 先看这一层有没有更深一层的子分组（例如「科目」下面还有「科目：数学」）。
+  const childBlocks =
+    depth < 5 ? splitByTitleLevel(block, childLevel + 1) : [];
+  if (childBlocks.length > 0) {
+    return {
+      name,
+      note: "",
+      items: [],
+      body: "",
+      children: childBlocks.map(([childName, childBlock]) =>
+        parseGroup(childName, childBlock, depth + 1),
+      ),
+    };
+  }
+
+  const itemBlocks = splitByTitleLevel(block, itemLevel);
   if (itemBlocks.length > 0) {
-    const firstItemIndex = block.search(/^####\s/m);
+    const pattern = new RegExp(`^#{${itemLevel}}\\s`, "m");
+    const firstItemIndex = block.search(pattern);
     return {
       name,
       note: firstItemIndex === -1 ? "" : block.slice(0, firstItemIndex).trim(),
       items: itemBlocks.map(([title, body]) => ({ ...splitTitle(title), body })),
       body: "",
+      children: [],
     };
   }
 
-  // 没有条目则为正文组（长文本场景）。
-  return { name, note: "", items: [], body: block.trim() };
+  // 既没有子分组也没有条目，则为正文组（长文本场景）。
+  return { name, note: "", items: [], body: block.trim(), children: [] };
 }
 
 /** 解析一个页面块。 */
@@ -120,24 +141,73 @@ function parsePage(name: string, block: string): PageBlock {
       `data/site/content.md 的「## 页面: ${name}」缺少 --- 包裹的字段块。`,
     );
   }
-  const closingIndex = trimmed.indexOf("\n---", 3);
-  if (closingIndex === -1) {
+  // 找字段块的结束分隔符：一行只有 `---` 的内容。
+  //
+  // 两个坑：
+  //   1. 不能用 indexOf("\n---")：正文里的 Markdown 表格分隔行（| --- | --- |）会命中。
+  //   2. 也不能用 /^---$/m：字段值里可能就有这样的表格（例如 `| 分组 | 基础价含义 |`
+  //      后面跟的 | --- | --- |），那会匹配到字段块内部，把正文全部吃掉。
+  // 因此限定：该行恰好是 `---`，且**不含冒号**（frontmatter 字段必然含冒号）。
+  const closingMatch = /^---[ \t]*$/m.exec(trimmed.slice(3));
+  if (closingMatch === null) {
     throw new Error(`data/site/content.md 的「## 页面: ${name}」字段块未闭合（缺少 ---）。`);
   }
+  const closingIndex = 3 + closingMatch.index;
+  const closingDelimiter = closingMatch[0];
 
   const fieldSource = trimmed.slice(3, closingIndex);
-  const rest = trimmed.slice(closingIndex + 4);
+  const rest = trimmed.slice(closingIndex + closingDelimiter.length);
   // 复用 parseMarkdown 的 frontmatter 解析：
   // 需要以 `---\n` 开头、以 `\n---` 结尾，因此这里补上新行。
   const { data } = parseMarkdown(`---\n${fieldSource.trim()}\n---\n`);
 
-  return {
-    name,
-    data,
-    groups: splitByTitleLevel(rest, 3).map(([groupName, groupBlock]) =>
-      parseGroup(groupName, groupBlock),
-    ),
-  };
+  return { name, data, groups: collectGroups(rest) };
+}
+
+/**
+ * 收集页面内的分组。
+ *
+ * 兼容两种写法：
+ *   - 页面内直接写 `### 分组名`（content.md 的约定）
+ *   - 页面内写 `## 分组名`（pricing.md 的约定，与页面段落同级更直观）
+ * 两种都支持是为了让数据文件按语义选择更自然的层级，解析结果一致。
+ */
+function collectGroups(rest: string): Group[] {
+  const topLevel = splitByTitleLevel(rest, 2).filter(
+    ([title]) => !/^页面\s*[:：]/.test(title),
+  );
+
+  if (topLevel.length > 0) {
+    return topLevel.map(([groupName, groupBlock]) => {
+      // 分组下面若还有 `### 子项`，继续向下一层展开
+      const subGroups = splitByTitleLevel(groupBlock, 3);
+      if (subGroups.length > 0) {
+        return {
+          name: groupName,
+          note: "",
+          items: [],
+          body: "",
+          // 子分组是三级标题，因此深度传 3：其条目为四级标题（depth + 1）。
+          // 若这里传 4，就会去找五级标题，子项会全部解析为空。
+          children: subGroups.map(([childName, childBlock]) =>
+            parseGroup(childName, childBlock, 3),
+          ),
+        };
+      }
+      return parseGroup(groupName, groupBlock, 3);
+    });
+  }
+
+  return splitByTitleLevel(rest, 3)
+    .map(([groupName, groupBlock]) => parseGroup(groupName, groupBlock, 3))
+    // 只丢弃空分组。注意不能只保留「有条目或子分组」的分组：
+    // 课程分组的内容是正文（body），没有条目，那样会被整体丢掉。
+    .filter(
+      (group) =>
+        group.items.length > 0 ||
+        group.children.length > 0 ||
+        group.body.trim() !== "",
+    );
 }
 
 /**
@@ -148,15 +218,40 @@ function parsePage(name: string, block: string): PageBlock {
  * 文件很小（约 10 KB），解析成本可以忽略；生产构建期只会读取一次。
  */
 export function loadContent(): ContentDocument {
-  const source = contentSource;
+  return parseDocument(contentSource);
+}
+
+/** 解析任意一份数据文件（content.md 之外的其它文件也复用同一套结构）。 */
+export function parseDocument(source: string): ContentDocument {
 
   const pages = new Map<string, PageBlock>();
-  for (const [rawName, block] of splitByTitleLevel(source, 2)) {
-    const marker = /^页面\s*[:：]\s*(.+)$/.exec(rawName);
-    if (marker?.[1] === undefined) continue; // 非页面段落（例如文件说明）跳过
-    const page = parsePage(marker[1].trim(), block);
-    pages.set(page.name, page);
+
+  // 按 `## 页面: xxx` 切块，而不是按任意二级标题。
+  // 原因：页面内部的分组本身也可能是二级标题（例如报价页的「## 科目」），
+  // 若按二级标题切块，页面块会在第一个分组处被截断，分组全部丢失。
+  const markerPattern = /^##\s+页面\s*[:：]\s*(.+?)\s*$/;
+  const lines = source.split(/\r?\n/);
+  let currentName: string | null = null;
+  let buffer: string[] = [];
+
+  const flush = () => {
+    if (currentName !== null) {
+      const page = parsePage(currentName, buffer.join("\n"));
+      pages.set(page.name, page);
+    }
+    buffer = [];
+  };
+
+  for (const line of lines) {
+    const marker = markerPattern.exec(line);
+    if (marker?.[1] !== undefined) {
+      flush();
+      currentName = marker[1].trim();
+      continue;
+    }
+    if (currentName !== null) buffer.push(line);
   }
+  flush();
 
   if (pages.size === 0) {
     throw new Error("data/site/content.md 中没有找到任何「## 页面: xxx」段落。");
@@ -176,7 +271,15 @@ export function getPageBlock(name: string): PageBlock {
 
 /** 取分组，缺失时返回空分组（便于某页暂时不需要某组）。 */
 export function getGroup(page: PageBlock, name: string): Group {
-  return page.groups.find((group) => group.name === name) ?? { name, note: "", items: [], body: "" };
+  return (
+    page.groups.find((group) => group.name === name) ?? {
+      name,
+      note: "",
+      items: [],
+      body: "",
+      children: [],
+    }
+  );
 }
 
 /** 读取页面短字段中的字符串。 */

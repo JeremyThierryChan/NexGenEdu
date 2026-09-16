@@ -58,7 +58,8 @@ app/
 │   ├── about/            #   /about
 │   ├── courses/          #   /courses
 │   ├── teachers/         #   /teachers
-│   └── contact/          #   /contact
+│   ├── contact/          #   /contact
+│   └── quote/            #   /quote 智能报价（下拉选择 + 报价计算）
 └── admin/                # B. 教务后台（布局已搭建，业务待 Phase 4）
 
 components/
@@ -67,6 +68,7 @@ components/
 ├── site/                 # 宣传网站区块组件（PageHeader / FeatureCard / EmptyState）
 ├── courses/              # CourseCard
 ├── teachers/             # TeacherCard
+├── pricing/              # EstimateForm（报价表单）
 └── students/ classrooms/ lessons/ dashboard/   # 后台业务组件（Phase 4+）
 
 lib/
@@ -75,12 +77,19 @@ lib/
 │   └── content.ts        # 单文件内容源解析（## 页面 / ### 分组 / #### 条目）
 ├── markdown.ts           # frontmatter / Markdown 极简解析与渲染
 ├── types/site.ts         # 内容类型定义
+├── pricing/quote.ts      # 报价公式（改报价规则只改这个文件）
 ├── site/nav.ts           # 导航与页头 CTA 的结构配置
 ├── scheduling/           # 排课与冲突检测（Phase 5）
 └── utils/cn.ts
 
 data/site/
-└── content.md            # 全站内容唯一来源（品牌 / 5 个页面文案与数据）
+├── content.md            # 网站内容唯一来源（品牌 / 5 个页面文案与数据）
+├── pricing.md            # 报价页的可选项与基础价格
+└── *.ts                  # 由 scripts/sync-content.mjs 从上面的 .md 自动生成
+
+scripts/
+├── dev.mjs               # 开发入口：监听 .md 改动自动同步 + 启动 next dev
+└── sync-content.mjs      # 把 .md 编译为 .ts 内容模块
 ```
 
 ## 4.1 内容数据层（全部内容集中在 1 个文件）
@@ -121,13 +130,28 @@ title: 让学习真正发生      ← 该页面的短字段（frontmatter）
 - **长文本**：直接写在分组标题下，支持 `**粗体**`、`- 列表`。
 - 解析实现在 `lib/markdown.ts` 与 `lib/data/content.ts`，只支持上述子集，零依赖。
 
-### 为什么用 import 而不是 fs 读取
+### 为什么 .md 还要生成 .ts
 
-`content.md` 通过 webpack 的 `asset/source` 以字符串导入（见 `next.config.ts`）：
+内容以 Markdown 维护（便于手改），但 Next 无法可靠地直接把 `.md` 当字符串导入：
+其内置处理会把 `·`（U+00B7）序列化成非法的 `\xb7` 转义，产物直接语法报错。
+因此 `scripts/sync-content.mjs` 会把 `data/site/*.md` 生成同名的 `.ts` 模块
+（`export const contentSource = \`...\``），再由数据层 import。
 
-- 文件进入依赖图 → dev 下保存即重新编译，**刷新页面就生效，不必重启服务器**
-- 生产构建把内容内联进产物，运行时不再依赖文件系统
-- 若改用 `fs.readFileSync`，打包器不追踪该文件，改完必须重启 dev server
+这一步已自动化，正常使用无需关心：
+
+- `npm run dev` → 启动时同步一次，并监听 `.md` 改动自动同步（刷新页面即生效）
+- `npm run build` → 构建前同步一次
+- `npm run sync-content` → 手工同步（备用）
+
+### 报价页（/quote）
+
+- **可选项与价格**：`data/site/pricing.md`（科目 / 学习阶段 / 开班人数三组，可增删）
+- **公式**：`lib/pricing/quote.ts` 的 `calculateQuote()`，单独一个文件
+- 页面（`app/(site)/quote/page.tsx` + `components/pricing/EstimateForm.tsx`）
+  只负责取值与展示，不含公式、不含选项清单
+
+⚠️ 当前公式是临时实现（科目基础价 + 阶段加价，再乘人数系数，取整到元），
+待真实定价规则确定后替换 `calculateQuote` 的实现即可，函数签名与页面都不用改。
 
 ### 页面读取方式
 
@@ -162,6 +186,7 @@ title: 让学习真正发生      ← 该页面的短字段（frontmatter）
 | Phase 3 | 宣传网站内容接入 Markdown | 待开始 |
 | Phase 4 | 后台：Dashboard / 学生 / 教师 / 教室 / 课程 / 日历 | 🚧 框架已搭建（仅布局 + 概览页） |
 | Phase 5 | 核心业务：排课 / 冲突检测 / 课程状态 / 课时扣减 / 搜索 | 待开始 |
+| — | 宣传网站「智能报价」页（选项 + 计算逻辑已分离，公式待定） | ✅ 已完成 |
 | Phase 6 | 响应式与 UI Polish | 待开始 |
 | Phase 7 | 部署：GitHub Actions → GitHub Pages | ✅ 已完成（提前） |
 
@@ -176,9 +201,10 @@ title: 让学习真正发生      ← 该页面的短字段（frontmatter）
 
 ```bash
 npm run dev        # 开发服务器 http://localhost:3000
-npm run lint       # ESLint
-npm run typecheck  # tsc --noEmit
-npm run build      # 生产构建
+npm run lint         # ESLint
+npm run typecheck    # tsc --noEmit
+npm run build        # 生产构建（会先同步内容）
+npm run sync-content # 手工同步 data/site/*.md（一般不需要）
 ```
 
 每个 Phase 完成后固定执行：`lint` → `typecheck` → `build` → 更新本文件 → Git commit。

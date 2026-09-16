@@ -59,7 +59,7 @@ V1 只围绕五件事：**学生 · 教师 · 教室 · 课程 · 课时**。
 - 设计系统：品牌色、状态色、中性色阶、圆角与字体，集中在 `app/globals.css`
 - 基础组件：`Button` `Card` `Badge` `Container` `Section`
 - 布局组件：`Header`（含移动端折叠菜单）`Footer` `Logo`
-- 宣传网站 5 个页面可访问：`/` `/courses` `/teachers` `/about` `/contact`
+- 宣传网站 6 个页面可访问：`/` `/courses` `/teachers` `/about` `/contact` `/quote`（智能报价）
 
 ### 待实现
 

@@ -7,11 +7,12 @@
     "node": ">=18.18.0"
   },
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run sync-content && next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "sync-content": "node scripts/sync-content.mjs"
   },
   "dependencies": {
     "next": "15.5.25",

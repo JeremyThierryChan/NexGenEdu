@@ -41,18 +41,6 @@ const nextConfig: NextConfig = {
         assetPrefix: basePath,
       }),
 
-  webpack(config) {
-    /**
-     * 把 data/site/content.md 作为字符串导入（见 lib/data/content.ts）。
-     * 目的是让它进入依赖图：dev 下保存文件即触发重新编译，
-     * 生产构建则把内容内联进产物。
-     */
-    config.module.rules.push({
-      test: /\.md$/,
-      type: "asset/source",
-    });
-    return config;
-  },
 };
 
 export default nextConfig;

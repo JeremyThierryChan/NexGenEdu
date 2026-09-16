@@ -15,6 +15,7 @@ export const MAIN_NAV: readonly NavItem[] = [
   { href: "/teachers", label: "教师" },
   { href: "/about", label: "关于我们" },
   { href: "/contact", label: "联系我们" },
+  { href: "/quote", label: "报价" },
 ] as const;
 
 /** 页头右上角的行动按钮。文案与链接属于可自定义内容，当前为代码内固定值，后续可迁移到 content.md。 */
