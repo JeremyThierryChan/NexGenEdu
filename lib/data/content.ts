@@ -189,9 +189,4 @@ export function pageArray(page: PageBlock, key: string): string[] {
   return readArray(page.data, key);
 }
 
-/** 页面是否仍为占位内容：显式写 placeholder: false 才算已替换。 */
-export function isPagePlaceholder(page: PageBlock): boolean {
-  return pageString(page, "placeholder", "true") !== "false";
-}
-
 export { parseItems };

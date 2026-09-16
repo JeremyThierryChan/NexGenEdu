@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { CourseCard } from "@/components/courses/CourseCard";
 import { PageHeader } from "@/components/site/PageHeader";
 import { Container } from "@/components/ui/Container";
-import { PlaceholderNotice } from "@/components/ui/PlaceholderNotice";
 import { Section } from "@/components/ui/Section";
 import { getCoursesPage } from "@/lib/data/site";
 import { renderMarkdown } from "@/lib/markdown";
@@ -14,7 +13,7 @@ export function generateMetadata(): Metadata {
 }
 
 export default function CoursesPage() {
-  const { heading, courses, placeholder } = getCoursesPage();
+  const { heading, courses } = getCoursesPage();
 
   return (
     <>
@@ -38,13 +37,6 @@ export default function CoursesPage() {
               />
             ))}
           </div>
-          {placeholder && (
-            <PlaceholderNotice
-              className="mt-6 max-w-2xl"
-              source="data/site/content.md"
-              detail="以下课程内容均为占位"
-            />
-          )}
         </Section>
 
         <Section className="border-t border-ink-200">

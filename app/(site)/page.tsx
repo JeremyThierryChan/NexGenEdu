@@ -5,7 +5,6 @@ import { FeatureCard } from "@/components/site/FeatureCard";
 import { TeacherCard } from "@/components/teachers/TeacherCard";
 import { ButtonLink } from "@/components/ui/Button";
 import { Container } from "@/components/ui/Container";
-import { PlaceholderNotice } from "@/components/ui/PlaceholderNotice";
 import { Section } from "@/components/ui/Section";
 import {
   getCoursesPage,
@@ -74,9 +73,6 @@ export default function HomePage() {
                 {home.secondaryCta.label}
               </ButtonLink>
             </div>
-            {home.placeholder && (
-              <PlaceholderNotice className="mt-8 max-w-lg" source="data/site/content.md" />
-            )}
           </div>
 
           {/*
@@ -182,12 +178,24 @@ export default function HomePage() {
             {home.classrooms.map((room) => (
               <figure key={room.title} className="overflow-hidden rounded-lg border border-ink-200">
                 {room.value === "" ? (
-                  // 无真实照片时的占位块（photo 文件名为空）
+                  // 尚未上传照片时显示中性图片位（photo 文件名为空）
                   <div
-                    className="flex aspect-4/3 items-center justify-center bg-ink-100 text-xs text-ink-400"
+                    className="flex aspect-4/3 items-center justify-center bg-ink-100 text-ink-300"
                     aria-hidden
                   >
-                    图片占位
+                    <svg
+                      viewBox="0 0 24 24"
+                      className="size-8"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <rect x="3" y="4.5" width="18" height="15" rx="1.5" />
+                      <circle cx="8.5" cy="9.5" r="1.5" />
+                      <path d="M3.5 17l5-4.5 4 3.5 3-2.5 5 4" />
+                    </svg>
                   </div>
                 ) : (
                   <Image
@@ -204,13 +212,6 @@ export default function HomePage() {
               </figure>
             ))}
           </div>
-          {home.placeholder && (
-            <PlaceholderNotice
-              className="mt-6 max-w-2xl"
-              source="data/site/content.md"
-              detail="教室名称与照片均为占位"
-            />
-          )}
         </Section>
       </Container>
 

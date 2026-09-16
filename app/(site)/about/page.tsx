@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { PageHeader } from "@/components/site/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Container } from "@/components/ui/Container";
-import { PlaceholderNotice } from "@/components/ui/PlaceholderNotice";
 import { Section } from "@/components/ui/Section";
 import { getAboutContent, getSiteBrand } from "@/lib/data/site";
 
@@ -81,15 +80,6 @@ export default function AboutPage() {
           </Section>
         )}
 
-        {about.placeholder && (
-          <Section className="pt-0">
-            <PlaceholderNotice
-              className="max-w-2xl"
-              source="data/site/content.md"
-              detail="教学理念、校区规模等均为占位内容"
-            />
-          </Section>
-        )}
       </Container>
     </>
   );

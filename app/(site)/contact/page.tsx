@@ -3,7 +3,6 @@ import { PageHeader } from "@/components/site/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Container } from "@/components/ui/Container";
-import { PlaceholderNotice } from "@/components/ui/PlaceholderNotice";
 import { Section } from "@/components/ui/Section";
 import { getContactContent, getSiteBrand } from "@/lib/data/site";
 
@@ -49,10 +48,21 @@ export default function ContactPage() {
 
           <Card title={contact.routeTitle} description={contact.routeDescription}>
             <div
-              className="flex aspect-4/3 items-center justify-center rounded-md bg-ink-100 text-xs text-ink-400"
+              className="flex aspect-4/3 items-center justify-center rounded-md bg-ink-100 text-ink-300"
               aria-hidden
             >
-              地图占位
+              <svg
+                viewBox="0 0 24 24"
+                className="size-8"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M12 21s7-5.6 7-11a7 7 0 10-14 0c0 5.4 7 11 7 11z" />
+                <circle cx="12" cy="10" r="2.5" />
+              </svg>
             </div>
             <p className="mt-4 text-sm leading-relaxed text-ink-600">
               {contact.routeParagraph}
@@ -63,15 +73,6 @@ export default function ContactPage() {
           </Card>
         </Section>
 
-        {contact.placeholder && (
-          <Section className="pt-0">
-            <PlaceholderNotice
-              className="max-w-2xl"
-              source="data/site/content.md"
-              detail="电话、地址、路线说明均为占位内容"
-            />
-          </Section>
-        )}
       </Container>
     </>
   );

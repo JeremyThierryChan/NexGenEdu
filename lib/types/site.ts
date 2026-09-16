@@ -21,7 +21,6 @@ export type SiteBrand = {
   homeTitle: string;
   /** 页面标题模板中的机构名，例如「NexGenEdu 新锐教培」。 */
   titleSuffix: string;
-  placeholder: boolean;
 };
 
 export type ContactInfo = {
@@ -30,7 +29,6 @@ export type ContactInfo = {
   email: string;
   address: string;
   businessHours: string;
-  placeholder: boolean;
 };
 
 /** 「标题 | 说明」形式的通用条目。 */
@@ -51,7 +49,6 @@ export type HomeContent = {
   courses: LabeledItem[];
   classrooms: LabeledItem[];
   cta: { title: string; description: string; label: string; href: string };
-  placeholder: boolean;
 };
 
 /** 区块标题（首页各区块共用）。 */
@@ -67,7 +64,6 @@ export type Course = {
   nameZh: string;
   /** 正文原文（Markdown）。 */
   content: string;
-  placeholder: boolean;
 };
 
 /** 教师（content.md 的「页面: 教师」段中一个分组） */
@@ -80,7 +76,6 @@ export type Teacher = {
   summary: string;
   /** 字段之外的自由介绍（Markdown 原文）。 */
   bio: string;
-  placeholder: boolean;
 };
 
 /** 关于我们（content.md 的「页面: 关于」段） */
@@ -93,7 +88,6 @@ export type AboutContent = {
   principles: LabeledItem[];
   facts: LabeledItem[];
   campusParagraphs: string[];
-  placeholder: boolean;
 };
 
 /** 联系我们（content.md 的「页面: 联系我们」段） */
@@ -106,5 +100,4 @@ export type ContactContent = {
   routeDescription: string;
   routeParagraph: string;
   disabledActionLabel: string;
-  placeholder: boolean;
 };

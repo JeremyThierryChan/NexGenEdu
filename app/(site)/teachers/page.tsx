@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { PageHeader } from "@/components/site/PageHeader";
 import { TeacherCard } from "@/components/teachers/TeacherCard";
 import { Container } from "@/components/ui/Container";
-import { PlaceholderNotice } from "@/components/ui/PlaceholderNotice";
 import { Section } from "@/components/ui/Section";
 import { getTeachersPage } from "@/lib/data/site";
 import { renderMarkdown } from "@/lib/markdown";
@@ -14,7 +13,7 @@ export function generateMetadata(): Metadata {
 }
 
 export default function TeachersPage() {
-  const { heading, teachers, placeholder } = getTeachersPage();
+  const { heading, teachers } = getTeachersPage();
 
   return (
     <>
@@ -36,13 +35,6 @@ export default function TeachersPage() {
               />
             ))}
           </div>
-          {placeholder && (
-            <PlaceholderNotice
-              className="mt-6 max-w-2xl"
-              source="data/site/content.md"
-              detail="以下教师均为虚构占位信息"
-            />
-          )}
         </Section>
 
         {/* 教师详情 */}

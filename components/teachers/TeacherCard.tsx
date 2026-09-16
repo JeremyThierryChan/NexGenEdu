@@ -12,7 +12,7 @@ type TeacherCardProps = {
 
 /**
  * 教师卡片。
- * 没有照片时用姓名首字作为圆形头像，避免出现空白占位框。
+ * 没有照片时用姓名首字作为圆形头像，避免出现空白框。
  */
 export function TeacherCard({ teacher, href, className }: TeacherCardProps) {
   const content = (

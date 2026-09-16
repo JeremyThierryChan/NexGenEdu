@@ -62,7 +62,7 @@ app/
 └── admin/                # B. 教务后台（布局已搭建，业务待 Phase 4）
 
 components/
-├── ui/                   # Button / Card / Badge / Container / Section / PageHeading / PlaceholderNotice
+├── ui/                   # Button / Card / Badge / Container / Section / PageHeading
 ├── layout/               # Logo / Header / Footer / AdminSidebar
 ├── site/                 # 宣传网站区块组件（PageHeader / FeatureCard / EmptyState）
 ├── courses/              # CourseCard
@@ -129,12 +129,6 @@ title: 让学习真正发生      ← 该页面的短字段（frontmatter）
 - 生产构建把内容内联进产物，运行时不再依赖文件系统
 - 若改用 `fs.readFileSync`，打包器不追踪该文件，改完必须重启 dev server
 
-### 占位信息机制
-
-- 文件内：每段正文开头标注**（占位信息）**并列出待确认项。
-- 页面上：对应区块旁显示黄色虚线角标「（占位信息）来源：data/site/content.md」。
-- 开关：该段的 `placeholder: true|false`。改成真实内容后改为 `false`，角标自动消失。
-
 ### 页面读取方式
 
 页面只调用 `lib/data/site.ts` 的函数（`getSiteBrand` / `getHomeContent` /
@@ -166,7 +160,7 @@ title: 让学习真正发生      ← 该页面的短字段（frontmatter）
 | Phase 1 | 项目基础：Next.js + TS + Tailwind + Layout + 基础 UI + 宣传网站骨架 | ✅ 已完成 |
 | Phase 2 | Markdown 数据层：类型 + 数据访问层 + 示例数据 | ⏳ 下一步 |
 | Phase 3 | 宣传网站内容接入 Markdown | 待开始 |
-| Phase 4 | 后台：Dashboard / 学生 / 教师 / 教室 / 课程 / 日历 | 🚧 框架已搭建（仅布局 + 概览占位） |
+| Phase 4 | 后台：Dashboard / 学生 / 教师 / 教室 / 课程 / 日历 | 🚧 框架已搭建（仅布局 + 概览页） |
 | Phase 5 | 核心业务：排课 / 冲突检测 / 课程状态 / 课时扣减 / 搜索 | 待开始 |
 | Phase 6 | 响应式与 UI Polish | 待开始 |
 | Phase 7 | 部署：GitHub Actions → GitHub Pages | ✅ 已完成（提前） |
@@ -177,7 +171,6 @@ title: 让学习真正发生      ← 该页面的短字段（frontmatter）
 - 建立设计系统：品牌色（深墨蓝 + 暖琥珀）、状态色（成功 / 预警 / 危险）、中性色阶、圆角与字体。
 - 建立布局与基础组件：`Header`（含移动端折叠菜单）、`Footer`、`Logo`、`Button`、`Card`、`Badge`、`Container`、`Section`。
 - 宣传网站 5 个页面全部可访问，数据待接入区块使用明确的空状态（`EmptyState`），不展示假数据。
-- **已知债务**：`lib/site/config.ts` 中的联系方式、首页特色文案为占位常量，Phase 2/3 迁移到 `data/site/*.md`。
 
 ## 7. 常用命令
 

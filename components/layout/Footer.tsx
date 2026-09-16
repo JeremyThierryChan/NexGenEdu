@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { Logo } from "@/components/layout/Logo";
 import { Container } from "@/components/ui/Container";
-import { PlaceholderNotice } from "@/components/ui/PlaceholderNotice";
 import { MAIN_NAV } from "@/lib/site/nav";
 import type { SiteBrand } from "@/lib/types/site";
 
@@ -57,12 +56,6 @@ export function Footer({ brand }: FooterProps) {
           </ul>
         </div>
       </Container>
-
-      {contact.placeholder && (
-        <Container className="pb-6">
-          <PlaceholderNotice source="data/site/content.md" />
-        </Container>
-      )}
 
       <Container className="flex flex-col gap-3 border-t border-ink-200 py-6 text-xs text-ink-500 sm:flex-row sm:items-center sm:justify-between">
         <p>

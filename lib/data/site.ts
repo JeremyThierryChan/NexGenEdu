@@ -1,7 +1,6 @@
 import {
   getGroup,
   getPageBlock,
-  isPagePlaceholder,
   pageArray,
   pageString,
   type Group,
@@ -74,7 +73,6 @@ function teacherBio(group: Group): string {
 
 export function getSiteBrand(): SiteBrand {
   const page = getPageBlock("全站");
-  const placeholder = isPagePlaceholder(page);
   return {
     brandName: pageString(page, "brand_name"),
     brandNameZh: pageString(page, "brand_name_zh"),
@@ -90,9 +88,7 @@ export function getSiteBrand(): SiteBrand {
       email: pageString(page, "email"),
       address: pageString(page, "address"),
       businessHours: pageString(page, "business_hours"),
-      placeholder,
     },
-    placeholder,
   };
 }
 
@@ -122,7 +118,6 @@ export function getHomeContent(): HomeContent {
       label: pageString(page, "cta_label"),
       href: pageString(page, "cta_href", "/contact"),
     },
-    placeholder: isPagePlaceholder(page),
   };
 }
 
@@ -157,20 +152,17 @@ export function getHomeSectionHeadings(): {
 export function getCoursesPage(): {
   heading: SectionHeading;
   courses: Course[];
-  placeholder: boolean;
 } {
   const page = getPageBlock("课程");
-  const placeholder = isPagePlaceholder(page);
 
   // 课程页的每个 `### 课程名` 分组就是一门课程，正文写在分组里。
   const courses = page.groups.map<Course>((group) => ({
     id: group.name,
     nameZh: group.name,
     content: group.body.trim(),
-    placeholder,
   }));
 
-  return { heading: pageHeading(page), courses, placeholder };
+  return { heading: pageHeading(page), courses };
 }
 
 // ── 教师页 ────────────────────────────────────────────────────────────────
@@ -178,10 +170,8 @@ export function getCoursesPage(): {
 export function getTeachersPage(): {
   heading: SectionHeading;
   teachers: Teacher[];
-  placeholder: boolean;
 } {
   const page = getPageBlock("教师");
-  const placeholder = isPagePlaceholder(page);
 
   // 带有「科目」或「简介」条目的分组才算教师，其余分段自动排除。
   const teachers = page.groups
@@ -196,10 +186,9 @@ export function getTeachersPage(): {
       years: fieldFrom(group, "教龄"),
       summary: fieldFrom(group, "简介"),
       bio: teacherBio(group),
-      placeholder,
     }));
 
-  return { heading: pageHeading(page), teachers, placeholder };
+  return { heading: pageHeading(page), teachers };
 }
 
 export function getTeacherById(id: string): Teacher | null {
@@ -224,7 +213,6 @@ export function getAboutContent(): AboutContent {
     facts: getGroup(page, "校区数据").items,
     // 校区介绍：只显示每条的「值」，名称仅用于作者辨识。
     campusParagraphs: getGroup(page, "校区介绍").items.map((item) => item.value),
-    placeholder: isPagePlaceholder(page),
   };
 }
 
@@ -241,6 +229,5 @@ export function getContactContent(): ContactContent {
     routeDescription: pageString(page, "route_description"),
     routeParagraph: pageString(page, "route_paragraph"),
     disabledActionLabel: pageString(page, "disabled_action_label"),
-    placeholder: isPagePlaceholder(page),
   };
 }
