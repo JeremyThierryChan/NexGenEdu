@@ -3,7 +3,7 @@ import { getSiteBrand } from "@/lib/data/site";
 import "./globals.css";
 
 /**
- * 站点级 metadata 从 data/site/site.md 读取，
+ * 站点级 metadata 从 data/site/content.md 的「页面: 全站」段读取，
  * 因此你修改品牌名 / 描述 / 关键词后无需改代码。
  */
 export function generateMetadata(): Metadata {

@@ -7,7 +7,7 @@ import { PlaceholderNotice } from "@/components/ui/PlaceholderNotice";
 import { Section } from "@/components/ui/Section";
 import { getContactContent, getSiteBrand } from "@/lib/data/site";
 
-/** 联系我们页面内容来自 data/site/contact.md。 */
+/** 联系我们页面内容来自 data/site/content.md。 */
 export function generateMetadata(): Metadata {
   const contact = getContactContent();
   const brand = getSiteBrand();
@@ -67,7 +67,7 @@ export default function ContactPage() {
           <Section className="pt-0">
             <PlaceholderNotice
               className="max-w-2xl"
-              source="data/site/contact.md"
+              source="data/site/content.md"
               detail="电话、地址、路线说明均为占位内容"
             />
           </Section>

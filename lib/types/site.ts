@@ -8,7 +8,7 @@
  * 业务实体表并列存在。
  */
 
-/** 全站品牌与联系方式（data/site/site.md） */
+/** 全站品牌与联系方式（content.md 的「页面: 全站」段） */
 export type SiteBrand = {
   brandName: string;
   brandNameZh: string;
@@ -39,7 +39,7 @@ export type LabeledItem = {
   value: string;
 };
 
-/** 首页内容（data/site/home.md） */
+/** 首页内容（content.md 的「页面: 首页」段） */
 export type HomeContent = {
   eyebrow: string;
   title: string;
@@ -61,7 +61,7 @@ export type SectionHeading = {
   description: string;
 };
 
-/** 课程（data/site/courses.md 中一个 `## 课程名` 小节） */
+/** 课程（content.md 的「页面: 课程」段中一个分组） */
 export type Course = {
   id: string;
   nameZh: string;
@@ -70,7 +70,7 @@ export type Course = {
   placeholder: boolean;
 };
 
-/** 教师（data/site/teachers.md 中一个 `## 姓名` 小节） */
+/** 教师（content.md 的「页面: 教师」段中一个分组） */
 export type Teacher = {
   id: string;
   name: string;
@@ -83,7 +83,7 @@ export type Teacher = {
   placeholder: boolean;
 };
 
-/** 关于我们（data/site/about.md） */
+/** 关于我们（content.md 的「页面: 关于」段） */
 export type AboutContent = {
   eyebrow: string;
   title: string;
@@ -96,7 +96,7 @@ export type AboutContent = {
   placeholder: boolean;
 };
 
-/** 联系我们（data/site/contact.md） */
+/** 联系我们（content.md 的「页面: 联系我们」段） */
 export type ContactContent = {
   eyebrow: string;
   title: string;

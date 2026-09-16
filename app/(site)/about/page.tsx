@@ -6,7 +6,7 @@ import { PlaceholderNotice } from "@/components/ui/PlaceholderNotice";
 import { Section } from "@/components/ui/Section";
 import { getAboutContent, getSiteBrand } from "@/lib/data/site";
 
-/** 关于我们页面内容来自 data/site/about.md。 */
+/** 关于我们页面内容来自 data/site/content.md。 */
 export function generateMetadata(): Metadata {
   const about = getAboutContent();
   const brand = getSiteBrand();
@@ -85,7 +85,7 @@ export default function AboutPage() {
           <Section className="pt-0">
             <PlaceholderNotice
               className="max-w-2xl"
-              source="data/site/about.md"
+              source="data/site/content.md"
               detail="教学理念、校区规模等均为占位内容"
             />
           </Section>

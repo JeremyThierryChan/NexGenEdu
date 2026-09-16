@@ -7,7 +7,7 @@ import { Section } from "@/components/ui/Section";
 import { getTeachersPage } from "@/lib/data/site";
 import { renderMarkdown } from "@/lib/markdown";
 
-/** 教师页内容来自 data/site/teachers.md。 */
+/** 教师页内容来自 data/site/content.md。 */
 export function generateMetadata(): Metadata {
   const { heading } = getTeachersPage();
   return { title: heading.title, description: heading.description };
@@ -39,7 +39,7 @@ export default function TeachersPage() {
           {placeholder && (
             <PlaceholderNotice
               className="mt-6 max-w-2xl"
-              source="data/site/teachers.md"
+              source="data/site/content.md"
               detail="以下教师均为虚构占位信息"
             />
           )}

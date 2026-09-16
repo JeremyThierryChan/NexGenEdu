@@ -9,7 +9,7 @@ type FooterProps = {
   brand: SiteBrand;
 };
 
-/** 宣传网站页脚。品牌与联系方式来自 data/site/site.md。 */
+/** 宣传网站页脚。品牌与联系方式来自 data/site/content.md。 */
 export function Footer({ brand }: FooterProps) {
   const year = new Date().getFullYear();
   const { contact } = brand;
@@ -60,7 +60,7 @@ export function Footer({ brand }: FooterProps) {
 
       {contact.placeholder && (
         <Container className="pb-6">
-          <PlaceholderNotice source="data/site/site.md" />
+          <PlaceholderNotice source="data/site/content.md" />
         </Container>
       )}
 

@@ -7,7 +7,7 @@ import { Section } from "@/components/ui/Section";
 import { getCoursesPage } from "@/lib/data/site";
 import { renderMarkdown } from "@/lib/markdown";
 
-/** 课程页内容来自 data/site/courses.md。 */
+/** 课程页内容来自 data/site/content.md。 */
 export function generateMetadata(): Metadata {
   const { heading } = getCoursesPage();
   return { title: heading.title, description: heading.description };
@@ -41,7 +41,7 @@ export default function CoursesPage() {
           {placeholder && (
             <PlaceholderNotice
               className="mt-6 max-w-2xl"
-              source="data/site/courses.md"
+              source="data/site/content.md"
               detail="以下课程内容均为占位"
             />
           )}

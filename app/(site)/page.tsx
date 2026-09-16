@@ -15,7 +15,7 @@ import {
   getTeachersPage,
 } from "@/lib/data/site";
 
-/** 首页 metadata 来自 data/site/home.md 与 site.md。 */
+/** 首页 metadata 来自 data/site/content.md。 */
 export function generateMetadata(): Metadata {
   const brand = getSiteBrand();
   const home = getHomeContent();
@@ -59,8 +59,8 @@ export default function HomePage() {
     <>
       {/* 首屏 */}
       <section className="border-b border-ink-200 bg-ink-50">
-        <Container className="grid gap-12 py-20 sm:py-28 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-center">
-          <div className="max-w-xl">
+        <Container className="py-20 sm:py-28">
+          <div className="max-w-2xl">
             <p className="text-sm font-medium text-brand-600">{home.eyebrow}</p>
             <h1 className="mt-4 text-4xl font-bold tracking-tight sm:text-5xl">
               {home.title}
@@ -75,15 +75,19 @@ export default function HomePage() {
               </ButtonLink>
             </div>
             {home.placeholder && (
-              <PlaceholderNotice className="mt-8 max-w-md" source="data/site/home.md" />
+              <PlaceholderNotice className="mt-8 max-w-lg" source="data/site/content.md" />
             )}
           </div>
 
-          <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200">
+          {/*
+            首屏数据独立成一行：条目数量与文字长度会随运营调整，
+            放成整行后 2–5 条都能自动铺满，不会出现半行空格。
+          */}
+          <dl className="mt-14 grid gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
             {home.stats.map((stat) => (
               <div key={stat.title} className="bg-white px-5 py-6">
                 <dt className="text-xs text-ink-500">{stat.title}</dt>
-                <dd className="mt-2 text-xl font-medium text-ink-900 tabular">
+                <dd className="mt-2 text-base font-medium leading-snug text-ink-900 tabular">
                   {stat.value}
                 </dd>
               </div>
@@ -99,7 +103,7 @@ export default function HomePage() {
           title={headings.features.title}
           description={headings.features.description}
         >
-          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
             {home.features.map((feature, index) => (
               <FeatureCard
                 key={feature.title}
@@ -120,7 +124,7 @@ export default function HomePage() {
             title={headings.courses.title}
             description={headings.courses.description}
           >
-            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
               {home.courses.map((entry) => {
                 // 首页只显示学科名与标签，详情链接到 courses.md 中的对应课程。
                 const detail = courses.find((course) => course.nameZh === entry.title);
@@ -203,7 +207,7 @@ export default function HomePage() {
           {home.placeholder && (
             <PlaceholderNotice
               className="mt-6 max-w-2xl"
-              source="data/site/home.md"
+              source="data/site/content.md"
               detail="教室名称与照片均为占位"
             />
           )}

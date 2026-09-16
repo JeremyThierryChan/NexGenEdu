@@ -17,7 +17,7 @@ export const MAIN_NAV: readonly NavItem[] = [
   { href: "/contact", label: "联系我们" },
 ] as const;
 
-/** 页头右上角的行动按钮。文案与链接属于可自定义内容，当前取值见 data/site/site.md（后续可扩展）。 */
+/** 页头右上角的行动按钮。文案与链接属于可自定义内容，当前为代码内固定值，后续可迁移到 content.md。 */
 export const HEADER_CTA = {
   label: "预约试听",
   href: "/contact",

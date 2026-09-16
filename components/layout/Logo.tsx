@@ -9,7 +9,7 @@ type LogoProps = {
   className?: string;
 };
 
-/** 品牌标识：文字 Logo，避免依赖图片资源。名称来自 data/site/site.md。 */
+/** 品牌标识：文字 Logo，避免依赖图片资源。名称来自 data/site/content.md。 */
 export function Logo({ brand, tone = "dark", className }: LogoProps) {
   return (
     <Link
