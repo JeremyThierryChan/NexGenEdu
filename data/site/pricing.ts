@@ -21,8 +21,9 @@ export const pricingSource = `# NexGenEdu · 新锐教培 · 报价数据
 result_title: 报价结果
 submit_label: 计算报价
 reset_label: 重新选择
-unit_label: 元 / 课时
-total_label: 合计费用
+unit_price_label: 课单价
+unit_label: 元 / 节
+total_label: 总价
 formula_note: 价格为参考估算，最终以咨询确认为准。标注「暂未开放」的选项暂不接受报名。
 calculator_title: 课时报价
 calculator_hint: 选择学习阶段、课程与科目，再选择班级类型与报课节数。

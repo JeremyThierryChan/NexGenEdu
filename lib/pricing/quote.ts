@@ -114,15 +114,19 @@ function baseUnitPrice(input: QuoteInput): { price: number } | { error: string }
   return { price: course.price * subjectCoefficient * (classType.coefficient ?? 1) };
 }
 
-/** 生成价格构成明细。 */
+/**
+ * 生成价格构成明细。
+ *
+ * 有意不展示时长乘数的换算过程：家长关心的是最终课单价与总价，
+ * 中间换算是内部逻辑，摆出来反而增加理解成本。
+ */
 function buildBreakdown(
   input: QuoteInput,
   basePrice: number,
-  afterDuration: number,
   finalUnitPrice: number,
   totalPrice: number,
 ): QuoteBreakdownItem[] {
-  const { course, subject, classType, duration, lessons } = input;
+  const { course, subject, classType, lessons } = input;
   const items: QuoteBreakdownItem[] = [
     { label: `${course.name} 基础价`, value: money(course.price ?? 0) },
   ];
@@ -139,13 +143,6 @@ function buildBreakdown(
     items.push({
       label: `${classType.name} 班级系数`,
       value: `×${classType.coefficient ?? 1}`,
-    });
-  }
-
-  if (duration.multiplier !== 1) {
-    items.push({
-      label: `${duration.name} 时长乘数`,
-      value: `×${duration.multiplier}（${money(basePrice)} → ${money(afterDuration)}）`,
     });
   }
 
@@ -195,6 +192,6 @@ export function calculateQuote(input: QuoteInput): QuoteResult {
     hours,
     totalPrice,
     includesTrial,
-    breakdown: buildBreakdown(input, base.price, afterDuration, finalUnitPrice, totalPrice),
+    breakdown: buildBreakdown(input, base.price, finalUnitPrice, totalPrice),
   };
 }

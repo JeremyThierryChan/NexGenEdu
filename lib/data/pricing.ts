@@ -83,6 +83,7 @@ export type PricingData = {
     result: string;
     submit: string;
     reset: string;
+    unitPriceLabel: string;
     unit: string;
     totalLabel: string;
     formulaNote: string;
@@ -242,6 +243,7 @@ export function getPricingData(): PricingData {
       result: field("result_title"),
       submit: field("submit_label"),
       reset: field("reset_label"),
+      unitPriceLabel: field("unit_price_label"),
       unit: field("unit_label"),
       totalLabel: field("total_label"),
       formulaNote: field("formula_note"),

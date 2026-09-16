@@ -7,7 +7,7 @@ import { getPricingData } from "@/lib/data/pricing";
 export const metadata: Metadata = {
   title: "智能报价",
   description:
-    "选择学习阶段、课程、科目、班级类型与报课数量，即时查看参考课时价格与合计费用。",
+    "选择学习阶段、课程、科目、班级类型、每节课时长与报课节数，即时查看课单价与总价。",
 };
 
 /**
@@ -30,7 +30,7 @@ export default function QuotePage() {
               按需求查看参考价格
             </h1>
             <p className="mt-5 text-base leading-relaxed text-ink-600">
-              选择学习阶段与课程确定基础价，再选择班级类型与报课数量，即可看到参考课时价与合计费用。
+              选择学习阶段与课程确定基础价，再选择班级类型、每节课时长并填写报课节数，即可看到课单价与总价。
               班级人数越少，单人费用越高。
             </p>
           </div>

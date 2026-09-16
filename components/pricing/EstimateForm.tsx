@@ -217,19 +217,20 @@ export function EstimateForm({ data }: EstimateFormProps) {
           <div className="rounded-lg border border-ink-200 bg-white p-6">
             <h2 className="text-sm font-medium text-ink-900">{data.labels.result}</h2>
 
-            <div className="mt-5 flex items-baseline gap-2">
-              <span className="text-3xl font-bold tracking-tight text-brand-800 tabular">
-                ¥{result.unitPrice}
-              </span>
-              <span className="text-sm text-ink-500">
-                {data.labels.unit}（{result.hours} 小时）
-              </span>
+            {/* 课单价：家长最关心的一项，单位用「/ 节」而不是「/ 课时」，避免换算困惑 */}
+            <div className="mt-5">
+              <p className="text-xs text-ink-500">{data.labels.unitPriceLabel}</p>
+              <div className="mt-1 flex items-baseline gap-2">
+                <span className="text-3xl font-bold tracking-tight text-brand-800 tabular">
+                  ¥{result.unitPrice}
+                </span>
+                <span className="text-sm text-ink-500">{data.labels.unit}</span>
+              </div>
             </div>
 
+            {/* 总价 */}
             <div className="mt-4 flex items-baseline justify-between gap-4 rounded-md bg-ink-50 px-4 py-3">
-              <span className="text-sm text-ink-600">
-                {data.labels.totalLabel}（{result.lessons} 节）
-              </span>
+              <span className="text-sm text-ink-600">{data.labels.totalLabel}</span>
               <span className="text-lg font-medium text-ink-900 tabular">
                 ¥{result.totalPrice}
               </span>
