@@ -1,7 +1,12 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { itemsIn, parseSections, type Section } from "@/lib/data/sections";
-import { parseMarkdown, readArray, readString } from "@/lib/markdown";
+import {
+  getGroup,
+  getPageBlock,
+  isPagePlaceholder,
+  pageArray,
+  pageString,
+  type Group,
+  type PageBlock,
+} from "@/lib/data/content";
 import type {
   AboutContent,
   ContactContent,
@@ -15,63 +20,27 @@ import type {
 /**
  * 数据访问层：页面获取内容的唯一入口。
  *
- * 内容组织：每个可自定义部分对应 data/site 下一个完整的 .md 文件。
- *   site.md      全站品牌与联系方式
- *   home.md     首页全部内容
- *   courses.md  课程页全部内容
- *   teachers.md 教师页全部内容（含教师名单）
- *   about.md    关于我们全部内容
- *   contact.md  联系我们全部内容
- *
+ * 全部内容都来自单文件 data/site/content.md，按页面分段（见 lib/data/content.ts）。
  * 页面只能调用本文件的函数，不得直接读文件或解析 Markdown。
  * 未来接入 PostgreSQL / API 时替换本文件实现即可，页面调用方式不变。
- *
- * 说明：这里使用同步读取（readFileSync）。数据量极小（6 个 Markdown 文件），
- * 且全部在构建期一次性读取，同步写法能让调用方（页面组件）保持简单。
  */
 
-const DATA_ROOT = path.join(process.cwd(), "data", "site");
-
-type Frontmatter = Record<string, string | string[]>;
-
-/** 同步读取并解析一个数据文件。文件缺失时抛出明确错误，避免静默渲染空页面。 */
-function loadFile(fileName: string): { data: Frontmatter; sections: Section[] } {
-  const filePath = path.join(DATA_ROOT, fileName);
-  let source: string;
-  try {
-    source = readFileSync(filePath, "utf8");
-  } catch {
-    throw new Error(`读取数据文件失败：data/site/${fileName}。请确认文件存在。`);
-  }
-  const { data, body } = parseMarkdown(source);
-  return { data, sections: parseSections(body) };
-}
-
-/** 占位标记：显式写 placeholder: false 才认为内容已替换为真实内容。 */
-function isPlaceholder(data: Frontmatter): boolean {
-  return readString(data, "placeholder", "true") !== "false";
-}
-
-/** 取「## 名称 | 值」条目。 */
-function items(sections: Section[], title: string): Array<{ title: string; value: string }> {
-  return itemsIn(sections, title);
-}
-
-/** 组成区块标题。 */
-function heading(data: Frontmatter, prefix: string): SectionHeading {
+/** 页面短字段中拼出的区块标题。 */
+function heading(page: PageBlock, prefix: string): SectionHeading {
   return {
-    eyebrow: readString(data, `${prefix}_eyebrow`),
-    title: readString(data, `${prefix}_title`),
-    description: readString(data, `${prefix}_description`),
+    eyebrow: pageString(page, `${prefix}_eyebrow`),
+    title: pageString(page, `${prefix}_title`),
+    description: pageString(page, `${prefix}_description`),
   };
 }
 
-/**
- * 从教师小节的 `### 科目: 数学, 物理` 形式子条目中取值。
- * 字段写在 `### ` 子标题里，因此直接查子条目，不解析正文。
- */
-function fieldFrom(section: Section, label: string): string {
-  return section.children.find((child) => child.title === label)?.value ?? "";
+/** 不带前缀的页面标题（课程页 / 教师页直接用 eyebrow / title / description）。 */
+function pageHeading(page: PageBlock): SectionHeading {
+  return {
+    eyebrow: pageString(page, "eyebrow"),
+    title: pageString(page, "title"),
+    description: pageString(page, "description"),
+  };
 }
 
 /** 把「数学, 物理」拆分为数组，支持中英文逗号与顿号。 */
@@ -82,36 +51,45 @@ function splitList(value: string): string[] {
     .filter((item) => item !== "");
 }
 
-/**
- * 文档性小节（格式说明、待确认清单）不属于内容数据。
- * 用固定前缀识别并排除，避免它们被渲染成课程或教师。
- */
-const DOC_SECTION_PREFIXES = ["待你确认", "待确认", "备注", "格式说明"];
-
-function isDocSection(title: string): boolean {
-  return DOC_SECTION_PREFIXES.some((prefix) => title.startsWith(prefix));
+/** 从教师分组的 `#### 科目: 数学` 条目中取值。 */
+function fieldFrom(group: Group, label: string): string {
+  return group.items.find((item) => item.title === label)?.value ?? "";
 }
 
-// ── 全站品牌 ──────────────────────────────────────────────────────────────
+/**
+ * 取教师的自由介绍。
+ *
+ * 介绍文字写在所有 `#### 字段` 之后，因此会被并进最后一个字段的条目正文里。
+ * 这里把分组正文与最后一个条目的正文拼起来，字段增减都不会影响取到介绍。
+ */
+function teacherBio(group: Group): string {
+  const lastItem = group.items.at(-1);
+  return [group.body, lastItem?.body ?? ""]
+    .map((part) => part.trim())
+    .filter((part) => part !== "")
+    .join("\n\n");
+}
+
+// ── 全站品牌与联系方式 ────────────────────────────────────────────────────
 
 export function getSiteBrand(): SiteBrand {
-  const { data } = loadFile("site.md");
-  const placeholder = isPlaceholder(data);
+  const page = getPageBlock("全站");
+  const placeholder = isPagePlaceholder(page);
   return {
-    brandName: readString(data, "brand_name"),
-    brandNameZh: readString(data, "brand_name_zh"),
-    tagline: readString(data, "tagline"),
-    description: readString(data, "description"),
-    copyrightHolder: readString(data, "copyright_holder"),
-    keywords: readArray(data, "keywords"),
-    homeTitle: readString(data, "home_title"),
-    titleSuffix: readString(data, "title_suffix"),
+    brandName: pageString(page, "brand_name"),
+    brandNameZh: pageString(page, "brand_name_zh"),
+    tagline: pageString(page, "tagline"),
+    description: pageString(page, "description"),
+    copyrightHolder: pageString(page, "copyright_holder"),
+    keywords: pageArray(page, "keywords"),
+    homeTitle: pageString(page, "home_title"),
+    titleSuffix: pageString(page, "title_suffix"),
     contact: {
-      phone: readString(data, "phone"),
-      wechat: readString(data, "wechat"),
-      email: readString(data, "email"),
-      address: readString(data, "address"),
-      businessHours: readString(data, "business_hours"),
+      phone: pageString(page, "phone"),
+      wechat: pageString(page, "wechat"),
+      email: pageString(page, "email"),
+      address: pageString(page, "address"),
+      businessHours: pageString(page, "business_hours"),
       placeholder,
     },
     placeholder,
@@ -121,34 +99,34 @@ export function getSiteBrand(): SiteBrand {
 // ── 首页 ──────────────────────────────────────────────────────────────────
 
 export function getHomeContent(): HomeContent {
-  const { data, sections } = loadFile("home.md");
+  const page = getPageBlock("首页");
   return {
-    eyebrow: readString(data, "eyebrow"),
-    title: readString(data, "title"),
-    subtitle: readString(data, "subtitle"),
+    eyebrow: pageString(page, "eyebrow"),
+    title: pageString(page, "title"),
+    subtitle: pageString(page, "subtitle"),
     primaryCta: {
-      label: readString(data, "primary_cta_label"),
-      href: readString(data, "primary_cta_href", "/courses"),
+      label: pageString(page, "primary_cta_label"),
+      href: pageString(page, "primary_cta_href", "/courses"),
     },
     secondaryCta: {
-      label: readString(data, "secondary_cta_label"),
-      href: readString(data, "secondary_cta_href", "/contact"),
+      label: pageString(page, "secondary_cta_label"),
+      href: pageString(page, "secondary_cta_href", "/contact"),
     },
-    stats: items(sections, "首屏数据"),
-    features: items(sections, "教学特色"),
-    courses: items(sections, "首页课程卡片"),
-    classrooms: items(sections, "教室照片格位"),
+    stats: getGroup(page, "首屏数据").items,
+    features: getGroup(page, "教学特色").items,
+    courses: getGroup(page, "首页课程卡片").items,
+    classrooms: getGroup(page, "教室照片格位").items,
     cta: {
-      title: readString(data, "cta_title"),
-      description: readString(data, "cta_description"),
-      label: readString(data, "cta_label"),
-      href: readString(data, "cta_href", "/contact"),
+      title: pageString(page, "cta_title"),
+      description: pageString(page, "cta_description"),
+      label: pageString(page, "cta_label"),
+      href: pageString(page, "cta_href", "/contact"),
     },
-    placeholder: isPlaceholder(data),
+    placeholder: isPagePlaceholder(page),
   };
 }
 
-/** 首页各区块的标题（教学特色 / 课程 / 教师 / 教室）。 */
+/** 首页各区块的标题与跳转按钮。 */
 export function getHomeSectionHeadings(): {
   features: SectionHeading;
   courses: SectionHeading;
@@ -157,19 +135,19 @@ export function getHomeSectionHeadings(): {
   coursesLink: { label: string; href: string };
   teachersLink: { label: string; href: string };
 } {
-  const { data } = loadFile("home.md");
+  const page = getPageBlock("首页");
   return {
-    features: heading(data, "features"),
-    courses: heading(data, "courses"),
-    teachers: heading(data, "teachers"),
-    classrooms: heading(data, "classrooms"),
+    features: heading(page, "features"),
+    courses: heading(page, "courses"),
+    teachers: heading(page, "teachers"),
+    classrooms: heading(page, "classrooms"),
     coursesLink: {
-      label: readString(data, "courses_link_label"),
-      href: readString(data, "courses_link_href", "/courses"),
+      label: pageString(page, "courses_link_label"),
+      href: pageString(page, "courses_link_href", "/courses"),
     },
     teachersLink: {
-      label: readString(data, "teachers_link_label"),
-      href: readString(data, "teachers_link_href", "/teachers"),
+      label: pageString(page, "teachers_link_label"),
+      href: pageString(page, "teachers_link_href", "/teachers"),
     },
   };
 }
@@ -181,124 +159,88 @@ export function getCoursesPage(): {
   courses: Course[];
   placeholder: boolean;
 } {
-  const { data, sections } = loadFile("courses.md");
-  const courses = sections
-    .filter((section) => !isDocSection(section.title))
-    .map<Course>((section) => ({
-      // 以课程名作为稳定 id：课程名唯一，且未来接入数据库时可保留 slug 字段。
-      id: section.title,
-      nameZh: section.title,
-      content: section.body,
-      placeholder: isPlaceholder(data),
-    }));
+  const page = getPageBlock("课程");
+  const placeholder = isPagePlaceholder(page);
 
-  return {
-    heading: {
-      eyebrow: readString(data, "eyebrow"),
-      title: readString(data, "title"),
-      description: readString(data, "description"),
-    },
-    courses,
-    placeholder: isPlaceholder(data),
-  };
+  // 课程页的每个 `### 课程名` 分组就是一门课程，正文写在分组里。
+  const courses = page.groups.map<Course>((group) => ({
+    id: group.name,
+    nameZh: group.name,
+    content: group.body.trim(),
+    placeholder,
+  }));
+
+  return { heading: pageHeading(page), courses, placeholder };
 }
 
 // ── 教师页 ────────────────────────────────────────────────────────────────
-
-/**
- * 取教师的自由介绍。
- *
- * 介绍文字写在所有 `### 字段` 之后，因此会被并进最后一个字段的正文里。
- * 这里把小节正文与「最后一个字段的正文」拼起来作为介绍，
- * 这样无论字段如何增减、介绍写在哪一段之后都能正确取到。
- */
-function teacherBio(section: Section): string {
-  const lastChild = section.children.at(-1);
-  return [section.body, lastChild?.body ?? ""]
-    .map((part) => part.trim())
-    .filter((part) => part !== "")
-    .join("\n\n");
-}
-
-function toTeacher(section: Section, placeholder: boolean): Teacher {
-  return {
-    id: section.title,
-    name: section.title,
-    role: fieldFrom(section, "职务"),
-    subjects: splitList(fieldFrom(section, "科目")),
-    years: fieldFrom(section, "教龄"),
-    summary: fieldFrom(section, "简介"),
-    bio: teacherBio(section),
-    placeholder,
-  };
-}
 
 export function getTeachersPage(): {
   heading: SectionHeading;
   teachers: Teacher[];
   placeholder: boolean;
 } {
-  const { data, sections } = loadFile("teachers.md");
-  const placeholder = isPlaceholder(data);
+  const page = getPageBlock("教师");
+  const placeholder = isPagePlaceholder(page);
 
-  // 只把带有教师字段的小节视为教师，格式说明等段落会自动被排除。
-  const teachers = sections
-    .filter((section) => !isDocSection(section.title))
-    .filter((section) => fieldFrom(section, "科目") !== "" || fieldFrom(section, "简介") !== "")
-    .map((section) => toTeacher(section, placeholder));
+  // 带有「科目」或「简介」条目的分组才算教师，其余分段自动排除。
+  const teachers = page.groups
+    .filter(
+      (group) => fieldFrom(group, "科目") !== "" || fieldFrom(group, "简介") !== "",
+    )
+    .map<Teacher>((group) => ({
+      id: group.name,
+      name: group.name,
+      role: fieldFrom(group, "职务"),
+      subjects: splitList(fieldFrom(group, "科目")),
+      years: fieldFrom(group, "教龄"),
+      summary: fieldFrom(group, "简介"),
+      bio: teacherBio(group),
+      placeholder,
+    }));
 
-  return {
-    heading: {
-      eyebrow: readString(data, "eyebrow"),
-      title: readString(data, "title"),
-      description: readString(data, "description"),
-    },
-    teachers,
-    placeholder,
-  };
+  return { heading: pageHeading(page), teachers, placeholder };
 }
 
 export function getTeacherById(id: string): Teacher | null {
-  const { teachers } = getTeachersPage();
-  return teachers.find((teacher) => teacher.id === id) ?? null;
+  return getTeachersPage().teachers.find((teacher) => teacher.id === id) ?? null;
 }
 
 // ── 关于我们 ──────────────────────────────────────────────────────────────
 
 export function getAboutContent(): AboutContent {
-  const { data, sections } = loadFile("about.md");
-
+  const page = getPageBlock("关于");
   return {
-    eyebrow: readString(data, "eyebrow"),
-    title: readString(data, "title"),
-    description: readString(data, "description"),
+    eyebrow: pageString(page, "eyebrow"),
+    title: pageString(page, "title"),
+    description: pageString(page, "description"),
     philosophy: {
       eyebrow: "",
-      title: readString(data, "philosophy_title"),
-      description: readString(data, "philosophy_description"),
+      title: pageString(page, "philosophy_title"),
+      description: pageString(page, "philosophy_description"),
     },
-    campusTitle: readString(data, "campus_title"),
-    principles: items(sections, "教学理念"),
-    facts: items(sections, "校区数据"),
-    // 校区介绍：取每条的「值」，名称只用于作者辨识。
-    campusParagraphs: items(sections, "校区介绍").map((item) => item.value),
-    placeholder: isPlaceholder(data),
+    campusTitle: pageString(page, "campus_title"),
+    principles: getGroup(page, "教学理念").items,
+    facts: getGroup(page, "校区数据").items,
+    // 校区介绍：只显示每条的「值」，名称仅用于作者辨识。
+    campusParagraphs: getGroup(page, "校区介绍").items.map((item) => item.value),
+    placeholder: isPagePlaceholder(page),
   };
 }
 
 // ── 联系我们 ──────────────────────────────────────────────────────────────
 
 export function getContactContent(): ContactContent {
-  const { data, sections } = loadFile("contact.md");
+  const page = getPageBlock("联系我们");
   return {
-    eyebrow: readString(data, "eyebrow"),
-    title: readString(data, "title"),
-    description: readString(data, "description"),
-    methods: items(sections, "联系方式清单"),
-    routeTitle: readString(data, "route_title"),
-    routeDescription: readString(data, "route_description"),
-    routeParagraph: readString(data, "route_paragraph"),
-    disabledActionLabel: readString(data, "disabled_action_label"),
-    placeholder: isPlaceholder(data),
+    eyebrow: pageString(page, "eyebrow"),
+    title: pageString(page, "title"),
+    description: pageString(page, "description"),
+    methods: getGroup(page, "联系方式清单").items,
+    routeTitle: pageString(page, "route_title"),
+    routeDescription: pageString(page, "route_description"),
+    routeParagraph: pageString(page, "route_paragraph"),
+    disabledActionLabel: pageString(page, "disabled_action_label"),
+    placeholder: isPagePlaceholder(page),
   };
 }
