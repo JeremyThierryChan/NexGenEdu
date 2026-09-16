@@ -1,0 +1,46 @@
+import type { ComponentProps } from "react";
+import { cn } from "@/lib/utils/cn";
+
+type NumberFieldProps = {
+  label: string;
+  hint?: string;
+  /** 单位后缀，例如「节」「人」「元」。 */
+  suffix?: string;
+} & Omit<ComponentProps<"input">, "className" | "type">;
+
+/**
+ * 数字输入框。
+ * 报价页的「报课节数 / 班级人数 / 教师课时总费用」共用，
+ * 统一标签、单位与焦点样式，避免三处各写一套。
+ */
+export function NumberField({ label, hint, suffix, id, ...props }: NumberFieldProps) {
+  const fieldId = id ?? props.name ?? label;
+
+  return (
+    <div>
+      <label htmlFor={fieldId} className="block text-sm font-medium text-ink-800">
+        {label}
+      </label>
+      {hint !== undefined && <p className="mt-1 text-xs text-ink-500">{hint}</p>}
+      <div className="relative mt-2">
+        <input
+          id={fieldId}
+          type="number"
+          inputMode="numeric"
+          className={cn(
+            "w-full rounded-md border border-ink-300 bg-white px-3 py-2.5 text-sm text-ink-800",
+            "transition-colors hover:border-brand-400",
+            "focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500",
+            suffix !== undefined && "pr-10",
+          )}
+          {...props}
+        />
+        {suffix !== undefined && (
+          <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-ink-400">
+            {suffix}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}

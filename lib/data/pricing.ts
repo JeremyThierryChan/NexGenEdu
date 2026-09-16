@@ -55,16 +55,20 @@ export type ClassType = {
   coefficient: number | null;
 };
 
-/** 报课数量档位。 */
-export type PurchaseTier = {
+/** 每节课的时长选项。 */
+export type LessonDuration = {
   name: string;
-  /** 计费节数。 */
-  lessons: number;
-  /** 手续费百分比（10 表示 +10%）。 */
-  feePercent: number;
-  /** 是否赠送试课。 */
-  includesTrial: boolean;
-  available: boolean;
+  /** 时长（小时）。 */
+  hours: number;
+  /** 价格乘数，1 小时为基准 1.0。 */
+  multiplier: number;
+};
+
+/** 试课：独立的体验产品，不参与课时公式。 */
+export type TrialLesson = {
+  name: string;
+  /** 价格显示文字，例如「免费」。 */
+  priceLabel: string;
 };
 
 /** 其他项目（按学期 / 按期的独立产品）。 */
@@ -85,6 +89,9 @@ export type PricingData = {
     calculatorTitle: string;
     calculatorHint: string;
     otherTitle: string;
+    lessonsLabel: string;
+    lessonsHint: string;
+    durationLabel: string;
     classSizeLabel: string;
     classCostLabel: string;
     classCostHint: string;
@@ -94,7 +101,8 @@ export type PricingData = {
   /** 科目分组，与 stages 同名对应。 */
   subjectGroups: SubjectGroup[];
   classTypes: ClassType[];
-  purchaseTiers: PurchaseTier[];
+  durations: LessonDuration[];
+  trial: TrialLesson | null;
   otherItems: OtherItem[];
 };
 
@@ -179,20 +187,26 @@ function toClassTypes(groups: Group[]): ClassType[] {
     .filter((item) => item.available);
 }
 
-/** 解析报课数量档位。 */
-function toPurchaseTiers(groups: Group[]): PurchaseTier[] {
-  return groups
-    .map((group) => {
-      const lessons = toNumber(groupField(group, "节数"), 1) ?? 1;
-      return {
-        name: groupField(group, "名称") ?? group.name,
-        lessons: lessons > 0 ? lessons : 1,
-        feePercent: toNumber(groupField(group, "手续费"), 0) ?? 0,
-        includesTrial: (groupField(group, "含试课") ?? "").trim() === "是",
-        available: toAvailability(groupField(group, "手续费") ?? "0"),
-      };
-    })
-    .filter((item) => item.available);
+/** 解析课时选择（每节课时长）。 */
+function toDurations(groups: Group[]): LessonDuration[] {
+  return groups.map((group) => {
+    // 未配置乘数时按小时数计算
+    const hours = toNumber(groupField(group, "小时"), 1) ?? 1;
+    return {
+      name: groupField(group, "名称") ?? group.name,
+      hours,
+      multiplier: toNumber(groupField(group, "乘数"), hours) ?? hours,
+    };
+  });
+}
+
+/** 解析试课（独立产品，取第一个分组）。 */
+function toTrial(group: Group | undefined): TrialLesson | null {
+  if (group === undefined) return null;
+  return {
+    name: groupField(group, "名称") ?? group.name,
+    priceLabel: groupField(group, "价格") ?? "",
+  };
 }
 
 /** 解析其他项目。 */
@@ -234,6 +248,9 @@ export function getPricingData(): PricingData {
       calculatorTitle: field("calculator_title"),
       calculatorHint: field("calculator_hint"),
       otherTitle: field("other_title"),
+      lessonsLabel: field("lessons_label"),
+      lessonsHint: field("lessons_hint"),
+      durationLabel: field("duration_label"),
       classSizeLabel: field("class_size_label"),
       classCostLabel: field("class_cost_label"),
       classCostHint: field("class_cost_hint"),
@@ -241,7 +258,8 @@ export function getPricingData(): PricingData {
     stages: toStages(named("学习阶段").children),
     subjectGroups: toSubjectGroups(named("科目").children),
     classTypes: toClassTypes(named("班级类型").children),
-    purchaseTiers: toPurchaseTiers(named("报课数量").children),
+    durations: toDurations(named("课时选择").children),
+    trial: toTrial(named("试课").children[0]),
     otherItems: toOtherItems(named("其他项目").children),
   };
 }
