@@ -12,6 +12,15 @@ export function generateMetadata(): Metadata {
   return { title: heading.title, description: heading.description };
 }
 
+/**
+ * 从学段小节标题里取出学段名，用于卡片标签。
+ * 「初中数学｜建立数学模型」→「初中」；语言类课程（雅思 / 法语等）无此形式，返回空串。
+ */
+function bandLabel(title: string): string {
+  const match = /^(小学|初中|高中)/.exec(title.trim());
+  return match?.[1] ?? "";
+}
+
 /** 课程正文的排版样式：Markdown 渲染出的 p / ul / li / strong 统一在此约束。 */
 const PROSE_CLASS =
   "mt-3 max-w-2xl leading-relaxed text-ink-600 " +
@@ -31,16 +40,16 @@ export default function CoursesPage() {
       />
 
       <Container>
-        {/* 快速跳转：课程较多时方便直接定位 */}
+        {/* 学科总览：学段以标签并排显示，同一学科的小学 / 初中 / 高中可直接对比 */}
         <Section className="pb-0">
-          <div className="flex flex-wrap gap-2">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {courses.map((course) => (
               <CourseCard
                 key={course.id}
                 title={course.nameZh}
+                bands={course.bands.map((band) => bandLabel(band.title))}
                 href={`#${encodeURIComponent(course.id)}`}
-                linkLabel="查看详情"
-                className="w-40 p-4"
+                linkLabel="查看学段说明"
               />
             ))}
           </div>

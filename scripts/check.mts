@@ -57,7 +57,7 @@ const aboutPage = contentDoc.pages.get("关于");
 const contactPage = contentDoc.pages.get("联系我们");
 
 eq("首页分组数", home?.groups.map((g) => g.name), ["首屏数据", "教学特色", "首页课程卡片", "教室照片格位"]);
-eq("首页课程卡片数", home?.groups.find((g) => g.name === "首页课程卡片")?.items.length, 24);
+eq("首页课程卡片数", home?.groups.find((g) => g.name === "首页课程卡片")?.items.length, 17);
 eq("首页首屏数据数", home?.groups.find((g) => g.name === "首屏数据")?.items.length, 6);
 eq("首页教学特色数", home?.groups.find((g) => g.name === "教学特色")?.items.length, 7);
 eq("教师数", teachersPage?.groups.length, 3);
@@ -65,12 +65,20 @@ eq("关于分组数", aboutPage?.groups.length, 3);
 eq("联系分组数", contactPage?.groups.length, 1);
 
 const courseNames = (coursesPage?.groups ?? []).map((g) => g.name);
-eq("课程数", courseNames.length, 24);
-ok("课程名含「高中技术」", courseNames.includes("高中技术"));
-ok("课程名含「初中社会」", courseNames.includes("初中社会"));
+eq("学科数", courseNames.length, 17);
+ok("学科名含「技术」", courseNames.includes("技术"));
+ok("学科名含「社会」", courseNames.includes("社会"));
 
-const bandsPerCourse = (coursesPage?.groups ?? []).map((g) => g.children.length);
-eq("每门课程的学段小节数均为 1", [...new Set(bandsPerCourse)], [1]);
+// 同一学科的不同学段放在同一分组内，学段数按学科不同（语文 3、科学 2、物理 1…）
+const bandCounts = Object.fromEntries(
+  (coursesPage?.groups ?? []).map((g) => [g.name, g.children.length]),
+);
+eq("语文含 3 个学段", bandCounts["语文"], 3);
+eq("数学含 3 个学段", bandCounts["数学"], 3);
+eq("英语含 3 个学段", bandCounts["英语"], 3);
+eq("科学含 2 个学段", bandCounts["科学"], 2);
+eq("社会含 1 个学段", bandCounts["社会"], 1);
+eq("物理含 1 个学段", bandCounts["物理"], 1);
 
 const pricingDoc = parseDocument(pricingSource);
 const pricingPage = pricingDoc.pages.get("智能报价");
@@ -83,16 +91,16 @@ ok("中文名非空", brand.brandNameZh === "新锐教培");
 ok("联系方式非空", brand.contact.phone !== "");
 
 const homeContent = getHomeContent();
-eq("首页课程卡片", homeContent.courses.length, 24);
+eq("首页课程卡片", homeContent.courses.length, 17);
 eq("首页教室格位", homeContent.classrooms.length, 3);
 eq("首页首屏数据", homeContent.stats.length, 6);
 eq("首页教学特色", homeContent.features.length, 7);
 ok("首页 CTA 非空", homeContent.cta.title !== "");
 
 const { courses } = getCoursesPage();
-eq("课程页课程数", courses.length, 24);
-ok("每门课程都有学段内容", courses.every((c) => c.bands.length > 0 && c.bands[0].content.length > 50));
-ok("数学学段含核心能力", (courses.find((c) => c.nameZh === "小学数学")?.bands[0].content ?? "").includes("核心能力"));
+eq("课程页学科数", courses.length, 17);
+ok("每门学科都有学段内容", courses.every((c) => c.bands.length > 0 && c.bands[0].content.length > 50));
+ok("数学含 3 个学段且带核心能力", (() => { const m = courses.find((c) => c.nameZh === "数学"); return m?.bands.length === 3 && m.bands.every((b) => b.content.includes("核心能力")); })());
 
 const { teachers } = getTeachersPage();
 eq("教师数", teachers.length, 3);

@@ -128,9 +128,10 @@ export default function HomePage() {
                   <CourseCard
                     key={entry.title}
                     title={entry.title}
-                    tag={entry.value}
+                    // 学段写在同一行、用顿号分隔，这里拆成标签并排显示
+                    bands={(entry.value ?? "").split(/[、,，|]/).map((x) => x.trim()).filter(Boolean)}
                     href={detail === undefined ? "/courses" : `/courses#${encodeURIComponent(detail.id)}`}
-                    linkLabel="查看课程详情"
+                    linkLabel="查看学段与教学说明"
                   />
                 );
               })}
