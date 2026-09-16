@@ -4,6 +4,8 @@ import { cn } from "@/lib/utils/cn";
 export type SelectOption = {
   value: string;
   label: string;
+  /** 该选项不可选（例如「暂未开放」）。 */
+  disabled?: boolean;
 };
 
 type SelectProps = {
@@ -33,12 +35,13 @@ export function Select({ label, options, placeholder, hint, id, ...props }: Sele
           "mt-2 w-full rounded-md border border-ink-300 bg-white px-3 py-2.5 text-sm text-ink-800",
           "transition-colors hover:border-brand-400",
           "focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500",
+          "disabled:cursor-not-allowed disabled:bg-ink-50 disabled:text-ink-400",
         )}
         {...props}
       >
         <option value="">{placeholder}</option>
         {options.map((option) => (
-          <option key={option.value} value={option.value}>
+          <option key={option.value} value={option.value} disabled={option.disabled}>
             {option.label}
           </option>
         ))}
