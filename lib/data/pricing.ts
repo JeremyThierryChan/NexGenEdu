@@ -13,7 +13,7 @@ import { parseDocument, type Group, type PageBlock } from "@/lib/data/content";
 /** 表示「暂未开放」的标记，数据文件里直接写这个值。 */
 const UNAVAILABLE = "暂未开放";
 
-/** 学习阶段下的一个课程（含基础价，单位：元 / 课时）。 */
+/** 学习阶段下的一个课程（含基础价，单位：元 / 节）。 */
 export type StageCourse = {
   name: string;
   /** 基础价；不可选时为 null。 */

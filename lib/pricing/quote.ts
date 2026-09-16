@@ -55,7 +55,7 @@ export type QuoteResult = {
   /** 是否计算成功；false 时 reason 说明原因。 */
   ok: boolean;
   reason?: string;
-  /** 最终单价（元 / 课时，已含时长与手续费）。 */
+  /** 最终单价（元 / 节，已含时长与手续费）。 */
   unitPrice: number;
   /** 报课节数。 */
   lessons: number;
