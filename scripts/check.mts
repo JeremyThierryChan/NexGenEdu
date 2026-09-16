@@ -79,6 +79,18 @@ eq("英语含 3 个学段", bandCounts["英语"], 3);
 eq("科学含 2 个学段", bandCounts["科学"], 2);
 eq("社会含 1 个学段", bandCounts["社会"], 1);
 eq("物理含 1 个学段", bandCounts["物理"], 1);
+// 语言类课程按欧标 A1–B2 四段
+for (const lang of ["法语", "德语", "意大利语", "西班牙语"]) {
+  eq(`${lang}含 A1–B2 四段`, bandCounts[lang], 4);
+}
+eq("雅思含 1 段", bandCounts["雅思"], 1);
+
+// 学段标题检查：语言课必须是 A1/A2/B1/B2
+const french = (coursesPage?.groups ?? []).find((g) => g.name === "法语");
+eq("法语学段标题", french?.children.map((c) => c.name.split("｜")[0]),
+  ["法语A1", "法语A2", "法语B1", "法语B2"]);
+ok("法语各级都写了核心能力",
+  (french?.children ?? []).every((c) => c.body.includes("核心能力")));
 
 const pricingDoc = parseDocument(pricingSource);
 const pricingPage = pricingDoc.pages.get("智能报价");
