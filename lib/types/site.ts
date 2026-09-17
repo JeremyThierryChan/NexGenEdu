@@ -84,10 +84,6 @@ export type Teacher = {
   subjects: string[];
   years: string;
   summary: string;
-  /** 展示顺序，越小越靠前；未填写时排在最后。 */
-  order: number;
-  /** 是否在职：离职教师保留在数据里但页面不展示。 */
-  active: boolean;
   /** 字段之外的自由介绍（Markdown 原文）。 */
   bio: string;
 };

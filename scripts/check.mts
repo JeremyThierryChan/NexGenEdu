@@ -117,9 +117,6 @@ ok("数学含 3 个学段且带核心能力", (() => { const m = courses.find((c
 const { teachers } = getTeachersPage();
 eq("教师数", teachers.length, 3);
 ok("教师有科目与详细介绍", teachers.every((t) => t.subjects.length > 0 && t.bio.length > 30));
-ok("教师均按排序升序", teachers.every((t, i) => i === 0 || (teachers[i - 1]?.order ?? 0) <= t.order));
-ok("页面只展示在职教师", teachers.every((t) => t.active));
-ok("教师排序字段已填写（非默认 999）", teachers.every((t) => t.order < 999));
 
 const about = getAboutContent();
 eq("教学理念条数", about.principles.length, 4);
