@@ -50,6 +50,13 @@ export function TeacherCard({ teacher, href, className }: TeacherCardProps) {
       </div>
 
       <p className="mt-4 text-sm leading-relaxed text-ink-600">{teacher.summary}</p>
+
+      {teacher.recommendation !== "" && (
+        <p className="mt-4 rounded-md bg-brand-50/70 px-3 py-2 text-xs leading-relaxed text-brand-800">
+          <span className="font-medium">推荐理由</span>
+          {teacher.recommendation}
+        </p>
+      )}
     </>
   );
 

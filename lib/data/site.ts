@@ -193,6 +193,7 @@ function toTeacher(section: Section): Teacher {
     subjects: splitList(fieldFrom(section, "科目")),
     years: fieldFrom(section, "教龄"),
     summary: fieldFrom(section, "简介"),
+    recommendation: fieldFrom(section, "推荐理由"),
     order: Number.isFinite(orderValue) ? orderValue : 999,
     active: status === "" || status === "在职",
     bio: teacherBio(section),

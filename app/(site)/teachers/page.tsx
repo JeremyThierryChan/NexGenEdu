@@ -60,6 +60,13 @@ export default function TeachersPage() {
                     ))}
                   </div>
                 )}
+                {teacher.recommendation !== "" && (
+                  <p className="mt-5 max-w-2xl rounded-md bg-brand-50 px-4 py-3 text-sm leading-relaxed text-brand-800">
+                    <span className="font-medium">推荐理由　</span>
+                    {teacher.recommendation}
+                  </p>
+                )}
+
                 {teacher.bio !== "" && (
                   <div
                     className="mt-4 max-w-2xl leading-relaxed text-ink-600 [&_p]:mt-3 [&_strong]:font-medium [&_strong]:text-ink-800"

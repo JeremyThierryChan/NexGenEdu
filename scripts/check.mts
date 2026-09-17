@@ -120,6 +120,9 @@ ok("教师有科目与详细介绍", teachers.every((t) => t.subjects.length > 0
 ok("教师按排序升序", teachers.every((t, i) => i === 0 || (teachers[i - 1]?.order ?? 0) <= t.order));
 ok("页面只展示在职教师", teachers.every((t) => t.active));
 ok("首位教师为陈老师", teachers[0]?.name === "陈老师");
+eq("陈老师职务为全科教师", teachers[0]?.role, "全科教师");
+ok("陈老师有推荐理由", (teachers[0]?.recommendation ?? "").length > 10);
+ok("其余教师未填推荐理由时为空", teachers.slice(1).every((t) => t.recommendation === ""));
 
 const about = getAboutContent();
 eq("教学理念条数", about.principles.length, 4);

@@ -84,6 +84,8 @@ export type Teacher = {
   subjects: string[];
   years: string;
   summary: string;
+  /** 推荐理由：一句话说明为什么推荐这位教师，显示在卡片与详情页。 */
+  recommendation: string;
   /** 展示顺序，越小越靠前；未填写时排在最后。 */
   order: number;
   /** 在职状态：填「离职」则保留资料但不在页面展示。 */
