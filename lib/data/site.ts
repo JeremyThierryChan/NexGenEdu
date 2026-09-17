@@ -5,6 +5,7 @@ import {
   pageString,
   type Group,
   type PageBlock,
+  type Section,
 } from "@/lib/data/content";
 import type {
   AboutContent,
@@ -173,6 +174,31 @@ export function getCoursesPage(): {
 }
 
 // ── 教师页 ────────────────────────────────────────────────────────────────
+/**
+ * 把教师分组转成 Teacher。
+ *
+ * 支持两个管理用字段（不显示在页面上）：
+ *   排序 —— 越小越靠前，未填时按 999 排在最后
+ *   状态 —— 填「离职」表示保留资料但不在页面展示
+ */
+function toTeacher(section: Section): Teacher {
+  const orderRaw = fieldFrom(section, "排序");
+  const orderValue = Number.parseFloat(orderRaw);
+  const status = fieldFrom(section, "状态");
+
+  return {
+    id: section.name,
+    name: section.name,
+    role: fieldFrom(section, "职务"),
+    subjects: splitList(fieldFrom(section, "科目")),
+    years: fieldFrom(section, "教龄"),
+    summary: fieldFrom(section, "简介"),
+    order: Number.isFinite(orderValue) ? orderValue : 999,
+    active: status === "" || status === "在职",
+    bio: teacherBio(section),
+  };
+}
+
 
 export function getTeachersPage(): {
   heading: SectionHeading;
@@ -180,20 +206,16 @@ export function getTeachersPage(): {
 } {
   const page = getPageBlock("教师");
 
-  // 带有「科目」或「简介」条目的分组才算教师，其余分段自动排除。
   const teachers = page.groups
+    // 带有「科目」或「简介」的分组才算教师，其余说明段落自动排除
     .filter(
       (group) => fieldFrom(group, "科目") !== "" || fieldFrom(group, "简介") !== "",
     )
-    .map<Teacher>((group) => ({
-      id: group.name,
-      name: group.name,
-      role: fieldFrom(group, "职务"),
-      subjects: splitList(fieldFrom(group, "科目")),
-      years: fieldFrom(group, "教龄"),
-      summary: fieldFrom(group, "简介"),
-      bio: teacherBio(group),
-    }));
+    .map(toTeacher)
+    // 离职教师保留资料但不在页面展示
+    .filter((teacher) => teacher.active)
+    // 按「排序」升序；未填写的排在最后，同序号保持文件顺序
+    .sort((a, b) => a.order - b.order);
 
   return { heading: pageHeading(page), teachers };
 }

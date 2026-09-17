@@ -3,6 +3,9 @@ import { Badge } from "@/components/ui/Badge";
 import type { Teacher } from "@/lib/types/site";
 import { cn } from "@/lib/utils/cn";
 
+/** 卡片上最多显示的科目标签数，超出部分折叠为「等 N 门」。 */
+const MAX_CARD_SUBJECTS = 4;
+
 type TeacherCardProps = {
   teacher: Teacher;
   /** 点击跳转地址。传 null 时渲染为纯展示卡片（详情页内部使用）。 */
@@ -30,12 +33,19 @@ export function TeacherCard({ teacher, href, className }: TeacherCardProps) {
         </div>
       </div>
 
+      {/*
+        卡片上最多显示 4 个科目标签，其余折叠为「等 N 门」。
+        否则像一位覆盖十几门学科的教师，卡片会被标签撑得远高于同排其他卡片。
+      */}
       <div className="mt-4 flex flex-wrap gap-1.5">
-        {teacher.subjects.map((subject) => (
+        {teacher.subjects.slice(0, MAX_CARD_SUBJECTS).map((subject) => (
           <Badge key={subject} tone="brand">
             {subject}
           </Badge>
         ))}
+        {teacher.subjects.length > MAX_CARD_SUBJECTS && (
+          <Badge tone="neutral">等 {teacher.subjects.length} 门</Badge>
+        )}
         {teacher.years !== "" && <Badge tone="neutral">{teacher.years}</Badge>}
       </div>
 

@@ -60,7 +60,7 @@ eq("首页分组数", home?.groups.map((g) => g.name), ["首屏数据", "教学�
 eq("首页课程卡片数", home?.groups.find((g) => g.name === "首页课程卡片")?.items.length, 17);
 eq("首页首屏数据数", home?.groups.find((g) => g.name === "首屏数据")?.items.length, 6);
 eq("首页教学特色数", home?.groups.find((g) => g.name === "教学特色")?.items.length, 7);
-eq("教师数", teachersPage?.groups.length, 3);
+eq("教师数", teachersPage?.groups.length, 4);
 eq("关于分组数", aboutPage?.groups.length, 4);
 eq("联系分组数", contactPage?.groups.length, 1);
 
@@ -115,8 +115,11 @@ ok("每门学科都有学段内容", courses.every((c) => c.bands.length > 0 && 
 ok("数学含 3 个学段且带核心能力", (() => { const m = courses.find((c) => c.nameZh === "数学"); return m?.bands.length === 3 && m.bands.every((b) => b.content.includes("核心能力")); })());
 
 const { teachers } = getTeachersPage();
-eq("教师数", teachers.length, 3);
+eq("教师数", teachers.length, 4);
 ok("教师有科目与详细介绍", teachers.every((t) => t.subjects.length > 0 && t.bio.length > 30));
+ok("教师按排序升序", teachers.every((t, i) => i === 0 || (teachers[i - 1]?.order ?? 0) <= t.order));
+ok("页面只展示在职教师", teachers.every((t) => t.active));
+ok("首位教师为陈老师", teachers[0]?.name === "陈老师");
 
 const about = getAboutContent();
 eq("教学理念条数", about.principles.length, 4);

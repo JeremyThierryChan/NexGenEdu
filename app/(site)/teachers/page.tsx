@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { PageHeader } from "@/components/site/PageHeader";
+import { Badge } from "@/components/ui/Badge";
 import { TeacherCard } from "@/components/teachers/TeacherCard";
 import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
@@ -48,10 +49,17 @@ export default function TeachersPage() {
               >
                 <h2 className="text-xl font-medium text-ink-900">{teacher.name}</h2>
                 <p className="mt-1 text-sm text-ink-500">
-                  {[teacher.role, teacher.subjects.join(" · "), teacher.years]
-                    .filter((part) => part !== "")
-                    .join(" ｜ ")}
+                  {[teacher.role, teacher.years].filter((part) => part !== "").join(" ｜ ")}
                 </p>
+                {teacher.subjects.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {teacher.subjects.map((subject) => (
+                      <Badge key={subject} tone="brand">
+                        {subject}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
                 {teacher.bio !== "" && (
                   <div
                     className="mt-4 max-w-2xl leading-relaxed text-ink-600 [&_p]:mt-3 [&_strong]:font-medium [&_strong]:text-ink-800"
