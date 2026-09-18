@@ -17,6 +17,7 @@ import { pricingSource } from "@/data/site/pricing";
 import {
   getAboutContent,
   getContactContent,
+  getCourseColumns,
   getCoursesPage,
   getHomeContent,
   getSiteBrand,
@@ -137,9 +138,18 @@ const { courses: allCourses, columns, electiveGroups: electiveGroupList } = getC
  *   - 卡片与标签的跳转目标都必须真实存在（这是「点了跳报错页」的根因）；
  *   - 课程页不能有「从任何入口都进不去」的孤立小节。
  */
-eq("首页栏目", homeContent.courseColumns.map((c) => c.title),
+// 栏目结构只服务于课程页的「课程总览」（首页课程区改为按班型展示）
+eq("课程页栏目", columns.map((c) => c.title),
   ["小学课内", "初中课内", "高中课内", "外语", "课外兴趣", "成人课程"]);
-eq("课程页栏目与首页同源", columns, homeContent.courseColumns);
+eq("栏目与全站段同源", columns, getCourseColumns());
+
+// 首页课程区展示的是班型（一对一等），不是学科
+const classTypes = getFeaturedContent().courses.flatMap((c) =>
+  c.children.map((child) => child.name),
+);
+ok("首页课程区有班型可展示", classTypes.length >= 5);
+ok("班型含 一对一定制课 与 小组课",
+  classTypes.some((n) => n.includes("一对一")) && classTypes.some((n) => n.includes("小组课")));
 
 const HIGH_SCHOOL_SUBGROUPS = ["必考科目", "外语", "七选三"];
 eq("高中课内的子标题", columns.find((c) => c.title === "高中课内")?.subgroups.map((g) => g.title),

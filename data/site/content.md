@@ -139,8 +139,8 @@ features_eyebrow: 教学特色
 features_title: 我们把注意力放在真正影响结果的事情上
 features_description: 不追求课程数量，而是把每一节课的准备、反馈和跟进做扎实。
 courses_eyebrow: 课程
-courses_title: 按学科与学段设置课程
-courses_description: 四个主要学科，按基础巩固、同步提高、考前冲刺三个阶段组织内容。
+courses_title: 按班型选课
+courses_description: 一对一定制课、一对二/三小组课、一对多小班课、9 人以上大班课，以及晚托管与周中预习课。人数越少，教师给到单个学生的注意力越多。
 courses_link_label: 查看全部课程
 courses_link_href: /courses
 teachers_eyebrow: 教师

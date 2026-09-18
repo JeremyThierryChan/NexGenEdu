@@ -46,8 +46,8 @@ export type HomeContent = {
   secondaryCta: { label: string; href: string };
   stats: LabeledItem[];
   features: LabeledItem[];
-  /** 课程栏目（小学课内 / 初中课内 / …），与课程页共用同一份结构。 */
-  courseColumns: CourseColumn[];
+  // 首页课程区按**班型**展示（取自特色课程），不按学科；
+  // 学科栏目结构只服务于课程页的「课程总览」，见 getCourseColumns()。
   classrooms: LabeledItem[];
   /** 试课体验区块。 */
   trial: {

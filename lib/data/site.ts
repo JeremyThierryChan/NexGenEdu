@@ -195,8 +195,7 @@ export function getHomeContent(): HomeContent {
     },
     stats: getGroup(page, "首屏数据").items,
     features: getGroup(page, "教学特色").items,
-    // 课程栏目定义在「全站」段，首页与课程页共用，避免两处结构走偏
-    courseColumns: getCourseColumns(),
+    // 首页课程区按班型展示（页面直接读特色课程），这里不再返回学科栏目
     classrooms: getGroup(page, "教室照片格位").items,
     trial: {
       eyebrow: pageString(page, "trial_eyebrow"),

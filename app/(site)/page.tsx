@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
 import Image from "next/image";
-import { CourseColumnCards } from "@/components/courses/CourseColumns";
+import { CourseTree } from "@/components/courses/CourseTree";
 import { FeatureCard } from "@/components/site/FeatureCard";
 import { TeacherCard } from "@/components/teachers/TeacherCard";
 import { ButtonLink } from "@/components/ui/Button";
 import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
+import { getFeaturedContent } from "@/lib/data/featured";
 import { getCasesContent } from "@/lib/data/pages";
 import {
   getHomeContent,
@@ -68,6 +69,7 @@ export default function HomePage() {
   const headings = getHomeSectionHeadings();
   const { teachers } = getTeachersPage();
   const { cases } = getCasesContent();
+  const featured = getFeaturedContent();
 
   return (
     <>
@@ -134,32 +136,6 @@ export default function HomePage() {
         </Section>
       </Container>
 
-      {/* 课程：栏目 → 子标题 → 卡片。
-          结构来自「页面: 全站 → 课程栏目」，与课程页共用一份数据；
-          每个栏目自己是一个 Section，子标题（高中课内的 必考科目 / 外语 / 七选三）降一级。 */}
-      <div className="border-y border-ink-200 bg-ink-50">
-        <Container>
-          {home.courseColumns.map((column, index) => (
-            <Section
-              key={column.title}
-              compact
-              eyebrow={index === 0 ? headings.courses.eyebrow : undefined}
-              title={column.title}
-              description={index === 0 ? headings.courses.description : undefined}
-              className={index === 0 ? undefined : "border-t border-ink-100"}
-            >
-              <CourseColumnCards column={column} subHeadingLevel={3} />
-            </Section>
-          ))}
-
-          <Section compact className="pt-0">
-            <ButtonLink href={headings.coursesLink.href} variant="outline" size="sm">
-              {headings.coursesLink.label}
-            </ButtonLink>
-          </Section>
-        </Container>
-      </div>
-
       {/* 教师 */}
       <Container>
         <Section
@@ -186,39 +162,6 @@ export default function HomePage() {
             </ButtonLink>
           </p>
         </Section>
-
-        {/* 试课体验：家长最关心的"能不能先试试"，放在课程与教师之后 */}
-        {home.trial.title !== "" && (
-          <Section
-            eyebrow={home.trial.eyebrow}
-            title={home.trial.title}
-            description={home.trial.description}
-            className="border-t border-ink-200"
-          >
-            <div className="rounded-lg border border-ink-200 bg-white p-6 sm:p-8">
-              {home.trial.points.length > 0 && (
-                <ul className="grid gap-3 sm:grid-cols-3">
-                  {home.trial.points.map((point) => (
-                    <li key={point} className="flex items-start gap-2.5 text-sm text-ink-700">
-                      <span className="mt-0.5 shrink-0 text-brand-600" aria-hidden>
-                        ✓
-                      </span>
-                      {point}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <div className="mt-6 flex flex-wrap gap-3">
-                <ButtonLink href={home.trial.cta.href} size="sm">
-                  {home.trial.cta.label}
-                </ButtonLink>
-                <ButtonLink href="/contact" size="sm" variant="outline">
-                  预约试课
-                </ButtonLink>
-              </div>
-            </div>
-          </Section>
-        )}
 
         {/* 学生案例：摘录前两条，更多跳转到案例页 */}
         {cases.length > 0 && (
@@ -257,6 +200,60 @@ export default function HomePage() {
             </p>
           </Section>
         )}
+
+        {/* 试课体验：家长最关心的"能不能先试试"，紧接学生案例之后 */}
+        {home.trial.title !== "" && (
+          <Section
+            eyebrow={home.trial.eyebrow}
+            title={home.trial.title}
+            description={home.trial.description}
+            className="border-t border-ink-200"
+          >
+            <div className="rounded-lg border border-ink-200 bg-white p-6 sm:p-8">
+              {home.trial.points.length > 0 && (
+                <ul className="grid gap-3 sm:grid-cols-3">
+                  {home.trial.points.map((point) => (
+                    <li key={point} className="flex items-start gap-2.5 text-sm text-ink-700">
+                      <span className="mt-0.5 shrink-0 text-brand-600" aria-hidden>
+                        ✓
+                      </span>
+                      {point}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="mt-6 flex flex-wrap gap-3">
+                <ButtonLink href={home.trial.cta.href} size="sm">
+                  {home.trial.cta.label}
+                </ButtonLink>
+                <ButtonLink href="/contact" size="sm" variant="outline">
+                  预约试课
+                </ButtonLink>
+              </div>
+            </div>
+          </Section>
+        )}
+
+      {/* 课程：按班型展示（一对一定制课、一对二/三小组课、一对多小班课、
+          大班课、晚托管、周中预习课），不按学科 —— 首页回答「怎么上课」，
+          学科与学段的完整清单在课程页的「课程总览」。 */}
+      <div className="border-y border-ink-200 bg-ink-50">
+        <Container>
+          <Section
+            eyebrow={headings.courses.eyebrow}
+            title={headings.courses.title}
+            description={headings.courses.description}
+          >
+            <CourseTree courses={featured.courses} level={3} />
+          </Section>
+
+          <Section compact className="pt-0">
+            <ButtonLink href={headings.coursesLink.href} variant="outline" size="sm">
+              {headings.coursesLink.label}
+            </ButtonLink>
+          </Section>
+        </Container>
+      </div>
 
         {/* 教室环境 */}
         <Section
