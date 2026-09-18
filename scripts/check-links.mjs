@@ -21,13 +21,11 @@ const outDir = path.join(root, "out");
 /**
  * 允许暂时不存在的站内路径。
  *
- * 教务后台的学生 / 教师 / 教室 / 课程安排 / 日历还没实现（Phase 4），
- * 侧边栏已经有入口，点进去会显示内部版 404 —— 这是刻意的，
+ * 教务后台的课程安排 / 日历还没实现，侧边栏已经有入口，
+ * 点进去会显示内部版 404 —— 这是刻意的，
  * 不计入失败；实现之后把它们从这里删掉即可。
  */
 const ALLOWED_MISSING = [
-  "/admin/teachers/",
-  "/admin/classrooms/",
   "/admin/lessons/",
   "/admin/calendar/",
 ];
