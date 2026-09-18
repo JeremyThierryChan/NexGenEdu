@@ -120,3 +120,56 @@ export type ContactContent = {
   routeParagraph: string;
   disabledActionLabel: string;
 };
+
+// ── 学生案例 / 常见问题 / 课程时间安排 ────────────────────────────────────────
+
+/** 通用信息分组：标题 + 若干「名称 | 内容」条目。 */
+export type InfoGroup = {
+  title: string;
+  note: string;
+  items: LabeledItem[];
+};
+
+/** 页面公共头部字段。 */
+export type PageIntro = {
+  eyebrow: string;
+  title: string;
+  description: string;
+  /** 页面底部的说明文字，留空则不显示。 */
+  notice: string;
+};
+
+/** 常见问题：按分组归类的问答。 */
+export type FaqGroup = {
+  title: string;
+  items: Array<{ question: string; answer: string }>;
+};
+
+export type FaqContent = PageIntro & {
+  groups: FaqGroup[];
+  /** 问题总数，用于页面提示。 */
+  count: number;
+};
+
+/** 一个学生案例。 */
+export type CaseItem = {
+  id: string;
+  /** 案例标题，形如「初二 李同学｜数学从 62 分到 91 分」。 */
+  title: string;
+  /** 案例的关键字段（年级、科目、入学/当前水平、辅导周期、主要问题）。 */
+  fields: LabeledItem[];
+  /** 入学水平，用于顶部前后对比展示。 */
+  from: string;
+  /** 当前水平，用于顶部前后对比展示。 */
+  to: string;
+  /** 过程描述（Markdown 原文）。 */
+  story: string;
+};
+
+export type CasesContent = PageIntro & {
+  cases: CaseItem[];
+};
+
+export type ScheduleContent = PageIntro & {
+  groups: InfoGroup[];
+};

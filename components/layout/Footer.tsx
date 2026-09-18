@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Logo } from "@/components/layout/Logo";
 import { Container } from "@/components/ui/Container";
-import { MAIN_NAV } from "@/lib/site/nav";
+import { MAIN_NAV, SECONDARY_NAV } from "@/lib/site/nav";
 import type { SiteBrand } from "@/lib/types/site";
 
 type FooterProps = {
@@ -26,7 +26,7 @@ export function Footer({ brand }: FooterProps) {
         <nav aria-label="页脚导航">
           <h2 className="text-sm font-medium text-ink-900">网站导航</h2>
           <ul className="mt-4 space-y-2.5">
-            {MAIN_NAV.map((item) => (
+            {[...MAIN_NAV, ...SECONDARY_NAV].map((item) => (
               <li key={item.href}>
                 <Link
                   href={item.href}

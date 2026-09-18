@@ -23,6 +23,7 @@ import {
   getTeachersPage,
 } from "@/lib/data/site";
 import { getPricingData } from "@/lib/data/pricing";
+import { getCasesContent, getFaqContent, getScheduleContent } from "@/lib/data/pages";
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
 
 let failures = 0;
@@ -146,7 +147,25 @@ const cardNames = homeContent.courses.map((c) => c.title).sort();
 const anchorNames = courses.map((c) => c.nameZh).sort();
 eq("首页卡片与课程页一一对应", cardNames, anchorNames);
 
-console.log("\n=== 3. 报价数据 ===");
+console.log("\n=== 3. 新增页面（案例 / 常见问题 / 时间安排）===");
+const faq = getFaqContent();
+eq("常见问题分组数", faq.groups.map((g) => g.title), ["试课与报名", "课时与收费", "班级与排课", "服务形式"]);
+eq("常见问题总数", faq.count, 17);
+ok("每个问题都有答案", faq.groups.every((g) => g.items.every((i) => i.question.length > 2 && i.answer.length > 10)));
+ok("试课规则答案与业务一致", faq.groups.some((g) => g.items.some((i) => i.answer.includes("满 10 节"))));
+
+const cases = getCasesContent();
+eq("学生案例数", cases.cases.length, 3);
+ok("每个案例都有前后水平对比", cases.cases.every((c) => c.from !== "" && c.to !== ""));
+ok("每个案例都有过程描述", cases.cases.every((c) => c.story.length > 50));
+ok("案例页有免责说明", cases.notice.includes("家长同意"));
+
+const schedule = getScheduleContent();
+eq("时间安排分组数", schedule.groups.length, 4);
+ok("每组都有时段", schedule.groups.every((g) => g.items.length > 0));
+ok("时间安排含晚托", schedule.groups.some((g) => g.title.includes("晚托")));
+
+console.log("\n=== 4. 报价数据 ===");
 const pricing = getPricingData();
 eq("阶段数", pricing.stages.length, 6);
 eq("小学课程", pricing.stages[0]?.courses.map((c) => `${c.name}=${c.price}`),
@@ -165,7 +184,7 @@ eq("时长选项", pricing.durations.map((d) => `${d.name}×${d.multiplier}`),
 eq("试课", pricing.trial?.priceLabel, "免费");
 eq("其他项目数", pricing.otherItems.length, 3);
 
-console.log("\n=== 4. 报价公式 ===");
+console.log("\n=== 5. 报价公式 ===");
 const stageOf = (courseName: string) =>
   pricing.stages.find((s) => s.courses.some((c) => c.name === courseName));
 const quote = (

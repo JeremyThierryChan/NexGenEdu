@@ -1,4 +1,7 @@
+import { casesSource } from "@/data/site/cases";
 import { contentSource } from "@/data/site/content";
+import { faqSource } from "@/data/site/faq";
+import { scheduleSource } from "@/data/site/schedule";
 import { parseItems, parseMarkdown, readArray, readString } from "@/lib/markdown";
 
 /**
@@ -247,26 +250,15 @@ function parsePage(name: string, block: string): PageBlock {
 }
 
 /**
- * 读取并解析 data/site/content.md。
+ * 解析一份内容文件源码，得到「页面名 → 页面内容」的映射。
  *
- * 故意不做进程内缓存：这样在 `npm run dev` 下修改 content.md 后，
- * 刷新页面即可看到最新内容，不需要重启开发服务器。
- * 文件很小（约 10 KB），解析成本可以忽略；生产构建期只会读取一次。
+ * 按 `## 页面: xxx` 切块（而不是按任意二级标题）：页面内部的分组本身
+ * 也可能是二级标题，按二级标题切会把页面块截断。
  */
-export function loadContent(): ContentDocument {
-  return parseDocument(contentSource);
-}
-
-/** 解析任意一份数据文件（content.md 之外的其它文件也复用同一套结构）。 */
 export function parseDocument(source: string): ContentDocument {
-
   const pages = new Map<string, PageBlock>();
-
-  // 按 `## 页面: xxx` 切块，而不是按任意二级标题。
-  // 原因：页面内部的分组本身也可能是二级标题（例如报价页的「## 科目」），
-  // 若按二级标题切块，页面块会在第一个分组处被截断，分组全部丢失。
   const markerPattern = /^##\s+页面\s*[:：]\s*(.+?)\s*$/;
-  const lines = source.split(/\r?\n/);
+
   let currentName: string | null = null;
   let buffer: string[] = [];
 
@@ -278,7 +270,7 @@ export function parseDocument(source: string): ContentDocument {
     buffer = [];
   };
 
-  for (const line of lines) {
+  for (const line of source.split(/\r?\n/)) {
     const marker = markerPattern.exec(line);
     if (marker?.[1] !== undefined) {
       flush();
@@ -290,19 +282,59 @@ export function parseDocument(source: string): ContentDocument {
   flush();
 
   if (pages.size === 0) {
-    throw new Error("data/site/content.md 中没有找到任何「## 页面: xxx」段落。");
+    throw new Error("内容文件中没有找到任何「## 页面: xxx」段落。");
   }
 
   return { pages };
 }
 
-/** 取某个页面块，缺失时报错（避免静默渲染空页面）。 */
-export function getPageBlock(name: string): PageBlock {
-  const page = loadContent().pages.get(name);
-  if (page === undefined) {
-    throw new Error(`data/site/content.md 中缺少「## 页面: ${name}」段落。`);
+/**
+ * 内容文件清单：文件名 → 源码。
+ *
+ * 分文件的理由：一个文件装全部页面会越来越长（现已 6 个页面 + 报价 + 时间表），
+ * 按功能拆开后每个文件的用途更明确，改动的范围也更小。
+ *
+ * 解析规则完全一致：`## 页面: xxx` 分段，标题层级即数据结构。
+ */
+const DOCUMENTS = {
+  content: contentSource,
+  faq: faqSource,
+  cases: casesSource,
+  schedule: scheduleSource,
+} as const;
+
+export type DocumentName = keyof typeof DOCUMENTS;
+
+/** 解析后的文档缓存：文件内容是编译期常量，解析结果可安全复用。 */
+const documentCache = new Map<DocumentName, ContentDocument>();
+
+/** 取某个内容文件（已解析）。 */
+export function getDocument(name: DocumentName): ContentDocument {
+  const cached = documentCache.get(name);
+  if (cached !== undefined) return cached;
+
+  const source = DOCUMENTS[name];
+  const doc = parseDocument(source);
+  documentCache.set(name, doc);
+  return doc;
+}
+
+/**
+ * 取指定页面的内容块。
+ * @param document 内容文件名（不含 .md），默认 content
+ * @param page     页面名，对应 `## 页面: xxx` 里的名称
+ */
+export function getPage(document: DocumentName, page: string): PageBlock {
+  const found = getDocument(document).pages.get(page);
+  if (found === undefined) {
+    throw new Error(`data/site/${document}.md 中缺少「## 页面: ${page}」段落。`);
   }
-  return page;
+  return found;
+}
+
+/** 取 content.md 里的页面（最常用，单独提供便捷函数）。 */
+export function getPageBlock(name: string): PageBlock {
+  return getPage("content", name);
 }
 
 /** 取分组，缺失时返回空分组（便于某页暂时不需要某组）。 */
