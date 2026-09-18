@@ -76,12 +76,19 @@ export default function HomePage() {
           </div>
 
           {/*
-            首屏数据独立成一行：条目数量与文字长度会随运营调整，
-            放成整行后 2–5 条都能自动铺满，不会出现半行空格。
+            首屏数据独立成一行。
+
+            分隔线用「单元格自带边框互相重叠」实现，不用「容器底色 + gap-px 露出底色」：
+            后者在条目数填不满最后一行时（缩放或增删条目都会出现），
+            空位会露出整片灰底色，看起来像多余的色块。
+            这里每格给 1px 边框并用 -ml/-mt 吃掉相邻边框，空位保持白色。
           */}
-          <dl className="mt-14 grid gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+          <dl className="mt-14 grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
             {home.stats.map((stat) => (
-              <div key={stat.title} className="bg-white px-5 py-6">
+              <div
+                key={stat.title}
+                className="-ml-px -mt-px border border-ink-200 px-5 py-6"
+              >
                 <dt className="text-xs text-ink-500">{stat.title}</dt>
                 <dd className="mt-2 text-base font-medium leading-snug text-ink-900 tabular">
                   {stat.value}
