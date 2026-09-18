@@ -28,7 +28,10 @@ export type ContactInfo = {
   wechat: string;
   email: string;
   address: string;
+  /** 营业时间：工作人员在校区接待咨询的时间。 */
   businessHours: string;
+  /** 上课时间：教师与学生实际上课的时段（比营业时间早开始、晚结束）。 */
+  classHours: string;
 };
 
 /** 「标题 | 说明」形式的通用条目。 */

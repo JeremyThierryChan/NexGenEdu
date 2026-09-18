@@ -15,16 +15,16 @@ import { dateKey } from "./format";
  */
 
 /**
- * 教室没设可用时段时，估算「一周可用时长」用的基准：08:00–21:30。
+ * 教室没设可用时段时，估算「一周可用时长」用的基准：每天 8:00–22:00，共 14 小时。
  *
- * 为什么要有这个默认值：不设时段表示「不限」，但算利用率总得有个分母。
- * 这个值取得和校区营业时间一致，宁可保守一点（分母偏大 → 利用率偏低），
- * 也不要让人误以为教室已经很满了。
+ * 取的是**上课时间**而不是营业时间（接待咨询 9:00–21:00）：教室能不能用，
+ * 取决于「这个时段能不能上课」，而不是「有没有老师在前台」。
+ * 不设时段表示「不限」，但算利用率总得有个分母。
  */
-export const OPERATING_HOURS_PER_DAY = 13.5;
+export const CLASS_HOURS_PER_DAY = 14;
 
-/** 一周可用分钟数（每天 08:00–21:30，共 7 天）。 */
-const DEFAULT_WEEKLY_MINUTES = Math.round(OPERATING_HOURS_PER_DAY * 60 * 7);
+/** 一周可用分钟数（每天 8:00–22:00，共 7 天）。 */
+const DEFAULT_WEEKLY_MINUTES = Math.round(CLASS_HOURS_PER_DAY * 60 * 7);
 
 /** 「HH:MM」→ 分钟数。 */
 function toMinutes(value: string): number | null {

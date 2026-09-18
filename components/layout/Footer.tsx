@@ -38,7 +38,9 @@ export function Footer({ brand }: FooterProps) {
     { label: "微信", value: contact.wechat },
     { label: "邮箱", value: contact.email, href: `mailto:${contact.email}` },
     { label: "地址", value: contact.address },
-    { label: "营业时间", value: contact.businessHours },
+    // 两个时间含义不同，标签必须写清楚：接待是「有人在」，上课是「能上课」
+    { label: "接待时间", value: contact.businessHours },
+    { label: "上课时间", value: contact.classHours },
   ].filter((row) => row.value.trim() !== "");
 
   return (

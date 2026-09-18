@@ -46,7 +46,10 @@ phone: +86 138-6853-0992（陈老师）
 wechat: JeremyThierryChan（陈老师）
 email: jeremy.thierry.chan@gmail.com
 address: （请电话/微信咨询）
-business_hours: 周一至周五 13:00–21:00 · 周六周日 09:00–20:00
+# 营业时间 = 工作人员在校区接待咨询的时间；上课时间 = 教师与学生实际上课的时段。
+# 两者含义不同，页脚与课程时间安排页都按这两个字段显示，不要混在一起写。
+business_hours: 每日 9:00–21:00
+class_hours: 每日 8:00–22:00
 copyright_holder: 新锐教培（NexGenEdu）
 ---
 
@@ -61,7 +64,9 @@ copyright_holder: 新锐教培（NexGenEdu）
 | tagline | 一句话定位，显示在页脚 |
 | description | 站点描述，用于搜索引擎摘要 |
 | copyright_holder | 页脚版权行里的机构名 |
-| phone / wechat / email / address / business_hours | 页脚显示的联系方式 |
+| phone / wechat / email / address | 页脚显示的联系方式 |
+| business_hours | **营业时间**：工作人员在校区接待咨询的时间（页脚显示为「接待时间」） |
+| class_hours | **上课时间**：教师与学生实际上课的时段；比营业时间早开始、晚结束 |
 
 ### 课程栏目
 
@@ -1027,5 +1032,7 @@ disabled_action_label: 在线预约表单（后续版本开放）
 
 #### 地址 | （请电话/微信咨询）
 
-#### 营业时间 | 9:00-22:00（包含节假日）
+#### 营业时间 | 每日 9:00–21:00（工作人员接待咨询的时间）
+
+#### 上课时间 | 每日 8:00–22:00（教师与学生实际上课的时段）
 `;

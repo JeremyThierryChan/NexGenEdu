@@ -65,9 +65,14 @@ export default function AboutPage() {
               <dt className="text-ink-500">校区地址</dt>
               <dd className="mt-1 text-ink-800">{brand.contact.address}</dd>
             </div>
+            {/* 两个时间含义不同：接待时间 = 有人在；上课时间 = 能上课 */}
             <div>
-              <dt className="text-ink-500">营业时间</dt>
+              <dt className="text-ink-500">营业时间（接待咨询）</dt>
               <dd className="mt-1 text-ink-800">{brand.contact.businessHours}</dd>
+            </div>
+            <div>
+              <dt className="text-ink-500">上课时间</dt>
+              <dd className="mt-1 text-ink-800">{brand.contact.classHours}</dd>
             </div>
           </dl>
 

@@ -113,6 +113,7 @@ export function getSiteBrand(): SiteBrand {
       email: pageString(page, "email"),
       address: pageString(page, "address"),
       businessHours: pageString(page, "business_hours"),
+      classHours: pageString(page, "class_hours"),
     },
   };
 }

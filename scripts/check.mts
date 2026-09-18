@@ -46,6 +46,7 @@ import { API_CONTRACT, MIGRATION_STEPS, SERVER_MUST_VALIDATE } from "@/lib/backe
 import { readFileSync } from "node:fs";
 import { LEAVE_NOTICE_HOURS, decideCharge } from "@/lib/backend/attendance";
 import {
+  CLASS_HOURS_PER_DAY,
   churnStats,
   describeRate,
   hourlyLoad,
@@ -185,6 +186,13 @@ eq("报价页分组", pricingPage?.groups.map((g) => g.name), ["学习阶段", "
 console.log("\n=== 2. 数据访问层 ===");
 const brand = getSiteBrand();
 ok("品牌名非空", brand.brandName === "NexGenEdu");
+// 营业时间（接待）与上课时间是两件事，混在一起写会让家长以为 8:00 就有人在接待
+ok("营业时间与上课时间都有值", brand.contact.businessHours !== "" && brand.contact.classHours !== "");
+ok("两个时间不是同一句话", brand.contact.businessHours !== brand.contact.classHours);
+ok("上课时间从 8:00 开始（早于营业时间）",
+  brand.contact.classHours.includes("8:00") && brand.contact.businessHours.includes("9:00"));
+ok("上课时间到晚 22:00（晚于营业时间）",
+  brand.contact.classHours.includes("22:00") && brand.contact.businessHours.includes("21:00"));
 ok("中文名非空", brand.brandNameZh === "新锐教培");
 ok("联系方式非空", brand.contact.phone !== "");
 
@@ -473,7 +481,9 @@ ok("关于页标题与站点标语一致", about.title === brand.tagline.split("
 ok("理念含数据化诊断", about.principles.some((x) => x.title === "数据化诊断"));
 
 const contact = getContactContent();
-eq("联系方式条数", contact.methods.length, 5);
+// 联系方式清单：电话 / 微信 / 邮箱 / 地址 / 营业时间 / 上课时间
+eq("联系方式条数", contact.methods.map((item) => item.title),
+  ["电话", "微信", "邮箱", "地址", "营业时间", "上课时间"]);
 
 // 卡片与标签的双向锚点校验已并入第 2 节（栏目结构同一处维护），此处不再重复。
 
@@ -1830,7 +1840,9 @@ const roomC2 = rooms.find((row) => row.classroom.id === "c2")!;
 eq("可用时长按教室自己的时段算", roomC1.availableMinutes, 5 * 4 * 60);
 eq("已排时长不含已取消的课", roomC1.bookedMinutes, 120 + 60);
 eq("利用率 = 已排 / 可用", describeRate(roomC1.rate), "15%");
-eq("没设时段的教室按营业时间估算", roomC2.availableMinutes, Math.round(13.5 * 60 * 7));
+// 基准用「上课时间」14 小时（8:00–22:00），不是营业时间 12 小时：
+// 教室能不能用取决于能不能上课，而不是前台有没有人
+eq("没设时段的教室按上课时间估算", roomC2.availableMinutes, Math.round(CLASS_HOURS_PER_DAY * 60 * 7));
 ok("取消的课不计入课次", roomC1.lessonCount === 2);
 // c1 的可用时段是周一到周五，课都排在周一 → 空档应为周二到周五（周六日不在可用时段内，不算空档）
 eq("空档日只在有可用时段的日子上统计",

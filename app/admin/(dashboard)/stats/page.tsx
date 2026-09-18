@@ -5,11 +5,7 @@ import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { api } from "@/lib/backend/api";
-import {
-  OPERATING_HOURS_PER_DAY,
-  describeMinutes,
-  describeRate,
-} from "@/lib/backend/stats";
+import { CLASS_HOURS_PER_DAY, describeMinutes, describeRate } from "@/lib/backend/stats";
 import { formatDayLabel, weekDays } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
 
@@ -88,8 +84,9 @@ export default function AdminStatsPage() {
         <header className="border-b border-ink-100 px-4 py-3">
           <h2 className="text-sm font-medium text-ink-900">教室利用率</h2>
           <p className="mt-0.5 text-xs text-ink-500">
-            可用时长按教室自己的「可用时段」算；没设时段的按营业时间估算（每天{" "}
-            {OPERATING_HOURS_PER_DAY} 小时）。只统计未取消的课。
+            可用时长按教室自己的「可用时段」算；没设时段的按上课时间估算（每天{" "}
+            {CLASS_HOURS_PER_DAY} 小时，即 8:00–22:00 —— 教室能不能用取决于能不能上课，
+            而不是前台有没有人）。只统计未取消的课。
           </p>
         </header>
 
