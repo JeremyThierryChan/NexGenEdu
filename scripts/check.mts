@@ -212,11 +212,20 @@ ok("核心课程都有详细介绍",
     const found = getAllFeaturedCourses().find((c) => c.name === name);
     return (found?.body.length ?? 0) > 50;
   }));
-// 按路径查找（页面路由与面包屑依赖它）
-const deep = findFeaturedCourse(["课内辅导", "一对多小班课", "精品小升初"]);
+// 按路径查找（页面路由与面包屑依赖它）。路径为显式声明的 ASCII 短路径。
+const deep = findFeaturedCourse(["in-class", "mini-class", "junior-prep"]);
 eq("按路径查找三级课程", deep?.course.name, "精品小升初");
 eq("面包屑链路长度", deep?.trail.length, 3);
 ok("不存在的路径返回 null", findFeaturedCourse(["不存在"]) === null);
+
+// URL 路径必须全部为 ASCII 安全字符，否则静态托管无法解析
+const allPaths = getAllFeaturedCourses().flatMap((c) => c.path);
+ok("全部路径分段为 ASCII 安全字符",
+  allPaths.every((segment) => /^[a-z0-9-]+$/.test(segment)));
+ok("路径无重复", new Set(getAllFeaturedCourses().map((c) => c.path.join("/"))).size === getAllFeaturedCourses().length);
+// 曾出问题的课程：课程名含空格与斜杠
+const smallGroup = getAllFeaturedCourses().find((c) => c.name.includes("一对二"));
+eq("含斜杠的课程名映射到安全路径", smallGroup?.path, ["in-class", "small-group"]);
 
 console.log("\n=== 4. 报价数据 ===");
 const pricing = getPricingData();

@@ -18,6 +18,20 @@ import type { CourseDetail, FeaturedContent, LabeledItem } from "@/lib/types/sit
 /** 课程描述字段的资料名，会按此顺序展示。 */
 const COURSE_FIELDS = ["适合对象", "课程定位", "主要做法", "可以期待"] as const;
 
+/**
+ * 由课程名派生 URL 路径分段（未显式声明「路径」时使用）。
+ *
+ * 剔除非 ASCII 可见字符：空格与斜杠等字符在 URL 里会被百分号编码，
+ * 其中 `%2F` 会被静态托管与一部分浏览器当作路径分隔符处理，
+ * 导致页面解析失败（例如「一对二 / 一对三小组课」）。
+ */
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 /** 把课程字段整理成「标题 + 内容」列表，缺失的字段自动跳过。 */
 function toFields(section: Section): LabeledItem[] {
   return COURSE_FIELDS.map((name) => ({
@@ -26,13 +40,16 @@ function toFields(section: Section): LabeledItem[] {
   })).filter((item) => item.value !== "");
 }
 
-/** 递归把标题树转成课程树。parentSlugs 记录从根到当前课程的路径。 */
+/** 递归把标题树转成课程树。parentSlugs 记录从根到当前课程的 URL 路径。 */
 function toCourses(sections: Section[], parentSlugs: string[]): CourseDetail[] {
   return sections
     .map((section) => {
-      const slugs = [...parentSlugs, section.name];
+      // URL 路径分段：优先用显式声明的「路径」，未声明时由课程名派生
+      const declared = section.fields.find((field) => field.name === "路径")?.value;
+      const segment = declared !== undefined && declared !== "" ? declared : slugify(section.name);
+      const slugs = [...parentSlugs, segment];
       return {
-        slug: section.name,
+        slug: segment,
         /** 完整路径分段，用于生成链接与查找。 */
         path: slugs,
         name: section.name,

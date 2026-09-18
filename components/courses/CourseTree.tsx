@@ -4,65 +4,75 @@ import type { CourseDetail } from "@/lib/types/site";
 
 type CourseTreeProps = {
   courses: CourseDetail[];
+  /** 卡片列数类名，默认三列（宽屏）。 */
+  className?: string;
 };
 
 /**
- * 特色课程树：按层级列出全部课程，每门课程链接到自己的独立页面。
+ * 特色课程卡片网格：每门课程一张卡片，卡片内列出它的下级班型。
  *
- * 层级用缩进与标题字号区分，而不是嵌套卡片 —— 三层嵌套卡片会很快变得拥挤，
- * 缩进列表更适合「一眼看清有哪些课、它们怎么归类」。
+ * 为什么用卡片而不是缩进列表：三层结构用缩进列表会拉得很长，
+ * 而层级关系可以用「下级班型作为卡片内的小链接」表达，
+ * 家长扫一遍就能看出有哪些课、彼此是什么关系。
  */
-export function CourseTree({ courses }: CourseTreeProps) {
+export function CourseTree({ courses, className }: CourseTreeProps) {
   return (
-    <ul className="space-y-6">
+    <div className={className ?? "grid gap-5 sm:grid-cols-2 lg:grid-cols-3"}>
       {courses.map((course) => (
-        <li key={course.slug}>
-          <CourseNode course={course} depth={0} />
-        </li>
+        <CourseCard key={course.slug} course={course} />
       ))}
-    </ul>
+    </div>
   );
 }
 
-function CourseNode({ course, depth }: { course: CourseDetail; depth: number }) {
+function CourseCard({ course }: { course: CourseDetail }) {
   const position = course.fields.find((field) => field.title === "课程定位");
+  const audience = course.fields.find((field) => field.title === "适合对象");
 
   return (
-    <div
-      className={
-        depth === 0
-          ? ""
-          : "border-l border-ink-200 pl-5 sm:pl-6"
-      }
-    >
-      <div className={depth === 0 ? "" : "mt-4"}>
+    <div className="flex flex-col rounded-lg border border-ink-200 bg-white p-6">
+      <h3 className="text-base font-medium text-ink-900">
         <Link
           href={courseHref(course.path)}
-          className="text-base font-medium text-ink-900 transition-colors hover:text-brand-700"
+          className="transition-colors hover:text-brand-700"
         >
           {course.name}
         </Link>
-        {position !== undefined && (
-          <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-ink-600">
-            {position.value}
-          </p>
-        )}
-        {course.children.length === 0 && position === undefined && course.fields.length > 0 && (
-          <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-ink-600">
-            {course.fields[0]?.value}
-          </p>
-        )}
-      </div>
+      </h3>
+
+      {position !== undefined && (
+        <p className="mt-2 text-sm leading-relaxed text-ink-600">{position.value}</p>
+      )}
+
+      {audience !== undefined && (
+        <p className="mt-3 text-xs leading-relaxed text-ink-500">
+          适合：{audience.value}
+        </p>
+      )}
 
       {course.children.length > 0 && (
-        <ul className="mt-1 space-y-1">
+        <ul className="mt-4 space-y-1.5 border-t border-ink-100 pt-4">
           {course.children.map((child) => (
             <li key={child.slug}>
-              <CourseNode course={child} depth={depth + 1} />
+              <Link
+                href={courseHref(child.path)}
+                className="text-sm text-brand-700 transition-colors hover:text-brand-800"
+              >
+                {child.name} →
+              </Link>
             </li>
           ))}
         </ul>
       )}
+
+      <div className="mt-auto pt-4">
+        <Link
+          href={courseHref(course.path)}
+          className="text-sm text-ink-500 transition-colors hover:text-brand-700"
+        >
+          查看课程说明
+        </Link>
+      </div>
     </div>
   );
 }
