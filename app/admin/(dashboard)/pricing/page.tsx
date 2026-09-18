@@ -11,7 +11,13 @@ import {
   validatePricingConfig,
   type PricingConfig,
   type QuoteResult,
+  type TeacherFeeResult,
 } from "@/lib/backend/pricing";
+import {
+  describeTeacherShare,
+  teacherShareFormula,
+  TEACHER_SHARE_MAX_STUDENTS,
+} from "@/lib/backend/teacher-share";
 import { formatMoney } from "@/lib/backend/finance";
 import { cn } from "@/lib/utils/cn";
 
@@ -45,9 +51,14 @@ export default function AdminPricingPage() {
   const [classTypeName, setClassTypeName] = useState("");
   const [durationName, setDurationName] = useState("");
   const [lessons, setLessons] = useState(10);
+  const [students, setStudents] = useState(1);
   const [studentCount, setStudentCount] = useState(12);
   const [classCost, setClassCost] = useState(2400);
   const [quote, setQuote] = useState<QuoteResult | null>(null);
+  /** 教师课时费试算结果（教师拿多少、机构留多少）。 */
+  const [teacherQuote, setTeacherQuote] = useState<TeacherFeeResult | null>(null);
+  /** 人数对照表：1–8 人各自的教师课时费（按当前选择与时长）。 */
+  const [shareRows, setShareRows] = useState<TeacherFeeResult[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -129,7 +140,7 @@ export default function AdminPricingPage() {
   }
 
   async function runQuote() {
-    const result = await api.pricing.quote({
+    const selection = {
       courseName,
       subjectName,
       classTypeName,
@@ -137,9 +148,28 @@ export default function AdminPricingPage() {
       lessons,
       studentCount,
       classCost,
-    });
-    setQuote(result);
+    };
+    const [parent, teacher] = await Promise.all([
+      api.pricing.quote(selection),
+      api.pricing.teacherFee({ ...selection, students }),
+    ]);
+    setQuote(parent);
+    setTeacherQuote(teacher);
+
+    // 人数对照表：把 1–8 人各算一遍，老师问「这个班多少钱」时直接看表
+    const rows = await Promise.all(
+      Array.from({ length: TEACHER_SHARE_MAX_STUDENTS }, (_, index) =>
+        api.pricing.teacherFee({ ...selection, students: index + 1 }),
+      ),
+    );
+    setShareRows(rows);
   }
+
+  // 打开页面就先按默认选择算一次：规则表与金额立刻是可看的，不用先点按钮
+  useEffect(() => {
+    if (!loading && draft !== null && quote === null) void runQuote();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, draft, quote]);
 
   async function exportMarkdown() {
     const text = await api.pricing.exportMarkdown();
@@ -275,6 +305,16 @@ export default function AdminPricingPage() {
             value={lessons}
             onChange={(event) => setLessons(Number(event.target.value))}
           />
+          {selectedClassType?.mode === "coefficient" && (
+            <NumberInput
+              label="学生人数"
+              hint="决定教师分成比例（1 人 40% 起）"
+              min={1}
+              max={TEACHER_SHARE_MAX_STUDENTS}
+              value={students}
+              onChange={(event) => setStudents(Number(event.target.value))}
+            />
+          )}
           {selectedClassType?.mode === "cost-share" && (
             <>
               <NumberInput
@@ -332,6 +372,47 @@ export default function AdminPricingPage() {
                     </li>
                   ))}
                 </ul>
+
+                {teacherQuote !== null && (
+                  <div className="mt-4 rounded-md border border-ink-200 bg-ink-50 px-3 py-2.5">
+                    {teacherQuote.ok ? (
+                      <>
+                        <p className="text-xs font-medium text-ink-700">
+                          教师课时费（分成规则算出来的，不是手填的）
+                        </p>
+                        <div className="mt-2 flex flex-wrap items-baseline gap-x-6 gap-y-1">
+                          <p className="text-sm text-ink-600">
+                            教师{" "}
+                            <strong className="font-medium text-ink-900">
+                              {formatMoney(teacherQuote.teacherFee)}
+                            </strong>
+                            <span className="text-ink-400">
+                              {" "}（{teacherQuote.students} 人 · {teacherQuote.percent}%）
+                            </span>
+                          </p>
+                          <p className="text-sm text-ink-600">
+                            机构留存 {formatMoney(teacherQuote.keepFee)}
+                          </p>
+                          <p className="text-xs text-ink-400">
+                            家长侧本课时段合计 {formatMoney(teacherQuote.revenue)}
+                          </p>
+                        </div>
+                        <ul className="mt-2 grid gap-1 text-xs text-ink-500 sm:grid-cols-2 lg:grid-cols-3">
+                          {teacherQuote.breakdown.map((item) => (
+                            <li key={item.label} className="flex justify-between gap-3">
+                              <span>{item.label}</span>
+                              <span className="text-ink-700">{item.value}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : (
+                      <p className="text-xs leading-relaxed text-ink-500">
+                        教师课时费：{teacherQuote.reason}
+                      </p>
+                    )}
+                  </div>
+                )}
               </>
             ) : (
               <p className="text-sm text-red-700">{quote.reason}</p>
@@ -549,6 +630,126 @@ export default function AdminPricingPage() {
                 未达门槛时按课程原价收 1 节试课费
               </label>
             </div>
+          </div>
+        </div>
+      </Panel>
+
+      {/* ── 教师分成：公式翻成人话 + 人数对照表 ── */}
+      <Panel
+        title="教师分成规则（课内课时费）"
+        description="课内按系数计价的班型适用。规则只有这一份实现，后台与将来接的服务端共用同一个函数。"
+        className="mt-5"
+      >
+        <div className="space-y-5 px-4 py-4">
+          <div>
+            <h3 className="mb-2 text-xs font-medium text-ink-500">规则原文（机构给的口径）</h3>
+            <p className="overflow-x-auto rounded-md bg-ink-50 px-3 py-2 font-mono text-xs leading-relaxed text-ink-700">
+              {teacherShareFormula(draft.teacherShare)}
+            </p>
+          </div>
+
+          <div>
+            <h3 className="mb-2 text-xs font-medium text-ink-500">人话版（给老师看的就是这一段）</h3>
+            <ul className="list-disc space-y-1.5 pl-5 text-xs leading-relaxed text-ink-600">
+              {describeTeacherShare(draft.teacherShare).map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            <NumberInput
+              label="第一名学生分成"
+              suffix="%"
+              min={0}
+              max={500}
+              value={draft.teacherShare.basePercent}
+              onChange={(event) =>
+                edit((next) => {
+                  next.teacherShare.basePercent = Number(event.target.value);
+                })
+              }
+            />
+            <NumberInput
+              label="每增加一名学生加"
+              hint="单位是百分点"
+              suffix="pp"
+              min={0}
+              max={500}
+              value={draft.teacherShare.stepPercent}
+              onChange={(event) =>
+                edit((next) => {
+                  next.teacherShare.stepPercent = Number(event.target.value);
+                })
+              }
+            />
+            <SelectInput
+              label="课程单价口径"
+              hint="公式里「课程单价/小时」按哪一档算"
+              value={draft.teacherShare.priceBasis}
+              onChange={(event) =>
+                edit((next) => {
+                  next.teacherShare.priceBasis =
+                    event.target.value === "seat" ? "seat" : "course";
+                })
+              }
+              options={[
+                { value: "course", label: "课程标准单价（基础价 × 科目系数）" },
+                { value: "seat", label: "班型课时价（再乘班级系数）" },
+              ]}
+            />
+          </div>
+
+          <div>
+            <h3 className="mb-2 text-xs font-medium text-ink-500">
+              人数对照表（按试算里选中的「{courseName} · {durationName}」）
+            </h3>
+            {shareRows[0]?.ok === true ? (
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-xs">
+                  <thead>
+                    <tr className="text-left text-ink-400">
+                      <th className="border-b border-ink-100 py-1.5 pr-3 font-normal">学生人数</th>
+                      <th className="border-b border-ink-100 py-1.5 pr-3 font-normal">分成比例</th>
+                      <th className="border-b border-ink-100 py-1.5 pr-3 font-normal">教师课时费</th>
+                      <th className="border-b border-ink-100 py-1.5 font-normal">机构留存</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shareRows.map((row) => (
+                      <tr
+                        key={row.students}
+                        className={row.students === students ? "bg-brand-50" : undefined}
+                      >
+                        <td className="border-b border-ink-100 py-1.5 pr-3 text-ink-700">
+                          {row.students} 人
+                        </td>
+                        <td className="border-b border-ink-100 py-1.5 pr-3 text-ink-600">
+                          {row.percent}%
+                        </td>
+                        <td className="border-b border-ink-100 py-1.5 pr-3 text-ink-800">
+                          {formatMoney(row.teacherFee)}
+                        </td>
+                        <td className="border-b border-ink-100 py-1.5 text-ink-600">
+                          {formatMoney(row.keepFee)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-xs leading-relaxed text-ink-500">
+                当前选择的班型不适用这条规则
+                {shareRows[0]?.reason === undefined ? "。" : `：${shareRows[0].reason}`}
+              </p>
+            )}
+            <p className="mt-2 text-xs leading-relaxed text-ink-400">
+              表格固定用当前选中的课程与班型算出「课时单价」，再按人数给比例 ——
+              用来看「多一个学生，老师多拿多少」。9 人以上大班课不出现在这张表里：
+              那类按「教师课时总费用 ÷ 班级人数」另议。比例与金额都是按当前配置算的，
+              改上面的数字或切换单价口径，表格会立刻跟着变。
+            </p>
           </div>
         </div>
       </Panel>

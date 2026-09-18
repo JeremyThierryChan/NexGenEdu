@@ -56,7 +56,14 @@ import {
   type SubjectOption,
 } from "@/lib/data/pricing";
 
-export type { PricingRules };
+import {
+  sharePercentFor,
+  teacherFeeFor,
+  teacherShareAppliesTo,
+  type TeacherShareRules,
+} from "./teacher-share";
+
+export type { PricingRules, TeacherShareRules };
 
 /* ── 一、配置：后台可改的那份数据 ─────────────────────────────────────── */
 
@@ -112,6 +119,8 @@ export type PricingTrial = {
 /** 报价配置：伪后端里的一份完整数据。 */
 export type PricingConfig = {
   rules: PricingRules;
+  /** 教师课时费（分成）规则：见 lib/backend/teacher-share.ts。 */
+  teacherShare: TeacherShareRules;
   stages: PricingStage[];
   subjects: PricingSubject[];
   classTypes: PricingClassType[];
@@ -444,6 +453,115 @@ export function quoteSelection(config: PricingConfig, selection: QuoteSelection)
   return calculateQuote(resolved.input, config.rules);
 }
 
+/* ── 三之二、教师课时费（分成）试算 ─────────────────────────────────── */
+
+/** 教师课时费试算请求：在报价选择之上再加「这个班有几个学生」。 */
+export type TeacherFeeSelection = QuoteSelection & { students?: number };
+
+/** 教师课时费试算结果（教师拿多少、机构留多少）。 */
+export type TeacherFeeResult = {
+  ok: boolean;
+  reason?: string;
+  /** 上课小时数。 */
+  hours: number;
+  students: number;
+  /** 分成比例（百分比）。 */
+  percent: number;
+  /** 「课程单价 / 小时」：按所选口径算出的数。 */
+  hourlyPrice: number;
+  /** 家长每生每小时的课时价（含班级系数），用于算机构留存。 */
+  seatHourlyPrice: number;
+  /** 教师课时费。 */
+  teacherFee: number;
+  /** 本课时段家长侧总收入。 */
+  revenue: number;
+  /** 机构留存 = 收入 − 教师课时费。 */
+  keepFee: number;
+  breakdown: QuoteBreakdownItem[];
+};
+
+/**
+ * 算教师课时费。
+ *
+ * 规则：`小时数 × 课程单价/小时 × (基准 + (人数 − 1) × 每加一名学生)`
+ * （见 lib/backend/teacher-share.ts）。**9 人以上大班课不适用** ——
+ * 那类按「教师课时总费用 ÷ 班级人数」另议，因此这里直接返回原因而不是硬套公式。
+ *
+ * 人数一样由调用方给（试算时手填、将来排课时取学生名单的实际人数），
+ * 比例与课时单价一律由这边的配置算，不接受外部传进来的比例。
+ */
+export function teacherFeeForSelection(
+  config: PricingConfig,
+  selection: TeacherFeeSelection,
+): TeacherFeeResult {
+  const hours = 0;
+  const empty = (reason: string): TeacherFeeResult => ({
+    ok: false,
+    reason,
+    hours,
+    students: 0,
+    percent: 0,
+    hourlyPrice: 0,
+    seatHourlyPrice: 0,
+    teacherFee: 0,
+    revenue: 0,
+    keepFee: 0,
+    breakdown: [],
+  });
+
+  const resolved = resolveSelection(config, selection);
+  if (!resolved.ok) return empty(resolved.reason);
+  const input = resolved.input;
+
+  if (input.course.price === null) return empty("所选课程暂未开放，无法计算教师课时费。");
+  if (!teacherShareAppliesTo(input.classType)) {
+    return empty(
+      "9 人以上大班课不适用分成规则：那类按「教师课时总费用 ÷ 班级人数」另议。",
+    );
+  }
+
+  const students = Math.max(1, Math.floor(selection.students ?? selection.studentCount ?? 1));
+  const courseHourly = round2(input.course.price * (input.subject?.coefficient ?? 1));
+  const seatHourly = round2(courseHourly * (input.classType.coefficient ?? 1));
+  const hourlyPrice = config.teacherShare.priceBasis === "seat" ? seatHourly : courseHourly;
+  const percent = sharePercentFor(students, config.teacherShare);
+  const teacherFee = teacherFeeFor(
+    { hours: input.duration.hours, hourlyPrice, students },
+    config.teacherShare,
+  );
+  const revenue = round2(seatHourly * input.duration.hours * students);
+  const keepFee = round2(revenue - teacherFee);
+
+  return {
+    ok: true,
+    hours: input.duration.hours,
+    students,
+    percent,
+    hourlyPrice,
+    seatHourlyPrice: seatHourly,
+    teacherFee,
+    revenue,
+    keepFee,
+    breakdown: [
+      {
+        label: `课程单价 / 小时（${config.teacherShare.priceBasis === "seat" ? "班型课时价" : "课程标准单价"}）`,
+        value: money(hourlyPrice),
+      },
+      {
+        label: `${students} 人的分成比例`,
+        value: `${percent}%（${config.teacherShare.basePercent}% + ${students - 1}×${config.teacherShare.stepPercent}%）`,
+      },
+      { label: "上课时长", value: `${input.duration.hours} 小时` },
+      { label: "教师课时费", value: money(teacherFee) },
+      {
+        label: "家长侧本课时段合计",
+        value: `${money(revenue)}（每生 ${money(seatHourly)} × ${students} 人 × ${input.duration.hours} 小时）`,
+      },
+      { label: "机构留存", value: money(keepFee) },
+    ],
+  };
+}
+
 /* ── 四、校验：服务端必须自己复核（不信前端传上来的配置）────────────── */
 
 /**
@@ -466,6 +584,21 @@ export function validatePricingConfig(config: PricingConfig): string[] {
   }
   if (!Number.isInteger(rules.freeTrialMinLessons) || rules.freeTrialMinLessons < 1) {
     problems.push("试课免费门槛必须是不小于 1 的整数节。");
+  }
+
+  const { teacherShare } = config;
+  if (
+    !Number.isFinite(teacherShare.basePercent) ||
+    teacherShare.basePercent < 0 ||
+    teacherShare.basePercent > 500
+  ) {
+    problems.push("教师分成（第一名学生）的百分比必须在 0 到 500 之间。");
+  }
+  if (!Number.isFinite(teacherShare.stepPercent) || teacherShare.stepPercent < 0) {
+    problems.push("教师分成每增加一名学生加的百分点必须是不小于 0 的数字。");
+  }
+  if (teacherShare.priceBasis !== "course" && teacherShare.priceBasis !== "seat") {
+    problems.push("教师分成的「课程单价口径」只能是课程标准单价或班型课时价。");
   }
 
   if (config.stages.length === 0) problems.push("至少要有一个学习阶段。");
@@ -544,6 +677,7 @@ export function validatePricingConfig(config: PricingConfig): string[] {
 export function configFromPricingData(data: PricingData, source: string): PricingConfig {
   return {
     rules: data.rules,
+    teacherShare: data.teacherShare,
     stages: data.stages.map((stage) => ({
       name: stage.name,
       courses: stage.courses.map((course) => ({
@@ -654,6 +788,17 @@ export function pricingConfigToMarkdown(config: PricingConfig): string {
   lines.push("#### 名称: 试课未达门槛", "");
   lines.push(`#### 收费: ${config.rules.chargeTrialWhenNotFree ? "是" : "否"}`, "");
 
+  lines.push("## 教师分成", "");
+  lines.push("### 基准分成", "");
+  lines.push("#### 名称: 基准分成", "");
+  lines.push(`#### 百分比: ${config.teacherShare.basePercent}`, "");
+  lines.push("### 每增加一名学生", "");
+  lines.push("#### 名称: 每增加一名学生", "");
+  lines.push(`#### 百分比: ${config.teacherShare.stepPercent}`, "");
+  lines.push("### 课程单价口径", "");
+  lines.push("#### 名称: 课程单价口径", "");
+  lines.push(`#### 取值: ${config.teacherShare.priceBasis === "seat" ? "班型" : "标准"}`, "");
+
   if (config.trial !== null) {
     lines.push("## 试课", "");
     lines.push(`### ${config.trial.name}`, "");
@@ -678,6 +823,7 @@ export function pricingConfigToMarkdown(config: PricingConfig): string {
 export function pricingConfigCore(config: PricingConfig): string {
   return JSON.stringify({
     rules: config.rules,
+    teacherShare: config.teacherShare,
     stages: config.stages,
     subjects: config.subjects,
     classTypes: config.classTypes,

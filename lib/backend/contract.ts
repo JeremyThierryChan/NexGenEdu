@@ -112,9 +112,14 @@ export const API_CONTRACT: ContractGroup[] = [
       "不要在前端再算一遍 —— 两边算出不同的价格是最不能接受的事故；" +
       "2) 报价请求只发「选了哪门课、哪个班型、多少节」，**不发价格**，" +
       "价格一律由服务端查自己的配置（否则前端改个数字就能改价）；" +
-      "3) 配置改动必须留审计：价格变了要能查到谁在什么时候改的、从多少改到多少。",
+      "3) 配置改动必须留审计：价格变了要能查到谁在什么时候改的、从多少改到多少；" +
+      "4) 报价配置里还包含**教师分成规则**（课内班型 40% 起、每加一名学生 +10%，" +
+      "即 `小时数 × 课程单价/小时 × (0.4 + (人数−1) × 0.1)`；9 人以上大班课不适用）。" +
+      "`pricing.teacherFee` 与 `pricing.quote` 一样只收「选择」不收金额 —— 教师工资" +
+      "同样不能让前端传数字进来。",
     methods: [
-      "pricing.get", "pricing.update", "pricing.reset", "pricing.quote", "pricing.exportMarkdown",
+      "pricing.get", "pricing.update", "pricing.reset", "pricing.quote", "pricing.teacherFee",
+      "pricing.exportMarkdown",
     ],
   },
   {

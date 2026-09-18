@@ -49,6 +49,12 @@ import {
 } from "@/lib/backend/inquiry";
 import { API_CONTRACT, MIGRATION_STEPS, SERVER_MUST_VALIDATE } from "@/lib/backend/contract";
 import {
+  describeTeacherShare,
+  sharePercentFor,
+  teacherShareFormula,
+  TEACHER_SHARE_MAX_STUDENTS,
+} from "@/lib/backend/teacher-share";
+import {
   pricingConfigCore,
   pricingConfigFromContent,
   pricingConfigFromSource,
@@ -194,7 +200,7 @@ ok("法语各级都写了核心能力",
 
 const pricingDoc = parseDocument(pricingSource);
 const pricingPage = pricingDoc.pages.get("智能报价");
-eq("报价页分组", pricingPage?.groups.map((g) => g.name), ["学习阶段", "班级类型", "课时选择", "试课", "计费规则", "其他项目"]);
+eq("报价页分组", pricingPage?.groups.map((g) => g.name), ["学习阶段", "班级类型", "课时选择", "试课", "计费规则", "教师分成", "其他项目"]);
 
 console.log("\n=== 2. 数据访问层 ===");
 const brand = getSiteBrand();
@@ -2540,6 +2546,109 @@ eq("升级补上的价格与站点内容一致",
   pricing.stages[1]?.courses.map((course) => course.price));
 eq("升级后的版本号是当前版本",
   JSON.parse(pbLegacyStore.read("nexgenedu.admin.db.v1") ?? "{}").version, CURRENT_VERSION);
+
+// ── 教师分成（课内课时费）：公式 → 人话规则 ───────────────────────────
+// 原始口径：小时数 × (课程单价/小时) × (0.4 + (学生人数 − 1) × 0.1)
+eq("内容的教师分成规则", [
+  pricing.teacherShare.basePercent,
+  pricing.teacherShare.stepPercent,
+  pricing.teacherShare.priceBasis,
+], [40, 10, "course"]);
+eq("人数对照表（1–8 人的分成比例）",
+  Array.from({ length: TEACHER_SHARE_MAX_STUDENTS }, (_, index) => sharePercentFor(index + 1, pricing.teacherShare)),
+  [40, 50, 60, 70, 80, 90, 100, 110]);
+eq("人数上限与班型「一对多（4-8）」对得上", TEACHER_SHARE_MAX_STUDENTS, 8);
+ok("规则原文与机构给的公式一致",
+  teacherShareFormula(pricing.teacherShare).includes("(0.4 + (学生人数 − 1) × 0.1)"));
+
+// 人话版必须回答四件事：适用什么班型、比例怎么加、不适用什么、单价怎么取
+const pbShareText = describeTeacherShare(pricing.teacherShare).join("\n");
+ok("人话版说明了适用班型", pbShareText.includes("一对一定制课") && pbShareText.includes("一对多小班课"));
+ok("人话版写明了 40% 起与每人 +10", pbShareText.includes("40%") && pbShareText.includes("10 个百分点"));
+ok("人话版点明了 8 人时的比例", pbShareText.includes("110%"));
+ok("人话版说明了 9 人以上大班课不适用",
+  pbShareText.includes("9 人以上大班课不适用") && pbShareText.includes("另议"));
+ok("人话版说明了课程单价的口径", pbShareText.includes("课程单价 = 基础价 × 科目系数"));
+ok("人话版说明了时长按小时算", pbShareText.includes("1.5 小时乘 1.5"));
+
+// 按名字算：一对一 1 人 1 小时（九年级课本 300 / 小时）= 300 × 40% = 120
+const pbTeacher1 = await api.pricing.teacherFee({
+  courseName: "九年级课本", subjectName: "数学", classTypeName: "一对一",
+  durationName: "1 小时", lessons: 1, students: 1,
+});
+eq("一对一 1 人 1 小时的教师课时费", [pbTeacher1.ok, pbTeacher1.percent, pbTeacher1.teacherFee], [true, 40, 120]);
+// 3 人 = 60%；1.5 小时 ×300 ×0.6 = 270
+const pbTeacher3 = await api.pricing.teacherFee({
+  courseName: "九年级课本", subjectName: "数学", classTypeName: "一对三",
+  durationName: "1.5 小时", lessons: 5, students: 3,
+});
+eq("一对三 3 人 1.5 小时的教师课时费", [pbTeacher3.percent, pbTeacher3.teacherFee], [60, 270]);
+ok("教师课时费里含家长侧收入与机构留存",
+  pbTeacher3.revenue > pbTeacher3.teacherFee &&
+  Math.abs(pbTeacher3.keepFee - (pbTeacher3.revenue - pbTeacher3.teacherFee)) < 0.01);
+ok("教师课时费明细写清了比例怎么来的",
+  pbTeacher3.breakdown.some((item) => item.value.includes("40% + 2×10%")));
+
+// 大班课不适用：按人数分摊的那类按「教师费用 ÷ 人数」另议，不能硬套公式
+const pbTeacherBig = await api.pricing.teacherFee({
+  courseName: "八年级课本", subjectName: "数学", classTypeName: "班课（9-20）",
+  durationName: "1.5 小时", lessons: 5, students: 12,
+});
+ok("9 人以上大班课不适用分成规则",
+  pbTeacherBig.ok === false && (pbTeacherBig.reason ?? "").includes("大班课"));
+
+// 单价口径切换会改变教师课时费，但不影响家长报价
+const pbSeatConfig = JSON.parse(JSON.stringify(await api.pricing.get()));
+pbSeatConfig.teacherShare.priceBasis = "seat";
+await api.pricing.update(pbSeatConfig);
+const pbTeacherSeat = await api.pricing.teacherFee({
+  courseName: "九年级课本", subjectName: "数学", classTypeName: "一对二",
+  durationName: "1 小时", lessons: 1, students: 1,
+});
+// 班型课时价口径：300 ×0.7 = 210 → 40% = 84
+eq("切到班型课时价口径后的教师课时费", pbTeacherSeat.teacherFee, 84);
+eq("口径切换不影响家长报价",
+  (await pbQuote("九年级课本", "数学", "一对二", "1 小时", 5)).unitPrice,
+  quote("九年级课本", "数学", "一对二", "1 小时", 5).unitPrice);
+
+// 导出 → 回读：教师分成规则也要能带走
+const pbShareExport = await api.pricing.exportMarkdown();
+ok("导出内容里带上了教师分成", pbShareExport.includes("## 教师分成"));
+const pbShareRoundTrip = pricingConfigFromSource(`# NexGenEdu · 新锐教培 · 报价数据
+
+## 页面: 智能报价
+
+---
+result_title: 报价结果
+---
+
+${pbShareExport}`);
+eq("回读后教师分成口径仍是班型课时价", pbShareRoundTrip.teacherShare.priceBasis, "seat");
+eq("回读后基准分成不变", pbShareRoundTrip.teacherShare.basePercent, 40);
+
+// 坏规则进不去库
+const pbBadShare = JSON.parse(JSON.stringify(pbSeatConfig));
+pbBadShare.teacherShare.basePercent = -1;
+ok("负的分成比例校验不通过", validatePricingConfig(pbBadShare).length > 0);
+const pbBadStep = JSON.parse(JSON.stringify(pbSeatConfig));
+pbBadStep.teacherShare.stepPercent = -5;
+ok("负的递增比例校验不通过", validatePricingConfig(pbBadStep).length > 0);
+await api.pricing.reset();
+eq("恢复后分成规则回到内容里的口径", (await api.pricing.get()).teacherShare, pricing.teacherShare);
+
+// 老库（v10 没有教师分成字段）升级后要补上默认值，不能是 undefined
+const pbV10Store = createMemoryStore();
+__useStoreForTesting(pbV10Store);
+const pbV10 = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown>;
+delete (pbV10.pricing as Record<string, unknown>).teacherShare;
+pbV10.version = 10;
+pbV10Store.write("nexgenedu.admin.db.v1", JSON.stringify(pbV10));
+const pbV11Config = await api.pricing.get();
+eq("v10 老库升级后补上了教师分成默认值",
+  [pbV11Config.teacherShare.basePercent, pbV11Config.teacherShare.stepPercent, pbV11Config.teacherShare.priceBasis],
+  [40, 10, "course"]);
+eq("升级后版本号是当前版本",
+  JSON.parse(pbV10Store.read("nexgenedu.admin.db.v1") ?? "{}").version, CURRENT_VERSION);
 
 // 收尾：切回主存储，并确保报价配置没有留下自检改动的痕迹
 __useStoreForTesting(memory);

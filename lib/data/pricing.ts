@@ -81,6 +81,32 @@ export type TrialLesson = {
   priceLabel: string;
 };
 
+/** 「课程单价」取哪一档（教师分成用）。 */
+export type TeacherSharePriceBasis = "course" | "seat";
+
+/**
+ * 教师课时费（分成）规则。
+ *
+ * 原始口径：`教师课时费 = 小时数 × (课程单价/小时) × (0.4 + (学生人数 − 1) × 0.1)`，
+ * 适用于课内课程里按系数计价的班型（一对一 … 一对多小班课），9 人以上大班课另议。
+ * 算法与人话说明见 `lib/backend/teacher-share.ts`。
+ */
+export type TeacherShareRules = {
+  /** 第一名学生的分成比例（百分比）。 */
+  basePercent: number;
+  /** 每增加一名学生，比例增加多少（百分点）。 */
+  stepPercent: number;
+  /** 「课程单价」的口径。 */
+  priceBasis: TeacherSharePriceBasis;
+};
+
+/** 未在内容里配置教师分成规则时的默认值（40% 起、每人 +10%、按标准单价）。 */
+export const DEFAULT_TEACHER_SHARE_RULES: TeacherShareRules = {
+  basePercent: 40,
+  stepPercent: 10,
+  priceBasis: "course",
+};
+
 /**
  * 计费规则：公式里那两个「不该写死在代码里」的数字。
  *
@@ -127,6 +153,8 @@ export type PricingData = {
   durations: LessonDuration[];
   /** 计费规则（手续费 / 试课免费门槛）。 */
   rules: PricingRules;
+  /** 教师课时费（分成）规则。 */
+  teacherShare: TeacherShareRules;
   trial: TrialLesson | null;
   otherItems: OtherItem[];
 };
@@ -252,6 +280,26 @@ function toRules(sections: Section[]): PricingRules {
   };
 }
 
+/**
+ * 解析教师分成规则。
+ *
+ * 老内容没有这一组时用默认值（40% / +10% / 标准单价），因此加这一组是向后兼容的。
+ */
+function toTeacherShare(sections: Section[]): TeacherShareRules {
+  const find = (name: string): Section | undefined =>
+    sections.find((section) => section.name === name);
+  const base = toNumber(itemValue(find("基准分成") ?? emptySection("基准分成"), "百分比"), null);
+  const step = toNumber(itemValue(find("每增加一名学生") ?? emptySection("每增加一名学生"), "百分比"), null);
+  const basis = itemValue(find("课程单价口径") ?? emptySection("课程单价口径"), "取值") ?? "";
+  return {
+    basePercent:
+      base !== null && base >= 0 && base <= 500 ? base : DEFAULT_TEACHER_SHARE_RULES.basePercent,
+    stepPercent:
+      step !== null && step >= 0 && step <= 500 ? step : DEFAULT_TEACHER_SHARE_RULES.stepPercent,
+    priceBasis: basis.trim() === "班型" ? "seat" : DEFAULT_TEACHER_SHARE_RULES.priceBasis,
+  };
+}
+
 /** 解析其他项目。 */
 function toOtherItems(sections: Section[]): OtherItem[] {
   return sections.map((section) => ({
@@ -338,6 +386,7 @@ export function parsePricingSource(source: string): PricingData {
     classTypes: toClassTypes(named("班级类型").children),
     durations: toDurations(named("课时选择").children),
     rules: toRules(named("计费规则").children),
+    teacherShare: toTeacherShare(named("教师分成").children),
     trial: toTrial(named("试课").children[0]),
     otherItems: toOtherItems(named("其他项目").children),
   };

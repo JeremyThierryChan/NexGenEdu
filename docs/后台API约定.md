@@ -17,10 +17,10 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 - 全部方法都是 `async`，**页面里没有一处直接读写 localStorage**；
 - 对外形状由 `lib/backend/types.ts` 定义，`export type BackendApi = typeof api`
   就是服务端要满足的那份形状；
-- 数据类型带 `version`（当前 v10），升级链在 `api.ts` 的 `migrate()`，
+- 数据类型带 `version`（当前 v11），升级链在 `api.ts` 的 `migrate()`，
   **必须按版本升序逐级推进**（历史上写反过一次顺序，导致老数据被重新灌成示例数据）。
 
-## 二、接口分组（共 96 个方法）
+## 二、接口分组（共 97 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -95,7 +95,8 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 
 ### 5. 报价配置（价格是数据，不是代码）
 
-`pricing.get`、`pricing.update`、`pricing.reset`、`pricing.quote`、`pricing.exportMarkdown`。
+`pricing.get`、`pricing.update`、`pricing.reset`、`pricing.quote`、`pricing.teacherFee`、
+`pricing.exportMarkdown`。
 
 报价原先只有一份公式写在页面侧（`lib/pricing/quote.ts`），规则还硬编码在里面：
 调一次价要改代码、重新构建，后台也看不到家长会被报多少。
@@ -126,6 +127,21 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
   伪后端阶段后台改价只存在管理员本机，因此 `pricing.exportMarkdown` 导出与
   `data/site/pricing.md` 同构的片段，替换进内容文件后才算真正上线 ——
   这也是 `npm run check` 里「前后台同一份配置必须算出同一个价」那条断言的由来。
+
+**教师分成（课时费）**：课内课程里按系数计价的班型（一对一定制课 / 一对二 /
+一对三小组课 / 一对多小班课，1–8 人）适用下面这条规则，9 人以上大班课不适用
+（那类按「教师课时总费用 ÷ 班级人数」另议）：
+
+```
+教师课时费 = 小时数 × (课程单价 / 小时) × (0.4 + (学生人数 − 1) × 0.1)
+```
+
+人话是「第一名学生 40%，此后每多一名学生加 10 个百分点（2 人 50% … 8 人 110%）」。
+公式里的「课程单价」默认取**课程标准单价**（基础价 × 科目系数，不含班级人数折扣），
+也可切换为**班型课时价**（再乘班级系数 = 家长每生实付）—— 两种口径后台一键切换。
+`pricing.teacherFee` 只收「哪门课 / 哪个班型 / 几个学生 / 多久」，比例与课时单价由
+服务端按配置算（教师工资同样不能由前端传数字）。后台报价页把这条规则翻译成人话、
+连同一张人数对照表展示，老师问「这个班多少钱」直接看表。
 
 ### 6. 看板与统计（只读）
 

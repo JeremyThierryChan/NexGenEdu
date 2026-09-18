@@ -26,15 +26,29 @@ import {
   type TeacherWorkload,
 } from "./stats";
 import { weekDays } from "./format";
+import { DEFAULT_TEACHER_SHARE_RULES } from "@/lib/data/pricing";
 import {
   PRICING_SOURCE_ADMIN,
   pricingConfigFromContent,
+  teacherFeeForSelection,
   pricingConfigToMarkdown,
   quoteSelection,
   validatePricingConfig,
 } from "./pricing";
-import type { PricingConfig, QuoteResult, QuoteSelection } from "./pricing";
-export type { PricingConfig, QuoteResult, QuoteSelection } from "./pricing";
+import type {
+  PricingConfig,
+  QuoteResult,
+  QuoteSelection,
+  TeacherFeeResult,
+  TeacherFeeSelection,
+} from "./pricing";
+export type {
+  PricingConfig,
+  QuoteResult,
+  QuoteSelection,
+  TeacherFeeResult,
+  TeacherFeeSelection,
+} from "./pricing";
 import {
   monthRange,
   outstandingAmount,
@@ -363,6 +377,20 @@ function migrate(db: Database): Database | null {
     db.version = 10;
   }
 
+  if (db.version === 10) {
+    /*
+     * v10 → v11：报价配置增加教师分成规则。
+     *
+     * v10 的库里没有这个字段，直接读会取到 undefined（算课时费时变成 NaN）。
+     * 补成默认的 40% / +10% / 课程标准单价 —— 与内容文件里的口径一致。
+     */
+    db.pricing = {
+      ...db.pricing,
+      teacherShare: db.pricing.teacherShare ?? DEFAULT_TEACHER_SHARE_RULES,
+    };
+    db.version = 11;
+  }
+
   return db.version === CURRENT_VERSION ? db : null;
 }
 
@@ -588,6 +616,19 @@ function describePricingChange(before: PricingConfig, after: PricingConfig): str
   }
   if (before.rules.freeTrialMinLessons !== after.rules.freeTrialMinLessons) {
     parts.push(`试课免费门槛 ${before.rules.freeTrialMinLessons} 节 → ${after.rules.freeTrialMinLessons} 节`);
+  }
+  if (before.teacherShare.basePercent !== after.teacherShare.basePercent) {
+    parts.push(`教师分成 ${before.teacherShare.basePercent}% → ${after.teacherShare.basePercent}%`);
+  }
+  if (before.teacherShare.stepPercent !== after.teacherShare.stepPercent) {
+    parts.push(
+      `每加一名学生 ${before.teacherShare.stepPercent} → ${after.teacherShare.stepPercent} 个百分点`,
+    );
+  }
+  if (before.teacherShare.priceBasis !== after.teacherShare.priceBasis) {
+    parts.push(
+      `课程单价口径 ${before.teacherShare.priceBasis === "seat" ? "班型课时价" : "课程标准单价"} → ${after.teacherShare.priceBasis === "seat" ? "班型课时价" : "课程标准单价"}`,
+    );
   }
   const changes = parts.length > 0 ? parts.join("；") : `未改动价格（${priceLabel(after)}）`;
   return `修改报价配置：${changes}`;
@@ -1879,6 +1920,17 @@ export const api = {
     async quote(selection: QuoteSelection): Promise<QuoteResult> {
       await delay();
       return quoteSelection(load().pricing, selection);
+    },
+
+    /**
+     * 算教师课时费（分成）：教师拿多少、机构留多少。
+     *
+     * 规则只收「哪门课 / 哪个班型 / 几个学生 / 多久」，**比例与课时单价一律由
+     * 服务端按配置算** —— 教师工资和报价一样，不能让前端传数字进来。
+     */
+    async teacherFee(selection: TeacherFeeSelection): Promise<TeacherFeeResult> {
+      await delay();
+      return teacherFeeForSelection(load().pricing, selection);
     },
 
     /** 导出成可直接替换 `data/site/pricing.md` 的 Markdown 片段。 */
