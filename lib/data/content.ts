@@ -1,6 +1,7 @@
 import { casesSource } from "@/data/site/cases";
 import { contentSource } from "@/data/site/content";
 import { faqSource } from "@/data/site/faq";
+import { featuredSource } from "@/data/site/featured";
 import { scheduleSource } from "@/data/site/schedule";
 import { parseItems, parseMarkdown, readArray, readString } from "@/lib/markdown";
 
@@ -33,6 +34,14 @@ export type Section = {
   name: string;
   /** 分组标题下的说明文字，不会显示在页面上。 */
   note: string;
+  /**
+   * 以 `- · 字段名: 内容` 声明的字段。
+   *
+   * 为什么要这个前缀：课程字段（适合对象 / 课程定位…）若写成同级标题，
+   * 会与「子课程」在格式上无法区分（两者都是 `#### xxx`），
+   * 造成子课程被当字段、或字段被当课程。加 `· ` 前缀后语义明确。
+   */
+  fields: Array<{ name: string; value: string }>;
   /** 条目：`#### 标题 | 值`；body 是条目下方到下一个条目之间的正文。 */
   items: Array<{ title: string; value: string; body: string }>;
   /** 正文段落组（长文本场景）。 */
@@ -167,6 +176,26 @@ function buildTree(markdown: string): HeadingBlock[] {
 }
 
 /** 把标题块转成节（含条目与子节）。 */
+/** 从正文里解析 `- · 字段名: 内容` 形式的字段。 */
+function parseFieldsFrom(text: string): Array<{ name: string; value: string }> {
+  const fields: Array<{ name: string; value: string }> = [];
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*[-*]\s*·\s*(.+?)\s*[:：]\s*(.*)$/.exec(line);
+    if (match?.[1] === undefined || match[2] === undefined) continue;
+    fields.push({ name: match[1].trim(), value: match[2].trim() });
+  }
+  return fields;
+}
+
+/** 与 parseFieldsFrom 配对：取走字段行后剩下的正文。 */
+function withoutFieldLines(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*[-*]\s*·\s*.+?\s*[:：]/.test(line))
+    .join("\n")
+    .trim();
+}
+
 function blockToSection(block: HeadingBlock): Section {
   const parsed = splitTitle(block.rawTitle);
   const children = block.children.map(blockToSection);
@@ -181,7 +210,8 @@ function blockToSection(block: HeadingBlock): Section {
   if (childItems.length > 0 && allItems && block.children[0]?.level === block.level + 1) {
     return {
       name: parsed.title,
-      note: block.text,
+      note: "",
+      fields: parseFieldsFrom(block.text),
       items: childItems.map(({ item, child }) => ({
         title: item.title,
         value: item.value,
@@ -195,8 +225,9 @@ function blockToSection(block: HeadingBlock): Section {
   return {
     name: parsed.title,
     note: "",
+    fields: parseFieldsFrom(block.text),
     items: [],
-    body: block.text,
+    body: withoutFieldLines(block.text),
     children,
   };
 }
@@ -301,6 +332,7 @@ const DOCUMENTS = {
   faq: faqSource,
   cases: casesSource,
   schedule: scheduleSource,
+  featured: featuredSource,
 } as const;
 
 export type DocumentName = keyof typeof DOCUMENTS;
@@ -343,6 +375,7 @@ export function getGroup(page: PageBlock, name: string): Group {
     page.groups.find((group) => group.name === name) ?? {
       name,
       note: "",
+      fields: [],
       items: [],
       body: "",
       children: [],

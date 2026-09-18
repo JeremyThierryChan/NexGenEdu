@@ -194,6 +194,7 @@ export function getPricingData(): PricingData {
     page.groups.find((group) => group.name === name) ?? {
       name,
       note: "",
+      fields: [],
       items: [],
       body: "",
       children: [],

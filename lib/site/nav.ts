@@ -25,6 +25,7 @@ export const MAIN_NAV: readonly NavItem[] = [
 
 /** 页脚补充导航（与主导航合并后覆盖全部页面）。 */
 export const SECONDARY_NAV: readonly NavItem[] = [
+  { href: "/courses/featured", label: "特色课程" },
   { href: "/schedule", label: "课程时间安排" },
   { href: "/faq", label: "常见问题" },
   { href: "/about", label: "关于我们" },

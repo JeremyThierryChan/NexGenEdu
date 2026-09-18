@@ -15,7 +15,7 @@ import path from "node:path";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetDir = path.join(root, "data", "site");
-const names = ["content", "pricing", "faq", "cases", "schedule"];
+const names = ["content", "pricing", "faq", "cases", "schedule", "featured"];
 
 for (const name of names) {
   const source = readFileSync(path.join(targetDir, `${name}.md`), "utf8");

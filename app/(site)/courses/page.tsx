@@ -3,7 +3,10 @@ import { CourseCard } from "@/components/courses/CourseCard";
 import { PageHeader } from "@/components/site/PageHeader";
 import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
+import { getFeaturedContent } from "@/lib/data/featured";
 import { getCoursesPage } from "@/lib/data/site";
+import { FEATURED_INDEX_HREF, courseHref } from "@/lib/site/featured-routes";
+import Link from "next/link";
 import { renderMarkdown } from "@/lib/markdown";
 
 /** 课程页内容来自 data/site/content.md。 */
@@ -30,6 +33,7 @@ const PROSE_CLASS =
 
 export default function CoursesPage() {
   const { heading, courses } = getCoursesPage();
+  const featured = getFeaturedContent();
 
   return (
     <>
@@ -99,6 +103,59 @@ export default function CoursesPage() {
               </article>
             ))}
           </div>
+        </Section>
+        {/* 特色课程：按需求（而非按学科）选课的入口 */}
+        <Section
+          title="特色课程"
+          description={featured.description}
+          className="border-t border-ink-200"
+        >
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {featured.courses.map((course) => (
+              <div
+                key={course.slug}
+                className="rounded-lg border border-ink-200 bg-white p-6"
+              >
+                <h3 className="text-base font-medium text-ink-900">
+                  <Link
+                    href={courseHref(course.path)}
+                    className="transition-colors hover:text-brand-700"
+                  >
+                    {course.name}
+                  </Link>
+                </h3>
+                {course.fields
+                  .filter((field) => field.title === "课程定位")
+                  .map((field) => (
+                    <p key={field.title} className="mt-2 text-sm leading-relaxed text-ink-600">
+                      {field.value}
+                    </p>
+                  ))}
+                {course.children.length > 0 && (
+                  <ul className="mt-4 space-y-1.5">
+                    {course.children.map((child) => (
+                      <li key={child.slug}>
+                        <Link
+                          href={courseHref(child.path)}
+                          className="text-sm text-brand-700 transition-colors hover:text-brand-800"
+                        >
+                          {child.name} →
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="mt-6">
+            <Link
+              href={FEATURED_INDEX_HREF}
+              className="inline-flex h-8 items-center rounded-md border border-ink-300 px-3 text-sm text-ink-800 transition-colors hover:border-brand-400 hover:text-brand-700"
+            >
+              查看特色课程全部班型
+            </Link>
+          </p>
         </Section>
       </Container>
     </>

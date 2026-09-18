@@ -24,6 +24,7 @@ import {
 } from "@/lib/data/site";
 import { getPricingData } from "@/lib/data/pricing";
 import { getCasesContent, getFaqContent, getScheduleContent } from "@/lib/data/pages";
+import { findFeaturedCourse, getAllFeaturedCourses, getFeaturedContent } from "@/lib/data/featured";
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
 
 let failures = 0;
@@ -189,6 +190,33 @@ eq("周末排课时段", slots("周末排课"), [
   "第四节|15:00–17:00", "第五节|18:00–20:00", "第六节|20:00–22:00",
 ]);
 eq("晚辅导时段", slots("晚辅导"), ["小学|17:30–19:30", "初中|18:00–21:00"]);
+
+console.log("\n=== 3.1 特色课程（层级与独立页面）===");
+const featured = getFeaturedContent();
+eq("特色课程一级分组", featured.courses.map((c) => c.name), ["课内辅导"]);
+const inClass = featured.courses[0];
+eq("二级课程数", inClass?.children.length, 6);
+eq("二级课程名", inClass?.children.map((c) => c.name),
+  ["一对一定制课", "一对二 / 一对三小组课", "一对多小班课", "9 人以上大班课", "晚托管", "周中预习课"]);
+eq("课程总数（含各级）", getAllFeaturedCourses().length, 13);
+ok("每门课程都有 4 个描述字段",
+  getAllFeaturedCourses().every((c) => c.fields.length >= 3));
+ok("三级课程挂在正确的父级下",
+  (inClass?.children.find((c) => c.name === "一对多小班课")?.children.map((c) => c.name) ?? []).join(",") === "精品小升初,精品初升高");
+ok("基础班挂在 9 人以上大班课下",
+  (inClass?.children.find((c) => c.name === "9 人以上大班课")?.children.map((c) => c.name) ?? []).join(",") === "基础小升初,基础初升高");
+ok("晚托班挂在晚托管下",
+  (inClass?.children.find((c) => c.name === "晚托管")?.children.map((c) => c.name) ?? []).join(",") === "小学晚托,初中晚托");
+ok("核心课程都有详细介绍",
+  ["周中预习课", "一对一定制课", "精品小升初"].every((name) => {
+    const found = getAllFeaturedCourses().find((c) => c.name === name);
+    return (found?.body.length ?? 0) > 50;
+  }));
+// 按路径查找（页面路由与面包屑依赖它）
+const deep = findFeaturedCourse(["课内辅导", "一对多小班课", "精品小升初"]);
+eq("按路径查找三级课程", deep?.course.name, "精品小升初");
+eq("面包屑链路长度", deep?.trail.length, 3);
+ok("不存在的路径返回 null", findFeaturedCourse(["不存在"]) === null);
 
 console.log("\n=== 4. 报价数据 ===");
 const pricing = getPricingData();

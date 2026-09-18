@@ -198,3 +198,26 @@ export type CasesContent = PageIntro & {
 export type ScheduleContent = PageIntro & {
   groups: InfoGroup[];
 };
+
+// ── 特色课程（含层级与独立页面） ──────────────────────────────────────────────
+
+/**
+ * 一门特色课程。
+ * 层级由数据文件的标题层级决定，children 是下一级课程。
+ */
+export type CourseDetail = {
+  /** 本级的课程名，同时作为路径分段。 */
+  slug: string;
+  /** 从根到本课程的完整路径分段，例如 ["课内辅导", "一对多小班课", "精品小升初"]。 */
+  path: string[];
+  name: string;
+  /** 课程描述字段（适合对象 / 课程定位 / 主要做法 / 可以期待）。 */
+  fields: LabeledItem[];
+  /** 详细介绍（Markdown 原文）。 */
+  body: string;
+  children: CourseDetail[];
+};
+
+export type FeaturedContent = PageIntro & {
+  courses: CourseDetail[];
+};
