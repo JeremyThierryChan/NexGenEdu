@@ -9,6 +9,7 @@ import {
 } from "@/lib/data/content";
 import type {
   AboutContent,
+  ElectiveCourse,
   ContactContent,
   Course,
   HomeContent,
@@ -172,16 +173,34 @@ export function getHomeSectionHeadings(): {
 
 // ── 课程页 ────────────────────────────────────────────────────────────────
 
+/**
+ * 课程页内容。
+ *
+ * 数据文件里有两类分组，这里显式分开返回，避免把选修课的父分组
+ * 也当成学科塞进学科网格：
+ *   - 学科课程：`### 学科` → `#### 学段｜一句话`（含学段小节）
+ *   - 选修课程：`### 成人课程与课外兴趣` → `#### 课程名` + 「状态」字段
+ */
 export function getCoursesPage(): {
   heading: SectionHeading;
   courses: Course[];
+  /** 选修类课程（成人 / 课外兴趣）的父分组名称。 */
+  electiveTitle: string;
+  electives: ElectiveCourse[];
 } {
   const page = getPageBlock("课程");
 
-  // 课程页的每个 `### 课程名` 分组就是一门课程。
-  // 分组内的 `#### 学段｜一句话` 是该课程的学段小节（解析器已放进 children），
-  // 分组 body 则是学段小节之前的导语。
-  const courses = page.groups.map<Course>((group) => ({
+  // 选修课分组的名称由数据文件决定，这里通过「子分组带状态字段」识别
+  const isElectiveGroup = (group: Section): boolean =>
+    group.children.length > 0 &&
+    group.children.every((child) =>
+      child.fields.some((field) => field.name === "状态"),
+    );
+
+  const subjectGroups = page.groups.filter((group) => !isElectiveGroup(group));
+  const electiveGroup = page.groups.find(isElectiveGroup);
+
+  const courses = subjectGroups.map<Course>((group) => ({
     id: group.name,
     nameZh: group.name,
     lead: group.body.trim(),
@@ -192,7 +211,20 @@ export function getCoursesPage(): {
     })),
   }));
 
-  return { heading: pageHeading(page), courses };
+  const electives = (electiveGroup?.children ?? []).map<ElectiveCourse>((child) => ({
+    id: child.name,
+    name: child.name,
+    description: child.body.trim(),
+    available:
+      child.fields.find((field) => field.name === "状态")?.value.trim() !== "暂未开放",
+  }));
+
+  return {
+    heading: pageHeading(page),
+    courses,
+    electiveTitle: electiveGroup?.name ?? "",
+    electives,
+  };
 }
 
 // ── 教师页 ────────────────────────────────────────────────────────────────

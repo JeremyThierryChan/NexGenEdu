@@ -33,7 +33,7 @@ const PROSE_CLASS =
   "[&_ul]:mt-3 [&_ul]:list-disc [&_ul]:pl-5";
 
 export default function CoursesPage() {
-  const { heading, courses } = getCoursesPage();
+  const { heading, courses, electiveTitle, electives } = getCoursesPage();
   const featured = getFeaturedContent();
 
   return (
@@ -122,6 +122,39 @@ export default function CoursesPage() {
             ))}
           </div>
         </Section>
+
+        {/* 选修课程：成人课程与课外兴趣。与学科课程分开呈现，
+            并标注开放状态（暂未开放的课有助于家长了解后续规划）。 */}
+        {electives.length > 0 && (
+          <Section
+            title={electiveTitle}
+            description="以下课程面向成人学员与课外兴趣需求，正在筹备中。"
+            className="border-t border-ink-200"
+          >
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {electives.map((course) => (
+                <div
+                  key={course.id}
+                  className="rounded-lg border border-ink-200 bg-white p-5"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="text-sm font-medium text-ink-900">{course.name}</h3>
+                    {!course.available && (
+                      <span className="shrink-0 rounded-sm border border-warning-100 bg-warning-50 px-1.5 py-0.5 text-[11px] text-warning-600">
+                        暂未开放
+                      </span>
+                    )}
+                  </div>
+                  {course.description !== "" && (
+                    <p className="mt-2 text-xs leading-relaxed text-ink-600">
+                      {course.description}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
       </Container>
     </>
   );

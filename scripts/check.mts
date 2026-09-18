@@ -67,7 +67,8 @@ eq("关于分组数", aboutPage?.groups.length, 4);
 eq("联系分组数", contactPage?.groups.length, 1);
 
 const courseNames = (coursesPage?.groups ?? []).map((g) => g.name);
-eq("学科数", courseNames.length, 17);
+// 数据文件里「课程」页有 17 个学科分组 + 1 个选修课分组
+eq("课程页分组数", courseNames.length, 18);
 ok("学科名含「技术」", courseNames.includes("技术"));
 ok("学科名含「社会」", courseNames.includes("社会"));
 
@@ -117,8 +118,16 @@ eq("学生案例区块跳案例页", homeContent.cases.cta.href, "/cases");
 ok("首页案例区块有文案", homeContent.cases.title !== "" && homeContent.cases.description !== "");
 
 const { courses } = getCoursesPage();
-eq("课程页学科数", courses.length, 17);
+eq("课程页学科数（不含选修分组）", courses.length, 17);
 ok("每门学科都有学段内容", courses.every((c) => c.bands.length > 0 && c.bands[0].content.length > 50));
+
+// 选修课程（成人 / 课外兴趣）：与学科分开返回，当前全部标注暂未开放
+const { electives, electiveTitle } = getCoursesPage();
+eq("选修课程分组名", electiveTitle, "成人课程与课外兴趣");
+eq("选修课程数", electives.length, 8);
+ok("选修课程都有介绍", electives.every((e) => e.description.length > 10));
+ok("选修课程当前全部未开放", electives.every((e) => !e.available));
+ok("选修课程未混入学科列表", courses.every((c) => !electives.some((e) => e.name === c.nameZh)));
 ok("数学含 3 个学段且带核心能力", (() => { const m = courses.find((c) => c.nameZh === "数学"); return m?.bands.length === 3 && m.bands.every((b) => b.content.includes("核心能力")); })());
 
 const { teachers } = getTeachersPage();

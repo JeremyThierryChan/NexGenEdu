@@ -74,6 +74,21 @@ export type SectionHeading = {
 };
 
 /** 课程（content.md 的「页面: 课程」段中一个分组） */
+/**
+ * 选修类课程（成人课程 / 课外兴趣）。
+ *
+ * 与学科课程不同：没有学段划分，只有名称、一句话介绍与开放状态。
+ * 状态为「暂未开放」时页面显示标记，供家长了解后续会开设哪些课。
+ */
+export type ElectiveCourse = {
+  id: string;
+  name: string;
+  /** 一句话介绍（取该分组下的正文）。 */
+  description: string;
+  /** 是否已开放报名。 */
+  available: boolean;
+};
+
 /** 课程下的一个学段小节（`#### 学段｜一句话` + 正文）。 */
 export type CourseBand = {
   /** 小节标题，例如「小学数学｜建立数学基础」。 */
