@@ -42,6 +42,8 @@ import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
 import { weekDays } from "@/lib/backend/format";
 import { groupHits, searchAll } from "@/lib/backend/search";
+import { API_CONTRACT, MIGRATION_STEPS, SERVER_MUST_VALIDATE } from "@/lib/backend/contract";
+import { readFileSync } from "node:fs";
 import { LEAVE_NOTICE_HOURS, decideCharge } from "@/lib/backend/attendance";
 import {
   churnStats,
@@ -2029,6 +2031,56 @@ const studentsBeforeSearch = (await api.students.list()).length;
 await api.search("示例");
 eq("搜索不产生操作日志", (await api.logs.list(200)).length, logsBeforeSearch);
 eq("搜索不改动数据", (await api.students.list()).length, studentsBeforeSearch);
+
+// ── 接口契约（第八组）─────────────────────────────────────────────────
+// 文档最容易「写完就过期」。这里让契约清单与代码互相校验：
+// 有方法没登记（漏文档）或登记了却不存在（文档漂移）都会失败。
+const realMethods: string[] = [];
+const walkApi = (value: unknown, prefix: string) => {
+  if (typeof value === "function") {
+    realMethods.push(prefix);
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const [key, child] of Object.entries(value)) {
+      walkApi(child, prefix === "" ? key : `${prefix}.${key}`);
+    }
+  }
+};
+walkApi(api, "", realMethods);
+realMethods.sort();
+
+const documented = API_CONTRACT.flatMap((group) => group.methods).sort();
+eq("接口契约没有漏登记的方法（新增方法要补进 contract.ts）",
+  realMethods.filter((name) => !documented.includes(name)), []);
+eq("接口契约里没有已不存在的方法（删方法要同步更新 contract.ts）",
+  documented.filter((name) => !realMethods.includes(name)), []);
+eq("每个方法只归属一个分组",
+  documented.filter((name, index) => documented.indexOf(name) !== index), []);
+ok(`接口方法总数与清单一致（${realMethods.length} 个）`, documented.length === realMethods.length);
+
+// 分组本身也要有内容与说明
+ok("每个分组都有说明", API_CONTRACT.every((group) => group.note.length > 30));
+ok("每个分组都有方法", API_CONTRACT.every((group) => group.methods.length > 0));
+
+// 服务端必须复核的清单：这些是接服务端时的验收项，不能被悄悄删掉
+ok("服务端校验清单覆盖关键项（冲突 / 幂等 / 金额 / 鉴权 / 审计）", (() => {
+  const text = SERVER_MUST_VALIDATE.map((item) => item.rule).join(" ");
+  return ["冲突", "幂等", "金额", "鉴权", "审计"].every((key) => text.includes(key));
+})());
+ok("每条服务端校验都写了理由", SERVER_MUST_VALIDATE.every((item) => item.why.length > 15));
+ok("迁移步骤含退出条件", MIGRATION_STEPS.some((item) => item.step.includes("退出条件")));
+
+// 文档必须提到每一个方法（否则「文档漏了接口」没人发现）
+const apiDoc = readFileSync(new URL("../docs/后台API约定.md", import.meta.url), "utf8");
+/*
+ * 按边界匹配方法名，而不是简单子串：`lessons.list` 是 `lessons.listByDate` 的子串，
+ * 用子串判断会让「文档里其实没写这个方法」也判为通过（我自己先用子串写过一版）。
+ */
+const mentionedInDoc = (name: string) =>
+  new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z])`).test(apiDoc);
+eq("API 文档漏掉的方法", realMethods.filter((name) => !mentionedInDoc(name)), []);
+ok("API 文档提到服务端必须复核的校验", apiDoc.includes("服务端") && apiDoc.includes("复核"));
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();

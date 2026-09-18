@@ -1672,6 +1672,16 @@ export function __useStoreForTesting(backing: KeyValueStore): void {
   cache = null;
 }
 
+/**
+ * 伪后端的对外形状。
+ *
+ * 将来实现 HTTP 版时，只要满足这个类型，页面代码一行都不用改：
+ *   const httpApi: BackendApi = { students: { list: () => fetch(…) … }, … };
+ * 契约分组与「服务端必须复核的校验」见 lib/backend/contract.ts
+ * 与 docs/后台API约定.md。
+ */
+export type BackendApi = typeof api;
+
 // 重新导出，便于页面只 import 这一处
 export type {
   Assessment,
