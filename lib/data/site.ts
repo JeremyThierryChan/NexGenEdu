@@ -12,6 +12,9 @@ import type {
   ElectiveCourse,
   ContactContent,
   Course,
+  CourseColumn,
+  CourseColumnCard,
+  CourseTag,
   HomeContent,
   SectionHeading,
   SiteBrand,
@@ -94,6 +97,65 @@ export function getSiteBrand(): SiteBrand {
   };
 }
 
+// ── 课程栏目（首页与课程页共用） ──────────────────────────────────────────
+
+/**
+ * 课程栏目结构：`栏目 → 子标题 → 卡片`。
+ *
+ * 数据格式（content.md「页面: 全站 → ### 课程栏目」）：
+ *   `#### 卡片名 | 栏目: 高中课内 · 子栏目: 七选三 · 标签: 学考→高中物理学考、选考→高中物理选考`
+ *
+ * 三条约定：
+ *   - 卡片名就是课程名，卡片与标签都指向课程页的小节；
+ *   - 课程内部没有细分时**不写标签**，整张卡片即入口；
+ *   - `子栏目` 只在栏目需要再分组时写（目前只有高中课内的 必考科目 / 外语 / 七选三）。
+ */
+export function getCourseColumns(): CourseColumn[] {
+  const page = getPageBlock("全站");
+  const columns: CourseColumn[] = [];
+
+  for (const item of getGroup(page, "课程栏目").items) {
+    // 先摘出「子栏目」再摘「栏目」：否则 /栏目:/ 会命中「子栏目:」里的同名片段
+    const subgroupRaw = /子栏目\s*[:：]\s*([^·]+)/.exec(item.value)?.[1]?.trim() ?? "";
+    const rest = item.value.replace(/子栏目\s*[:：][^·]*/, "");
+    const columnTitle = /栏目\s*[:：]\s*([^·]+)/.exec(rest)?.[1]?.trim() ?? "";
+    if (columnTitle === "") continue;
+
+    const tagText = /标签\s*[:：]\s*(.+)$/.exec(rest)?.[1]?.trim() ?? "";
+    const tags: CourseTag[] = tagText
+      .split(/[、,，]/)
+      .map((raw) => raw.trim())
+      .filter((raw) => raw !== "")
+      .map((raw) => {
+        const [label = "", target] = raw.split(/→|->/).map((x) => x.trim());
+        return { label, target: target !== undefined && target !== "" ? target : label };
+      });
+
+    const title = item.title.trim();
+    const card: CourseColumnCard = {
+      title,
+      tags,
+      // 有标签时卡片本身指向第一个标签；无标签时指向与卡片同名的小节
+      target: tags[0]?.target ?? title,
+    };
+
+    let column = columns.find((c) => c.title === columnTitle);
+    if (column === undefined) {
+      column = { title: columnTitle, subgroups: [] };
+      columns.push(column);
+    }
+
+    let subgroup = column.subgroups.find((g) => g.title === subgroupRaw);
+    if (subgroup === undefined) {
+      subgroup = { title: subgroupRaw, cards: [] };
+      column.subgroups.push(subgroup);
+    }
+    subgroup.cards.push(card);
+  }
+
+  return columns;
+}
+
 // ── 首页 ──────────────────────────────────────────────────────────────────
 
 export function getHomeContent(): HomeContent {
@@ -112,28 +174,8 @@ export function getHomeContent(): HomeContent {
     },
     stats: getGroup(page, "首屏数据").items,
     features: getGroup(page, "教学特色").items,
-    courses: getGroup(page, "首页课程卡片").items.map((item) => {
-      /**
-       * 值形如「栏目: 小学课内 · 标签: 小学语文、小学数学」
-       * 标签可写成「标签→目标小节」（如「英语→高中英语」），
-       * 未写目标时以标签本身作为目标小节名。
-       */
-      const group = /栏目\s*[:：]\s*([^·]+)/.exec(item.value)?.[1]?.trim() ?? "";
-      const tagText = /标签\s*[:：]\s*(.+)$/.exec(item.value)?.[1]?.trim() ?? "";
-      const tags = tagText
-        .split(/[、,，]/)
-        .map((raw) => raw.trim())
-        .filter((raw) => raw !== "")
-        .map((raw) => {
-          const [label = "", target] = raw.split(/→|->/).map((x) => x.trim());
-          return { label, target: target !== undefined && target !== "" ? target : label };
-        });
-
-      // 卡片标题留空时，用第一个标签作为标题（例如「小学课内」这一类卡片）
-      const title = item.title.trim() !== "" ? item.title.trim() : (tags[0]?.label ?? "");
-
-      return { group, title, tags };
-    }),
+    // 课程栏目定义在「全站」段，首页与课程页共用，避免两处结构走偏
+    courseColumns: getCourseColumns(),
     classrooms: getGroup(page, "教室照片格位").items,
     trial: {
       eyebrow: pageString(page, "trial_eyebrow"),
@@ -204,7 +246,10 @@ export function getHomeSectionHeadings(): {
  */
 export function getCoursesPage(): {
   heading: SectionHeading;
+  /** 学科课程（学科 → 学段小节），用于课程详情区。 */
   courses: Course[];
+  /** 课程总览的栏目结构，与首页同源。 */
+  columns: CourseColumn[];
   /** 选修类课程的父分组名称。 */
   electiveTitle: string;
   /** 选修课按栏目（外语 / 课外兴趣 / 成人课程）分组。 */
@@ -255,6 +300,7 @@ export function getCoursesPage(): {
   return {
     heading: pageHeading(page),
     courses,
+    columns: getCourseColumns(),
     electiveTitle: electiveGroup?.name ?? "",
     electiveGroups,
   };

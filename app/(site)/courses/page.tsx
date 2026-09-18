@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { CourseCard } from "@/components/courses/CourseCard";
+import { CourseColumns } from "@/components/courses/CourseColumns";
 import { PageHeader } from "@/components/site/PageHeader";
 import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
@@ -24,15 +24,6 @@ function bandAnchor(title: string): string {
   return title.split("｜")[0]?.trim() ?? title;
 }
 
-/**
- * 从学段小节标题里取出学段名，用于卡片标签。
- * 「初中数学｜建立数学模型」→「初中」；语言类课程（雅思 / 法语等）无此形式，返回空串。
- */
-function bandLabel(title: string): string {
-  const match = /^(小学|初中|高中)/.exec(title.trim());
-  return match?.[1] ?? "";
-}
-
 /** 课程正文的排版样式：Markdown 渲染出的 p / ul / li / strong 统一在此约束。 */
 const PROSE_CLASS =
   "mt-3 max-w-2xl leading-relaxed text-ink-600 " +
@@ -41,7 +32,7 @@ const PROSE_CLASS =
   "[&_ul]:mt-3 [&_ul]:list-disc [&_ul]:pl-5";
 
 export default function CoursesPage() {
-  const { heading, courses, electiveTitle, electiveGroups } = getCoursesPage();
+  const { heading, courses, columns, electiveTitle, electiveGroups } = getCoursesPage();
   const featured = getFeaturedContent();
 
   return (
@@ -68,31 +59,21 @@ export default function CoursesPage() {
         </Section>
 
         {/*
-          学科总览：学段以标签并排显示。
-          用 compact 尺寸并把列数提到 4 列（宽屏），17 个学科能一屏看完。
+          课程总览：栏目 → 子标题 → 卡片，与首页共用同一份结构
+          （「页面: 全站 → 课程栏目」）。一张卡片 = 一门课程，
+          卡片与标签都跳到下方课程详情里的对应小节。
         */}
         <Section
-          title="学科总览"
-          description="点击学科卡片可跳到该学科的学段说明。"
+          title="课程总览"
+          description="点卡片或卡片内的标签，可跳到下方对应课程的说明。"
           className="border-t border-ink-200 pb-0"
         >
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
-            {courses.map((course) => (
-              <CourseCard
-                key={course.id}
-                title={course.nameZh}
-                bands={course.bands.map((band) => bandLabel(band.title))}
-                href={`#${encodeURIComponent(course.id)}`}
-                linkLabel="查看学段说明"
-                compact
-              />
-            ))}
-          </div>
+          <CourseColumns columns={columns} />
         </Section>
 
-        {/* 学科详情：每个学段小节都带锚点 id，
-            首页卡片的标签借此跳到对应学段（如「小学语文」）。 */}
-        <Section title="学科详情">
+        {/* 课程详情：每个小节都带锚点 id，
+            课程栏目里的卡片与标签借此跳到对应小节（如「小学语文」「高中物理学考」）。 */}
+        <Section title="课程详情">
           <div className="space-y-12">
             {courses.map((course) => (
               <article

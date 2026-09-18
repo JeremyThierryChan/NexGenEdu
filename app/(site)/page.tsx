@@ -1,13 +1,12 @@
 import type { Metadata } from "next";
 import Image from "next/image";
-import { TagCard } from "@/components/courses/TagCard";
+import { CourseColumnCards } from "@/components/courses/CourseColumns";
 import { FeatureCard } from "@/components/site/FeatureCard";
 import { TeacherCard } from "@/components/teachers/TeacherCard";
 import { ButtonLink } from "@/components/ui/Button";
 import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
 import { getCasesContent } from "@/lib/data/pages";
-import { bandAnchorHref } from "@/lib/site/featured-routes";
 import {
   getHomeContent,
   getHomeSectionHeadings,
@@ -64,8 +63,6 @@ function excerpt(text: string, maxLength: number): string {
  * 按学段从低到高排列，再排外语 —— 家长通常先看孩子当前学段。
  * 栏目名来自 content.md 卡片上的「栏目」字段，改数据即可调整归属。
  */
-const COURSE_GROUPS = ["小学课内", "初中课内", "高中课内", "外语", "课外兴趣", "成人课程"] as const;
-
 export default function HomePage() {
   const home = getHomeContent();
   const headings = getHomeSectionHeadings();
@@ -137,37 +134,22 @@ export default function HomePage() {
         </Section>
       </Container>
 
-      {/* 课程：按栏目分组（小学课内 / 初中课内 / 高中课内 / 外语 / 课外兴趣 / 成人课程），
-          卡片内的每个标签都可点，跳到课程页对应的小节 */}
+      {/* 课程：栏目 → 子标题 → 卡片。
+          结构来自「页面: 全站 → 课程栏目」，与课程页共用一份数据；
+          每个栏目自己是一个 Section，子标题（高中课内的 必考科目 / 外语 / 七选三）降一级。 */}
       <div className="border-y border-ink-200 bg-ink-50">
         <Container>
-          {COURSE_GROUPS.map((groupName, index) => {
-            const items = home.courses.filter((course) => course.group === groupName);
-            if (items.length === 0) return null;
-
-            return (
-              <Section
-                key={groupName}
-                eyebrow={index === 0 ? headings.courses.eyebrow : undefined}
-                title={groupName}
-                description={index === 0 ? headings.courses.description : undefined}
-                className={index === 0 ? undefined : "border-t border-ink-100"}
-              >
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {items.map((entry) => (
-                    <TagCard
-                      key={`${entry.title}-${groupName}`}
-                      title={entry.title}
-                      tags={entry.tags.map((tag) => ({
-                        label: tag.label,
-                        href: bandAnchorHref(tag.target),
-                      }))}
-                    />
-                  ))}
-                </div>
-              </Section>
-            );
-          })}
+          {home.courseColumns.map((column, index) => (
+            <Section
+              key={column.title}
+              eyebrow={index === 0 ? headings.courses.eyebrow : undefined}
+              title={column.title}
+              description={index === 0 ? headings.courses.description : undefined}
+              className={index === 0 ? undefined : "border-t border-ink-100"}
+            >
+              <CourseColumnCards column={column} subHeadingLevel={3} />
+            </Section>
+          ))}
 
           <Section className="pt-0">
             <ButtonLink href={headings.coursesLink.href} variant="outline" size="sm">

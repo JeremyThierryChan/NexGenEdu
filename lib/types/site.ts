@@ -46,8 +46,8 @@ export type HomeContent = {
   secondaryCta: { label: string; href: string };
   stats: LabeledItem[];
   features: LabeledItem[];
-  /** 首页课程卡片：按栏目分组，每张卡片含若干可点击标签。 */
-  courses: CourseCardItem[];
+  /** 课程栏目（小学课内 / 初中课内 / …），与课程页共用同一份结构。 */
+  courseColumns: CourseColumn[];
   classrooms: LabeledItem[];
   /** 试课体验区块。 */
   trial: {
@@ -67,14 +67,43 @@ export type HomeContent = {
   cta: { title: string; description: string; label: string; href: string };
 };
 
-/** 首页课程卡片的一张卡片。 */
-export type CourseCardItem = {
+/**
+ * 课程栏目结构（content.md「页面: 全站 → ### 课程栏目」）。
+ *
+ * 首页与课程页共用这一份数据：**一张卡片 = 一门课程**，
+ * 课程内部没有细分时不带标签，整张卡片就是入口。
+ * 只有确有细分的课程（外语按语种与级别、七选三按学考/选考）才带标签。
+ */
+export type CourseColumn = {
   /** 栏目名（小学课内 / 初中课内 / 高中课内 / 外语 / 课外兴趣 / 成人课程）。 */
-  group: string;
-  /** 卡片标题；标签只有一个时可留空，此时以标签作为标题。 */
   title: string;
-  /** 卡片上的标签；每个标签可点，标签文字与跳转目标分开存。 */
-  tags: Array<{ label: string; target: string }>;
+  /** 栏目下的子标题（高中课内分 必考科目 / 外语 / 七选三）；无子标题时为单个空标题分组。 */
+  subgroups: CourseColumnSubgroup[];
+};
+
+export type CourseColumnSubgroup = {
+  /** 子标题；无子标题时为空字符串，页面不渲染标题。 */
+  title: string;
+  cards: CourseColumnCard[];
+};
+
+export type CourseColumnCard = {
+  /** 卡片名（即课程名，例如「小学语文」「高中物理」「雅思」）。 */
+  title: string;
+  /** 课程内部的细分标签；没有细分时为空数组。 */
+  tags: CourseTag[];
+  /**
+   * 卡片本身的跳转目标小节：
+   * 无标签时为课程名本身，有标签时为第一个标签的目标。
+   */
+  target: string;
+};
+
+export type CourseTag = {
+  /** 标签文字（显示用，例如「学考」「A1」「高考日语」）。 */
+  label: string;
+  /** 目标小节名（锚点用，例如「高中物理学考」「法语A1」「日语N3」）。 */
+  target: string;
 };
 
 /** 区块标题（首页各区块共用）。 */
