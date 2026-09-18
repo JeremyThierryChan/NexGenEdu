@@ -6,6 +6,7 @@ import { TeacherCard } from "@/components/teachers/TeacherCard";
 import { ButtonLink } from "@/components/ui/Button";
 import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
+import { getCasesContent } from "@/lib/data/pages";
 import {
   getCoursesPage,
   getHomeContent,
@@ -48,11 +49,21 @@ const FEATURE_ICONS = [
   </svg>,
 ] as const;
 
+/**
+ * 生成案例摘要：去掉 Markdown 标记，按字数截断。
+ * 只有真正被截断时才加省略号，避免短案例出现多余的「…」。
+ */
+function excerpt(text: string, maxLength: number): string {
+  const plain = text.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+  return plain.length > maxLength ? `${plain.slice(0, maxLength)}…` : plain;
+}
+
 export default function HomePage() {
   const home = getHomeContent();
   const headings = getHomeSectionHeadings();
   const { teachers } = getTeachersPage();
   const { courses } = getCoursesPage();
+  const { cases } = getCasesContent();
 
   return (
     <>
@@ -178,6 +189,77 @@ export default function HomePage() {
             </ButtonLink>
           </p>
         </Section>
+
+        {/* 试课体验：家长最关心的"能不能先试试"，放在课程与教师之后 */}
+        {home.trial.title !== "" && (
+          <Section
+            eyebrow={home.trial.eyebrow}
+            title={home.trial.title}
+            description={home.trial.description}
+            className="border-t border-ink-200"
+          >
+            <div className="rounded-lg border border-ink-200 bg-white p-6 sm:p-8">
+              {home.trial.points.length > 0 && (
+                <ul className="grid gap-3 sm:grid-cols-3">
+                  {home.trial.points.map((point) => (
+                    <li key={point} className="flex items-start gap-2.5 text-sm text-ink-700">
+                      <span className="mt-0.5 shrink-0 text-brand-600" aria-hidden>
+                        ✓
+                      </span>
+                      {point}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="mt-6 flex flex-wrap gap-3">
+                <ButtonLink href={home.trial.cta.href} size="sm">
+                  {home.trial.cta.label}
+                </ButtonLink>
+                <ButtonLink href="/contact" size="sm" variant="outline">
+                  预约试课
+                </ButtonLink>
+              </div>
+            </div>
+          </Section>
+        )}
+
+        {/* 学生案例：摘录前两条，更多跳转到案例页 */}
+        {cases.length > 0 && (
+          <Section
+            eyebrow={home.cases.eyebrow}
+            title={home.cases.title}
+            description={home.cases.description}
+            className="border-t border-ink-200"
+          >
+            <div className="grid gap-5 sm:grid-cols-2">
+              {cases.slice(0, 2).map((item) => (
+                <div
+                  key={item.id}
+                  className="rounded-lg border border-ink-200 bg-white p-6"
+                >
+                  <h3 className="text-base font-medium text-ink-900">{item.title}</h3>
+                  {item.from !== "" && item.to !== "" && (
+                    <p className="mt-3 text-sm text-ink-600">
+                      <span className="tabular">{item.from}</span>
+                      <span className="mx-2 text-ink-400" aria-hidden>
+                        →
+                      </span>
+                      <span className="font-medium tabular text-brand-800">{item.to}</span>
+                    </p>
+                  )}
+                  <p className="mt-3 text-sm leading-relaxed text-ink-600">
+                    {excerpt(item.story, 90)}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <p className="mt-6">
+              <ButtonLink href={home.cases.cta.href} variant="outline" size="sm">
+                {home.cases.cta.label}
+              </ButtonLink>
+            </p>
+          </Section>
+        )}
 
         {/* 教室环境 */}
         <Section

@@ -78,6 +78,17 @@ teachers_link_href: /teachers
 classrooms_eyebrow: 教室环境
 classrooms_title: 小班教室与自习区
 classrooms_description: 每个教室按 6–8 人配置，配备白板与独立自习位。
+trial_eyebrow: 试课体验
+trial_title: 先试一节课，再决定要不要报
+trial_description: 正式报课前先安排一次试课。授课教师会带着学生做一遍真实课堂内容，并给出当前水平判断与建议。
+trial_points: 试课后再决定，不催报名 | 报课满 10 节，试课免费 | 试课后生成试课报告
+trial_cta_label: 查看试课与价格
+trial_cta_href: /quote
+cases_eyebrow: 学生案例
+cases_title: 学生是怎么进步的
+cases_description: 下面是几位学生的真实学习过程，含入学水平、辅导周期与提升路径。
+cases_cta_label: 查看全部案例
+cases_cta_href: /cases
 cta_title: 先来一次免费测评
 cta_description: 了解学生当前水平与薄弱环节，再决定是否报名。
 cta_label: 预约试听

@@ -109,6 +109,11 @@ eq("首页教室格位", homeContent.classrooms.length, 3);
 eq("首页首屏数据", homeContent.stats.length, 6);
 eq("首页教学特色", homeContent.features.length, 7);
 ok("首页 CTA 非空", homeContent.cta.title !== "");
+ok("首页试课区块有标题与要点", homeContent.trial.title !== "" && homeContent.trial.points.length >= 3);
+eq("试课区块跳报价页", homeContent.trial.cta.href, "/quote");
+ok("试课要点含免费条件", homeContent.trial.points.some((p) => p.includes("满 10 节")));
+eq("学生案例区块跳案例页", homeContent.cases.cta.href, "/cases");
+ok("首页案例区块有文案", homeContent.cases.title !== "" && homeContent.cases.description !== "");
 
 const { courses } = getCoursesPage();
 eq("课程页学科数", courses.length, 17);

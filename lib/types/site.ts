@@ -48,6 +48,21 @@ export type HomeContent = {
   features: LabeledItem[];
   courses: LabeledItem[];
   classrooms: LabeledItem[];
+  /** 试课体验区块。 */
+  trial: {
+    eyebrow: string;
+    title: string;
+    description: string;
+    points: string[];
+    cta: { label: string; href: string };
+  };
+  /** 学生案例入口区块。 */
+  cases: {
+    eyebrow: string;
+    title: string;
+    description: string;
+    cta: { label: string; href: string };
+  };
   cta: { title: string; description: string; label: string; href: string };
 };
 

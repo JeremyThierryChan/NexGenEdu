@@ -113,6 +113,28 @@ export function getHomeContent(): HomeContent {
     features: getGroup(page, "教学特色").items,
     courses: getGroup(page, "首页课程卡片").items,
     classrooms: getGroup(page, "教室照片格位").items,
+    trial: {
+      eyebrow: pageString(page, "trial_eyebrow"),
+      title: pageString(page, "trial_title"),
+      description: pageString(page, "trial_description"),
+      points: pageString(page, "trial_points")
+        .split("|")
+        .map((item) => item.trim())
+        .filter((item) => item !== ""),
+      cta: {
+        label: pageString(page, "trial_cta_label"),
+        href: pageString(page, "trial_cta_href", "/quote"),
+      },
+    },
+    cases: {
+      eyebrow: pageString(page, "cases_eyebrow"),
+      title: pageString(page, "cases_title"),
+      description: pageString(page, "cases_description"),
+      cta: {
+        label: pageString(page, "cases_cta_label"),
+        href: pageString(page, "cases_cta_href", "/cases"),
+      },
+    },
     cta: {
       title: pageString(page, "cta_title"),
       description: pageString(page, "cta_description"),
