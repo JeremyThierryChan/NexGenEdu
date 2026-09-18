@@ -138,9 +138,32 @@ export function dateKey(value: string | Date): string {
   return `${date.getFullYear()}-${month}-${day}`;
 }
 
+const studentCollection = collection<Student>((db) => db.students, "s");
+
 export const api = {
   students: {
-    ...collection<Student>((db) => db.students, "s"),
+    ...studentCollection,
+    /** 建档时间由服务生成，调用方不用管。 */
+    async create(input: NewStudent): Promise<Student> {
+      return studentCollection.create({ ...input, createdAt: new Date().toISOString() });
+    },
+    /**
+     * 调整剩余课时（delta 可为负）。
+     *
+     * 单独成一个方法而不是让页面「读出对象、加一下、整体写回」：
+     * 将来接服务端时，扣课时必须是一次服务端原子操作（还要写流水），
+     * 页面按这个签名调用就不用改。
+     */
+    async adjustLessons(id: string, delta: number): Promise<Student | null> {
+      await delay();
+      const db = load();
+      const student = db.students.find((item) => item.id === id);
+      if (student === undefined) return null;
+      student.remainingLessons = Math.max(0, student.remainingLessons + delta);
+      persist(db);
+      return clone(student);
+    },
+
     async search(keyword: string): Promise<Student[]> {
       await delay();
       const text = keyword.trim().toLowerCase();
@@ -176,6 +199,33 @@ export const api = {
       return clone(
         load()
           .lessons.filter((lesson) => dateKey(lesson.startsAt) === key)
+          .sort((a, b) => a.startsAt.localeCompare(b.startsAt)),
+      );
+    },
+    /** 某个学生的课，按时间升序（学生详情用）。 */
+    async listByStudent(studentId: string): Promise<Lesson[]> {
+      await delay();
+      return clone(
+        load()
+          .lessons.filter((lesson) => lesson.studentIds.includes(studentId))
+          .sort((a, b) => a.startsAt.localeCompare(b.startsAt)),
+      );
+    },
+    /** 某个教师的课，按时间升序（教师详情用）。 */
+    async listByTeacher(teacherId: string): Promise<Lesson[]> {
+      await delay();
+      return clone(
+        load()
+          .lessons.filter((lesson) => lesson.teacherId === teacherId)
+          .sort((a, b) => a.startsAt.localeCompare(b.startsAt)),
+      );
+    },
+    /** 某个教室的课，按时间升序（教室占用用）。 */
+    async listByClassroom(classroomId: string): Promise<Lesson[]> {
+      await delay();
+      return clone(
+        load()
+          .lessons.filter((lesson) => lesson.classroomId === classroomId)
           .sort((a, b) => a.startsAt.localeCompare(b.startsAt)),
       );
     },

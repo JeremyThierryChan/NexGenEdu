@@ -644,6 +644,27 @@ ok("排课的教师 / 教室 / 学生都真实存在",
     allClassrooms.some((room) => room.id === lesson.classroomId) &&
     lesson.studentIds.every((id) => allStudents.some((student) => student.id === id))));
 
+// 课时调整：上课扣减 / 续课增加，且不会扣成负数
+const target = seeded[0]!;
+const before = target.remainingLessons;
+eq("上课扣 1 节", (await api.students.adjustLessons(target.id, -1))?.remainingLessons, before - 1);
+eq("续课加 2 节", (await api.students.adjustLessons(target.id, 2))?.remainingLessons, before + 1);
+const zeroed = await api.students.update(target.id, { remainingLessons: 0 });
+ok("已归零", zeroed?.remainingLessons === 0);
+eq("课时不会扣成负数", (await api.students.adjustLessons(target.id, -5))?.remainingLessons, 0);
+
+// 按关系查询（学生 / 教师 / 教室详情用）：结果必须真的相关
+const someLesson = (await api.lessons.list())[0]!;
+const byStudent = await api.lessons.listByStudent(someLesson.studentIds[0]!);
+ok("按学生查课只返回该学生的课",
+  byStudent.length > 0 && byStudent.every((lesson) => lesson.studentIds.includes(someLesson.studentIds[0]!)));
+const byTeacher = await api.lessons.listByTeacher(someLesson.teacherId);
+ok("按教师查课只返回该教师的课",
+  byTeacher.length > 0 && byTeacher.every((lesson) => lesson.teacherId === someLesson.teacherId));
+const byClassroom = await api.lessons.listByClassroom(someLesson.classroomId);
+ok("按教室查课只返回该教室的课",
+  byClassroom.length > 0 && byClassroom.every((lesson) => lesson.classroomId === someLesson.classroomId));
+
 await api.reset();
 eq("重置回到示例数据", (await api.students.list()).length, seeded.length);
 

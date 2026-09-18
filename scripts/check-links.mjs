@@ -26,7 +26,6 @@ const outDir = path.join(root, "out");
  * 不计入失败；实现之后把它们从这里删掉即可。
  */
 const ALLOWED_MISSING = [
-  "/admin/students/",
   "/admin/teachers/",
   "/admin/classrooms/",
   "/admin/lessons/",
