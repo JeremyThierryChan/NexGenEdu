@@ -15,7 +15,8 @@
     "sync-content": "node scripts/sync-content.mjs",
     "check": "node --experimental-strip-types scripts/check.mjs",
     "check:404": "node scripts/check-404.mjs",
-    "check:all": "npm run check && npm run check:404"
+    "check:links": "node scripts/check-links.mjs",
+    "check:all": "npm run check && npm run check:404 && npm run check:links"
   },
   "dependencies": {
     "next": "15.5.25",

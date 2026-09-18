@@ -14,6 +14,8 @@ import type {
   Course,
   CourseColumn,
   CourseColumnCard,
+  CoursePageData,
+  CourseStage,
   CourseTag,
   HomeContent,
   SectionHeading,
@@ -28,6 +30,21 @@ import type {
  * 页面只能调用本文件的函数，不得直接读文件或解析 Markdown。
  * 未来接入 PostgreSQL / API 时替换本文件实现即可，页面调用方式不变。
  */
+
+/**
+ * 卡片没写 `· 路径:` 时的兜底。
+ *
+ * 正常情况都应该显式写 ASCII 路径（中文名直接进 URL 会遇到百分号编码问题，
+ * 历史上「一对二 / 一对三小组课」就因此点进了报错页）。这里只保证路径不为空，
+ * 并把「缺路径」暴露在自检里，而不是让页面悄悄消失。
+ */
+function slugifyFallback(title: string): string {
+  const ascii = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return ascii !== "" ? ascii : `course-${Buffer.from(title).toString("hex").slice(0, 12)}`;
+}
 
 /** 页面短字段中拼出的区块标题。 */
 function heading(page: PageBlock, prefix: string): SectionHeading {
@@ -142,6 +159,9 @@ export function getCourseColumns(): CourseColumn[] {
     const columnTitle = /栏目\s*[:：]\s*([^·]+)/.exec(rest)?.[1]?.trim() ?? "";
     if (columnTitle === "") continue;
 
+    // 每张卡片一个独立页面，路径写在 `· 路径: <ascii>` 里
+    const cardPath = /路径\s*[:：]\s*([^·]+)/.exec(rest)?.[1]?.trim() ?? "";
+
     // 「暂未开放」写在卡片行里，页面上显示成卡片右上角的标记
     const statusText = /状态\s*[:：]\s*([^·]+)/.exec(rest)?.[1]?.trim() ?? "";
     const tagText = /标签\s*[:：]\s*(.+)$/.exec(rest)?.[1]?.trim() ?? "";
@@ -157,6 +177,7 @@ export function getCourseColumns(): CourseColumn[] {
     const title = item.title.trim();
     const card: CourseColumnCard = {
       title,
+      path: cardPath !== "" ? cardPath : slugifyFallback(title),
       unavailable: statusText === "暂未开放",
       tags,
       // 这门课自己有说明小节就指向它；否则退回到第一个标签（七选三这类没有总览小节）
@@ -329,6 +350,157 @@ export function getCoursesPage(): {
     electiveTitle: electiveGroup?.name ?? "",
     electiveGroups,
   };
+}
+
+// ── 课程卡片页（每张卡片一个页面） ────────────────────────────────────────
+
+/** 小节标题里「｜」之前的部分就是锚点名。 */
+function stageAnchor(title: string): string {
+  return (title.split("｜")[0] ?? title).trim();
+}
+
+/** 小节标题里「｜」之后的部分是导语。 */
+function stageLead(title: string): string {
+  const parts = title.split("｜");
+  return parts.length > 1 ? (parts[1] ?? "").trim() : "";
+}
+
+/**
+ * 课程页（详情）里所有可引用的小节索引。
+ *
+ * 卡片页要把「阶段」的内容渲染出来，而阶段内容存在「页面: 课程」段
+ * （`### 学科` → `#### 小节｜一句话`），因此这里先建一张锚点索引。
+ */
+function courseStageIndex(): {
+  bands: Map<string, { stage: CourseStage; group: string }>;
+  subjects: Map<string, { lead: string; anchors: string[] }>;
+  electives: Map<string, string>;
+} {
+  const { courses, electiveGroups } = getCoursesPage();
+  const bands = new Map<string, { stage: CourseStage; group: string }>();
+  const subjects = new Map<string, { lead: string; anchors: string[] }>();
+
+  for (const course of courses) {
+    const anchors: string[] = [];
+    for (const band of course.bands) {
+      const anchor = stageAnchor(band.title);
+      anchors.push(anchor);
+      bands.set(anchor, {
+        stage: {
+          anchor,
+          title: band.title,
+          lead: stageLead(band.title),
+          body: band.content,
+        },
+        group: course.nameZh,
+      });
+    }
+    subjects.set(course.nameZh, { lead: course.lead, anchors });
+  }
+
+  const electives = new Map<string, string>();
+  for (const group of electiveGroups) {
+    for (const item of group.items) electives.set(item.name, item.description);
+  }
+
+  return { bands, subjects, electives };
+}
+
+/** 全部卡片页路径（静态导出用）。 */
+export function getAllCoursePageSlugs(): string[] {
+  return getCourseColumns().flatMap((column) =>
+    column.subgroups.flatMap((subgroup) => subgroup.cards.map((card) => card.path)),
+  );
+}
+
+/**
+ * 一张卡片的页面数据。
+ *
+ * 页面结构由三条规则决定：
+ *   1. 卡片上的每个标签 = **同一页面内的一个阶段**（如 高中物理 → 学考 / 选考），
+ *      不为标签单独建页面；
+ *   2. 卡片没有标签时，「阶段」就是这门课自己在详情里那一段；
+ *   3. 页面还要给出与其他阶段的关联：同一学科的其他学段（小学语文 → 初中语文 /
+ *      高中语文），以及同栏目（同子栏目）的其他课程。
+ */
+export function getCoursePageData(slug: string): CoursePageData | null {
+  const columns = getCourseColumns();
+  let found: { card: CourseColumnCard; column: string; subgroup: string } | null = null;
+  let columnCards: CourseColumnCard[] = [];
+  let subgroupCards: CourseColumnCard[] = [];
+
+  for (const column of columns) {
+    for (const subgroup of column.subgroups) {
+      for (const card of subgroup.cards) {
+        if (card.path !== slug) continue;
+        found = { card, column: column.title, subgroup: subgroup.title };
+        columnCards = column.subgroups.flatMap((item) => item.cards);
+        subgroupCards = subgroup.cards;
+      }
+    }
+  }
+  if (found === null) return null;
+
+  const { card, column, subgroup } = found;
+  const index = courseStageIndex();
+
+  // ── 本卡片的阶段 ──────────────────────────────────────────────────────
+  const stages: CourseStage[] = [];
+  if (card.tags.length > 0) {
+    for (const tag of card.tags) {
+      const hit = index.bands.get(tag.target);
+      if (hit !== undefined) stages.push(hit.stage);
+    }
+  } else if (index.subjects.has(card.title)) {
+    for (const anchor of index.subjects.get(card.title)?.anchors ?? []) {
+      const hit = index.bands.get(anchor);
+      if (hit !== undefined) stages.push(hit.stage);
+    }
+  } else {
+    const hit = index.bands.get(card.title);
+    if (hit !== undefined) stages.push(hit.stage);
+  }
+
+  const intro =
+    index.subjects.get(card.title)?.lead ??
+    index.electives.get(card.title) ??
+    stages[0]?.lead ??
+    "";
+
+  /*
+   * 卡片自己有总览小节时（如「雅思｜按目标分数提分」），它不对应任何标签，
+   * 既不是阶段也不该被丢掉 —— 作为页面开头的「课程说明」渲染。
+   */
+  const ownSection = index.bands.get(card.title)?.stage ?? null;
+  const overview = card.tags.length > 0 ? ownSection : null;
+
+  // ── 同一学科的其他阶段 ────────────────────────────────────────────────
+  const ownAnchors = new Set(stages.map((stage) => stage.anchor));
+  const subjectNames = new Set<string>();
+  if (index.subjects.has(card.title)) subjectNames.add(card.title);
+  for (const stage of stages) {
+    const hit = index.bands.get(stage.anchor);
+    if (hit !== undefined) subjectNames.add(hit.group);
+  }
+
+  const otherAnchors = new Set<string>();
+  for (const name of subjectNames) {
+    for (const anchor of index.subjects.get(name)?.anchors ?? []) {
+      if (!ownAnchors.has(anchor)) otherAnchors.add(anchor);
+    }
+  }
+  const sameSubject = columns
+    .flatMap((item) => item.subgroups.flatMap((group) => group.cards))
+    .filter((item) => item.path !== slug && otherAnchors.has(item.title));
+
+  // ── 同栏目（有子栏目时同子栏目）的其他课程 ────────────────────────────
+  const siblings = subgroup !== "" ? subgroupCards : columnCards;
+  const sameSubjectPaths = new Set(sameSubject.map((item) => item.path));
+  const sameColumn = siblings.filter(
+    (item) => item.path !== slug && !sameSubjectPaths.has(item.path),
+  );
+
+  return { card, column, subgroup, intro, overview, stages, sameSubject, sameColumn };
 }
 
 // ── 教师页 ────────────────────────────────────────────────────────────────

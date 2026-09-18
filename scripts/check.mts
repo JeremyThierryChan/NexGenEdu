@@ -17,7 +17,9 @@ import { pricingSource } from "@/data/site/pricing";
 import {
   getAboutContent,
   getContactContent,
+  getAllCoursePageSlugs,
   getCourseColumns,
+  getCoursePageData,
   getCoursesPage,
   getHomeContent,
   getSiteBrand,
@@ -180,27 +182,67 @@ const foreignCards = (columns.find((c) => c.title === "外语")?.subgroups ?? []
 ok("外语栏目每张语言卡都有级别标签",
   foreignCards.filter((c) => c.title !== "雅思").every((c) => c.tags.length >= 3));
 
-// 卡片与标签的目标都必须能在课程页找到对应小节（曾因小节改名导致大批标签跳空）
-const sectionNames = new Set<string>();
-for (const course of allCourses) {
-  sectionNames.add(course.nameZh);
-  for (const band of course.bands) sectionNames.add(band.title.split("｜")[0] ?? band.title);
+// 每张卡片一个页面：路径必须写全、不能重复，且每张卡片都能取到页面数据
+const slugs = allCards.map((c) => c.path);
+ok("每张卡片都有路径", slugs.every((slug) => slug !== ""));
+eq("卡片路径不重复", slugs.filter((s, i) => slugs.indexOf(s) !== i), []);
+eq("卡片路径是 ASCII（中文名进 URL 会踩百分号编码的坑）",
+  slugs.filter((slug) => !/^[a-z0-9-]+$/.test(slug)), []);
+
+const pages = allCards.map((card) => ({ card, data: getCoursePageData(card.path) }));
+eq("每张卡片都有页面数据", pages.filter((p) => p.data === null).map((p) => p.card.title), []);
+eq("卡片页路径清单与卡片一致", [...getAllCoursePageSlugs()].sort(), [...slugs].sort());
+
+// 卡片上的标签 = **同一页面内的阶段**：不单独建页面，而是必须能在本页取到内容
+const missingStages = pages.flatMap(({ card, data }) =>
+  card.tags
+    .filter((tag) => !(data?.stages ?? []).some((stage) => stage.anchor === tag.target))
+    .map((tag) => `${card.title} · ${tag.label}→${tag.target}`),
+);
+eq("标签都能在本卡片页面里找到对应阶段", missingStages, []);
+
+// 没标签的卡片必须至少有一段正文或介绍，否则页面会只剩标题
+eq("无标签的卡片都有正文或介绍",
+  pages
+    .filter(({ card, data }) =>
+      card.tags.length === 0 &&
+      (data?.stages.length ?? 0) === 0 &&
+      (data?.intro ?? "").trim() === "")
+    .map(({ card }) => card.title),
+  []);
+
+// 「与其他阶段的关联性」：学段课程应当能指出同学科的其他学段
+const chinese = getCoursePageData("primary-chinese");
+eq("小学语文页面关联到初中 / 高中语文",
+  chinese?.sameSubject.map((c) => c.title), ["初中语文", "高中语文"]);
+const physics = getCoursePageData("senior-physics");
+eq("高中物理页面的阶段是 学考 + 选考", physics?.stages.map((s) => s.anchor),
+  ["高中物理学考", "高中物理选考"]);
+ok("高中物理页面关联到七选三的其他课程",
+  (physics?.sameColumn.length ?? 0) >= 3);
+const ielts = getCoursePageData("ielts");
+// 阶段顺序跟随卡片上的标签顺序
+eq("雅思页面的阶段是四项分项", ielts?.stages.map((s) => s.anchor),
+  ["雅思口语", "雅思听力", "雅思阅读", "雅思写作"]);
+// 雅思自己的总览小节不属于任何标签，也不能丢内容
+eq("雅思页面保留了课程总览", ielts?.overview?.anchor, "雅思");
+
+/*
+ * 反向：详情区的每一段内容都必须**在某个页面上看得见**——
+ * 要么是某张卡片页里的一个阶段，要么是某张卡片页开头的课程说明，
+ * 要么这张卡片本身就有页面（选修课的介绍就是它的页面内容）。
+ */
+const visible = new Set<string>();
+for (const { card, data } of pages) {
+  for (const stage of data?.stages ?? []) visible.add(stage.anchor);
+  if (data?.overview != null) visible.add(data.overview.anchor);
+  visible.add(card.title);
 }
-for (const group of electiveGroupList) for (const item of group.items) sectionNames.add(item.name);
-
-const dangling = allCards.flatMap((c) => [
-  ...(sectionNames.has(c.target) ? [] : [`${c.title}→${c.target}`]),
-  ...c.tags.filter((t) => !sectionNames.has(t.target)).map((t) => `${t.label}→${t.target}`),
-]);
-eq("所有卡片与标签都有对应小节", dangling, []);
-
-// 反向：课程页的每个小节都要能从首页/课程页点进来，不能有孤立小节
-const entryTargets = new Set(allCards.flatMap((c) => [c.target, ...c.tags.map((t) => t.target)]));
 const orphans = [
-  ...allCourses.flatMap((c) => c.bands.map((b) => b.title.split("｜")[0] ?? b.title)),
+  ...allCourses.flatMap((c) => c.bands.map((b) => (b.title.split("｜")[0] ?? b.title))),
   ...electiveGroupList.flatMap((g) => g.items.map((i) => i.name)),
-].filter((name) => !entryTargets.has(name));
-eq("课程页没有进不去的小节（栏目里删掉课程时，详情区的小节也要删）", orphans, []);
+].filter((name) => !visible.has(name));
+eq("课程内容没有进不去的孤立小节", orphans, []);
 
 eq("首页教室格位", homeContent.classrooms.length, 3);
 eq("首页首屏数据", homeContent.stats.length, 6);

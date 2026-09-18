@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { cn } from "@/lib/utils/cn";
-import { bandAnchorHref } from "@/lib/site/featured-routes";
+import { cardPageHref, courseStageHref } from "@/lib/site/featured-routes";
 import type { CourseColumn, CourseColumnCard } from "@/lib/types/site";
 
 /**
@@ -72,7 +72,8 @@ function UnavailableBadge() {
 }
 
 function ColumnCard({ card }: { card: CourseColumnCard }) {
-  const href = bandAnchorHref(card.target);
+  // 整张卡片指向这门课自己的页面
+  const href = cardPageHref(card.path);
   const hasTags = card.tags.length > 0;
 
   // 没有细分：整张卡片可点
@@ -108,7 +109,8 @@ function ColumnCard({ card }: { card: CourseColumnCard }) {
         {card.tags.map((tag) => (
           <Link
             key={`${tag.label}-${tag.target}`}
-            href={bandAnchorHref(tag.target)}
+            // 标签是同一页面内的阶段，因此带页内锚点
+            href={courseStageHref(card.path, tag.target)}
             className="rounded-sm bg-brand-50 px-2 py-0.5 text-xs text-brand-700 transition-colors hover:bg-brand-100"
           >
             {tag.label}

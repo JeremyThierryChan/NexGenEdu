@@ -68,6 +68,13 @@ jobs:
         env:
           NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
 
+      - name: Check internal links
+        # 站点是静态托管，链接写错没有服务端兜底，只会让访客点进 404：
+        # 这里逐页取出站内链接，校验目标页面与锚点是否真的存在。
+        run: npm run check:links
+        env:
+          NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
         # 不自动启用 Pages：若仓库尚未在 Settings 中把 Source 设为

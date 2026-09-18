@@ -90,6 +90,8 @@ export type CourseColumnSubgroup = {
 export type CourseColumnCard = {
   /** 卡片名（即课程名，例如「小学语文」「高中物理」「雅思」）。 */
   title: string;
+  /** 独立页面的路径分段（ASCII，写在 `· 路径:` 里）。每张卡片一个页面。 */
+  path: string;
   /** 是否暂未开放（数据里写 `· 状态: 暂未开放` 时为 true），页面上显示标记。 */
   unavailable: boolean;
   /** 课程内部的细分标签；没有细分时为空数组。 */
@@ -281,4 +283,43 @@ export type CourseDetail = {
 
 export type FeaturedContent = PageIntro & {
   courses: CourseDetail[];
+};
+
+/**
+ * 课程卡片页里的一个「阶段」。
+ *
+ * 卡片上的每个标签就是同一页面里的一个阶段（如 高中物理 → 学考 / 选考），
+ * 因此阶段不是独立页面，而是页面内的小节。
+ */
+export type CourseStage = {
+  /** 页内锚点（小节名，例如「高中物理学考」）。 */
+  anchor: string;
+  /** 小节标题全文（「｜」之后是导语）。 */
+  title: string;
+  /** 标题「｜」之后的导语；没有则为空串。 */
+  lead: string;
+  /** 正文（Markdown，含「核心能力」列表）。 */
+  body: string;
+};
+
+/** 课程卡片页的全部数据（/courses/<路径>）。 */
+export type CoursePageData = {
+  card: CourseColumnCard;
+  /** 所属栏目（小学课内 / 高中课内 / …）。 */
+  column: string;
+  /** 子栏目（必考科目 / 外语 / 七选三）；无子栏目时为空串。 */
+  subgroup: string;
+  /** 页面导语：学科导语 / 选修课介绍 / 第一个阶段导语。 */
+  intro: string;
+  /**
+   * 课程说明：卡片自己有总览小节时（如「雅思｜按目标分数提分」）。
+   * 这类小节不属于任何一个标签，但内容不能丢，因此单独作为页面开头的一段。
+   */
+  overview: CourseStage | null;
+  /** 本卡片自己的阶段。 */
+  stages: CourseStage[];
+  /** 同一学科的其他阶段（小学语文 → 初中语文 / 高中语文）。 */
+  sameSubject: CourseColumnCard[];
+  /** 同栏目（有子栏目时同子栏目）的其他课程。 */
+  sameColumn: CourseColumnCard[];
 };

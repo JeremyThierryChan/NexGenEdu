@@ -18,6 +18,21 @@ export function bandAnchorHref(sectionName: string): string {
   return `${COURSES_HREF}#${encodeURIComponent(sectionName)}`;
 }
 
+/**
+ * 课程卡片页路径：`/courses/<路径>`。
+ *
+ * 每张课程卡片（小学语文、高中物理、雅思…）都有自己的页面；
+ * 卡片上的标签是**同一页面内的阶段**，用 courseStageHref 跳到页内小节。
+ */
+export function cardPageHref(path: string): string {
+  return `${COURSES_HREF}/${encodeURIComponent(path)}`;
+}
+
+/** 课程卡片页里某个阶段的页内锚点。 */
+export function courseStageHref(path: string, stage: string): string {
+  return `${cardPageHref(path)}#${encodeURIComponent(stage)}`;
+}
+
 /** 特色课程总览页路径。 */
 export const FEATURED_INDEX_HREF = FEATURED_BASE;
 
