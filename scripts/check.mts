@@ -43,6 +43,14 @@ import { CURRENT_VERSION } from "@/lib/backend/version";
 import { weekDays } from "@/lib/backend/format";
 import { LEAVE_NOTICE_HOURS, decideCharge } from "@/lib/backend/attendance";
 import {
+  churnStats,
+  describeRate,
+  hourlyLoad,
+  rangeSummary,
+  roomUtilization,
+  teacherWorkload,
+} from "@/lib/backend/stats";
+import {
   FOLLOWUP_RULES,
   buildFollowUps,
   followUpsToText,
@@ -1772,6 +1780,139 @@ ok("原课取消后不再要求补课",
 
 await api.lessons.remove(makeup!.id);
 await api.lessons.remove(reconcileLesson.id);
+
+// ── 经营统计（第六组）─────────────────────────────────────────────────
+// 统计最容易出的问题是「口径不一致」：利用率分母是什么、取消的课算不算、
+// 退课比例按条还是按课时。这里逐项把口径钉死。
+const statsDays = weekDays(new Date());
+const statsFrom = statsDays[0]!;
+const statsTo = new Date(statsDays[6]!);
+statsTo.setHours(23, 59, 59, 999);
+
+const statLesson = (
+  id: string,
+  dayIndex: number,
+  hour: number,
+  duration: number,
+  over: Partial<Lesson> = {},
+): Lesson => {
+  const day = new Date(statsDays[dayIndex]!);
+  day.setHours(hour, 0, 0, 0);
+  return {
+    id, subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1",
+    studentIds: ["s1"], startsAt: day.toISOString(), durationMinutes: duration,
+    status: "已排", note: "", makeupForLessonId: "", ...over,
+  };
+};
+
+const statRooms: Classroom[] = [
+  {
+    id: "c1", name: "301", kind: "上课用教室", capacity: 8,
+    // 周一至周五 17:00–21:00 → 每天 4 小时，一周 20 小时 = 1200 分钟
+    availability: [{ id: "a1", weekdays: [1, 2, 3, 4, 5], start: "17:00", end: "21:00" }],
+    note: "",
+  },
+  { id: "c2", name: "不限时段教室", kind: "自习室", capacity: 4, availability: [], note: "" },
+];
+const statLessons: Lesson[] = [
+  statLesson("sl1", 0, 17, 120),           // 周一 2 小时
+  statLesson("sl2", 0, 19, 60),            // 周一 1 小时
+  statLesson("sl3", 1, 18, 90, { classroomId: "c2" }),
+  statLesson("sl4", 2, 10, 60, { status: "已取消" }),  // 取消的不算
+];
+
+const rooms = roomUtilization(statRooms, statLessons, statsDays);
+const roomC1 = rooms.find((row) => row.classroom.id === "c1")!;
+const roomC2 = rooms.find((row) => row.classroom.id === "c2")!;
+eq("可用时长按教室自己的时段算", roomC1.availableMinutes, 5 * 4 * 60);
+eq("已排时长不含已取消的课", roomC1.bookedMinutes, 120 + 60);
+eq("利用率 = 已排 / 可用", describeRate(roomC1.rate), "15%");
+eq("没设时段的教室按营业时间估算", roomC2.availableMinutes, Math.round(13.5 * 60 * 7));
+ok("取消的课不计入课次", roomC1.lessonCount === 2);
+// c1 的可用时段是周一到周五，课都排在周一 → 空档应为周二到周五（周六日不在可用时段内，不算空档）
+eq("空档日只在有可用时段的日子上统计",
+  roomC1.idleDays, statsDays.slice(1, 5).map((day) => dateKey(day)));
+
+const hourly = hourlyLoad(statLessons);
+ok("时段分布不含已取消的课", hourly.every((row) => row.hour !== 10));
+eq("17:00 有两节课中的一节", hourly.find((row) => row.hour === 17)?.count, 1);
+ok("时段按小时升序", hourly.every((row, index) => index === 0 || hourly[index - 1]!.hour < row.hour));
+
+// 教师课时：按科目拆分 + 平均人数
+const statTeachers: Teacher[] = [
+  { id: "t1", name: "自检老师A", subjects: ["数学"], role: "", phone: "", active: true },
+  { id: "t2", name: "自检老师B", subjects: ["英语"], role: "", phone: "", active: true },
+];
+const workload = teacherWorkload(statTeachers, [
+  statLesson("wl1", 0, 17, 60, { studentIds: ["s1", "s2"] }),
+  statLesson("wl2", 0, 18, 90, { subject: "初中物理" }),
+  statLesson("wl3", 1, 17, 60, { teacherId: "t2" }),
+  statLesson("wl4", 2, 17, 60, { status: "已取消" }),
+]);
+const teacherA = workload.find((row) => row.teacher.id === "t1")!;
+eq("教师课次不含已取消", teacherA.lessonCount, 2);
+eq("教师时长合计", teacherA.minutes, 150);
+eq("教师涉及学生数（去重）", teacherA.studentCount, 2);
+eq("平均每节课人数", teacherA.avgStudents, 1.5);
+eq("按科目拆分（按时长降序）", teacherA.bySubject.map((item) => item.subject), ["初中物理", "初中数学"]);
+ok("按课时降序排列（老师A 在前）", workload[0]?.teacher.id, "t1");
+
+// 退课与流失：口径按「退掉的课时」而不是条数
+const churnStudents: Student[] = [
+  {
+    id: "cs1", name: "退课学生", grade: "初二", guardian: "", subjects: [], profile: {},
+    enrollments: [
+      {
+        id: "ce1", subject: "初中数学", form: "", teacherId: "",
+        totalLessons: 10, usedLessons: 3, unitPrice: 200, agreedAmount: 2000, paidAmount: 2000,
+        startedAt: new Date().toISOString(), endedAt: new Date().toISOString(),
+        status: "已退课", note: "",
+        history: [{ at: new Date().toISOString(), kind: "退课", lessons: 0, note: "时间冲突" }],
+      },
+      {
+        id: "ce2", subject: "初中数学", form: "", teacherId: "",
+        totalLessons: 10, usedLessons: 8, unitPrice: 200, agreedAmount: 2000, paidAmount: 2000,
+        startedAt: new Date().toISOString(), endedAt: new Date().toISOString(),
+        status: "已退课", note: "",
+        history: [{ at: new Date().toISOString(), kind: "退课", lessons: 0, note: "时间冲突" }],
+      },
+      {
+        id: "ce3", subject: "初中英语", form: "", teacherId: "",
+        totalLessons: 10, usedLessons: 5, unitPrice: 200, agreedAmount: 2000, paidAmount: 2000,
+        startedAt: new Date().toISOString(), endedAt: "", status: "在读", note: "", history: [],
+      },
+    ],
+    status: "在读", note: "", createdAt: new Date().toISOString(),
+  },
+  {
+    id: "cs2", name: "暂停学生", grade: "初三", guardian: "", subjects: [], profile: {},
+    enrollments: [], status: "暂停", note: "", createdAt: new Date().toISOString(),
+  },
+];
+const churn = churnStats(churnStudents);
+eq("只统计已退课的报课", churn.refundedCount, 2);
+eq("退掉的课时合计", churn.refundedLessons, 20);
+eq("退课时仍未上的课时合计", churn.refundedRemaining, 9);
+eq("平均已上节数", churn.avgUsedLessons, 5.5);
+eq("平均已上比例（3/10 与 8/10 → 0.55）", churn.avgUsedRatio, 0.55);
+eq("按科目汇总", churn.bySubject, [{ subject: "初中数学", count: 2 }]);
+eq("按原因汇总", churn.byReason, [{ reason: "时间冲突", count: 2 }]);
+eq("暂停 / 结课学生数", churn.pausedOrFinished, 1);
+ok("在读的报课不计入流失", !churn.bySubject.some((row) => row.subject === "初中英语"));
+
+// 区间汇总
+const range = rangeSummary(statLessons, statsFrom, statsTo);
+eq("区间课次不含取消", range.lessonCount, 3);
+eq("区间取消课次单独统计", range.cancelled, 1);
+eq("区间课时合计", range.minutes, 120 + 60 + 90);
+ok("区间涉及学生去重", range.studentCount === 1);
+
+// 服务层统计接口可用
+const liveStats = await api.stats(new Date());
+ok("服务层能返回统计", Array.isArray(liveStats.rooms) && Array.isArray(liveStats.teachers));
+ok("统计里每间场地都有利用率", liveStats.rooms.every((row) => row.rate >= 0));
+ok("统计里的利用率不超过 1（已排不该超过可用）",
+  liveStats.rooms.every((row) => row.rate <= 1 || row.availableMinutes === 0));
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();

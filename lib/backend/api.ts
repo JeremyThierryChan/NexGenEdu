@@ -7,6 +7,17 @@ import { decideCharge, isAbsent } from "./attendance";
 import { databaseStats, validateImportedDatabase, type ImportOutcome } from "./backup";
 import { buildFollowUps, type FollowUpItem } from "./followup";
 import {
+  churnStats,
+  hourlyLoad,
+  rangeSummary,
+  roomUtilization,
+  teacherWorkload,
+  type ChurnStats,
+  type RoomUtilization,
+  type TeacherWorkload,
+} from "./stats";
+import { weekDays } from "./format";
+import {
   monthRange,
   outstandingAmount,
   round2,
@@ -811,6 +822,44 @@ export const api = {
   },
 
   /**
+   * 经营统计（教室利用率 / 教师课时 / 退课与流失）。
+   *
+   * 服务层只负责把数据与区间凑齐，算法在 lib/backend/stats.ts ——
+   * 将来服务端实现时可以整体搬走，页面不用改。
+   */
+  async stats(anchor: Date = new Date()): Promise<{
+    from: string;
+    to: string;
+    days: string[];
+    rooms: RoomUtilization[];
+    hourly: Array<{ hour: number; count: number; minutes: number }>;
+    teachers: TeacherWorkload[];
+    churn: ChurnStats;
+    summary: ReturnType<typeof rangeSummary>;
+  }> {
+    await delay();
+    const db = load();
+    const days = weekDays(anchor);
+    const from = days[0] ?? anchor;
+    const to = days[6] ?? anchor;
+    const toEnd = new Date(to);
+    toEnd.setHours(23, 59, 59, 999);
+
+    const weekLessons = db.lessons.filter((lesson) => withinRange(lesson.startsAt, from, toEnd));
+
+    return clone({
+      from: from.toISOString(),
+      to: toEnd.toISOString(),
+      days: days.map((day) => dateKey(day)),
+      rooms: roomUtilization(db.classrooms, weekLessons, days),
+      hourly: hourlyLoad(weekLessons),
+      teachers: teacherWorkload(db.teachers, weekLessons),
+      churn: churnStats(db.students),
+      summary: rangeSummary(weekLessons, from, toEnd),
+    });
+  },
+
+  /**
    * 待跟进清单。
    *
    * 服务层只负责「把数据凑齐交给规则引擎」，规则本身在 lib/backend/followup.ts。
@@ -1418,8 +1467,11 @@ export function __useStoreForTesting(backing: KeyValueStore): void {
 // 重新导出，便于页面只 import 这一处
 export type {
   Assessment,
+  ChurnStats,
   Classroom,
   FollowUpItem,
+  RoomUtilization,
+  TeacherWorkload,
   LessonTransaction,
   Payment,
   ClassroomAvailability,
