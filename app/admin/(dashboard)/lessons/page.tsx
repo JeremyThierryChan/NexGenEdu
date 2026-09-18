@@ -5,6 +5,7 @@ import { DataNotice } from "@/components/admin/DataNotice";
 import { Panel } from "@/components/admin/AdminFields";
 import { LessonForm } from "@/components/admin/LessonForm";
 import { LessonRecordPanel } from "@/components/admin/LessonRecordPanel";
+import { PendingMakeups } from "@/components/admin/PendingMakeups";
 import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
 import {
@@ -165,6 +166,14 @@ export default function AdminLessonsPage() {
           />
         </Panel>
       )}
+
+      {/* 待补课：缺课之后需要一个收口的地方，否则它会散在老师的记忆里 */}
+      <section className="mt-4 rounded-lg border border-ink-200 bg-white">
+        <h2 className="border-b border-ink-100 px-4 py-3 text-sm font-medium text-ink-900">
+          待补课
+        </h2>
+        <PendingMakeups onChanged={load} />
+      </section>
 
       <div className="mt-4 overflow-x-auto rounded-lg border border-ink-200 bg-white">
         <table className="w-full min-w-[860px] border-collapse text-sm">

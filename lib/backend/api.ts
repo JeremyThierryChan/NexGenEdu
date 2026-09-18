@@ -3,6 +3,7 @@ import { createSeedDatabase } from "./seed";
 import { isWithinAvailability } from "./availability";
 import { CURRENT_VERSION } from "./version";
 import { enrollmentForLesson, remainingOf, remainingTotal } from "./enrollment";
+import { decideCharge, isAbsent } from "./attendance";
 import { databaseStats, validateImportedDatabase, type ImportOutcome } from "./backup";
 import { buildFollowUps, type FollowUpItem } from "./followup";
 import {
@@ -288,6 +289,20 @@ function migrate(db: Database): Database | null {
     db.version = 6;
   }
 
+  if (db.version === 6) {
+    // v6 → v7：课堂记录增加请假时间、课节增加补课关联。
+    // 老记录没有请假时间 → 空串，按「临时缺课」处理（不默认成对机构有利的解释）
+    db.lessonRecords = db.lessonRecords.map((record) => ({
+      ...record,
+      leaveRequestedAt: record.leaveRequestedAt ?? "",
+    }));
+    db.lessons = db.lessons.map((lesson) => ({
+      ...lesson,
+      makeupForLessonId: lesson.makeupForLessonId ?? "",
+    }));
+    db.version = 7;
+  }
+
   return db.version === CURRENT_VERSION ? db : null;
 }
 
@@ -357,6 +372,74 @@ function recordPayment(db: Database, input: Omit<Payment, "id">): Payment {
   }
 
   return created;
+}
+
+/**
+ * 按出勤事实对账：让这位学生这节课的扣减与「该不该扣」一致。
+ *
+ * 为什么需要「对账」而不是「扣一次就完事」：出勤是**会变的** ——
+ * 老师先标了「到课」扣了课时，后来发现是提前请假；或者先标了请假、后来补录了
+ * 请假时间。任何一次改动都可能让「已扣」与「应扣」不一致，
+ * 而对账是唯一能保证两者最终一致的写法（增扣、退回都由它统一处理）。
+ *
+ * 幂等：反复调用不会重复扣。
+ */
+function reconcileCharge(
+  db: Database,
+  lesson: Lesson,
+  studentId: string,
+): { changed: boolean; charged: boolean; reason: string } {
+  const record = db.lessonRecords.find(
+    (item) => item.lessonId === lesson.id && item.studentId === studentId,
+  );
+  const decision = decideCharge(lesson, record);
+
+  const active = db.transactions.filter(
+    (item) =>
+      item.lessonId === lesson.id &&
+      item.studentId === studentId &&
+      item.kind === "上课" &&
+      item.reversedAt === "",
+  );
+  const actual = active.length;
+  const expected = decision.charge ? 1 : 0;
+
+  if (actual === expected) return { changed: false, charged: decision.charge, reason: decision.reason };
+
+  const student = db.students.find((item) => item.id === studentId);
+  if (student === undefined) return { changed: false, charged: decision.charge, reason: decision.reason };
+
+  if (expected > actual) {
+    // 该扣但没扣：补扣（按科目找报课记录；找不到就如实跳过）
+    const enrollment = enrollmentForLesson(student.enrollments, lesson.subject);
+    if (enrollment === null) {
+      return { changed: false, charged: decision.charge, reason: `${decision.reason}（没有对应报课记录，未扣）` };
+    }
+    enrollment.usedLessons += 1;
+    addTransaction(db, {
+      studentId,
+      enrollmentId: enrollment.id,
+      subject: enrollment.subject,
+      delta: -1,
+      kind: "上课",
+      lessonId: lesson.id,
+      note: decision.reason,
+    });
+    return { changed: true, charged: true, reason: decision.reason };
+  }
+
+  // 不该扣但扣了：按流水退回（撤销而不是删除，便于追溯）
+  let toReverse = actual - expected;
+  for (const transaction of [...active].reverse()) {
+    if (toReverse <= 0) break;
+    transaction.reversedAt = nowIso();
+    const enrollment = student.enrollments.find((item) => item.id === transaction.enrollmentId);
+    if (enrollment !== undefined) {
+      enrollment.usedLessons = Math.max(0, enrollment.usedLessons - 1);
+    }
+    toReverse -= 1;
+  }
+  return { changed: true, charged: false, reason: decision.reason };
 }
 
 /** 通用集合：把「取数组 → 改 → 存」的重复代码在一处。 */
@@ -816,14 +899,25 @@ export const api = {
 
       if (existing !== undefined) {
         Object.assign(existing, input, { recordedAt: nowIso() });
-        persist(db);
-        return clone(existing);
+      } else {
+        db.lessonRecords.push({ ...input, id: nextId("lr"), recordedAt: nowIso() });
       }
 
-      const created: LessonRecord = { ...input, id: nextId("lr"), recordedAt: nowIso() };
-      db.lessonRecords.push(created);
+      /*
+       * 出勤一改，课时就要跟着变：先标「到课」扣了课时、后来发现是提前请假，
+       * 这里会自动把课时退回去；反过来（改成旷课）会自动补扣。
+       * 已上的课才需要处理 —— 没上完的课本来就没扣过。
+       */
+      const lesson = db.lessons.find((item) => item.id === input.lessonId);
+      if (lesson !== undefined && lesson.status === "已上") {
+        reconcileCharge(db, lesson, input.studentId);
+      }
+
       persist(db);
-      return clone(created);
+      const saved = db.lessonRecords.find(
+        (item) => item.lessonId === input.lessonId && item.studentId === input.studentId,
+      )!;
+      return clone(saved);
     },
   },
 
@@ -1032,7 +1126,17 @@ export const api = {
             continue;
           }
 
-          // 扣哪一条报课：按这节课的科目匹配（见 lib/backend/enrollment.ts）
+          /*
+           * 扣不扣课时按**出勤**决定（提前 24 小时请假不扣，见 attendance.ts），
+           * 并且走对账逻辑而不是直接 -1：老师先填了出勤再标记已上、
+           * 或先标记已上再改出勤，两种顺序都要落到同一个结果。
+           */
+          const outcome = reconcileCharge(db, lesson, studentId);
+          if (!outcome.charged) {
+            skipped.push({ studentId, reason: outcome.reason });
+            continue;
+          }
+
           const enrollment = enrollmentForLesson(student.enrollments, lesson.subject);
           if (enrollment === null) {
             skipped.push({
@@ -1042,16 +1146,6 @@ export const api = {
             continue;
           }
 
-          enrollment.usedLessons += 1;
-          addTransaction(db, {
-            studentId,
-            enrollmentId: enrollment.id,
-            subject: enrollment.subject,
-            delta: -1,
-            kind: "上课",
-            lessonId: lesson.id,
-            note: `${lesson.subject} ${new Date(lesson.startsAt).toLocaleString("zh-CN")}`,
-          });
           deducted.push({
             studentId,
             subject: enrollment.subject,
@@ -1074,6 +1168,89 @@ export const api = {
           .sort((a, b) => a.startsAt.localeCompare(b.startsAt)),
       );
     },
+    /**
+     * 安排补课：以「被补的那节课」为模板建一节新课。
+     *
+     * 补课是一节**真实占用教师与教室**的课，因此：
+     * - 走同一套冲突检查（由表单在保存前调用 findConflicts）；
+     * - 标记已上时按正常规则扣 1 节 —— 提前请假的课没扣，补课时扣，
+     *   两次加起来恰好等于正常上一节课（口径见 lib/backend/attendance.ts）。
+     */
+    async createMakeup(input: {
+      originalLessonId: string;
+      startsAt: string;
+      durationMinutes: number;
+      teacherId: string;
+      classroomId: string;
+      studentIds: string[];
+      note: string;
+    }): Promise<Lesson | null> {
+      await delay();
+      const db = load();
+      const original = db.lessons.find((item) => item.id === input.originalLessonId);
+      if (original === undefined) return null;
+
+      const created: Lesson = {
+        id: nextId("l"),
+        subject: original.subject,
+        form: original.form,
+        teacherId: input.teacherId !== "" ? input.teacherId : original.teacherId,
+        classroomId: input.classroomId !== "" ? input.classroomId : original.classroomId,
+        studentIds: input.studentIds.length > 0 ? input.studentIds : original.studentIds,
+        startsAt: input.startsAt,
+        durationMinutes: input.durationMinutes > 0 ? input.durationMinutes : original.durationMinutes,
+        status: "已排",
+        note: input.note.trim() === "" ? "补课" : input.note.trim(),
+        makeupForLessonId: original.id,
+      };
+
+      db.lessons.push(created);
+      persist(db);
+      return clone(created);
+    },
+
+    /**
+     * 待补课清单：缺了课、且还没安排补课的学生。
+     *
+     * 判据是「原课上有请假/旷课的记录」+「之后没有以这节课为原课的补课」。
+     * 提前请假（没扣课时）同样要补 —— 学生事实上没上到这节课。
+     */
+    async pendingMakeups(): Promise<
+      Array<{ original: Lesson; student: Student; record: LessonRecord; reason: string }>
+    > {
+      await delay();
+      const db = load();
+      const rows: Array<{ original: Lesson; student: Student; record: LessonRecord; reason: string }> = [];
+
+      for (const record of db.lessonRecords) {
+        if (!isAbsent(record)) continue;
+
+        const original = db.lessons.find((item) => item.id === record.lessonId);
+        if (original === undefined || original.status === "已取消") continue;
+
+        // 已经补过了吗（该学生出现在以这节为原课的补课里）
+        const covered = db.lessons.some(
+          (lesson) =>
+            lesson.makeupForLessonId === original.id &&
+            lesson.studentIds.includes(record.studentId) &&
+            lesson.status !== "已取消",
+        );
+        if (covered) continue;
+
+        const student = db.students.find((item) => item.id === record.studentId);
+        if (student === undefined) continue;
+
+        rows.push({
+          original,
+          student,
+          record,
+          reason: decideCharge(original, record).reason,
+        });
+      }
+
+      return clone(rows.sort((a, b) => a.original.startsAt.localeCompare(b.original.startsAt)));
+    },
+
     /** 某个学生的课，按时间升序（学生详情用）。 */
     async listByStudent(studentId: string): Promise<Lesson[]> {
       await delay();

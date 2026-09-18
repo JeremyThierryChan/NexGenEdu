@@ -122,6 +122,8 @@ export function createSeedDatabase(now: Date = new Date()): Database {
   const lessonRecords: LessonRecord[] = [
     record("l7", "s1", "到课", "中", "一般", 3, "定理记不牢，讲第二遍才通。", now),
     record("l7", "s2", "到课", "高", "主动", 4, "压轴题思路清楚，计算偶有跳步。", now),
+    // 缺课样本：给「待补课」清单用（提前请假 → 不扣课时，但课要补）
+    record("l6", "s8", "请假", "中", "一般", 3, "提前请假，需安排补课。", now),
   ];
 
   const homeworkRecords: HomeworkRecord[] = [
@@ -282,6 +284,8 @@ function record(
     lessonId,
     studentId,
     attendance,
+    // 请假时间默认给「提前 2 天」：示例数据展示的是「提前请假不扣课时」这条规则
+    leaveRequestedAt: attendance === "请假" ? day(now, -3, 10, 0) : "",
     focus,
     interaction,
     rating,
@@ -382,5 +386,9 @@ function lesson(
   durationMinutes: number,
   status: Lesson["status"] = "已排",
 ): Lesson {
-  return { id, subject, form, teacherId, classroomId, studentIds, startsAt, durationMinutes, status, note: "" };
+  return {
+    id, subject, form, teacherId, classroomId, studentIds, startsAt, durationMinutes, status,
+    note: "",
+    makeupForLessonId: "",
+  };
 }

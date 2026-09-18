@@ -11,6 +11,7 @@ import {
   type Student,
 } from "@/lib/backend/api";
 import { Button } from "@/components/ui/Button";
+import { decideCharge } from "@/lib/backend/attendance";
 import { cn } from "@/lib/utils/cn";
 
 /**
@@ -44,12 +45,20 @@ export function LessonRecordPanel({ lesson }: { lesson: Lesson }) {
       next[studentId] = existing
         ? {
             attendance: existing.attendance,
+            leaveRequestedAt: toLocalInput(existing.leaveRequestedAt),
             focus: existing.focus,
             interaction: existing.interaction,
             rating: `${existing.rating}`,
             note: existing.note,
           }
-        : { attendance: "到课", focus: "中", interaction: "一般", rating: "3", note: "" };
+        : {
+            attendance: "到课",
+            leaveRequestedAt: "",
+            focus: "中",
+            interaction: "一般",
+            rating: "3",
+            note: "",
+          };
     }
     setDraft(next);
   }, [lesson.id, lesson.studentIds]);
@@ -67,6 +76,7 @@ export function LessonRecordPanel({ lesson }: { lesson: Lesson }) {
       lessonId: lesson.id,
       studentId,
       attendance: value.attendance,
+      leaveRequestedAt: value.leaveRequestedAt,
       focus: value.focus,
       interaction: value.interaction,
       rating: Math.min(5, Math.max(1, Math.trunc(Number(value.rating) || 3))),
@@ -94,6 +104,25 @@ export function LessonRecordPanel({ lesson }: { lesson: Lesson }) {
           if (value === undefined) return null;
           const existing = records.find((item) => item.studentId === studentId);
           const name = students.find((item) => item.id === studentId)?.name ?? studentId;
+          // 实时显示这节课扣不扣课时（口径见 lib/backend/attendance.ts）
+          const decision = decideCharge(lesson, {
+            ...(existing ?? {
+              id: "draft",
+              lessonId: lesson.id,
+              studentId,
+              attendance: "到课",
+              leaveRequestedAt: "",
+              focus: "中",
+              interaction: "一般",
+              rating: 3,
+              note: "",
+              recordedAt: new Date().toISOString(),
+            }),
+            attendance: value.attendance,
+            leaveRequestedAt: value.leaveRequestedAt === ""
+              ? ""
+              : new Date(value.leaveRequestedAt).toISOString(),
+          });
 
           return (
             <li key={studentId} className="rounded-md border border-ink-200 bg-white px-3 py-2.5">
@@ -152,6 +181,27 @@ export function LessonRecordPanel({ lesson }: { lesson: Lesson }) {
                 </Button>
               </div>
 
+              {/* 请假时间：决定「提前 24 小时请假不扣课时」是否成立 */}
+              {value.attendance === "请假" && (
+                <label className="mt-2 flex flex-wrap items-center gap-2 text-xs text-ink-600">
+                  请假时间
+                  <input
+                    type="datetime-local"
+                    value={value.leaveRequestedAt}
+                    onChange={(event) =>
+                      setDraft((d) => ({
+                        ...d,
+                        [studentId]: { ...value, leaveRequestedAt: event.target.value },
+                      }))
+                    }
+                    className="rounded-md border border-ink-300 px-2 py-1 text-xs outline-none focus:border-brand-500"
+                  />
+                  <span className={decision.charge ? "text-warning-600" : "text-success-600"}>
+                    本次{decision.charge ? "扣" : "不扣"}课时 · {decision.reason}
+                  </span>
+                </label>
+              )}
+
               <input
                 value={value.note}
                 onChange={(event) =>
@@ -180,6 +230,8 @@ export function LessonRecordPanel({ lesson }: { lesson: Lesson }) {
 
 type LessonRecordDraft = {
   attendance: LessonRecord["attendance"];
+  /** 请假时间（datetime-local 的值）；空串表示没记录。 */
+  leaveRequestedAt: string;
   focus: LessonRecord["focus"];
   interaction: LessonRecord["interaction"];
   rating: string;
@@ -221,4 +273,12 @@ function Choice({
       </span>
     </span>
   );
+}
+
+/** ISO → datetime-local 输入框的值（`YYYY-MM-DDTHH:MM`）。 */
+function toLocalInput(iso: string): string {
+  if (iso === "") return "";
+  const date = new Date(iso);
+  const pad = (value: number) => `${value}`.padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }

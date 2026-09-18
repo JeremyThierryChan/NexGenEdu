@@ -99,6 +99,8 @@ export function LessonForm({
       durationMinutes: Math.max(15, Math.trunc(Number(duration) || 60)),
       status,
       note: note.trim(),
+      // 普通排课不带补课关联（补课走 api.lessons.createMakeup）
+      makeupForLessonId: lesson?.makeupForLessonId ?? "",
     };
   }
 

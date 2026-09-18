@@ -41,6 +41,7 @@ import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
 import { weekDays } from "@/lib/backend/format";
+import { LEAVE_NOTICE_HOURS, decideCharge } from "@/lib/backend/attendance";
 import {
   FOLLOWUP_RULES,
   buildFollowUps,
@@ -1623,6 +1624,149 @@ const realFollowUps = await api.followups(new Date());
 ok("真实数据上能生成清单", Array.isArray(realFollowUps));
 ok("真实清单里每条都有原因与话术",
   realFollowUps.every((item) => item.reason !== "" && item.message.length > 20));
+
+// ── 请假与补课（第五组）──────────────────────────────────────────────
+// 规则：提前 24 小时请假不扣课时，临时缺课扣。边界值（正好 24 小时）必须钉死，
+// 因为这是最容易和家长扯不清的地方。
+__useStoreForTesting(memory);
+
+const leaveLessonStart = new Date("2026-09-20T17:00:00");
+const leaveLesson: Lesson = {
+  id: "lv1", subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1",
+  studentIds: ["s1"], startsAt: leaveLessonStart.toISOString(), durationMinutes: 60,
+  status: "已排", note: "", makeupForLessonId: "",
+};
+const makeRecord = (
+  attendance: LessonRecord["attendance"],
+  hoursBeforeStart: number | null,
+): LessonRecord => ({
+  id: "lr_draft", lessonId: leaveLesson.id, studentId: "s1",
+  attendance,
+  leaveRequestedAt:
+    hoursBeforeStart === null
+      ? ""
+      : new Date(leaveLessonStart.getTime() - hoursBeforeStart * 3_600_000).toISOString(),
+  focus: "中", interaction: "一般", rating: 3, note: "", recordedAt: leaveLessonStart.toISOString(),
+});
+
+eq("到课 → 扣课时", decideCharge(leaveLesson, makeRecord("到课", null)).charge, true);
+eq("旷课 → 扣课时", decideCharge(leaveLesson, makeRecord("旷课", null)).charge, true);
+eq(`提前 ${LEAVE_NOTICE_HOURS + 1} 小时请假 → 不扣`,
+  decideCharge(leaveLesson, makeRecord("请假", LEAVE_NOTICE_HOURS + 1)).charge, false);
+eq(`提前 ${LEAVE_NOTICE_HOURS} 小时整 → 不扣（边界含等于）`,
+  decideCharge(leaveLesson, makeRecord("请假", LEAVE_NOTICE_HOURS)).charge, false);
+eq(`提前 ${LEAVE_NOTICE_HOURS - 0.1} 小时请假 → 扣（临时缺课）`,
+  decideCharge(leaveLesson, makeRecord("请假", LEAVE_NOTICE_HOURS - 0.1)).charge, true);
+eq("请假但未记录时间 → 扣（不默认成有利解释）",
+  decideCharge(leaveLesson, makeRecord("请假", null)).charge, true);
+eq("没有课堂记录 → 按到课扣",
+  decideCharge(leaveLesson, undefined).charge, true);
+ok("判断理由可读（含小时数）",
+  decideCharge(leaveLesson, makeRecord("请假", 30)).reason.includes("30 小时"));
+
+// 补课不改变口径：补课本身是一节正常课 → 标记已上时扣 1 节
+eq("补课课节（未填出勤）按到课扣",
+  decideCharge({ ...leaveLesson, makeupForLessonId: "lv1" }, undefined).charge, true);
+
+// ── 对账：出勤一变，课时跟着变 ────────────────────────────────────────
+const leaveStudent = (await api.students.list()).find((item) => item.enrollments.length > 0)!;
+const leaveEnrollment = leaveStudent.enrollments[0]!;
+const remainingOfEnrollment = async () =>
+  remainingOf((await api.students.get(leaveStudent.id))!.enrollments
+    .find((item) => item.id === leaveEnrollment.id)!);
+
+const reconcileStart = new Date();
+reconcileStart.setDate(reconcileStart.getDate() + 3);
+reconcileStart.setHours(9, 0, 0, 0);
+
+const reconcileLesson = await api.lessons.create({
+  subject: leaveEnrollment.subject, form: "", teacherId: teacher.id, classroomId: room.id,
+  studentIds: [leaveStudent.id], startsAt: reconcileStart.toISOString(),
+  durationMinutes: 60, status: "已排", note: "",
+});
+
+// 先填「到课」→ 标记已上 → 扣 1
+await api.lessonRecords.save({
+  lessonId: reconcileLesson.id, studentId: leaveStudent.id,
+  attendance: "到课", leaveRequestedAt: "", focus: "中", interaction: "一般", rating: 3, note: "",
+});
+const beforeLeaveRule = await remainingOfEnrollment();
+await api.lessons.markCompleted(reconcileLesson.id);
+eq("到课标记已上 → 扣 1 节", await remainingOfEnrollment(), beforeLeaveRule - 1);
+
+// 后来发现其实是提前请假的 → 保存请假时间后应自动退回
+const leaveAt = new Date(reconcileStart.getTime() - 30 * 3_600_000).toISOString();
+await api.lessonRecords.save({
+  lessonId: reconcileLesson.id, studentId: leaveStudent.id,
+  attendance: "请假", leaveRequestedAt: leaveAt, focus: "中", interaction: "一般", rating: 3, note: "",
+});
+eq("改为提前请假 → 课时自动退回", await remainingOfEnrollment(), beforeLeaveRule);
+ok("退回是留痕（流水标了已撤销）",
+  (await api.transactions.listByEnrollment(leaveEnrollment.id))
+    .some((item) => item.lessonId === reconcileLesson.id && item.reversedAt !== ""));
+
+// 再改成临时请假（提前 2 小时）→ 应自动补扣
+await api.lessonRecords.save({
+  lessonId: reconcileLesson.id, studentId: leaveStudent.id,
+  attendance: "请假",
+  leaveRequestedAt: new Date(reconcileStart.getTime() - 2 * 3_600_000).toISOString(),
+  focus: "中", interaction: "一般", rating: 3, note: "",
+});
+eq("改为临时缺课 → 课时自动补扣", await remainingOfEnrollment(), beforeLeaveRule - 1);
+
+// 反复保存同一份记录不能重复扣（对账是幂等的）
+await api.lessonRecords.save({
+  lessonId: reconcileLesson.id, studentId: leaveStudent.id,
+  attendance: "请假",
+  leaveRequestedAt: new Date(reconcileStart.getTime() - 2 * 3_600_000).toISOString(),
+  focus: "中", interaction: "一般", rating: 3, note: "",
+});
+eq("重复保存不重复扣课时", await remainingOfEnrollment(), beforeLeaveRule - 1);
+
+// ── 待补课清单与补课创建 ──────────────────────────────────────────────
+const pending = await api.lessons.pendingMakeups();
+ok("缺课的学生出现在待补课清单里",
+  pending.some((row) => row.original.id === reconcileLesson.id && row.student.id === leaveStudent.id));
+
+const makeupStart = new Date(reconcileStart);
+makeupStart.setDate(makeupStart.getDate() + 7);
+const makeup = await api.lessons.createMakeup({
+  originalLessonId: reconcileLesson.id,
+  startsAt: makeupStart.toISOString(),
+  durationMinutes: 60,
+  teacherId: teacher.id,
+  classroomId: room.id,
+  studentIds: [leaveStudent.id],
+  note: "自检补课",
+});
+ok("补课创建成功", makeup !== null);
+eq("补课关联了原课", makeup?.makeupForLessonId, reconcileLesson.id);
+eq("补课沿用原课科目", makeup?.subject, reconcileLesson.subject);
+eq("补课状态为已排", makeup?.status, "已排");
+ok("补课之后不再出现在待补课清单里",
+  !(await api.lessons.pendingMakeups()).some((row) => row.original.id === reconcileLesson.id));
+
+/*
+ * 补课标记已上会再扣 1 节。
+ * 这里的账要算清：临时缺课已经扣了 1 节，补课再扣 1 节 → 相对原值共扣 2 节。
+ * （换成「提前请假」的话就是 0 + 1 = 1 节，与正常上一节课一致 ——
+ *  这也解释了为什么 24 小时规则对家长是有意义的。）
+ */
+await api.lessons.markCompleted(makeup!.id);
+eq("临时缺课 + 补课，共扣 2 节", await remainingOfEnrollment(), beforeLeaveRule - 2);
+
+// 已取消的课不算「已补」
+await api.lessons.update(makeup!.id, { status: "已取消" });
+ok("补课被取消后又回到待补课清单",
+  (await api.lessons.pendingMakeups()).some((row) => row.original.id === reconcileLesson.id));
+
+// 原课被取消时不再要求补课
+await api.lessons.update(reconcileLesson.id, { status: "已取消" });
+ok("原课取消后不再要求补课",
+  !(await api.lessons.pendingMakeups()).some((row) => row.original.id === reconcileLesson.id));
+
+await api.lessons.remove(makeup!.id);
+await api.lessons.remove(reconcileLesson.id);
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();

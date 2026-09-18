@@ -11,7 +11,7 @@
  *   2. 在 api.ts 的 migrate() 里补一段「上一版 → 这一版」的转换；
  *   3. 确认 seed.ts 用的是这个常量（它已经这么做了）。
  */
-export const CURRENT_VERSION = 6;
+export const CURRENT_VERSION = 7;
 
 /** 版本变更记录（给后来的人看，不用翻提交历史）。 */
 export const VERSION_NOTES: Record<number, string> = {
@@ -21,4 +21,5 @@ export const VERSION_NOTES: Record<number, string> = {
   4: "新增动态追踪：课堂记录（挂在课节上）、作业记录、阶段测评",
   5: "新增课时流水（账本）；编排课时的每一次变动都可追溯到课节，且可撤销",
   6: "新增收费：报课金额（标价 / 约定应缴 / 实收）、收款流水与退费策略",
+  7: "请假规则：课堂记录增加请假时间；课节增加补课关联（makeupForLessonId）",
 };

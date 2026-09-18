@@ -222,6 +222,8 @@ export type Lesson = {
   durationMinutes: number;
   status: LessonStatus;
   note: string;
+  /** 补课：指向被补的那节课；空串表示这是一节普通课。 */
+  makeupForLessonId: string;
 };
 
 /** 课堂记录：一节课的每个学生一条（由上课老师在课后填写）。 */
@@ -231,6 +233,12 @@ export type LessonRecord = {
   lessonId: string;
   studentId: string;
   attendance: Attendance;
+  /**
+   * 请假时间（ISO）；空串表示没记录。
+   * 用来判断是否「提前 24 小时请假」—— 这直接决定扣不扣课时，
+   * 因此必须留时间戳而不是只记一个「请假」。
+   */
+  leaveRequestedAt: string;
   focus: FocusLevel;
   interaction: InteractionLevel;
   /** 状态评分 1–5。 */
@@ -349,6 +357,8 @@ export type LessonInput = {
   durationMinutes: number;
   status: LessonStatus;
   note: string;
+  /** 补课：指向被补的那节课；空串表示这是一节普通课。 */
+  makeupForLessonId: string;
 };
 
 /**
