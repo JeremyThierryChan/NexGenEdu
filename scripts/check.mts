@@ -59,7 +59,7 @@ const aboutPage = contentDoc.pages.get("关于");
 const contactPage = contentDoc.pages.get("联系我们");
 
 eq("首页分组数", home?.groups.map((g) => g.name), ["首屏数据", "教学特色", "首页课程卡片", "教室照片格位"]);
-eq("首页课程卡片数", home?.groups.find((g) => g.name === "首页课程卡片")?.items.length, 17);
+eq("首页课程卡片数", home?.groups.find((g) => g.name === "首页课程卡片")?.items.length, 10);
 eq("首页首屏数据数", home?.groups.find((g) => g.name === "首屏数据")?.items.length, 6);
 eq("首页教学特色数", home?.groups.find((g) => g.name === "教学特色")?.items.length, 7);
 eq("角色数（含 AI）", teachersPage?.groups.length, 7);
@@ -106,7 +106,25 @@ ok("中文名非空", brand.brandNameZh === "新锐教培");
 ok("联系方式非空", brand.contact.phone !== "");
 
 const homeContent = getHomeContent();
-eq("首页课程卡片", homeContent.courses.length, 17);
+const { courses: allCourses, electiveGroups: electiveGroupList } = getCoursesPage();
+eq("首页课程卡片", homeContent.courses.length, 10);
+
+// 首页卡片按栏目分组，每张卡片含可点击标签
+eq("首页栏目", [...new Set(homeContent.courses.map((c) => c.group))],
+  ["小学课内", "初中课内", "高中课内", "外语", "课外兴趣", "成人课程"]);
+ok("每张卡片都有标签", homeContent.courses.every((c) => c.tags.length > 0));
+ok("标签都有跳转目标", homeContent.courses.every((c) => c.tags.every((t) => t.target !== "")));
+// 标签目标必须能在课程页找到对应小节（曾因小节改名导致 47 个标签跳空）
+const sectionNames = new Set<string>();
+for (const course of allCourses) {
+  sectionNames.add(course.nameZh);
+  for (const band of course.bands) sectionNames.add(band.title.split("｜")[0] ?? band.title);
+}
+for (const group of electiveGroupList) for (const item of group.items) sectionNames.add(item.name);
+const dangling = homeContent.courses.flatMap((c) =>
+  c.tags.filter((t) => !sectionNames.has(t.target)).map((t) => `${t.label}→${t.target}`),
+);
+eq("所有标签都有对应小节", dangling, []);
 eq("首页教室格位", homeContent.classrooms.length, 3);
 eq("首页首屏数据", homeContent.stats.length, 6);
 eq("首页教学特色", homeContent.features.length, 7);
@@ -122,12 +140,16 @@ eq("课程页学科数（不含选修分组）", courses.length, 17);
 ok("每门学科都有学段内容", courses.every((c) => c.bands.length > 0 && c.bands[0].content.length > 50));
 
 // 选修课程（成人 / 课外兴趣）：与学科分开返回，当前全部标注暂未开放
-const { electives, electiveTitle } = getCoursesPage();
+const { electiveGroups, electiveTitle } = getCoursesPage();
+const electives = electiveGroups.flatMap((g) => g.items);
 eq("选修课程分组名", electiveTitle, "成人课程与课外兴趣");
 eq("选修课程数", electives.length, 8);
+eq("选修课按栏目分节", electiveGroups.map((g) => `${g.title}(${g.items.length})`),
+  ["成人课程(4)", "课外兴趣(4)"]);
 ok("选修课程都有介绍", electives.every((e) => e.description.length > 10));
 ok("选修课程当前全部未开放", electives.every((e) => !e.available));
 ok("选修课程未混入学科列表", courses.every((c) => !electives.some((e) => e.name === c.nameZh)));
+ok("每门选修课都归类到栏目", electives.every((e) => e.group !== ""));
 ok("数学含 3 个学段且带核心能力", (() => { const m = courses.find((c) => c.nameZh === "数学"); return m?.bands.length === 3 && m.bands.every((b) => b.content.includes("核心能力")); })());
 
 const { teachers } = getTeachersPage();
@@ -168,10 +190,17 @@ ok("理念含数据化诊断", about.principles.some((x) => x.title === "数据�
 const contact = getContactContent();
 eq("联系方式条数", contact.methods.length, 5);
 
-// 首页卡片与课程页必须一一对应，否则点击卡片会跳不到对应课程
-const cardNames = homeContent.courses.map((c) => c.title).sort();
-const anchorNames = courses.map((c) => c.nameZh).sort();
-eq("首页卡片与课程页一一对应", cardNames, anchorNames);
+// 首页标签与课程页小节必须双向对得上：
+// 正向（上面已查）保证点标签不跳空；反向保证没有小节从首页进不去。
+// 注意标签对的是“小节”（小学语文 / 法语A1），不是 17 张学科卡名，两者不是一回事。
+const homeLabels = homeContent.courses.flatMap((c) => c.tags.map((t) => t.label));
+eq("首页标签不重复", homeLabels.filter((l, i) => homeLabels.indexOf(l) !== i), []);
+const orphanSections = [
+  ...allCourses.flatMap((c) => c.bands.map((b) => b.title.split("｜")[0] ?? b.title)),
+  ...electiveGroupList.flatMap((g) => g.items.map((i) => i.name)),
+].filter((n) => !homeLabels.includes(n));
+eq("课程页没有首页进不去的小节", orphanSections, []);
+ok("首页标签覆盖全部选修课", electiveGroupList.every((g) => g.items.every((i) => homeLabels.includes(i.name))));
 
 console.log("\n=== 3. 新增页面（案例 / 常见问题 / 时间安排）===");
 const faq = getFaqContent();

@@ -17,6 +17,14 @@ export function generateMetadata(): Metadata {
 }
 
 /**
+ * 从学段小节标题取出锚点名：取「｜」前的部分。
+ * 「小学语文｜建立阅读与表达的基础」→「小学语文」
+ */
+function bandAnchor(title: string): string {
+  return title.split("｜")[0]?.trim() ?? title;
+}
+
+/**
  * 从学段小节标题里取出学段名，用于卡片标签。
  * 「初中数学｜建立数学模型」→「初中」；语言类课程（雅思 / 法语等）无此形式，返回空串。
  */
@@ -33,7 +41,7 @@ const PROSE_CLASS =
   "[&_ul]:mt-3 [&_ul]:list-disc [&_ul]:pl-5";
 
 export default function CoursesPage() {
-  const { heading, courses, electiveTitle, electives } = getCoursesPage();
+  const { heading, courses, electiveTitle, electiveGroups } = getCoursesPage();
   const featured = getFeaturedContent();
 
   return (
@@ -45,13 +53,10 @@ export default function CoursesPage() {
       />
 
       <Container>
-        {/* 特色课程：按需求（而非按学科）选课。放在学科卡片上方，
+        {/* 特色课程：按需求（而非按学科）选课。放在最前，
             因为「按目标选课」比「按学科浏览」更接近家长的实际决策路径。 */}
-        <Section
-          title="特色课程"
-          description={featured.description}
-        >
-          <CourseTree courses={featured.courses} />
+        <Section title="特色课程" description={featured.description}>
+          <CourseTree courses={featured.courses} level={3} />
           <p className="mt-6">
             <Link
               href={FEATURED_INDEX_HREF}
@@ -63,11 +68,14 @@ export default function CoursesPage() {
         </Section>
 
         {/*
-          学科总览：学段以标签并排显示，同一学科的小学 / 初中 / 高中可直接对比。
-          用 compact 尺寸并把列数提到 4 列（宽屏），17 个学科能一屏看完，
-          不必滚动就能发现有哪些学科、各有哪些学段。
+          学科总览：学段以标签并排显示。
+          用 compact 尺寸并把列数提到 4 列（宽屏），17 个学科能一屏看完。
         */}
-        <Section className="pb-0">
+        <Section
+          title="学科总览"
+          description="点击学科卡片可跳到该学科的学段说明。"
+          className="border-t border-ink-200 pb-0"
+        >
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
             {courses.map((course) => (
               <CourseCard
@@ -82,7 +90,9 @@ export default function CoursesPage() {
           </div>
         </Section>
 
-        <Section className="border-t border-ink-200">
+        {/* 学科详情：每个学段小节都带锚点 id，
+            首页卡片的标签借此跳到对应学段（如「小学语文」）。 */}
+        <Section title="学科详情">
           <div className="space-y-12">
             {courses.map((course) => (
               <article
@@ -90,26 +100,24 @@ export default function CoursesPage() {
                 id={course.id}
                 className="scroll-mt-24 border-b border-ink-100 pb-12 last:border-0 last:pb-0"
               >
-                <h2 className="text-xl font-medium text-ink-900">{course.nameZh}</h2>
+                <h3 className="text-xl font-medium text-ink-900">{course.nameZh}</h3>
 
-                {/* 导语：课程名与第一个学段小节之间的文字 */}
                 {course.lead !== "" && (
                   <div
                     className={PROSE_CLASS}
-                    // 内容来自项目自己的 Markdown 文件，renderMarkdown 内部已做 HTML 转义。
                     dangerouslySetInnerHTML={{ __html: renderMarkdown(course.lead) }}
                   />
                 )}
 
-                {/* 学段小节：小学 / 初中 / 高中各一段 */}
                 {course.bands.length > 0 && (
                   <div className="mt-6 space-y-6">
                     {course.bands.map((band) => (
                       <section
                         key={band.title}
-                        className="rounded-lg border border-ink-200 bg-white p-5"
+                        id={bandAnchor(band.title)}
+                        className="scroll-mt-24 rounded-lg border border-ink-200 bg-white p-5"
                       >
-                        <h3 className="text-base font-medium text-ink-900">{band.title}</h3>
+                        <h4 className="text-base font-medium text-ink-900">{band.title}</h4>
                         <div
                           className={PROSE_CLASS}
                           dangerouslySetInnerHTML={{ __html: renderMarkdown(band.content) }}
@@ -123,33 +131,37 @@ export default function CoursesPage() {
           </div>
         </Section>
 
-        {/* 选修课程：成人课程与课外兴趣。与学科课程分开呈现，
-            并标注开放状态（暂未开放的课有助于家长了解后续规划）。 */}
-        {electives.length > 0 && (
-          <Section
-            title={electiveTitle}
-            description="以下课程面向成人学员与课外兴趣需求，正在筹备中。"
-            className="border-t border-ink-200"
-          >
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              {electives.map((course) => (
-                <div
-                  key={course.id}
-                  className="rounded-lg border border-ink-200 bg-white p-5"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <h3 className="text-sm font-medium text-ink-900">{course.name}</h3>
-                    {!course.available && (
-                      <span className="shrink-0 rounded-sm border border-warning-100 bg-warning-50 px-1.5 py-0.5 text-[11px] text-warning-600">
-                        暂未开放
-                      </span>
-                    )}
+        {/* 选修课程：按栏目分节（外语 / 课外兴趣 / 成人课程），与首页卡片栏目一致。
+            每门课带锚点 id，首页标签可跳到对应课程。 */}
+        {electiveGroups.length > 0 && (
+          <Section title={electiveTitle} className="border-t border-ink-200">
+            <div className="space-y-10">
+              {electiveGroups.map((group) => (
+                <div key={group.title}>
+                  <h3 className="text-base font-medium text-ink-900">{group.title}</h3>
+                  <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    {group.items.map((course) => (
+                      <div
+                        key={course.id}
+                        id={course.id}
+                        className="scroll-mt-24 rounded-lg border border-ink-200 bg-white p-5"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <h4 className="text-sm font-medium text-ink-900">{course.name}</h4>
+                          {!course.available && (
+                            <span className="shrink-0 rounded-sm border border-warning-100 bg-warning-50 px-1.5 py-0.5 text-[11px] text-warning-600">
+                              暂未开放
+                            </span>
+                          )}
+                        </div>
+                        {course.description !== "" && (
+                          <p className="mt-2 text-xs leading-relaxed text-ink-600">
+                            {course.description}
+                          </p>
+                        )}
+                      </div>
+                    ))}
                   </div>
-                  {course.description !== "" && (
-                    <p className="mt-2 text-xs leading-relaxed text-ink-600">
-                      {course.description}
-                    </p>
-                  )}
                 </div>
               ))}
             </div>

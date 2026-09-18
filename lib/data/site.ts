@@ -112,7 +112,28 @@ export function getHomeContent(): HomeContent {
     },
     stats: getGroup(page, "首屏数据").items,
     features: getGroup(page, "教学特色").items,
-    courses: getGroup(page, "首页课程卡片").items,
+    courses: getGroup(page, "首页课程卡片").items.map((item) => {
+      /**
+       * 值形如「栏目: 小学课内 · 标签: 小学语文、小学数学」
+       * 标签可写成「标签→目标小节」（如「英语→高中英语」），
+       * 未写目标时以标签本身作为目标小节名。
+       */
+      const group = /栏目\s*[:：]\s*([^·]+)/.exec(item.value)?.[1]?.trim() ?? "";
+      const tagText = /标签\s*[:：]\s*(.+)$/.exec(item.value)?.[1]?.trim() ?? "";
+      const tags = tagText
+        .split(/[、,，]/)
+        .map((raw) => raw.trim())
+        .filter((raw) => raw !== "")
+        .map((raw) => {
+          const [label = "", target] = raw.split(/→|->/).map((x) => x.trim());
+          return { label, target: target !== undefined && target !== "" ? target : label };
+        });
+
+      // 卡片标题留空时，用第一个标签作为标题（例如「小学课内」这一类卡片）
+      const title = item.title.trim() !== "" ? item.title.trim() : (tags[0]?.label ?? "");
+
+      return { group, title, tags };
+    }),
     classrooms: getGroup(page, "教室照片格位").items,
     trial: {
       eyebrow: pageString(page, "trial_eyebrow"),
@@ -184,9 +205,10 @@ export function getHomeSectionHeadings(): {
 export function getCoursesPage(): {
   heading: SectionHeading;
   courses: Course[];
-  /** 选修类课程（成人 / 课外兴趣）的父分组名称。 */
+  /** 选修类课程的父分组名称。 */
   electiveTitle: string;
-  electives: ElectiveCourse[];
+  /** 选修课按栏目（外语 / 课外兴趣 / 成人课程）分组。 */
+  electiveGroups: Array<{ title: string; items: ElectiveCourse[] }>;
 } {
   const page = getPageBlock("课程");
 
@@ -215,15 +237,26 @@ export function getCoursesPage(): {
     id: child.name,
     name: child.name,
     description: child.body.trim(),
+    // 「栏目」把选修课分到外语 / 课外兴趣 / 成人课程
+    group: child.fields.find((field) => field.name === "栏目")?.value.trim() ?? "",
     available:
       child.fields.find((field) => field.name === "状态")?.value.trim() !== "暂未开放",
   }));
+
+  // 按「栏目」字段把选修课分组，并保持数据文件中的出现顺序
+  const electiveGroups: Array<{ title: string; items: ElectiveCourse[] }> = [];
+  for (const course of electives) {
+    const title = course.group !== "" ? course.group : (electiveGroup?.name ?? "选修课程");
+    const existing = electiveGroups.find((g) => g.title === title);
+    if (existing !== undefined) existing.items.push(course);
+    else electiveGroups.push({ title, items: [course] });
+  }
 
   return {
     heading: pageHeading(page),
     courses,
     electiveTitle: electiveGroup?.name ?? "",
-    electives,
+    electiveGroups,
   };
 }
 

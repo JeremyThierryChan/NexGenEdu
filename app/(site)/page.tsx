@@ -1,14 +1,14 @@
 import type { Metadata } from "next";
 import Image from "next/image";
-import { CourseCard } from "@/components/courses/CourseCard";
+import { TagCard } from "@/components/courses/TagCard";
 import { FeatureCard } from "@/components/site/FeatureCard";
 import { TeacherCard } from "@/components/teachers/TeacherCard";
 import { ButtonLink } from "@/components/ui/Button";
 import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
 import { getCasesContent } from "@/lib/data/pages";
+import { bandAnchorHref } from "@/lib/site/featured-routes";
 import {
-  getCoursesPage,
   getHomeContent,
   getHomeSectionHeadings,
   getSiteBrand,
@@ -58,11 +58,18 @@ function excerpt(text: string, maxLength: number): string {
   return plain.length > maxLength ? `${plain.slice(0, maxLength)}…` : plain;
 }
 
+/**
+ * 首页课程卡片的栏目顺序。
+ *
+ * 按学段从低到高排列，再排外语 —— 家长通常先看孩子当前学段。
+ * 栏目名来自 content.md 卡片上的「栏目」字段，改数据即可调整归属。
+ */
+const COURSE_GROUPS = ["小学课内", "初中课内", "高中课内", "外语", "课外兴趣", "成人课程"] as const;
+
 export default function HomePage() {
   const home = getHomeContent();
   const headings = getHomeSectionHeadings();
   const { teachers } = getTeachersPage();
-  const { courses } = getCoursesPage();
   const { cases } = getCasesContent();
 
   return (
@@ -130,35 +137,42 @@ export default function HomePage() {
         </Section>
       </Container>
 
-      {/* 课程 */}
+      {/* 课程：按栏目分组（小学课内 / 初中课内 / 高中课内 / 外语 / 课外兴趣 / 成人课程），
+          卡片内的每个标签都可点，跳到课程页对应的小节 */}
       <div className="border-y border-ink-200 bg-ink-50">
         <Container>
-          <Section
-            eyebrow={headings.courses.eyebrow}
-            title={headings.courses.title}
-            description={headings.courses.description}
-          >
-            <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-              {home.courses.map((entry) => {
-                // 首页只显示学科名与标签，详情链接到 courses.md 中的对应课程。
-                const detail = courses.find((course) => course.nameZh === entry.title);
-                return (
-                  <CourseCard
-                    key={entry.title}
-                    title={entry.title}
-                    // 学段写在同一行、用顿号分隔，这里拆成标签并排显示
-                    bands={(entry.value ?? "").split(/[、,，|]/).map((x) => x.trim()).filter(Boolean)}
-                    href={detail === undefined ? "/courses" : `/courses#${encodeURIComponent(detail.id)}`}
-                    linkLabel="查看学段与教学说明"
-                  />
-                );
-              })}
-            </div>
-            <p className="mt-6">
-              <ButtonLink href={headings.coursesLink.href} variant="outline" size="sm">
-                {headings.coursesLink.label}
-              </ButtonLink>
-            </p>
+          {COURSE_GROUPS.map((groupName, index) => {
+            const items = home.courses.filter((course) => course.group === groupName);
+            if (items.length === 0) return null;
+
+            return (
+              <Section
+                key={groupName}
+                eyebrow={index === 0 ? headings.courses.eyebrow : undefined}
+                title={groupName}
+                description={index === 0 ? headings.courses.description : undefined}
+                className={index === 0 ? undefined : "border-t border-ink-100"}
+              >
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {items.map((entry) => (
+                    <TagCard
+                      key={`${entry.title}-${groupName}`}
+                      title={entry.title}
+                      tags={entry.tags.map((tag) => ({
+                        label: tag.label,
+                        href: bandAnchorHref(tag.target),
+                      }))}
+                    />
+                  ))}
+                </div>
+              </Section>
+            );
+          })}
+
+          <Section className="pt-0">
+            <ButtonLink href={headings.coursesLink.href} variant="outline" size="sm">
+              {headings.coursesLink.label}
+            </ButtonLink>
           </Section>
         </Container>
       </div>

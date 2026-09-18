@@ -46,7 +46,8 @@ export type HomeContent = {
   secondaryCta: { label: string; href: string };
   stats: LabeledItem[];
   features: LabeledItem[];
-  courses: LabeledItem[];
+  /** 首页课程卡片：按栏目分组，每张卡片含若干可点击标签。 */
+  courses: CourseCardItem[];
   classrooms: LabeledItem[];
   /** 试课体验区块。 */
   trial: {
@@ -64,6 +65,16 @@ export type HomeContent = {
     cta: { label: string; href: string };
   };
   cta: { title: string; description: string; label: string; href: string };
+};
+
+/** 首页课程卡片的一张卡片。 */
+export type CourseCardItem = {
+  /** 栏目名（小学课内 / 初中课内 / 高中课内 / 外语 / 课外兴趣 / 成人课程）。 */
+  group: string;
+  /** 卡片标题；标签只有一个时可留空，此时以标签作为标题。 */
+  title: string;
+  /** 卡片上的标签；每个标签可点，标签文字与跳转目标分开存。 */
+  tags: Array<{ label: string; target: string }>;
 };
 
 /** 区块标题（首页各区块共用）。 */
@@ -85,6 +96,8 @@ export type ElectiveCourse = {
   name: string;
   /** 一句话介绍（取该分组下的正文）。 */
   description: string;
+  /** 所属栏目（外语 / 课外兴趣 / 成人课程）。 */
+  group: string;
   /** 是否已开放报名。 */
   available: boolean;
 };

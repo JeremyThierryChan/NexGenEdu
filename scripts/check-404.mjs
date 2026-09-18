@@ -18,6 +18,15 @@ if (!existsSync(file)) {
 }
 
 const html = readFileSync(file, "utf8");
+
+// 站内链接前缀取决于本次构建是否注入 NEXT_PUBLIC_BASE_PATH：
+// CI 部署时带 /NexGenEdu，本地直接 build 则没有。
+// 这里原先硬编码 /NexGenEdu，导致本地构建后必然误报一项失败。
+const basePath = (process.env.NEXT_PUBLIC_BASE_PATH ?? "").replace(/\/+$/, "");
+const siteLink = new RegExp(
+  `href="${basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/(courses|quote|faq|cases|schedule)/"`,
+);
+
 const checks = [
   ["自定义标题", html.includes("这一页还没学到")],
   ["页码意象文案", html.includes("还没印上去的页码")],
@@ -25,7 +34,7 @@ const checks = [
   ["返回首页入口", html.includes("回到首页")],
   ["页头品牌（含页脚 Layout 未被绕过）", html.includes("NexGenEdu")],
   ["页脚版权", html.includes("保留所有权利")],
-  ["含 basePath 的站内链接", /href="\/NexGenEdu\/(courses|quote|faq|cases|schedule)\//.test(html)],
+  [`站内链接前缀（basePath="${basePath}"）`, siteLink.test(html)],
   ["未残留默认 Next 404 文案", !html.includes("This page could not be found")],
 ];
 
