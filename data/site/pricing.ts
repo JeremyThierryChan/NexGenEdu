@@ -2,6 +2,7 @@
  * 本文件由 scripts/sync-content.mjs 自动生成，请勿手工编辑。
  * 内容来源：data/site/pricing.md —— 修改后执行 npm run sync-content。
  */
+export const pricingSyncedAt = "2026-09-18T06:59:21.903Z";
 export const pricingSource = `# NexGenEdu · 新锐教培 · 报价数据
 
 > 这个文件决定报价页面的可选项与价格。**公式不在这里** —— 公式在 \`lib/pricing/quote.ts\`。

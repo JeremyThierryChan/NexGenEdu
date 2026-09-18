@@ -2,6 +2,7 @@
  * 本文件由 scripts/sync-content.mjs 自动生成，请勿手工编辑。
  * 内容来源：data/site/featured.md —— 修改后执行 npm run sync-content。
  */
+export const featuredSyncedAt = "2026-09-18T06:59:21.905Z";
 export const featuredSource = `# NexGenEdu · 新锐教培 · 特色课程
 
 > 这个文件决定「特色课程」页面与各课程的独立页面。

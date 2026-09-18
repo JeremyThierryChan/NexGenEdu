@@ -112,6 +112,16 @@ function splitTitle(raw: string): {
 }
 
 /** 解析一个分组块（`### 分组名` 的内容）。 */
+/**
+ * 内容文件的格式问题只警告、不抛错。
+ *
+ * 这样一处笔误不会让整页 500（此前需要重启开发服务器才能恢复），
+ * 作者能在终端看到明确提示，页面则渲染为对应的空内容。
+ */
+function warn(message: string): void {
+  console.warn(`[content] ${message}`);
+}
+
 /** 标题块：一段以某个层级标题开头的内容。 */
 type HeadingBlock = {
   /** 标题层级（井号数）。 */
@@ -253,9 +263,10 @@ function parsePage(name: string, block: string): PageBlock {
 
   // 页面短字段是一个 `--- ... ---` 块，位于该页面内容的开头。
   if (!trimmed.startsWith("---")) {
-    throw new Error(
-      `data/site/content.md 的「## 页面: ${name}」缺少 --- 包裹的字段块。`,
-    );
+    // 不抛错：内容文件的格式问题不应让整站 500，
+    // 返回空短字段 + 该段落全部作为正文（页面仍可渲染，只是缺字段）。
+    warn(`「## 页面: ${name}」缺少 --- 包裹的字段块，该段短字段将为空。`);
+    return { name, data: {}, groups: collectGroups(trimmed) };
   }
   // 找字段块的结束分隔符：一行只有 `---` 的内容。
   //
@@ -266,7 +277,8 @@ function parsePage(name: string, block: string): PageBlock {
   // 因此限定：该行恰好是 `---`，且**不含冒号**（frontmatter 字段必然含冒号）。
   const closingMatch = /^---[ \t]*$/m.exec(trimmed.slice(3));
   if (closingMatch === null) {
-    throw new Error(`data/site/content.md 的「## 页面: ${name}」字段块未闭合（缺少 ---）。`);
+    warn(`「## 页面: ${name}」字段块未闭合（缺少 ---），该段短字段将为空。`);
+    return { name, data: {}, groups: collectGroups(trimmed) };
   }
   const closingIndex = 3 + closingMatch.index;
   const closingDelimiter = closingMatch[0];
@@ -302,6 +314,10 @@ export function parseDocument(source: string): ContentDocument {
   };
 
   for (const line of source.split(/\r?\n/)) {
+    // 跳过引用块（`> ...`）：文件头的说明里会写示例「## 页面: xxx」，
+    // 不加这一条就会被当成真正的页面标记，导致页面名错乱或取到空页面。
+    if (line.trimStart().startsWith(">")) continue;
+
     const marker = markerPattern.exec(line);
     if (marker?.[1] !== undefined) {
       flush();
@@ -313,7 +329,9 @@ export function parseDocument(source: string): ContentDocument {
   flush();
 
   if (pages.size === 0) {
-    throw new Error("内容文件中没有找到任何「## 页面: xxx」段落。");
+    // 同样不抛错：文件内容有问题时页面继续渲染（内容为空），
+    // 由控制台警告提示作者，而不是让用户看到 500。
+    warn("内容文件中没有找到任何「## 页面: xxx」段落，本文件将被视为空。");
   }
 
   return { pages };
@@ -340,13 +358,21 @@ export type DocumentName = keyof typeof DOCUMENTS;
 /** 解析后的文档缓存：文件内容是编译期常量，解析结果可安全复用。 */
 const documentCache = new Map<DocumentName, ContentDocument>();
 
-/** 取某个内容文件（已解析）。 */
+/**
+ * 取某个内容文件（已解析）。
+ *
+ * 缓存策略有个例外：**解析结果为空时不缓存**。
+ * 原因：内容文件写错（例如页面标记被改坏）时解析结果为空，
+ * 若把空结果缓存下来，作者改回正确内容后本进程仍会返回旧的空结果 ——
+ * 表现为「改好了还是空白，必须重启」。空结果解析成本极低，重解析即可。
+ */
 export function getDocument(name: DocumentName): ContentDocument {
   const cached = documentCache.get(name);
   if (cached !== undefined) return cached;
 
   const source = DOCUMENTS[name];
   const doc = parseDocument(source);
+  if (doc.pages.size === 0) return doc; // 不缓存空结果
   documentCache.set(name, doc);
   return doc;
 }
@@ -358,10 +384,26 @@ export function getDocument(name: DocumentName): ContentDocument {
  */
 export function getPage(document: DocumentName, page: string): PageBlock {
   const found = getDocument(document).pages.get(page);
-  if (found === undefined) {
-    throw new Error(`data/site/${document}.md 中缺少「## 页面: ${page}」段落。`);
-  }
-  return found;
+  if (found !== undefined) return found;
+
+  // 缓存里没有该页面时，清掉本文件缓存后重解析一次：
+  // 内容可能刚被修好，而缓存里留着上一版（缺少该页面）的结果。
+  documentCache.delete(document);
+  const retried = getDocument(document).pages.get(page);
+  if (retried !== undefined) return retried;
+
+  // 严禁 500：页面名写错（例如手改时改动了「## 页面: xxx」）时
+  // 只提示作者并渲染空内容，站点其余部分不受影响。
+  warn(
+    `data/site/${document}.md 中缺少「## 页面: ${page}」段落。` +
+      `请检查该文件的页面标记是否被改动。本页将渲染为空。`,
+  );
+  return { name: page, data: {}, groups: [] };
+}
+
+/** 页面是否存在（需要区分「空页面」与「页面为空的正常情况」时使用）。 */
+export function hasPage(document: DocumentName, page: string): boolean {
+  return getDocument(document).pages.has(page);
 }
 
 /** 取 content.md 里的页面（最常用，单独提供便捷函数）。 */
