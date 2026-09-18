@@ -9,6 +9,7 @@ import { Panel, SelectInput, TextAreaField, TextField } from "@/components/admin
 import { api, COURSE_STATUSES, type Course, type CourseSummary } from "@/lib/backend/api";
 import { getCourseCategoryOptions, getFormOptions } from "@/lib/backend/options";
 import { canRemoveCourse } from "@/lib/backend/courses";
+import { pricingStatusForCourses, type LibraryPricingStatus } from "@/lib/backend/pricing";
 import { cn } from "@/lib/utils/cn";
 
 /**
@@ -25,6 +26,8 @@ import { cn } from "@/lib/utils/cn";
  */
 export default function AdminCoursesPage() {
   const [courses, setCourses] = useState<Course[] | null>(null);
+  /** 每门课在报价配置里的定价状态（「打通」的可见部分）。 */
+  const [pricingStatus, setPricingStatus] = useState<LibraryPricingStatus[]>([]);
   const [summary, setSummary] = useState<CourseSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
@@ -47,9 +50,14 @@ export default function AdminCoursesPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [list, stats] = await Promise.all([api.courses.list(), api.courses.summary()]);
+    const [list, stats, config] = await Promise.all([
+      api.courses.list(),
+      api.courses.summary(),
+      api.pricing.get(),
+    ]);
     setCourses(list);
     setSummary(stats);
+    setPricingStatus(pricingStatusForCourses(config, list));
     setLoading(false);
   }, []);
 
@@ -159,6 +167,17 @@ export default function AdminCoursesPage() {
     [courses, keyword, originFilter],
   );
 
+  /** 还没配价格的课程（家长问价时答不上来的那些）。 */
+  const unpricedCount = useMemo(
+    () => pricingStatus.filter((item) => !item.priced).length,
+    [pricingStatus],
+  );
+  const priceOf = useMemo(() => {
+    const map = new Map<string, LibraryPricingStatus>();
+    for (const item of pricingStatus) map.set(item.courseId, item);
+    return map;
+  }, [pricingStatus]);
+
   const grouped = useMemo(() => {
     const map = new Map<string, Course[]>();
     for (const course of visible) {
@@ -188,6 +207,10 @@ export default function AdminCoursesPage() {
         <code className="mx-1 rounded bg-white/70 px-1">data/site/content.md</code>
         的课程栏目里加一张卡片（见内容维护手册）。反过来，网站上新加了课程卡片后，
         点下面的「从网站同步」把它拉进课程库即可。
+        <br />
+        <strong className="font-medium">与报价的关系：</strong>
+        课程库决定「能排哪些课」，报价页决定「这门课多少钱」。每门课下面是它的报价状态；
+        没定价的课到「报价」页填一个基础价（那一步之后还要「导出配置」才会出现在家长的报价页上）。
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -198,6 +221,7 @@ export default function AdminCoursesPage() {
           <span className="text-xs text-ink-500">
             共 {summary.total} 门（网站 {summary.fromSite} · 后台 {summary.fromAdmin}）· 开放{" "}
             {summary.open} · 暂未开放 {summary.unavailable}
+            {unpricedCount > 0 && ` · 未定价 ${unpricedCount} 门`}
           </span>
         )}
       </div>
@@ -372,6 +396,26 @@ export default function AdminCoursesPage() {
                       {course.note !== "" && (
                         <p className="mt-1 text-[11px] text-ink-400">{course.note}</p>
                       )}
+
+                      {/* 报价状态：课程库与报价配置「打通」之后，这里能一眼看出哪门课还没定价 */}
+                      {(() => {
+                        const status = priceOf.get(course.id);
+                        if (status === undefined) return null;
+                        if (!status.priced) {
+                          return (
+                            <p className="mt-1 text-[11px] text-warning-600">
+                              未定价 —— 到「报价」页给它填一个基础价，家长问价时才有依据
+                            </p>
+                          );
+                        }
+                        return (
+                          <p className="mt-1 text-[11px] text-ink-500">
+                            {status.basePrice === null
+                              ? `已关联报价（${status.stageName} · 暂未开放）`
+                              : `报价 ${status.basePrice} 元/节（${status.stageName}）`}
+                          </p>
+                        );
+                      })()}
 
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <button

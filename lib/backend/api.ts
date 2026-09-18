@@ -30,6 +30,7 @@ import { DEFAULT_TEACHER_SHARE_RULES } from "@/lib/data/pricing";
 import {
   PRICING_SOURCE_ADMIN,
   pricingConfigFromContent,
+  syncLibraryLinks,
   teacherFeeForSelection,
   pricingConfigToMarkdown,
   quoteSelection,
@@ -656,6 +657,26 @@ function describePricingChange(before: PricingConfig, after: PricingConfig): str
   return `修改报价配置：${changes}`;
 }
 
+/**
+ * 课程库改了之后，让报价配置跟着走（改名跟随、停开跟随、删除后置为暂未开放）。
+ *
+ * 放在服务层而不是页面里：改名发生在编辑课程的那一刻，页面可能根本没打开报价页 ——
+ * 依赖页面自觉调用一定会漏，然后两边就悄悄分叉了（家长看到旧课名、或者报了已停开的课）。
+ */
+function syncPricingWithCourses(db: Database): string[] {
+  const { config, changes } = syncLibraryLinks(db.pricing, db.courses);
+  if (changes.length === 0) return [];
+
+  db.pricing = { ...config, source: PRICING_SOURCE_ADMIN, updatedAt: nowIso() };
+  writeLog(db, {
+    entity: "报价",
+    action: "跟随课程库",
+    targetId: "pricing",
+    summary: changes.join("；"),
+  });
+  return changes;
+}
+
 function fileSummary(fromVersion: number, db: Database): string {
   return `v${fromVersion} → v${db.version}，${db.students.length} 名学生、${db.lessons.length} 节课`;
 }
@@ -1019,6 +1040,7 @@ export const api = {
 
       const created: Course = { ...input, id: nextId("course") };
       db.courses.push(created);
+      syncPricingWithCourses(db);
       writeLog(db, {
         entity: "课程",
         action: "新建",
@@ -1041,6 +1063,7 @@ export const api = {
       if (problems.length > 0) throw new Error(problems.join("；"));
 
       Object.assign(target, next);
+      syncPricingWithCourses(db);
       writeLog(db, {
         entity: "课程",
         action: "修改",
@@ -1068,6 +1091,7 @@ export const api = {
       if (!verdict.ok) throw new Error(verdict.reason);
 
       db.courses.splice(index, 1);
+      syncPricingWithCourses(db);
       writeLog(db, {
         entity: "课程",
         action: "删除",
@@ -1091,6 +1115,7 @@ export const api = {
       const merged = mergeSiteCourses(db.courses);
       if (merged.added.length > 0) {
         db.courses = merged.courses;
+        syncPricingWithCourses(db);
         writeLog(db, {
           entity: "课程",
           action: "同步",

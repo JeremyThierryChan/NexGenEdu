@@ -5,8 +5,11 @@ import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { NumberInput, Panel, SelectInput, TextField } from "@/components/admin/AdminFields";
-import { api } from "@/lib/backend/api";
+import { api, type Course } from "@/lib/backend/api";
+import { MultiSelect } from "@/components/admin/MultiSelect";
 import {
+  addLibraryCourseToPricing,
+  pricingStatusForCourses,
   PRICING_SOURCE_ADMIN,
   validatePricingConfig,
   type PricingConfig,
@@ -43,6 +46,13 @@ export default function AdminPricingPage() {
   const [message, setMessage] = useState("");
   const [problems, setProblems] = useState<string[]>([]);
   const [exported, setExported] = useState("");
+  /** 课程库：报价要跟着它走（改名跟随、停开跟随）。 */
+  const [libraryCourses, setLibraryCourses] = useState<Course[]>([]);
+  /** 待定价的课程库课程（多选）。 */
+  const [pickedCourses, setPickedCourses] = useState<string[]>([]);
+  const [targetStage, setTargetStage] = useState("");
+  const [newStageName, setNewStageName] = useState("");
+  const [newCoursePrice, setNewCoursePrice] = useState(300);
   const [copied, setCopied] = useState(false);
 
   // 试算器
@@ -62,9 +72,11 @@ export default function AdminPricingPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const config = await api.pricing.get();
+    const [config, courses] = await Promise.all([api.pricing.get(), api.courses.list()]);
     setSaved(config);
     setDraft(config);
+    setLibraryCourses(courses);
+    setTargetStage((current) => current || (config.stages[0]?.name ?? ""));
     setCourseName((current) => current || (config.stages[0]?.courses[0]?.name ?? ""));
     setClassTypeName((current) => current || (config.classTypes[0]?.name ?? ""));
     setDurationName((current) => current || (config.durations[0]?.name ?? ""));
@@ -111,6 +123,49 @@ export default function AdminPricingPage() {
       setSubjectName(subjectsOfCourse[0]?.name ?? "");
     }
   }, [subjectName, subjectsOfCourse]);
+
+  /** 课程库里还没定价的课程（家长问价时答不上来的那些）。 */
+  const unpricedCourses = useMemo(() => {
+    if (draft === null) return [];
+    return pricingStatusForCourses(draft, libraryCourses).filter((item) => !item.priced);
+  }, [draft, libraryCourses]);
+
+  /** 有多少课程库课程已定价（列表顶部显示进度）。 */
+  const pricedCount = libraryCourses.length - unpricedCourses.length;
+
+  /**
+   * 把课程库里选中的课程加进报价配置（填一个基础价）。
+   *
+   * 只改草稿，**不直接落库**：与这一页其它字段一样，改完点「保存修改」——
+   * 否则一次误点就写进了配置，而这个配置是算钱的依据。
+   */
+  function addPickedCourses() {
+    if (draft === null || pickedCourses.length === 0) return;
+    const stageName = targetStage === "__new__" ? newStageName.trim() : targetStage;
+    if (stageName === "") {
+      setMessage("请先选择或填写一个阶段名。");
+      return;
+    }
+    edit((next) => {
+      for (const courseId of pickedCourses) {
+        const course = libraryCourses.find((item) => item.id === courseId);
+        if (course === undefined) continue;
+        const result = addLibraryCourseToPricing(next, {
+          courseId: course.id,
+          name: course.name,
+          stageName,
+          basePrice: newCoursePrice,
+          available: course.status === "开放",
+        });
+        next.stages = result.config.stages;
+      }
+    });
+    setMessage(
+      `已把 ${pickedCourses.length} 门课加进「${stageName}」（基础价 ${newCoursePrice} 元/节）。` +
+        "确认价格后点「保存修改」；要上线到家长看到的报价页，还需要「导出配置」并替换内容文件。",
+    );
+    setPickedCourses([]);
+  }
 
   async function save() {
     if (draft === null) return;
@@ -421,6 +476,88 @@ export default function AdminPricingPage() {
         )}
       </Panel>
 
+      {/* ── 课程库课程定价：把「能排的课」变成「有价的课」 ── */}
+      <Panel
+        title="课程库课程定价"
+        description="课程库里能排的课，在这里给它们一个基础价，家长问价时才有依据。"
+        className="mt-5"
+      >
+        <div className="space-y-4 px-4 py-4">
+          <p className="text-xs leading-relaxed text-ink-500">
+            课程库共 {libraryCourses.length} 门，已定价 {pricedCount} 门
+            {unpricedCourses.length > 0 && `，还有 ${unpricedCourses.length} 门没价格`}。
+            课程库决定了「能排哪些课」，这一页决定「这门课多少钱」；课程库里改了名字或设为
+            暂未开放，这里会跟着变（保存时会自动同步）。
+          </p>
+
+          {unpricedCourses.length === 0 ? (
+            <p className="text-xs text-success-600">课程库里的课程都已有报价配置。</p>
+          ) : (
+            <>
+              <MultiSelect
+                label="选择要定价的课程"
+                hint="可多选；一次给多门课定同一个基础价"
+                options={unpricedCourses.map((item) => ({ value: item.name }))}
+                value={pickedCourses
+                  .map((id) => libraryCourses.find((course) => course.id === id)?.name ?? "")
+                  .filter((name) => name !== "")}
+                onChange={(names) =>
+                  setPickedCourses(
+                    names
+                      .map((name) => libraryCourses.find((course) => course.name === name)?.id ?? "")
+                      .filter((id) => id !== ""),
+                  )
+                }
+                placeholder="选择还没定价的课程"
+              />
+
+              <div className="grid gap-3 sm:grid-cols-3">
+                <SelectInput
+                  label="放进哪个阶段"
+                  hint="对应报价页上的分组"
+                  value={targetStage}
+                  onChange={(event) => setTargetStage(event.target.value)}
+                  options={[
+                    ...draft.stages.map((stage) => ({ value: stage.name, label: stage.name })),
+                    { value: "__new__", label: "＋ 新建一个阶段" },
+                  ]}
+                />
+                {targetStage === "__new__" && (
+                  <TextField
+                    label="新阶段名"
+                    hint="例如「兴趣才艺」"
+                    value={newStageName}
+                    onChange={(event) => setNewStageName(event.target.value)}
+                    placeholder="兴趣才艺"
+                  />
+                )}
+                <NumberInput
+                  label="基础价"
+                  hint="一对一、1 小时、报 2 节及以上的价格"
+                  suffix="元 / 节"
+                  min={0}
+                  value={newCoursePrice}
+                  onChange={(event) => setNewCoursePrice(Number(event.target.value))}
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  variant="secondary"
+                  onClick={addPickedCourses}
+                  disabled={pickedCourses.length === 0}
+                >
+                  加入报价配置（{pickedCourses.length} 门）
+                </Button>
+                <span className="text-xs text-ink-400">
+                  加入后还需要点上面的「保存修改」；上线到家长看到的报价页要再「导出配置」。
+                </span>
+              </div>
+            </>
+          )}
+        </div>
+      </Panel>
+
       {/* ── 基础价 ── */}
       <Panel
         title="基础价"
@@ -434,7 +571,14 @@ export default function AdminPricingPage() {
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {stage.courses.map((course, courseIndex) => (
                   <div key={course.name} className="rounded-md border border-ink-200 px-3 py-2.5">
-                    <p className="mb-2 text-sm text-ink-800">{course.name}</p>
+                    <p className="mb-2 flex items-center gap-1.5 text-sm text-ink-800">
+                      {course.name}
+                      {course.courseId !== undefined && course.courseId !== "" && (
+                        <span className="rounded-sm border border-brand-200 bg-brand-50 px-1 py-0.5 text-[10px] text-brand-700">
+                          课程库
+                        </span>
+                      )}
+                    </p>
                     <div className="flex items-end gap-2">
                       <NumberInput
                         label=""

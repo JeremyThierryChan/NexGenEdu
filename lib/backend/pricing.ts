@@ -73,6 +73,14 @@ export type PricingCourse = {
   /** 基础价；null 表示暂未开放（不可选、不可报价）。 */
   basePrice: number | null;
   available: boolean;
+  /**
+   * 关联到课程库的课程 id（后台「课程库」里那门课）。
+   *
+   * 有它才叫「打通」：课程库里改了名字这里跟着改、课程停了价也跟着停，
+   * 而不是两边各留一个名字慢慢对不上。网站内容里没有这个概念（写进 Markdown 的就是
+   * 名字 + 价格），所以导出/回读时这一项会被忽略 —— 见 `pricingConfigCore`。
+   */
+  courseId?: string;
 };
 
 /** 一个学习阶段（小学 / 初中阶段 / …）及其课程。 */
@@ -819,12 +827,25 @@ export function pricingConfigToMarkdown(config: PricingConfig): string {
   return lines.join("\n").trimEnd() + "\n";
 }
 
-/** 配置里与「钱」有关的可比较部分（导出回读校验用，忽略来源与时间）。 */
+/**
+ * 配置里与「钱」有关的可比较部分（导出回读校验用，忽略来源与时间）。
+ *
+ * **刻意忽略 `courseId`**：内容里的 Markdown 只写「课程名: 价格」，没有「这门课在后台
+ * 课程库里是哪一条」这种后台专属信息。忽略它，导出 → 替换内容文件 → 回读 才能一致；
+ * 后台自己的配置里这条关联一直保留（导出不会改动配置）。
+ */
 export function pricingConfigCore(config: PricingConfig): string {
   return JSON.stringify({
     rules: config.rules,
     teacherShare: config.teacherShare,
-    stages: config.stages,
+    stages: config.stages.map((stage) => ({
+      name: stage.name,
+      courses: stage.courses.map((course) => ({
+        name: course.name,
+        basePrice: course.basePrice,
+        available: course.available,
+      })),
+    })),
     subjects: config.subjects,
     classTypes: config.classTypes,
     durations: config.durations,
@@ -835,3 +856,150 @@ export function pricingConfigCore(config: PricingConfig): string {
 
 /** 默认规则（老数据 / 兜底）。 */
 export const FALLBACK_RULES: PricingRules = DEFAULT_PRICING_RULES;
+
+/* ── 六、课程库 ↔ 报价配置 的关联 ───────────────────────────────────── */
+
+/** 报价配置里一门课程的关联状态（课程库页面用来显示「已定价 / 未定价」）。 */
+export type LibraryPricingStatus = {
+  courseId: string;
+  name: string;
+  /** 已在报价配置里的阶段名；未定价时为空串。 */
+  stageName: string;
+  /** 基础价；未定价或未开放时为 null。 */
+  basePrice: number | null;
+  /** 是否已经在报价配置里（含暂未开放）。 */
+  priced: boolean;
+  /** 关联已失效：课程库里没有这门课了（但配置里还留着名字）。 */
+  dangling: boolean;
+};
+
+/** 在配置里按 id 或名字找一门课程。 */
+function findPricingCourse(
+  config: PricingConfig,
+  target: { courseId?: string; name: string },
+): { stage: PricingStage; course: PricingCourse } | null {
+  for (const stage of config.stages) {
+    for (const course of stage.courses) {
+      if (target.courseId !== undefined && target.courseId !== "" && course.courseId === target.courseId) {
+        return { stage, course };
+      }
+      if (course.name === target.name) return { stage, course };
+    }
+  }
+  return null;
+}
+
+/** 每个课程库课程的定价状态（课程库页面用）。 */
+export function pricingStatusForCourses(
+  config: PricingConfig,
+  courses: Array<{ id: string; name: string }>,
+): LibraryPricingStatus[] {
+  const linkedIds = new Set(
+    config.stages.flatMap((stage) => stage.courses.map((course) => course.courseId ?? "")).filter((id) => id !== ""),
+  );
+  return courses.map((course) => {
+    const found = findPricingCourse(config, { courseId: course.id, name: course.name });
+    return {
+      courseId: course.id,
+      name: course.name,
+      stageName: found?.stage.name ?? "",
+      basePrice: found?.course.basePrice ?? null,
+      priced: found !== null,
+      // 课程库里的这门课存在 → 能通过 id 或名字对上；对不上才算失效
+      dangling: found === null && !linkedIds.has(course.id),
+    };
+  });
+}
+
+/** 把课程库里的一门课加进报价配置（指定阶段与基础价）。 */
+export function addLibraryCourseToPricing(
+  config: PricingConfig,
+  input: { courseId: string; name: string; stageName: string; basePrice: number; available?: boolean },
+): { config: PricingConfig; createdStage: boolean } {
+  const next = JSON.parse(JSON.stringify(config)) as PricingConfig;
+  let stage = next.stages.find((item) => item.name === input.stageName);
+  let createdStage = false;
+  if (stage === undefined) {
+    stage = { name: input.stageName, courses: [] };
+    next.stages.push(stage);
+    createdStage = true;
+  }
+
+  const existing = findPricingCourse(next, { courseId: input.courseId, name: input.name });
+  if (existing !== null) {
+    // 已经配过：只更新价格与关联，不重复添加
+    existing.course.basePrice = input.basePrice;
+    existing.course.available = input.available ?? true;
+    existing.course.courseId = input.courseId;
+    return { config: next, createdStage };
+  }
+
+  stage.courses.push({
+    name: input.name,
+    basePrice: input.basePrice,
+    available: input.available ?? true,
+    courseId: input.courseId,
+  });
+  return { config: next, createdStage };
+}
+
+/**
+ * 让报价配置跟着课程库走（服务层在课程改名 / 改状态 / 删除后调用）。
+ *
+ * 做四件事，都是为了让两边不会悄悄分叉：
+ *   1. **按名字认领**：配置里已经有一门同名课程（网站内容带过来的，没有 courseId）→ 补上关联；
+ *   2. **改名跟随**：课程库改了名字，配置里也跟着改（否则家长看到的还是旧名字）；
+ *   3. **停开跟随**：课程库里设为「暂未开放」→ 配置里也置为不可报价；重新开放则恢复；
+ *   4. **失效标记**：课程库里没有这门课了 → 在配置里置为不可报价（不删名字，便于机构自己决定去留）。
+ *
+ * 返回变更说明（服务层拿去写操作日志），没有变更时是空数组。
+ */
+export function syncLibraryLinks(
+  config: PricingConfig,
+  courses: Array<{ id: string; name: string; status: string }>,
+): { config: PricingConfig; changes: string[] } {
+  const byId = new Map(courses.map((course) => [course.id, course]));
+  const byName = new Map(courses.map((course) => [course.name, course]));
+  const next = JSON.parse(JSON.stringify(config)) as PricingConfig;
+  const changes: string[] = [];
+
+  for (const stage of next.stages) {
+    for (const course of stage.courses) {
+      const linked = course.courseId !== undefined && course.courseId !== ""
+        ? byId.get(course.courseId)
+        : byName.get(course.name);
+
+      if (linked === undefined) {
+        // 找不到对应课程：可能是课程库里删掉了，也可能本来就不是课程库的课程（例如「九年级课本」）
+        if (course.courseId !== undefined && course.courseId !== "") {
+          if (course.available) {
+            course.available = false;
+            course.basePrice = course.basePrice ?? null;
+            changes.push(`「${course.name}」在课程库里已不存在 → 报价配置里置为暂未开放`);
+          }
+        }
+        continue;
+      }
+
+      if (course.courseId !== linked.id) {
+        course.courseId = linked.id;
+        changes.push(`「${course.name}」与课程库建立关联`);
+      }
+      if (course.name !== linked.name) {
+        changes.push(`课程名跟随课程库：「${course.name}」→「${linked.name}」`);
+        course.name = linked.name;
+      }
+      const shouldBeAvailable = linked.status === "开放";
+      if (course.available !== shouldBeAvailable && course.basePrice !== null) {
+        course.available = shouldBeAvailable;
+        changes.push(
+          shouldBeAvailable
+            ? `「${linked.name}」恢复为可报价`
+            : `「${linked.name}」在课程库里设为暂未开放 → 报价配置同步停用`,
+        );
+      }
+    }
+  }
+
+  return { config: next, changes };
+}

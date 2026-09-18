@@ -59,6 +59,11 @@ import {
 } from "@/lib/backend/inquiry";
 import { API_CONTRACT, MIGRATION_STEPS, SERVER_MUST_VALIDATE } from "@/lib/backend/contract";
 import {
+  addLibraryCourseToPricing,
+  pricingStatusForCourses,
+  syncLibraryLinks,
+} from "@/lib/backend/pricing";
+import {
   describeTeacherShare,
   sharePercentFor,
   teacherShareFormula,
@@ -2928,6 +2933,98 @@ eq("升级后版本号是当前版本",
 // 收尾：切回主存储
 __useStoreForTesting(memory);
 eq("主存储的课程库未被自检改坏", (await api.courses.list()).length, pbLibrary.length);
+
+console.log("\n=== 10. 课程库 ↔ 报价配置（打通）===");
+
+/*
+ * 打通的核心是「两边不会悄悄分叉」：课程库里改了名字、停了课，报价配置要跟着走。
+ * 否则会出现家长看到旧课名、或者按已停开的课程报了价。
+ */
+__useStoreForTesting(memory);
+
+const pbLib = await api.courses.list();
+const pbPriceConfig = await api.pricing.get();
+
+/*
+ * 1) 按名字认领：报价配置里的课程（内容带的，没有 courseId）与课程库同名时自动关联。
+ *
+ * 注意一个真实情况：报价配置里的课程名是「课程包」粒度（九年级课本 / 雅思口语），
+ * 课程库是「学科」粒度（初中数学 / 雅思），**大多数名字本来就不一样** ——
+ * 所以自动认领只在名字确实相同时生效，不强求两边一一对应。
+ * 机构要给某门课定价，走的是「课程库课程定价」面板（显式选课程 + 填价格）。
+ */
+const pbClaimable = {
+  ...pbPriceConfig,
+  stages: [
+    { name: "测试阶段", courses: [{ name: "初中数学", basePrice: 100, available: true }] },
+  ],
+};
+const pbClaimed = syncLibraryLinks(pbClaimable, pbLib);
+ok("配置里与课程库同名的课程会被自动认领（补上关联）",
+  (pbClaimed.config.stages[0]?.courses[0]?.courseId ?? "") !== "");
+ok("认领会写进变更说明",
+  pbClaimed.changes.some((change) => change.includes("建立关联")));
+eq("认领后再次同步不再产生变更", syncLibraryLinks(pbClaimed.config, pbLib).changes, []);
+
+// 2) 课程库里加一门课 → 定价 → 后台能给这门课报价
+const pbGo = await api.courses.create({
+  name: "围棋", category: "兴趣才艺", forms: ["一对一定制课"], origin: "后台",
+  status: "开放", note: "", createdAt: new Date().toISOString(),
+});
+const pbPriced = addLibraryCourseToPricing(await api.pricing.get(), {
+  courseId: pbGo.id, name: "围棋", stageName: "兴趣才艺", basePrice: 200,
+});
+eq("加入报价配置时新建了阶段", pbPriced.createdStage, true);
+eq("报价配置里出现了这门课及其价格",
+  pbPriced.config.stages.find((stage) => stage.name === "兴趣才艺")?.courses.map((course) => [course.name, course.basePrice, course.available]),
+  [["围棋", 200, true]]);
+await api.pricing.update(pbPriced.config);
+ok("后台可以按名字给这门课报价",
+  (await api.pricing.quote({
+    courseName: "围棋", classTypeName: "一对一", durationName: "1 小时", lessons: 5,
+  })).ok);
+ok("教师课时费也算得出来（同一份配置）",
+  (await api.pricing.teacherFee({
+    courseName: "围棋", classTypeName: "一对一", durationName: "1 小时", lessons: 5, students: 1,
+  })).ok);
+ok("导出的内容里带上了这门课（替换内容文件后家长也能看到）",
+  (await api.pricing.exportMarkdown()).includes("#### 课程: 围棋: 200"));
+
+// 3) 改名跟随
+await api.courses.update(pbGo.id, { name: "围棋（入门）" });
+eq("课程库改名后报价配置跟着改",
+  (await api.pricing.get()).stages
+    .flatMap((stage) => stage.courses)
+    .filter((course) => course.courseId === pbGo.id)
+    .map((course) => course.name),
+  ["围棋（入门）"]);
+ok("改名同步留下了日志",
+  (await api.logs.list(20)).some((log) => log.action === "跟随课程库" && log.summary.includes("围棋（入门）")));
+
+// 4) 停开跟随
+await api.courses.update(pbGo.id, { status: "暂未开放" });
+eq("课程库里设为暂未开放后报价配置同步停用",
+  (await api.pricing.get()).stages.flatMap((stage) => stage.courses)
+    .find((course) => course.courseId === pbGo.id)?.available,
+  false);
+
+// 5) 删除后置为暂未开放（不静默消失，机构自己决定去留）
+await api.courses.remove(pbGo.id);
+const pbAfterRemove = (await api.pricing.get()).stages.flatMap((stage) => stage.courses)
+  .find((course) => course.courseId === pbGo.id);
+eq("删除课程后报价配置里的这一项仍在（置为暂未开放）", pbAfterRemove?.available, false);
+
+// 6) 定价状态查询（课程库页面用它显示「已定价 / 未定价」）
+const pbStatus = pricingStatusForCourses(await api.pricing.get(), await api.courses.list());
+ok("每门课程库课程都能查出定价状态",
+  pbStatus.length === (await api.courses.list()).length);
+ok("至少有一门课被标为未定价（演示库里的兴趣才艺课已停用）",
+  pbStatus.some((item) => !item.priced));
+
+// 收尾：把报价配置恢复成内容里的口径，避免影响后面的用例
+await api.pricing.reset();
+eq("收尾：报价配置回到站点内容", (await api.pricing.get()).source, PRICING_SOURCE_CONTENT);
+__useStoreForTesting(memory);
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();
