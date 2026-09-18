@@ -20,6 +20,7 @@ import {
   COLUMN_PATHS,
   getAllCourseColumnSlugs,
   getAllCoursePageSlugs,
+  getCardsForForm,
   getCourseColumnPageData,
   getCourseColumns,
   getCoursePageData,
@@ -207,6 +208,19 @@ ok("栏目页每个科目都有一句简介",
 const featuredNames = new Set(
   getFeaturedContent().courses.flatMap((c) => c.children.map((child) => child.name)),
 );
+// 班型的正反两个方向必须一致：卡片上写了哪个班型，那个班型页就该列出这张卡片
+const formNames = getFeaturedContent().courses.flatMap((c) => c.children.map((child) => child.name));
+const reverseMismatch = formNames.flatMap((form) => {
+  const listed = new Set(getCardsForForm(form).map((item) => item.card.path));
+  const expected = new Set(allCards.filter((card) => card.forms.includes(form)).map((card) => card.path));
+  const missing = [...expected].filter((path) => !listed.has(path));
+  const extra = [...listed].filter((path) => !expected.has(path));
+  return [...missing.map((p) => `${form} 少了 ${p}`), ...extra.map((p) => `${form} 多了 ${p}`)];
+});
+eq("班型页列出的科目与卡片上写的班型一致", reverseMismatch, []);
+ok("四种按人数的班型都有关联科目",
+  ["一对一定制课", "一对二 / 一对三小组课", "一对多小班课", "9 人以上大班课"]
+    .every((form) => getCardsForForm(form).length >= 20));
 eq("卡片上写的班型都存在于特色课程",
   allCards.flatMap((c) => c.forms.filter((form) => !featuredNames.has(form)).map((form) => `${c.title} → ${form}`)),
   []);

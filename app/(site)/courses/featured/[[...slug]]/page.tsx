@@ -6,8 +6,9 @@ import { Breadcrumbs } from "@/components/ui/Breadcrumbs";
 import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
 import { findFeaturedCourse, getAllFeaturedCourses, getFeaturedContent } from "@/lib/data/featured";
+import { getCardsForForm } from "@/lib/data/site";
 import { renderMarkdown } from "@/lib/markdown";
-import { COURSES_HREF, courseHref, courseTrail } from "@/lib/site/featured-routes";
+import { COURSES_HREF, cardPageHref, courseHref, courseTrail } from "@/lib/site/featured-routes";
 import Link from "next/link";
 
 /**
@@ -116,6 +117,15 @@ export default async function FeaturedCoursePage({ params }: PageProps) {
   if (found === null) notFound();
 
   const { course, trail } = found;
+  /*
+   * 反向关联：这个班型下有哪些学科开设。
+   * 关系来自课程卡片行里的 `· 班型:`，所以卡片上改了班型，这里自动跟着变。
+   */
+  const subjects = getCardsForForm(course.name);
+  const subjectsByColumn = new Map<string, typeof subjects>();
+  for (const item of subjects) {
+    subjectsByColumn.set(item.column, [...(subjectsByColumn.get(item.column) ?? []), item]);
+  }
 
   return (
     <>
@@ -168,6 +178,37 @@ export default async function FeaturedCoursePage({ params }: PageProps) {
               </Link>
             </div>
           </div>
+
+          {/* 侧栏：这个班型下有哪些学科 */}
+          {subjects.length > 0 && (
+            <aside className="rounded-lg border border-ink-200 bg-white p-5">
+              <h2 className="text-sm font-medium text-ink-900">
+                开设这个班型的科目
+              </h2>
+              <p className="mt-2 text-xs leading-relaxed text-ink-500">
+                共 {subjects.length} 门课，按栏目分组。
+              </p>
+              <div className="mt-4 space-y-4">
+                {[...subjectsByColumn].map(([column, items]) => (
+                  <div key={column}>
+                    <p className="text-xs font-medium text-ink-500">{column}</p>
+                    <ul className="mt-1.5 space-y-1.5">
+                      {items.map((item) => (
+                        <li key={item.card.path}>
+                          <Link
+                            href={cardPageHref(item.card.path)}
+                            className="text-sm text-brand-700 transition-colors hover:text-brand-800"
+                          >
+                            {item.card.title} →
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            </aside>
+          )}
 
           {/* 侧栏：下级课程 */}
           {course.children.length > 0 && (

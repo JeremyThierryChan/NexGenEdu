@@ -606,6 +606,24 @@ export function getCourseColumnPageData(slug: string): CourseColumnPageData | nu
   };
 }
 
+/**
+ * 某个班型下开设了哪些课程（反向关联：班型页 → 学科）。
+ *
+ * 正向关系写在卡片行的 `· 班型:` 里，这里反向查回来，
+ * 因此两者永远一致 —— 改卡片上的班型，班型页会跟着变，不需要两处维护。
+ */
+export function getCardsForForm(
+  form: string,
+): Array<{ card: CourseColumnCard; column: string; subgroup: string }> {
+  return getCourseColumns().flatMap((column) =>
+    column.subgroups.flatMap((subgroup) =>
+      subgroup.cards
+        .filter((card) => card.forms.includes(form))
+        .map((card) => ({ card, column: column.title, subgroup: subgroup.title })),
+    ),
+  );
+}
+
 /** 全部栏目页路径（静态导出用）。 */
 export function getAllCourseColumnSlugs(): string[] {
   return getCourseColumns()
