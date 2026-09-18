@@ -9,6 +9,7 @@ import type {
   Lesson,
   LessonRecord,
   LessonTransaction,
+  Payment,
   Student,
   Teacher,
 } from "./types";
@@ -75,8 +76,9 @@ export function createSeedDatabase(now: Date = new Date()): Database {
   // 因此这里给每人 1–2 条报课；其中两位刻意留成低课时，用来看课时预警
   const students: Student[] = [
     student("s1", "示例·李同学", "初二", "138-0000-0001", "在读", "几何证明薄弱，需固定节奏。", now, [
-      enroll("e1", "初中数学", "一对一定制课", 10, 3, now),
-      enroll("e2", "初中物理", "一对二 / 一对三小组课", 6, 1, now),
+      // 报课 10 节、单价 200、优惠 200 → 约定 1800，只付了 1200（欠费样本）
+      enroll("e1", "初中数学", "一对一定制课", 10, 3, now, { unitPrice: 200, discount: 200, paidRatio: 2 / 3 }),
+      enroll("e2", "初中物理", "一对二 / 一对三小组课", 6, 1, now, { unitPrice: 160 }),
     ]),
     student("s2", "示例·王同学", "初三", "138-0000-0002", "在读", "中考冲刺，重点压轴题。", now, [
       enroll("e3", "中考数学", "一对多小班课", 8, 4, now),
@@ -85,7 +87,8 @@ export function createSeedDatabase(now: Date = new Date()): Database {
       enroll("e4", "小学数学", "一对一定制课", 8, 2, now),
     ]),
     student("s4", "示例·张同学", "高一", "138-0000-0004", "在读", "课时快用完，需要提醒续课。", now, [
-      enroll("e5", "高中数学", "一对一定制课", 4, 2, now),
+      // 分期付款：约定 1200，只付了 600
+      enroll("e5", "高中数学", "一对一定制课", 4, 2, now, { unitPrice: 300, paidRatio: 0.5 }),
     ]),
     student("s5", "示例·刘同学", "初一", "138-0000-0005", "在读", "语法体系刚建立。", now, [
       enroll("e6", "初中英语", "一对二 / 一对三小组课", 20, 2, now),
@@ -176,6 +179,44 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     }),
   );
 
+  /*
+   * 收款流水：与报课记录上的 paidAmount 严格对应（自检会校验两者一致）。
+   * 一条记录可能对应一次或多次收款 —— 这里刻意给「分期付款」留了一个样本。
+   */
+  const payments: Payment[] = students.flatMap((student) =>
+    student.enrollments.flatMap((enrollment) => {
+      const rows: Payment[] = [];
+      const first = Math.round(enrollment.paidAmount * 0.6);
+      const second = enrollment.paidAmount - first;
+
+      if (first > 0) {
+        rows.push({
+          id: `pay_${enrollment.id}_1`,
+          studentId: student.id,
+          enrollmentId: enrollment.id,
+          amount: first,
+          kind: "收款",
+          method: "微信",
+          at: enrollment.startedAt,
+          note: "报课收款",
+        });
+      }
+      if (second > 0) {
+        rows.push({
+          id: `pay_${enrollment.id}_2`,
+          studentId: student.id,
+          enrollmentId: enrollment.id,
+          amount: second,
+          kind: "收款",
+          method: "支付宝",
+          at: day(now, -5, 15, 0),
+          note: "分期第二笔",
+        });
+      }
+      return rows;
+    }),
+  );
+
   return {
     // 必须是当前版本：写成旧版本会让新灌入的数据在下次读取时被迁移逻辑改写
     version: CURRENT_VERSION,
@@ -187,6 +228,7 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     homeworkRecords,
     assessments,
     transactions,
+    payments,
     updatedAt: now.toISOString(),
   };
 }
@@ -292,7 +334,12 @@ function assessment(
   };
 }
 
-/** 造一条报课记录：total 已购课时，used 已消耗课时。 */
+/**
+ * 造一条报课记录：total 已购课时，used 已消耗课时。
+ *
+ * 金额按「单价 × 课时」算，并给三种典型情况各留一个样本：
+ * 全额付清、有优惠、分期只付了一部分（用来演示欠费与对账单）。
+ */
 function enroll(
   id: string,
   subject: string,
@@ -300,7 +347,12 @@ function enroll(
   total: number,
   used: number,
   now: Date,
+  money: { unitPrice: number; discount?: number; paidRatio?: number } = { unitPrice: 200 },
 ): Enrollment {
+  const list = total * money.unitPrice;
+  const agreed = Math.max(0, list - (money.discount ?? 0));
+  const paid = Math.round(agreed * (money.paidRatio ?? 1));
+
   return {
     id,
     subject,
@@ -308,6 +360,9 @@ function enroll(
     teacherId: "",
     totalLessons: total,
     usedLessons: used,
+    unitPrice: money.unitPrice,
+    agreedAmount: agreed,
+    paidAmount: paid,
     startedAt: now.toISOString(),
     endedAt: "",
     status: "在读",

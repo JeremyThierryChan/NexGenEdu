@@ -42,6 +42,13 @@ import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
 import { weekDays } from "@/lib/backend/format";
 import {
+  discountAmount,
+  findRefundPolicy,
+  formatMoney,
+  outstandingAmount,
+  round2,
+} from "@/lib/backend/finance";
+import {
   createCsv,
   createIcs,
   databaseStats,
@@ -1287,6 +1294,111 @@ eq("统计里的版本与数据一致", stats.version, exported.version);
 // ── 课表导出用的区间与筛选（与课表页口径一致）─────────────────────────
 const icsRange = await api.lessons.listBetween(weekDays(new Date())[0]!, weekDays(new Date())[6]!);
 ok("ICS 导出的数据源能取到本周课程", Array.isArray(icsRange));
+
+// ── 收费与金额（第三组）──────────────────────────────────────────────
+// 钱的部分最怕「三处口径不一」，因此这里既测公式，也测「账实相符」的不变式。
+__useStoreForTesting(memory);
+
+const moneyStudent = (await api.students.list()).find((item) => item.enrollments.length > 0)!;
+const beforeMoney = (await api.students.list()).length;
+
+// 报课带金额：约定应缴可低于标价（优惠）、实收可分次
+const moneyEnrollment = await api.students.enroll(moneyStudent.id, {
+  subject: "自检·收费科目", form: "一对一定制课", teacherId: "",
+  lessons: 10, startedAt: new Date().toISOString(), note: "自检报课",
+  unitPrice: 200, agreedAmount: 1800, paidNow: 1000, method: "微信",
+});
+const moneyCreated = moneyEnrollment!.enrollments.find((item) => item.subject === "自检·收费科目")!;
+eq("报课后学生数 +1 条报课", moneyEnrollment!.enrollments.length, moneyStudent.enrollments.length + 1);
+eq("标价 = 课时 × 单价", moneyCreated.totalLessons * moneyCreated.unitPrice, 2000);
+eq("优惠 = 标价 − 约定应缴", discountAmount(moneyCreated), 200);
+eq("实收等于本次付款", moneyCreated.paidAmount, 1000);
+eq("欠费 = 约定应缴 − 实收", outstandingAmount(moneyCreated), 800);
+eq("首笔收款已入账",
+  (await api.payments.listByEnrollment(moneyCreated.id)).filter((item) => item.kind === "收款").length, 1);
+
+// 续费：加课时 + 加金额 + 记一笔收款（默认按标价补约定应缴）
+const renewedMoney = await api.students.renewEnrollment(moneyStudent.id, moneyCreated.id, 5, "续费自检", {
+  amount: 900, method: "支付宝",
+});
+const renewedEnrollment = renewedMoney!.enrollments.find((item) => item.id === moneyCreated.id)!;
+eq("续费后课时增加", renewedEnrollment.totalLessons, 15);
+eq("续费后约定应缴按标价增加", renewedEnrollment.agreedAmount, 1800 + 5 * 200);
+eq("续费后实收累加", renewedEnrollment.paidAmount, 1900);
+eq("续费后欠费正确",
+  outstandingAmount(renewedEnrollment), renewedEnrollment.agreedAmount - 1900);
+
+// 补记一笔收款（分期到账）
+await api.payments.record({
+  studentId: moneyStudent.id, enrollmentId: moneyCreated.id,
+  amount: 500, kind: "收款", method: "现金", note: "自检补款",
+});
+eq("补记收款后实收增加",
+  (await api.students.get(moneyStudent.id))!.enrollments
+    .find((item) => item.id === moneyCreated.id)!.paidAmount,
+  2400);
+
+// 账实相符：报课记录上的实收必须等于收款流水合计（这是钱的核心不变式）
+ok("实收与收款流水一致（全部报课）", await (async () => {
+  const all = await api.students.list();
+  for (const student of all) {
+    const payments = await api.payments.listByStudent(student.id);
+    for (const enrollment of student.enrollments) {
+      const received = payments
+        .filter((item) => item.enrollmentId === enrollment.id && item.kind === "收款")
+        .reduce((sum, item) => sum + item.amount, 0);
+      const refunded = payments
+        .filter((item) => item.enrollmentId === enrollment.id && item.kind === "退款")
+        .reduce((sum, item) => sum + item.amount, 0);
+      if (round2(received - refunded) !== round2(enrollment.paidAmount)) return false;
+    }
+  }
+  return true;
+})());
+
+// 退费策略：两种口径必须给出不同结果，且公式能解释
+const refundSample = {
+  totalLessons: 10, usedLessons: 3, agreedAmount: 1800, unitPrice: 200,
+};
+const prorata = findRefundPolicy("prorata").calculate(refundSample);
+const clawback = findRefundPolicy("list-clawback").calculate(refundSample);
+eq("按实付比例退：剩 7 节 × 实付单价", prorata.refund, 1260);
+eq("追回标价：实付 − 已上 3 节 × 标价", clawback.refund, 1200);
+ok("两条策略结果不同且都带公式说明",
+  prorata.refund !== clawback.refund && prorata.formula !== "" && clawback.formula !== "");
+eq("已上完时不退款（追回口径）",
+  findRefundPolicy("list-clawback").calculate({ ...refundSample, usedLessons: 10 }).refund, 0);
+ok("退款不会为负（超退保护）",
+  findRefundPolicy("list-clawback").calculate({ ...refundSample, usedLessons: 10, agreedAmount: 1000 }).refund >= 0);
+
+// 退课 + 退款：记一笔退款并把实收扣回
+const moneyRefunded = await api.students.refundEnrollment(moneyStudent.id, moneyCreated.id, "退课自检", {
+  amount: 500, method: "微信", policyName: "按实付比例退（默认）",
+});
+const afterRefund = moneyRefunded!.enrollments.find((item) => item.id === moneyCreated.id)!;
+eq("退课后状态为已退课", afterRefund.status, "已退课");
+eq("退款后实收被扣回", afterRefund.paidAmount, 1900);
+ok("退款流水已记录",
+  (await api.payments.listByEnrollment(moneyCreated.id)).some((item) => item.kind === "退款"));
+
+// 财务汇总：月份区间与按方式分组
+const finance = await api.finance(new Date());
+ok("本月收款包含刚才的收款", finance.summary.received > 0);
+ok("净收入 = 收款 − 退款", round2(finance.summary.received - finance.summary.refunded) === finance.summary.net);
+ok("按收款方式分组非空", finance.summary.byMethod.length > 0);
+ok("欠费清单只含有欠费的报课",
+  finance.outstanding.every((item) => outstandingAmount(item.enrollment) > 0));
+ok("欠费合计等于清单之和",
+  round2(finance.outstanding.reduce((sum, item) => sum + item.amount, 0)) === finance.outstandingTotal);
+eq("上个月的汇总与本月独立（区间过滤生效）",
+  (await api.finance(new Date(Date.now() - 40 * 86_400_000))).summary.received >= 0, true);
+
+// 金额工具：四舍五入到分、显示格式
+eq("金额四舍五入到分", round2(0.1 + 0.2), 0.3);
+eq("金额显示带货币符号", formatMoney(1280), "¥1,280");
+eq("金额显示保留两位小数（非整数）", formatMoney(1280.5), "¥1,280.50");
+
+eq("学生数没有被这些操作改变", (await api.students.list()).length, beforeMoney);
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();

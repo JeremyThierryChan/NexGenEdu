@@ -45,6 +45,15 @@ export type Enrollment = {
   totalLessons: number;
   /** 已消耗课时（上课时扣减）。 */
   usedLessons: number;
+  /**
+   * 标价单价（元 / 节）。用于展示「优惠了多少」以及某些退费策略。
+   * 为 0 表示这门课没有登记价格（例如赠送课）。
+   */
+  unitPrice: number;
+  /** 与家长约定应缴的总额（可低于标价 = 优惠，也可高于实收 = 分期未付）。 */
+  agreedAmount: number;
+  /** 实收累计（由收款记录累加，不手工维护）。 */
+  paidAmount: number;
   /** 报课日期（ISO）。 */
   startedAt: string;
   /** 退课 / 结课日期；空串表示仍在生效。 */
@@ -104,7 +113,43 @@ export type NewEnrollment = {
   lessons: number;
   startedAt: string;
   note: string;
+  /** 标价单价（元 / 节）。 */
+  unitPrice: number;
+  /** 约定应缴总额。 */
+  agreedAmount: number;
+  /** 本次实收；0 表示先上课后付款。 */
+  paidNow: number;
+  method: PaymentMethod;
 };
+
+/** 收款方式。 */
+export const PAYMENT_METHODS = ["微信", "支付宝", "现金", "银行转账", "其他"] as const;
+export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
+
+export const PAYMENT_KINDS = ["收款", "退款"] as const;
+export type PaymentKind = (typeof PAYMENT_KINDS)[number];
+
+/**
+ * 收款记录（钱的账本，与课时流水分开）。
+ *
+ * 课时与钱是两本账：一次报课可能分期付款（课时一次给、钱分几次收），
+ * 也可能有纯补款（不带课时）。因此收款记录独立成表，
+ * 报课记录的 paidAmount 由它累加得出（自检会校验两者一致）。
+ */
+export type Payment = {
+  id: string;
+  studentId: string;
+  /** 关联的报课记录；纯补款 / 无对应报课时为空串。 */
+  enrollmentId: string;
+  /** 收款为正、退款为正数但 kind 为「退款」。 */
+  amount: number;
+  kind: PaymentKind;
+  method: PaymentMethod;
+  at: string;
+  note: string;
+};
+
+export type NewPayment = Omit<Payment, "id">;
 
 export const STUDENT_STATUSES = ["在读", "暂停", "结课"] as const;
 export type StudentStatus = (typeof STUDENT_STATUSES)[number];
@@ -253,6 +298,8 @@ export type Database = {
   assessments: Assessment[];
   /** 课时流水（账本）。 */
   transactions: LessonTransaction[];
+  /** 收款 / 退款流水（钱的账本）。 */
+  payments: Payment[];
   /** 最后一次写入时间（ISO）。 */
   updatedAt: string;
 };

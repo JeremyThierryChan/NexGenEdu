@@ -4,11 +4,20 @@ import { isWithinAvailability } from "./availability";
 import { CURRENT_VERSION } from "./version";
 import { enrollmentForLesson, remainingOf, remainingTotal } from "./enrollment";
 import { databaseStats, validateImportedDatabase, type ImportOutcome } from "./backup";
+import {
+  monthRange,
+  outstandingAmount,
+  round2,
+  summarizePayments,
+  withinRange,
+  type PaymentSummary,
+} from "./finance";
 import type { StudentProfile } from "./student-profile";
 import type {
   Assessment,
   Classroom,
   LessonTransaction,
+  Payment,
   ClassroomAvailability,
   ClassroomKind,
   CompletionResult,
@@ -17,6 +26,8 @@ import type {
   NewAssessment,
   NewHomeworkRecord,
   NewLessonRecord,
+  NewPayment,
+  PaymentMethod,
   ConflictReport,
   Database,
   Enrollment,
@@ -168,6 +179,9 @@ function migrate(db: Database): Database | null {
                 teacherId: "",
                 totalLessons: remaining,
                 usedLessons: 0,
+                unitPrice: 0,
+                agreedAmount: 0,
+                paidAmount: 0,
                 startedAt: student.createdAt,
                 endedAt: "",
                 status: "在读",
@@ -252,6 +266,27 @@ function migrate(db: Database): Database | null {
     db.version = 5;
   }
 
+  if (db.version === 5) {
+    /*
+     * v5 → v6：报课记录增加金额（标价单价 / 约定应缴 / 实收），新增收款流水表。
+     *
+     * 老数据里没有任何金额信息，因此**一律记 0 而不是猜**：
+     * 猜一个单价会让「欠费清单」凭空冒出金额，比留空危险得多。
+     * 管理员可以在界面上按实际情况补。
+     */
+    db.payments = db.payments ?? [];
+
+    for (const student of db.students) {
+      for (const enrollment of student.enrollments) {
+        enrollment.unitPrice = enrollment.unitPrice ?? 0;
+        enrollment.agreedAmount = enrollment.agreedAmount ?? 0;
+        enrollment.paidAmount = enrollment.paidAmount ?? 0;
+      }
+    }
+
+    db.version = 6;
+  }
+
   return db.version === CURRENT_VERSION ? db : null;
 }
 
@@ -301,7 +336,29 @@ function addTransaction(
   return created;
 }
 
-/** 通用集合：把「取数组 → 改 → 存」的重复代码收在一处。 */
+/**
+ * 记一笔收款 / 退款，并同步报课记录上的实收累计。
+ *
+ * 金额只允许通过这里改动：把 paidAmount 手工改来改去，
+ * 「收了多少钱」这件事就再也对不上账了（自检会校验两者一致）。
+ */
+function recordPayment(db: Database, input: Omit<Payment, "id">): Payment {
+  const created: Payment = { ...input, id: nextId("pay") };
+  db.payments.push(created);
+
+  const enrollment = db.students
+    .flatMap((student) => student.enrollments)
+    .find((item) => item.id === input.enrollmentId);
+  if (enrollment !== undefined) {
+    enrollment.paidAmount = round2(
+      Math.max(0, enrollment.paidAmount + (input.kind === "退款" ? -input.amount : input.amount)),
+    );
+  }
+
+  return created;
+}
+
+/** 通用集合：把「取数组 → 改 → 存」的重复代码在一处。 */
 function collection<T extends { id: string }>(
   pick: (db: Database) => T[],
   prefix: string,
@@ -384,19 +441,41 @@ export const api = {
       if (student === undefined) return null;
 
       const lessons = Math.max(0, Math.trunc(input.lessons));
-      student.enrollments.push({
+      const enrollment: Enrollment = {
         id: nextId("e"),
         subject: input.subject.trim(),
         form: input.form.trim(),
         teacherId: input.teacherId,
         totalLessons: lessons,
         usedLessons: 0,
+        unitPrice: round2(Math.max(0, input.unitPrice)),
+        agreedAmount: round2(Math.max(0, input.agreedAmount)),
+        paidAmount: 0,
         startedAt: input.startedAt !== "" ? input.startedAt : nowIso(),
         endedAt: "",
         status: "在读",
         note: input.note.trim(),
+        // 成交即到账的可以留空；后面用「收款 / 退款」补记
         history: [{ at: nowIso(), kind: "报课", lessons, note: input.note.trim() }],
-      });
+      };
+      student.enrollments.push(enrollment);
+
+      /*
+       * 首次实收：金额由收款记录承载，报课记录的 paidAmount 从收款记录累加。
+       * 一次报课可能分期付款，因此这两件事必须分开记 ——
+       * 把金额只存在报课记录上，就没法表达「报课时只付了一半」。
+       */
+      if (input.paidNow > 0) {
+        recordPayment(db, {
+          studentId: student.id,
+          enrollmentId: enrollment.id,
+          amount: round2(input.paidNow),
+          kind: "收款",
+          method: input.method,
+          at: enrollment.startedAt,
+          note: "报课收款",
+        });
+      }
 
       syncSubjects(student);
       persist(db);
@@ -409,6 +488,7 @@ export const api = {
       enrollmentId: string,
       lessons: number,
       note = "",
+      money?: { amount: number; method: PaymentMethod; agreedDelta?: number },
     ): Promise<Student | null> {
       await delay();
       const db = load();
@@ -419,7 +499,24 @@ export const api = {
 
       const added = Math.max(0, Math.trunc(lessons));
       enrollment.totalLessons += added;
+      // 续费时约定应缴同步增加（不填则按标价补），否则欠费会算错
+      enrollment.agreedAmount = round2(
+        Math.max(0, enrollment.agreedAmount + (money?.agreedDelta ?? added * enrollment.unitPrice)),
+      );
       enrollment.history.push({ at: nowIso(), kind: "续费", lessons: added, note: note.trim() });
+
+      const amount = round2(Math.max(0, money?.amount ?? 0));
+      if (amount > 0) {
+        recordPayment(db, {
+          studentId: student.id,
+          enrollmentId: enrollment.id,
+          amount,
+          kind: "收款",
+          method: money?.method ?? "微信",
+          at: nowIso(),
+          note: note.trim() === "" ? "续费收款" : `续费收款 · ${note.trim()}`,
+        });
+      }
 
       syncSubjects(student);
       persist(db);
@@ -436,6 +533,11 @@ export const api = {
       studentId: string,
       enrollmentId: string,
       note = "",
+      /**
+       * 退款信息：金额由退费策略算出后传进来（服务层不自己挑策略 ——
+       * 换策略是业务决策，应该由操作的人在界面上确认）。
+       */
+      refund?: { amount: number; method: PaymentMethod; policyName: string },
     ): Promise<Student | null> {
       await delay();
       const db = load();
@@ -449,8 +551,23 @@ export const api = {
         at: nowIso(),
         kind: "退课",
         lessons: 0,
-        note: note.trim(),
+        note:
+          refund !== undefined && refund.amount > 0
+            ? `${note.trim()}${note.trim() !== "" ? " · " : ""}按「${refund.policyName}」退款 ${refund.amount} 元`
+            : note.trim(),
       });
+
+      if (refund !== undefined && refund.amount > 0) {
+        recordPayment(db, {
+          studentId: student.id,
+          enrollmentId: enrollment.id,
+          amount: round2(refund.amount),
+          kind: "退款",
+          method: refund.method,
+          at: nowIso(),
+          note: `退课退款 · ${refund.policyName}`,
+        });
+      }
 
       syncSubjects(student);
       persist(db);
@@ -522,6 +639,110 @@ export const api = {
   },
 
   classrooms: collection<Classroom>((db) => db.classrooms, "c"),
+
+  /** 收款流水（钱的账本）。 */
+  payments: {
+    ...collection<Payment>((db) => db.payments, "pay"),
+    listByStudent: async (studentId: string): Promise<Payment[]> => {
+      await delay();
+      return clone(
+        load()
+          .payments.filter((item) => item.studentId === studentId)
+          .sort((a, b) => b.at.localeCompare(a.at)),
+      );
+    },
+    listByEnrollment: async (enrollmentId: string): Promise<Payment[]> => {
+      await delay();
+      return clone(
+        load()
+          .payments.filter((item) => item.enrollmentId === enrollmentId)
+          .sort((a, b) => b.at.localeCompare(a.at)),
+      );
+    },
+    /** 按时间区间取（本月收入用）。 */
+    listBetween: async (from: Date, to: Date): Promise<Payment[]> => {
+      await delay();
+      return clone(
+        load()
+          .payments.filter((item) => withinRange(item.at, from, to))
+          .sort((a, b) => b.at.localeCompare(a.at)),
+      );
+    },
+    /** 单独补记一笔收款 / 退款（分期付款、补款、无课时的费用）。 */
+    async record(input: {
+      studentId: string;
+      enrollmentId: string;
+      amount: number;
+      kind: Payment["kind"];
+      method: PaymentMethod;
+      note: string;
+    }): Promise<Payment | null> {
+      await delay();
+      const db = load();
+      const student = db.students.find((item) => item.id === input.studentId);
+      if (student === undefined) return null;
+
+      const created = recordPayment(db, {
+        ...input,
+        amount: round2(Math.max(0, input.amount)),
+        at: nowIso(),
+      });
+      persist(db);
+      return clone(created);
+    },
+  },
+
+  /**
+   * 财务汇总：某个月的收款、退款、净收入、按支付方式，以及全部欠费。
+   *
+   * 欠费不分月份 —— 它是一笔「还没收到的钱」，跨月存在，
+   * 按月切分反而会让 1 月欠的费在 2 月的报表里消失。
+   */
+  async finance(anchor: Date = new Date()): Promise<{
+    month: string;
+    summary: PaymentSummary;
+    recent: Payment[];
+    outstanding: Array<{ student: Student; enrollment: Enrollment; amount: number }>;
+    outstandingTotal: number;
+  }> {
+    await delay();
+    const db = load();
+    const { from, to, label } = monthRange(anchor);
+    const monthPayments = db.payments.filter((item) => withinRange(item.at, from, to));
+
+    const outstanding = db.students.flatMap((student) =>
+      student.enrollments
+        .filter((enrollment) => enrollment.status === "在读")
+        .map((enrollment) => ({ student, enrollment, amount: outstandingAmount(enrollment) }))
+        .filter((item) => item.amount > 0),
+    );
+
+    return clone({
+      month: label,
+      summary: summarizePayments(monthPayments),
+      recent: [...monthPayments].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 20),
+      outstanding: outstanding.sort((a, b) => b.amount - a.amount),
+      outstandingTotal: round2(outstanding.reduce((sum, item) => sum + item.amount, 0)),
+    });
+  },
+
+  /** 学生维度的欠费合计（列表里显示）。 */
+  async outstandingByStudent(): Promise<Array<{ studentId: string; amount: number }>> {
+    await delay();
+    const db = load();
+    return clone(
+      db.students
+        .map((student) => ({
+          studentId: student.id,
+          amount: round2(
+            student.enrollments
+              .filter((enrollment) => enrollment.status === "在读")
+              .reduce((sum, enrollment) => sum + outstandingAmount(enrollment), 0),
+          ),
+        }))
+        .filter((item) => item.amount > 0),
+    );
+  },
 
   /** 课时流水（只读；写入由报课 / 续费 / 上课 / 撤销等业务动作负责）。 */
   transactions: {
@@ -1000,6 +1221,7 @@ export type {
   Assessment,
   Classroom,
   LessonTransaction,
+  Payment,
   ClassroomAvailability,
   ClassroomKind,
   CompletionResult,
@@ -1008,6 +1230,8 @@ export type {
   NewAssessment,
   NewHomeworkRecord,
   NewLessonRecord,
+  NewPayment,
+  PaymentMethod,
   Enrollment,
   NewEnrollment,
   ConflictReport,
@@ -1024,6 +1248,8 @@ export type {
 };
 export {
   ATTENDANCE_OPTIONS,
+  PAYMENT_KINDS,
+  PAYMENT_METHODS,
   TRANSACTION_KINDS,
   CLASSROOM_KINDS,
   ENROLLMENT_STATUSES,

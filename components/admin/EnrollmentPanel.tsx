@@ -1,16 +1,26 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { Button } from "@/components/ui/Button";
-import { useEffect } from "react";
 import {
+  PAYMENT_METHODS,
   api,
   type Enrollment,
   type LessonTransaction,
+  type Payment,
+  type PaymentMethod,
   type Student,
   type Teacher,
 } from "@/lib/backend/api";
+import {
+  DEFAULT_REFUND_POLICY_ID,
+  REFUND_POLICIES,
+  calculateRefund,
+  discountAmount,
+  formatMoney,
+  outstandingAmount,
+} from "@/lib/backend/finance";
 import { cn } from "@/lib/utils/cn";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel } from "@/lib/backend/format";
@@ -40,11 +50,17 @@ export function EnrollmentPanel({
   const [pending, setPending] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [transactions, setTransactions] = useState<LessonTransaction[]>([]);
+  const [paymentsByEnrollment, setPaymentsByEnrollment] = useState<Payment[]>([]);
 
   useEffect(() => {
     let cancelled = false;
-    void api.transactions.listByStudent(student.id).then((rows) => {
-      if (!cancelled) setTransactions(rows);
+    void Promise.all([
+      api.transactions.listByStudent(student.id),
+      api.payments.listByStudent(student.id),
+    ]).then(([rows, payments]) => {
+      if (cancelled) return;
+      setTransactions(rows);
+      setPaymentsByEnrollment(payments);
     });
     return () => {
       cancelled = true;
@@ -52,6 +68,9 @@ export function EnrollmentPanel({
   }, [student.id, student.enrollments]);
 
   const total = remainingTotal(student.enrollments);
+  const owed = student.enrollments
+    .filter((item) => item.status === "在读")
+    .reduce((sum, item) => sum + outstandingAmount(item), 0);
   const active = student.enrollments.filter((item) => item.status === "在读");
   const subjectOptions = useMemo(() => getSubjectOptions(), []);
   const formOptions = useMemo(() => getFormOptions(), []);
@@ -67,6 +86,11 @@ export function EnrollmentPanel({
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink-100 px-4 py-3">
         <p className="text-sm text-ink-600">
+          {owed > 0 && (
+            <span className="mr-3 rounded-sm border border-warning-100 bg-warning-50 px-1.5 py-0.5 text-xs text-warning-600">
+              欠费 {formatMoney(owed)}
+            </span>
+          )}
           剩余课时合计{" "}
           <span className={total <= 5 ? "font-medium tabular text-warning-600" : "font-medium tabular text-ink-900"}>
             {total}
@@ -112,21 +136,36 @@ export function EnrollmentPanel({
               onToggle={() => setExpandedId(expandedId === enrollment.id ? null : enrollment.id)}
               pending={pending}
               transactions={transactions.filter((item) => item.enrollmentId === enrollment.id)}
-              onRenew={(lessons) =>
+              payments={paymentsByEnrollment.filter((item) => item.enrollmentId === enrollment.id)}
+              onRenew={(lessons, amount, method) =>
                 run(() =>
-                  api.students.renewEnrollment(student.id, enrollment.id, lessons, "续费"),
+                  api.students.renewEnrollment(student.id, enrollment.id, lessons, "续费", {
+                    amount,
+                    method,
+                  }),
                 )
               }
-              onRefund={() => {
-                if (
-                  !window.confirm(
-                    `确认退课「${enrollment.subject}」？\n退课后不再计入剩余课时，记录会保留（可查历史）。`,
-                  )
-                ) {
-                  return;
-                }
-                return run(() => api.students.refundEnrollment(student.id, enrollment.id, "退课"));
-              }}
+              onRecordPayment={(amount, kind, method, note) =>
+                run(() =>
+                  api.payments.record({
+                    studentId: student.id,
+                    enrollmentId: enrollment.id,
+                    amount,
+                    kind,
+                    method,
+                    note,
+                  }),
+                )
+              }
+              onRefund={(refundAmount, method, policyId) =>
+                run(() =>
+                  api.students.refundEnrollment(student.id, enrollment.id, "退课", {
+                    amount: refundAmount,
+                    method,
+                    policyName: REFUND_POLICIES.find((item) => item.id === policyId)?.name ?? "",
+                  }),
+                )
+              }
             />
           ))}
         </ul>
@@ -143,7 +182,9 @@ function EnrollmentRow({
   onToggle,
   pending,
   transactions,
+  payments,
   onRenew,
+  onRecordPayment,
   onRefund,
 }: {
   enrollment: Enrollment;
@@ -153,11 +194,48 @@ function EnrollmentRow({
   pending: boolean;
   /** 这条报课的课时流水（含上课扣减与撤销记录）。 */
   transactions: LessonTransaction[];
-  onRenew: (lessons: number) => void | Promise<void>;
-  onRefund: () => void | Promise<void>;
+  /** 这条报课的收款 / 退款流水。 */
+  payments: Payment[];
+  onRenew: (lessons: number, amount: number, method: PaymentMethod) => void | Promise<void>;
+  onRecordPayment: (
+    amount: number,
+    kind: Payment["kind"],
+    method: PaymentMethod,
+    note: string,
+  ) => void | Promise<void>;
+  onRefund: (refundAmount: number, method: PaymentMethod, policyId: string) => void | Promise<void>;
 }) {
   const remaining = remainingOf(enrollment);
   const refunded = enrollment.status === "已退课";
+  const [panel, setPanel] = useState<"renew" | "pay" | "refund" | null>(null);
+  const [policyId, setPolicyId] = useState(DEFAULT_REFUND_POLICY_ID);
+  const [amountInput, setAmountInput] = useState("");
+  const [method, setMethod] = useState<PaymentMethod>("微信");
+  const [renewLessons, setRenewLessons] = useState("10");
+
+  const refundPreview = calculateRefund(enrollment, policyId);
+  const moneyFields = (defaultAmount: number) => (
+    <span className="flex items-center gap-1.5">
+      <input
+        type="number"
+        min={0}
+        value={amountInput === "" ? `${Math.round(defaultAmount)}` : amountInput}
+        onChange={(event) => setAmountInput(event.target.value)}
+        className="w-24 rounded-md border border-ink-300 px-2 py-1 text-xs tabular outline-none focus:border-brand-500"
+      />
+      <select
+        value={method}
+        onChange={(event) => setMethod(event.target.value as PaymentMethod)}
+        className="rounded-md border border-ink-300 px-1.5 py-1 text-xs outline-none focus:border-brand-500"
+      >
+        {PAYMENT_METHODS.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </span>
+  );
 
   return (
     <li className="px-4 py-3">
@@ -182,25 +260,43 @@ function EnrollmentRow({
             剩 {remaining}
           </span>
         </span>
+        {enrollment.agreedAmount > 0 && (
+          <span className="text-xs text-ink-500">
+            实收 {formatMoney(enrollment.paidAmount)} / 约定 {formatMoney(enrollment.agreedAmount)}
+            {outstandingAmount(enrollment) > 0 && (
+              <span className="ml-1 text-warning-600">
+                欠 {formatMoney(outstandingAmount(enrollment))}
+              </span>
+            )}
+          </span>
+        )}
 
         {refunded ? (
           <span className="rounded-sm border border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[11px] text-ink-500">
             已退课
           </span>
         ) : (
-          <span className="ml-auto flex gap-2">
+          <span className="ml-auto flex flex-wrap gap-2">
             <button
               type="button"
               disabled={pending}
-              onClick={() => void onRenew(10)}
+              onClick={() => setPanel(panel === "renew" ? null : "renew")}
               className="text-xs text-brand-700 transition-colors hover:text-brand-800 disabled:opacity-60"
             >
-              续费 +10 节
+              续费
             </button>
             <button
               type="button"
               disabled={pending}
-              onClick={() => void onRefund()}
+              onClick={() => setPanel(panel === "pay" ? null : "pay")}
+              className="text-xs text-brand-700 transition-colors hover:text-brand-800 disabled:opacity-60"
+            >
+              记收款 / 退款
+            </button>
+            <button
+              type="button"
+              disabled={pending}
+              onClick={() => setPanel(panel === "refund" ? null : "refund")}
               className="text-xs text-ink-500 transition-colors hover:text-danger-600 disabled:opacity-60"
             >
               退课
@@ -208,6 +304,125 @@ function EnrollmentRow({
           </span>
         )}
       </div>
+
+      {/* 续费：加课时 + 收款 */}
+      {panel === "renew" && !refunded && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-600">
+          <span>续费</span>
+          <input
+            type="number"
+            min={1}
+            value={renewLessons}
+            onChange={(event) => setRenewLessons(event.target.value)}
+            className="w-16 rounded-md border border-ink-300 px-2 py-1 text-xs tabular outline-none focus:border-brand-500"
+          />
+          <span>节，收款</span>
+          {moneyFields(Number(renewLessons) * enrollment.unitPrice)}
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => {
+              const count = Math.trunc(Number(renewLessons) || 0);
+              const amount = amountInput === "" ? count * enrollment.unitPrice : Number(amountInput);
+              setPanel(null);
+              setAmountInput("");
+              void onRenew(count, amount, method);
+            }}
+            className="rounded-md bg-brand-700 px-2.5 py-1 text-xs text-white transition-colors hover:bg-brand-800 disabled:opacity-60"
+          >
+            确认续费
+          </button>
+        </div>
+      )}
+
+      {/* 补记收款 / 退款（分期付款、无课时的费用） */}
+      {panel === "pay" && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-600">
+          <span>记一笔</span>
+          {moneyFields(outstandingAmount(enrollment) > 0 ? outstandingAmount(enrollment) : 0)}
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => {
+              const amount = Number(amountInput);
+              setPanel(null);
+              setAmountInput("");
+              if (Number.isFinite(amount) && amount > 0) {
+                void onRecordPayment(amount, "收款", method, "补记收款");
+              }
+            }}
+            className="rounded-md bg-brand-700 px-2.5 py-1 text-xs text-white transition-colors hover:bg-brand-800 disabled:opacity-60"
+          >
+            记收款
+          </button>
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => {
+              const amount = Number(amountInput);
+              setPanel(null);
+              setAmountInput("");
+              if (Number.isFinite(amount) && amount > 0) {
+                void onRecordPayment(amount, "退款", method, "手工退款");
+              }
+            }}
+            className="rounded-md border border-ink-300 px-2.5 py-1 text-xs text-ink-700 transition-colors hover:border-danger-400 hover:text-danger-600 disabled:opacity-60"
+          >
+            记退款
+          </button>
+        </div>
+      )}
+
+      {/* 退课：先选退费口径，看清明细再确认 */}
+      {panel === "refund" && !refunded && (
+        <div className="mt-2 rounded-md border border-warning-100 bg-warning-50 px-3 py-2">
+          <p className="text-xs font-medium text-warning-600">
+            退课后退费 {formatMoney(refundPreview.refund)}
+          </p>
+          <p className="mt-0.5 text-xs text-warning-600">口径：{refundPreview.formula}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            <select
+              value={policyId}
+              onChange={(event) => setPolicyId(event.target.value)}
+              className="rounded-md border border-ink-300 bg-white px-2 py-1 text-xs outline-none focus:border-brand-500"
+            >
+              {REFUND_POLICIES.map((policy) => (
+                <option key={policy.id} value={policy.id}>
+                  {policy.name}
+                </option>
+              ))}
+            </select>
+            <span className="text-ink-500">
+              {REFUND_POLICIES.find((item) => item.id === policyId)?.description}
+            </span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={pending}
+              onClick={() => {
+                setPanel(null);
+                void onRefund(refundPreview.refund, method, policyId);
+              }}
+              className="rounded-md bg-brand-700 px-2.5 py-1 text-xs text-white transition-colors hover:bg-brand-800 disabled:opacity-60"
+            >
+              确认退课并退款
+            </button>
+            <button
+              type="button"
+              disabled={pending}
+              onClick={() => {
+                setPanel(null);
+                // 只退课、不涉及退款（例如课时已上完）
+                void onRefund(0, method, policyId);
+              }}
+              className="rounded-md border border-ink-300 px-2.5 py-1 text-xs text-ink-700 transition-colors hover:border-brand-400 disabled:opacity-60"
+            >
+              只退课，不退款
+            </button>
+          </div>
+        </div>
+      )}
 
       {expanded && (
         <div className="mt-2 rounded-md border border-ink-100 bg-ink-50/60 px-3 py-2">
@@ -218,6 +433,28 @@ function EnrollmentRow({
           {enrollment.note !== "" && (
             <p className="mt-1 text-xs text-ink-500">备注：{enrollment.note}</p>
           )}
+          {/* 金额明细：标价 / 优惠 / 约定 / 实收 / 欠费 */}
+          {enrollment.agreedAmount > 0 && (
+            <dl className="mt-2 grid gap-x-4 gap-y-1 text-xs text-ink-500 sm:grid-cols-2">
+              <div>
+                标价：{formatMoney(enrollment.totalLessons * enrollment.unitPrice)}
+                <span className="ml-1 text-ink-400">
+                  （{enrollment.totalLessons} 节 × {formatMoney(enrollment.unitPrice)}）
+                </span>
+              </div>
+              <div>优惠：{formatMoney(discountAmount(enrollment))}</div>
+              <div>约定应缴：{formatMoney(enrollment.agreedAmount)}</div>
+              <div>
+                实收：{formatMoney(enrollment.paidAmount)}
+                {outstandingAmount(enrollment) > 0 && (
+                  <span className="ml-1 text-warning-600">
+                    欠 {formatMoney(outstandingAmount(enrollment))}
+                  </span>
+                )}
+              </div>
+            </dl>
+          )}
+
           <p className="mt-2 text-xs font-medium text-ink-600">
             课时流水（{transactions.length} 笔）
           </p>
@@ -243,6 +480,22 @@ function EnrollmentRow({
           <p className="mt-1.5 text-[11px] text-ink-400">
             上课扣减会记录关联的课节；撤销「已上」时按流水退回，撤销记录保留可追溯。
           </p>
+
+          <p className="mt-2 text-xs font-medium text-ink-600">
+            收款流水（{payments.length} 笔）
+          </p>
+          {payments.length === 0 ? (
+            <p className="mt-1 text-xs text-ink-400">还没有收款记录。</p>
+          ) : (
+            <ul className="mt-1 space-y-0.5">
+              {payments.map((item) => (
+                <li key={item.id} className="text-xs text-ink-500">
+                  {formatDayLabel(item.at)} · {item.kind} {formatMoney(item.amount)} · {item.method}
+                  {item.note !== "" && ` · ${item.note}`}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
     </li>
@@ -268,6 +521,10 @@ function EnrollForm({
     lessons: number;
     startedAt: string;
     note: string;
+    unitPrice: number;
+    agreedAmount: number;
+    paidNow: number;
+    method: PaymentMethod;
   }) => void | Promise<void>;
   onCancel: () => void;
   pending: boolean;
@@ -278,7 +535,20 @@ function EnrollForm({
   const [lessons, setLessons] = useState("10");
   const [startedAt, setStartedAt] = useState(() => new Date().toISOString().slice(0, 10));
   const [note, setNote] = useState("");
+  const [unitPrice, setUnitPrice] = useState("200");
+  const [agreedAmount, setAgreedAmount] = useState("2000");
+  const [paidNow, setPaidNow] = useState("2000");
+  const [method, setMethod] = useState<PaymentMethod>("微信");
   const [error, setError] = useState("");
+
+  /** 课时或单价变了就给出默认的「约定应缴 = 课时 × 单价」，管理员可以改成谈定价。 */
+  function syncAgreed(nextLessons: string, nextUnitPrice: string) {
+    const count = Number(nextLessons);
+    const price = Number(nextUnitPrice);
+    if (!Number.isFinite(count) || !Number.isFinite(price)) return;
+    setAgreedAmount(`${Math.round(count * price)}`);
+    setPaidNow(`${Math.round(count * price)}`);
+  }
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -300,6 +570,10 @@ function EnrollForm({
       lessons: count,
       startedAt: new Date(`${startedAt}T00:00:00`).toISOString(),
       note,
+      unitPrice: Math.max(0, Number(unitPrice) || 0),
+      agreedAmount: Math.max(0, Number(agreedAmount) || 0),
+      paidNow: Math.max(0, Number(paidNow) || 0),
+      method,
     });
   }
 
@@ -343,10 +617,54 @@ function EnrollForm({
           type="number"
           min={1}
           value={lessons}
-          onChange={(event) => setLessons(event.target.value)}
+          onChange={(event) => {
+            setLessons(event.target.value);
+            syncAgreed(event.target.value, unitPrice);
+          }}
           hint="本次报课购买的节数"
           required
         />
+        <TextField
+          label="单价"
+          hint="元 / 节（标价）"
+          type="number"
+          min={0}
+          value={unitPrice}
+          onChange={(event) => {
+            setUnitPrice(event.target.value);
+            syncAgreed(lessons, event.target.value);
+          }}
+        />
+        <TextField
+          label="约定应缴"
+          hint="谈定总额，可低于标价（优惠）"
+          type="number"
+          min={0}
+          value={agreedAmount}
+          onChange={(event) => setAgreedAmount(event.target.value)}
+        />
+        <TextField
+          label="本次实收"
+          hint="分期付款时可以只填一部分"
+          type="number"
+          min={0}
+          value={paidNow}
+          onChange={(event) => setPaidNow(event.target.value)}
+        />
+        <label className="block">
+          <span className="text-xs font-medium text-ink-600">收款方式</span>
+          <select
+            value={method}
+            onChange={(event) => setMethod(event.target.value as PaymentMethod)}
+            className="mt-1 block w-full rounded-md border border-ink-300 bg-white px-2.5 py-1.5 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+          >
+            {PAYMENT_METHODS.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </label>
         <TextField
           label="报课日期"
           type="date"

@@ -22,6 +22,11 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     description: "按周查看教师课表与教室占用（谁什么时候上、哪间教室空着）",
   },
   {
+    href: "/admin/finance",
+    label: "收费",
+    description: "本月收入、收款流水、欠费清单与退费口径",
+  },
+  {
     href: "/admin/data",
     label: "数据与备份",
     description: "导出 / 导入全部数据，导出课表到手机日历",
