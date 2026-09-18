@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/admin/AdminFields";
-import { api } from "@/lib/backend/api";
+import { api, type OperationLog } from "@/lib/backend/api";
 import {
   createCsv,
   createIcs,
@@ -31,13 +31,24 @@ export default function AdminDataPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [logs, setLogs] = useState<OperationLog[] | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
-    const db = await api.exportDatabase();
+    const [db, logList] = await Promise.all([api.exportDatabase(), api.logs.list(100)]);
     setStats(databaseStats(db));
     setHasBackup(api.hasBackup());
+    setLogs(logList);
   }, []);
+
+  async function clearLogs() {
+    if (!window.confirm("清空操作日志？日志本身也会记一条「清空日志」。")) return;
+    setBusy(true);
+    const count = await api.logs.clear();
+    setBusy(false);
+    setMessage(`已清空 ${count} 条操作日志。`);
+    await load();
+  }
 
   useEffect(() => {
     void load();
@@ -243,6 +254,44 @@ export default function AdminDataPage() {
           导入会**整体替换**当前数据（不是合并）。文件结构不对会直接拒绝，现有数据不受影响；
           版本较旧的文件会自动升级到当前结构。
         </p>
+      </Panel>
+
+      {/* 操作日志：谁在什么时候改了什么 */}
+      <Panel
+        className="mt-4"
+        title="操作日志"
+        description="记录谁在什么时候改了什么（最近 100 条）。纯前端阶段存在本机，接服务端后改为服务端审计。"
+        actions={
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || (logs?.length ?? 0) === 0}
+            onClick={() => void clearLogs()}
+          >
+            清空日志
+          </Button>
+        }
+      >
+        {logs === null ? (
+          <p className="px-4 py-3 text-sm text-ink-400">加载中…</p>
+        ) : logs.length === 0 ? (
+          <p className="px-4 py-3 text-sm text-ink-500">还没有操作记录。</p>
+        ) : (
+          <ul className="max-h-96 divide-y divide-ink-100 overflow-y-auto">
+            {logs.map((log) => (
+              <li key={log.id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-4 py-2 text-xs">
+                <span className="w-32 shrink-0 text-ink-400">
+                  {new Date(log.at).toLocaleString("zh-CN")}
+                </span>
+                <span className="shrink-0 text-ink-500">{log.operator}</span>
+                <span className="shrink-0 rounded-sm bg-ink-100 px-1.5 py-0.5 text-[11px] text-ink-600">
+                  {log.entity} · {log.action}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-ink-700">{log.summary}</span>
+              </li>
+            ))}
+          </ul>
+        )}
       </Panel>
 
       {/* 危险操作 */}

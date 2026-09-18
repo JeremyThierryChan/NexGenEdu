@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { GlobalSearch } from "@/components/admin/GlobalSearch";
+import { api } from "@/lib/backend/api";
 import { getSession, logout } from "@/lib/auth/session";
 
 /**
@@ -16,7 +18,10 @@ export function AdminTopBar() {
   const [username, setUsername] = useState("");
 
   useEffect(() => {
-    setUsername(getSession()?.username ?? "");
+    const name = getSession()?.username ?? "";
+    setUsername(name);
+    // 操作日志要记「谁改的」：登录后把操作人告诉服务层（纯前端只有 admin 一个账号）
+    if (name !== "") api.setOperator(name);
   }, []);
 
   function onLogout() {
@@ -31,8 +36,10 @@ export function AdminTopBar() {
           <span className="text-base font-bold tracking-tight text-brand-800">
             NexGenEdu
           </span>
-          <span className="text-sm text-ink-500">教务后台</span>
+          <span className="text-sm text-ink-500 max-sm:hidden">教务后台</span>
         </div>
+
+        <GlobalSearch />
 
         <div className="flex items-center gap-3">
           {username !== "" && (

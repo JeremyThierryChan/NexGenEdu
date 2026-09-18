@@ -6,6 +6,7 @@ import { enrollmentForLesson, remainingOf, remainingTotal } from "./enrollment";
 import { decideCharge, isAbsent } from "./attendance";
 import { databaseStats, validateImportedDatabase, type ImportOutcome } from "./backup";
 import { buildFollowUps, type FollowUpItem } from "./followup";
+import { searchAll } from "./search";
 import {
   churnStats,
   hourlyLoad,
@@ -26,6 +27,7 @@ import {
   type PaymentSummary,
 } from "./finance";
 import type { StudentProfile } from "./student-profile";
+import { getCourseColumns } from "@/lib/data/site";
 import type {
   Assessment,
   Classroom,
@@ -40,6 +42,7 @@ import type {
   NewHomeworkRecord,
   NewLessonRecord,
   NewPayment,
+  OperationLog,
   PaymentMethod,
   ConflictReport,
   Database,
@@ -54,6 +57,7 @@ import type {
   Student,
   Teacher,
   TodaySummary,
+  SearchHit,
 } from "./types";
 
 /**
@@ -314,6 +318,12 @@ function migrate(db: Database): Database | null {
     db.version = 7;
   }
 
+  if (db.version === 7) {
+    // v7 → v8：新增操作日志表。老数据没有日志 → 空数组，不伪造历史记录
+    db.logs = db.logs ?? [];
+    db.version = 8;
+  }
+
   return db.version === CURRENT_VERSION ? db : null;
 }
 
@@ -453,10 +463,69 @@ function reconcileCharge(
   return { changed: true, charged: false, reason: decision.reason };
 }
 
+/**
+ * 操作日志的保留上限。
+ *
+ * 日志本身也占存储：无上限地涨下去，几年后一份 JSON 会大到导不出来。
+ * 500 条足够回溯「最近发生了什么」，超出后丢最旧的。
+ */
+const LOG_LIMIT = 500;
+
+/** 当前操作人（由后台外壳在登录后写入；纯前端只有 admin 一个账号）。 */
+let operatorName = "admin";
+
+/** 设置操作人。页面在登录后调用一次即可。 */
+export function setOperator(name: string): void {
+  operatorName = name.trim() === "" ? "admin" : name.trim();
+}
+
+/**
+ * 记一条操作日志。
+ *
+ * 由各业务方法自己调用（而不是给页面提供一个「记得写日志」的接口）——
+ * 依赖调用方自觉的日志一定会漏。写在服务层，无论从哪个页面改数据都会留痕。
+ */
+function writeLog(
+  db: Database,
+  input: { entity: string; action: string; targetId: string; summary: string },
+): void {
+  db.logs.push({
+    id: nextId("log"),
+    at: nowIso(),
+    operator: operatorName,
+    entity: input.entity,
+    action: input.action,
+    targetId: input.targetId,
+    summary: input.summary,
+  });
+
+  if (db.logs.length > LOG_LIMIT) {
+    db.logs.splice(0, db.logs.length - LOG_LIMIT);
+  }
+}
+
+/** 导入日志的一句话摘要。 */
+function fileSummary(fromVersion: number, db: Database): string {
+  return `v${fromVersion} → v${db.version}，${db.students.length} 名学生、${db.lessons.length} 节课`;
+}
+
+/** 从对象里挑一个能说清身份的字段，用于日志摘要。 */
+function describeTarget(value: unknown): string {
+  if (typeof value !== "object" || value === null) return "";
+  const record = value as Record<string, unknown>;
+  for (const key of ["name", "subject", "title", "date"]) {
+    const field = record[key];
+    if (typeof field === "string" && field.trim() !== "") return `「${field.trim()}」`;
+  }
+  return "";
+}
+
 /** 通用集合：把「取数组 → 改 → 存」的重复代码在一处。 */
 function collection<T extends { id: string }>(
   pick: (db: Database) => T[],
   prefix: string,
+  /** 日志里显示的对象类别（如「学生」）。传空串表示不记日志。 */
+  label = "",
 ) {
   return {
     async list(): Promise<T[]> {
@@ -472,6 +541,14 @@ function collection<T extends { id: string }>(
       const db = load();
       const created = { ...input, id: nextId(prefix) } as T;
       pick(db).push(created);
+      if (label !== "") {
+        writeLog(db, {
+          entity: label,
+          action: "新建",
+          targetId: created.id,
+          summary: `新建${label}${describeTarget(created)}`,
+        });
+      }
       persist(db);
       return clone(created);
     },
@@ -483,6 +560,15 @@ function collection<T extends { id: string }>(
       if (index === -1) return null;
       const updated = { ...list[index], ...patch } as T;
       list[index] = updated;
+      if (label !== "") {
+        writeLog(db, {
+          entity: label,
+          action: "修改",
+          targetId: id,
+          // 记下改了哪些字段：只说「修改了学生」等于没说
+          summary: `修改${label}${describeTarget(updated)}（${Object.keys(patch).join("、")}）`,
+        });
+      }
       persist(db);
       return clone(updated);
     },
@@ -492,7 +578,15 @@ function collection<T extends { id: string }>(
       const list = pick(db);
       const index = list.findIndex((item) => item.id === id);
       if (index === -1) return false;
-      list.splice(index, 1);
+      const [removed] = list.splice(index, 1);
+      if (label !== "") {
+        writeLog(db, {
+          entity: label,
+          action: "删除",
+          targetId: id,
+          summary: `删除${label}${describeTarget(removed as T)}`,
+        });
+      }
       persist(db);
       return true;
     },
@@ -507,7 +601,7 @@ export function dateKey(value: string | Date): string {
   return `${date.getFullYear()}-${month}-${day}`;
 }
 
-const studentCollection = collection<Student>((db) => db.students, "s");
+const studentCollection = collection<Student>((db) => db.students, "s", "学生");
 
 export const api = {
   students: {
@@ -573,6 +667,12 @@ export const api = {
       }
 
       syncSubjects(student);
+      writeLog(db, {
+        entity: "报课",
+        action: "报课",
+        targetId: enrollment.id,
+        summary: `${student.name} 报课「${enrollment.subject}」${lessons} 节`,
+      });
       persist(db);
       return clone(student);
     },
@@ -614,6 +714,12 @@ export const api = {
       }
 
       syncSubjects(student);
+      writeLog(db, {
+        entity: "报课",
+        action: "续费",
+        targetId: enrollment.id,
+        summary: `${student.name} 续费「${enrollment.subject}」${added} 节`,
+      });
       persist(db);
       return clone(student);
     },
@@ -665,6 +771,12 @@ export const api = {
       }
 
       syncSubjects(student);
+      writeLog(db, {
+        entity: "报课",
+        action: "退课",
+        targetId: enrollment.id,
+        summary: `${student.name} 退课「${enrollment.subject}」${note.trim()}`.trim(),
+      });
       persist(db);
       return clone(student);
     },
@@ -705,6 +817,12 @@ export const api = {
       const student = db.students.find((item) => item.id === id);
       if (student === undefined) return null;
       student.profile = profile;
+      writeLog(db, {
+        entity: "学生",
+        action: "填写采集表",
+        targetId: student.id,
+        summary: `更新「${student.name}」的信息采集表`,
+      });
       persist(db);
       return clone(student);
     },
@@ -725,7 +843,7 @@ export const api = {
   },
 
   teachers: {
-    ...collection<Teacher>((db) => db.teachers, "t"),
+    ...collection<Teacher>((db) => db.teachers, "t", "教师"),
     /** 在职教师，排课下拉用。 */
     async listActive(): Promise<Teacher[]> {
       await delay();
@@ -733,7 +851,7 @@ export const api = {
     },
   },
 
-  classrooms: collection<Classroom>((db) => db.classrooms, "c"),
+  classrooms: collection<Classroom>((db) => db.classrooms, "c", "教室"),
 
   /** 收款流水（钱的账本）。 */
   payments: {
@@ -962,6 +1080,12 @@ export const api = {
         reconcileCharge(db, lesson, input.studentId);
       }
 
+      writeLog(db, {
+        entity: "排课",
+        action: "课堂记录",
+        targetId: input.lessonId,
+        summary: `记录课堂表现：${input.attendance}${input.leaveRequestedAt !== "" ? "（含请假时间）" : ""}`,
+      });
       persist(db);
       const saved = db.lessonRecords.find(
         (item) => item.lessonId === input.lessonId && item.studentId === input.studentId,
@@ -972,7 +1096,7 @@ export const api = {
 
   /** 作业记录（按次）。 */
   homework: {
-    ...collection<HomeworkRecord>((db) => db.homeworkRecords, "hw"),
+    ...collection<HomeworkRecord>((db) => db.homeworkRecords, "hw", "作业记录"),
     listByStudent: async (studentId: string): Promise<HomeworkRecord[]> => {
       await delay();
       return clone(
@@ -991,7 +1115,7 @@ export const api = {
    * 也让「补录旧数据」时前后顺序对不上。
    */
   assessments: {
-    ...collection<Assessment>((db) => db.assessments, "as"),
+    ...collection<Assessment>((db) => db.assessments, "as", "测评"),
     listByStudent: async (studentId: string): Promise<Assessment[]> => {
       await delay();
       return clone(
@@ -1020,7 +1144,7 @@ export const api = {
   },
 
   lessons: {
-    ...collection<Lesson>((db) => db.lessons, "l"),
+    ...collection<Lesson>((db) => db.lessons, "l", "排课"),
 
     /**
      * 更新课节。
@@ -1202,6 +1326,16 @@ export const api = {
           });
         }
 
+        persist(db);
+      }
+
+      if (!alreadyCompleted) {
+        writeLog(db, {
+          entity: "排课",
+          action: "标记已上",
+          targetId: lesson.id,
+          summary: `标记已上：${lesson.subject}（扣 ${deducted.length} 人，跳过 ${skipped.length} 人）`,
+        });
         persist(db);
       }
 
@@ -1415,6 +1549,12 @@ export const api = {
     store.write(BACKUP_KEY, JSON.stringify(load()));
 
     cache = migrated;
+    writeLog(cache, {
+      entity: "数据",
+      action: "导入",
+      targetId: "",
+      summary: `导入数据：${fileSummary(fromVersion, cache)}`,
+    });
     persist(cache);
 
     const stats = databaseStats(cache);
@@ -1440,6 +1580,12 @@ export const api = {
       const restored = migrate(JSON.parse(raw) as Database);
       if (restored === null) return { ok: false, error: "备份数据结构无法识别。" };
       cache = restored;
+      writeLog(cache, {
+        entity: "数据",
+        action: "恢复备份",
+        targetId: "",
+        summary: "恢复导入前的数据",
+      });
       persist(cache);
       return { ok: true, stats: databaseStats(cache), note: "已恢复导入前的数据" };
     } catch {
@@ -1447,11 +1593,73 @@ export const api = {
     }
   },
 
+  /** 设置操作人（登录后由后台外壳调用一次，用于操作日志）。 */
+  setOperator,
+
   /** 清空并重新灌入示例数据（开发与演示用）。 */
   async reset(): Promise<void> {
     await delay();
     cache = createSeedDatabase();
+    writeLog(cache, {
+      entity: "数据",
+      action: "重置",
+      targetId: "",
+      summary: "重置为示例数据（原有数据已丢弃）",
+    });
     persist(cache);
+  },
+
+  /**
+   * 操作日志（最近的在前）。
+   *
+   * 只提供读取：写入由各业务方法自己负责 —— 依赖调用方自觉写日志一定会漏。
+   */
+  logs: {
+    async list(limit = 100): Promise<OperationLog[]> {
+      await delay();
+      return clone([...load().logs].reverse().slice(0, limit));
+    },
+    async clear(): Promise<number> {
+      await delay();
+      const db = load();
+      const count = db.logs.length;
+      db.logs = [];
+      writeLog(db, {
+        entity: "数据",
+        action: "清空日志",
+        targetId: "",
+        summary: `清空了 ${count} 条操作日志`,
+      });
+      persist(db);
+      return count;
+    },
+  },
+
+  /**
+   * 全局搜索（学生 / 教师 / 教室 / 排课 / 课程）。
+   *
+   * 匹配规则在 lib/backend/search.ts；服务层负责把数据快照与课程列表凑齐。
+   */
+  async search(keyword: string): Promise<SearchHit[]> {
+    await delay();
+    const db = load();
+    return clone(
+      searchAll({
+        keyword,
+        students: db.students,
+        teachers: db.teachers,
+        classrooms: db.classrooms,
+        lessons: db.lessons,
+        courses: getCourseColumns().flatMap((column) =>
+          column.subgroups.flatMap((subgroup) =>
+            subgroup.cards.map((card) => ({
+              title: card.title,
+              href: `/courses/${card.path}`,
+            })),
+          ),
+        ),
+      }),
+    );
   },
 };
 
@@ -1471,6 +1679,7 @@ export type {
   Classroom,
   FollowUpItem,
   RoomUtilization,
+  SearchHit,
   TeacherWorkload,
   LessonTransaction,
   Payment,
@@ -1483,6 +1692,7 @@ export type {
   NewHomeworkRecord,
   NewLessonRecord,
   NewPayment,
+  OperationLog,
   PaymentMethod,
   Enrollment,
   NewEnrollment,

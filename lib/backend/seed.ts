@@ -231,6 +231,8 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     assessments,
     transactions,
     payments,
+    // 操作日志从空开始：示例数据不需要伪造「谁改过什么」
+    logs: [],
     updatedAt: now.toISOString(),
   };
 }

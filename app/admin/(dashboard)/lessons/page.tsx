@@ -60,6 +60,12 @@ export default function AdminLessonsPage() {
     void load();
   }, [load]);
 
+  // 支持从全局搜索直达某一天：/admin/lessons?date=2026-09-18
+  useEffect(() => {
+    const value = new URLSearchParams(window.location.search).get("date");
+    if (value !== null && /^\d{4}-\d{2}-\d{2}$/.test(value)) setDate(value);
+  }, []);
+
   const teacherName = (id: string) => teachers.find((item) => item.id === id)?.name ?? "—";
   const classroomName = (id: string) => classrooms.find((item) => item.id === id)?.name ?? "—";
   const studentNames = (ids: string[]) =>

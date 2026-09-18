@@ -42,6 +42,16 @@ export default function AdminStudentsPage() {
     void load();
   }, [load]);
 
+  /*
+   * 支持从全局搜索直达：/admin/students?studentId=xxx 会直接展开这位学生的详情。
+   * 刻意用 window.location 而不是 useSearchParams —— 后者在静态导出下会触发
+   * CSR bailout，把整页从预渲染的 HTML 里踢出去。
+   */
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("studentId");
+    if (id !== null && id !== "") setOpenId(id);
+  }, []);
+
   const visible = useMemo(() => {
     const text = keyword.trim().toLowerCase();
     if (text === "") return students;

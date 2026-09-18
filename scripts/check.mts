@@ -41,6 +41,7 @@ import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
 import { weekDays } from "@/lib/backend/format";
+import { groupHits, searchAll } from "@/lib/backend/search";
 import { LEAVE_NOTICE_HOURS, decideCharge } from "@/lib/backend/attendance";
 import {
   churnStats,
@@ -1913,6 +1914,121 @@ ok("服务层能返回统计", Array.isArray(liveStats.rooms) && Array.isArray(l
 ok("统计里每间场地都有利用率", liveStats.rooms.every((row) => row.rate >= 0));
 ok("统计里的利用率不超过 1（已排不该超过可用）",
   liveStats.rooms.every((row) => row.rate <= 1 || row.availableMinutes === 0));
+
+// ── 全局搜索与操作日志（第七组）───────────────────────────────────────
+__useStoreForTesting(memory);
+
+const searchInput = {
+  keyword: "",
+  students: [
+    {
+      id: "s1", name: "张小明", grade: "初二", guardian: "138-0000-0000",
+      subjects: ["初中数学"], profile: {}, enrollments: [],
+      status: "在读" as const, note: "", createdAt: new Date().toISOString(),
+    },
+    {
+      id: "s2", name: "张小红", grade: "初三", guardian: "", subjects: [],
+      profile: {}, enrollments: [], status: "在读" as const, note: "",
+      createdAt: new Date().toISOString(),
+    },
+  ],
+  teachers: [
+    { id: "t1", name: "陈老师", subjects: ["数学"], role: "全科教师", phone: "", active: true },
+  ],
+  classrooms: [
+    {
+      id: "c1", name: "301 教室", kind: "上课用教室" as const, capacity: 8,
+      availability: [], note: "白板",
+    },
+  ],
+  lessons: [
+    {
+      id: "l1", subject: "初中数学", form: "一对一定制课", teacherId: "t1", classroomId: "c1",
+      studentIds: ["s1"], startsAt: new Date("2026-09-18T17:30:00").toISOString(),
+      durationMinutes: 60, status: "已排" as const, note: "", makeupForLessonId: "",
+    },
+  ],
+  courses: [{ title: "初中数学", href: "/courses/junior-math" }],
+};
+
+eq("空关键词不返回结果", searchAll({ ...searchInput, keyword: "   " }).length, 0);
+const byName = searchAll({ ...searchInput, keyword: "张小明" });
+eq("按学生姓名能搜到", byName.filter((hit) => hit.kind === "学生").map((hit) => hit.title), ["张小明"]);
+ok("学生结果带直达链接（含 studentId）",
+  byName[0]?.href === "/admin/students?studentId=s1");
+eq("按年级能搜到多个学生",
+  searchAll({ ...searchInput, keyword: "初" }).filter((hit) => hit.kind === "学生").length, 2);
+eq("按教师姓名能搜到", searchAll({ ...searchInput, keyword: "陈老师" }).filter((h) => h.kind === "教师").length, 1);
+eq("按教师科目也能搜到", searchAll({ ...searchInput, keyword: "数学" }).filter((h) => h.kind === "教师").length, 1);
+eq("按教室名能搜到", searchAll({ ...searchInput, keyword: "301" }).filter((h) => h.kind === "教室").length, 1);
+eq("按科目能搜到排课",
+  searchAll({ ...searchInput, keyword: "初中数学" }).filter((h) => h.kind === "排课").length, 1);
+ok("排课结果带日期参数（便于跳到那一天）",
+  (searchAll({ ...searchInput, keyword: "初中数学" }).find((h) => h.kind === "排课")?.href ?? "")
+    .includes("date=2026-09-18"));
+eq("课程（前台科目页）也能搜到",
+  searchAll({ ...searchInput, keyword: "初中数学" }).filter((h) => h.kind === "课程").length, 1);
+eq("搜不到时不硬凑结果", searchAll({ ...searchInput, keyword: "不存在的人" }).length, 0);
+// 「数学」会同时命中学生（在读科目）、教师（可带科目）、排课（科目）与课程
+const searchGroups = groupHits(searchAll({ ...searchInput, keyword: "数学" }));
+eq("分组按固定顺序（学生 → 教师 → 教室 → 排课 → 课程）",
+  searchGroups.map((group) => group.kind), ["学生", "教师", "排课", "课程"]);
+
+// 服务层搜索（真实数据）
+ok("服务层搜索能返回结果", (await api.search("示例")).length > 0);
+eq("服务层搜索空关键词返回空", (await api.search("  ")).length, 0);
+
+// ── 操作日志 ──────────────────────────────────────────────────────────
+await api.logs.clear();
+eq("清空后只剩「清空日志」这一条", (await api.logs.list()).length, 1);
+ok("清空日志本身也被记录",
+  (await api.logs.list())[0]?.action === "清空日志");
+
+const logStudent = await api.students.create({
+  name: "日志自检学生", grade: "初一", guardian: "", status: "在读", note: "", profile: {},
+});
+const afterCreate = await api.logs.list();
+eq("新建学生会留下日志", afterCreate[0]?.entity, "学生");
+eq("日志动作是新建", afterCreate[0]?.action, "新建");
+eq("日志摘要带姓名", afterCreate[0]?.summary.includes("日志自检学生"), true);
+eq("日志记的是操作人", afterCreate[0]?.operator, "admin");
+
+await api.students.update(logStudent.id, { grade: "初二" });
+const afterUpdate = await api.logs.list();
+ok("修改会留下日志并写明改了哪个字段",
+  afterUpdate[0]?.action === "修改" && (afterUpdate[0]?.summary ?? "").includes("grade"));
+
+await api.students.remove(logStudent.id);
+const afterRemove = await api.logs.list();
+eq("删除会留下日志", afterRemove[0]?.action, "删除");
+
+// 业务动作（不走通用集合的那些）也要留痕
+const logTarget = (await api.students.list())[0]!;
+await api.lessons.markCompleted((await api.lessons.list()).find((l) => l.status === "已排")!.id);
+ok("标记已上有日志",
+  (await api.logs.list(20)).some((log) => log.action === "标记已上"));
+await api.students.saveProfile(logTarget.id, { gender: "女" });
+ok("填写采集表有日志",
+  (await api.logs.list(20)).some((log) => log.action === "填写采集表"));
+
+// 日志条数上限：不能无限涨（否则 localStorage 迟早撑满）
+const beforeCap = (await api.logs.list(1))[0]!;
+for (let index = 0; index < 5; index += 1) {
+  await api.students.create({
+    name: `日志上限${index}`, grade: "初一", guardian: "", status: "在读", note: "", profile: {},
+  });
+}
+ok("日志按时间倒序（最新在前）",
+  (await api.logs.list(1))[0]!.at >= beforeCap.at);
+const allLogs = JSON.parse(memory.read("nexgenedu.admin.db.v1")!).logs as unknown[];
+ok("日志条数不超过上限", allLogs.length <= 500);
+
+// 搜索是只读的：不能因为它而多出日志或改动数据
+const logsBeforeSearch = (await api.logs.list(200)).length;
+const studentsBeforeSearch = (await api.students.list()).length;
+await api.search("示例");
+eq("搜索不产生操作日志", (await api.logs.list(200)).length, logsBeforeSearch);
+eq("搜索不改动数据", (await api.students.list()).length, studentsBeforeSearch);
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();

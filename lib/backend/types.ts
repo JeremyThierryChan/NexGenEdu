@@ -292,6 +292,40 @@ export type Assessment = {
   note: string;
 };
 
+/**
+ * 操作日志。
+ *
+ * 纯前端阶段只记「谁、何时、对什么做了什么」，并**限制条数**（旧的自动丢弃）：
+ * 日志本身也会占存储，无上限地涨下去迟早把 localStorage 撑满。
+ * 接真后端后这一层应改为服务端审计（不可被前端篡改），现在至少能回答
+ * 「这条数据是谁什么时候改的」。
+ */
+export type OperationLog = {
+  id: string;
+  at: string;
+  /** 操作人（当前只有 admin）。 */
+  operator: string;
+  /** 对象类别：学生 / 教师 / 教室 / 排课 / 报课 / 收费 / 数据 … */
+  entity: string;
+  /** 动作：新建 / 修改 / 删除 / 标记已上 / 导入 … */
+  action: string;
+  /** 对象 id（删除后仍保留，便于追溯）。 */
+  targetId: string;
+  /** 可读的一句话，直接显示在日志里。 */
+  summary: string;
+};
+
+/** 全局搜索的一条结果。 */
+export type SearchHit = {
+  kind: "学生" | "教师" | "教室" | "课程" | "排课";
+  id: string;
+  title: string;
+  /** 副标题：用来区分同名对象（年级、科目、时间…）。 */
+  subtitle: string;
+  /** 点进去的地址。 */
+  href: string;
+};
+
 /** 后台全部数据。 */
 export type Database = {
   /** 数据结构版本，将来加字段时用于迁移。 */
@@ -308,6 +342,8 @@ export type Database = {
   transactions: LessonTransaction[];
   /** 收款 / 退款流水（钱的账本）。 */
   payments: Payment[];
+  /** 操作日志（谁在什么时候改了什么）。 */
+  logs: OperationLog[];
   /** 最后一次写入时间（ISO）。 */
   updatedAt: string;
 };
