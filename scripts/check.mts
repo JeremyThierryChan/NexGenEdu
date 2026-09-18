@@ -61,7 +61,7 @@ eq("首页分组数", home?.groups.map((g) => g.name), ["首屏数据", "教学�
 eq("首页课程卡片数", home?.groups.find((g) => g.name === "首页课程卡片")?.items.length, 17);
 eq("首页首屏数据数", home?.groups.find((g) => g.name === "首屏数据")?.items.length, 6);
 eq("首页教学特色数", home?.groups.find((g) => g.name === "教学特色")?.items.length, 7);
-eq("教师数", teachersPage?.groups.length, 5);
+eq("角色数（含 AI）", teachersPage?.groups.length, 7);
 eq("关于分组数", aboutPage?.groups.length, 4);
 eq("联系分组数", contactPage?.groups.length, 1);
 
@@ -116,7 +116,7 @@ ok("每门学科都有学段内容", courses.every((c) => c.bands.length > 0 && 
 ok("数学含 3 个学段且带核心能力", (() => { const m = courses.find((c) => c.nameZh === "数学"); return m?.bands.length === 3 && m.bands.every((b) => b.content.includes("核心能力")); })());
 
 const { teachers } = getTeachersPage();
-eq("教师数", teachers.length, 5);
+eq("角色数", teachers.length, 7);
 ok("教师有科目与详细介绍", teachers.every((t) => t.subjects.length > 0 && t.bio.length > 30));
 ok("教师按排序升序", teachers.every((t, i) => i === 0 || (teachers[i - 1]?.order ?? 0) <= t.order));
 ok("页面只展示在职教师", teachers.every((t) => t.active));
@@ -129,7 +129,18 @@ eq("林老师职务", lin?.role, "晚辅导老师");
 eq("林老师科目标签", lin?.subjects, ["晚辅导"]);
 eq("林老师教龄", lin?.years, "10 年");
 ok("林老师有详细介绍", (lin?.bio.length ?? 0) > 50);
-ok("教师排序无重复", new Set(teachers.map((t) => t.order)).size === teachers.length);
+ok("排序无重复", new Set(teachers.map((t) => t.order)).size === teachers.length);
+eq("真人教师数", teachers.filter((t) => t.kind === "teacher").length, 5);
+eq("AI 智能体数", teachers.filter((t) => t.kind === "ai").length, 2);
+eq("AI 智能体名称", teachers.filter((t) => t.kind === "ai").map((t) => t.name),
+  ["采苓 · 试课诊断", "有恒 · 学习跟踪"]);
+ok("AI 智能体都有简介与详细介绍",
+  teachers.filter((t) => t.kind === "ai").every((t) => t.summary.length > 10 && t.bio.length > 80));
+ok("AI 智能体排在真人教师之后",
+  Math.min(...teachers.filter((t) => t.kind === "ai").map((t) => t.order)) >
+  Math.max(...teachers.filter((t) => t.kind === "teacher").map((t) => t.order)));
+ok("有恒的说明提示需家长配合",
+  (teachers.find((t) => t.name.startsWith("有恒"))?.bio ?? "").includes("家长"));
 
 const about = getAboutContent();
 eq("教学理念条数", about.principles.length, 4);

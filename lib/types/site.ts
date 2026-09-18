@@ -77,8 +77,18 @@ export type Course = {
 };
 
 /** 教师（content.md 的「页面: 教师」段中一个分组） */
+/**
+ * 教学角色类型：
+ *   teacher —— 真人授课教师
+ *   ai      —— AI 智能体（辅助诊断与跟踪，不授课）
+ * 卡片上会据此显示「AI 智能体」标记，避免家长误认为是真人教师。
+ */
+export type TeacherKind = "teacher" | "ai";
+
 export type Teacher = {
   id: string;
+  /** 角色类型，默认 teacher。 */
+  kind: TeacherKind;
   name: string;
   role: string;
   subjects: string[];

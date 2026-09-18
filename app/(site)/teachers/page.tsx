@@ -16,6 +16,11 @@ export function generateMetadata(): Metadata {
 export default function TeachersPage() {
   const { heading, teachers } = getTeachersPage();
 
+  // 真人与 AI 智能体分开展示：两类角色性质不同，
+  // 混在一个网格里容易让家长误以为智能体也是授课教师。
+  const humans = teachers.filter((teacher) => teacher.kind === "teacher");
+  const agents = teachers.filter((teacher) => teacher.kind === "ai");
+
   return (
     <>
       <PageHeader
@@ -25,10 +30,10 @@ export default function TeachersPage() {
       />
 
       <Container>
-        {/* 教师列表：可点击跳转到下方对应详情 */}
+        {/* 授课教师：可点击跳转到下方对应详情 */}
         <Section>
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {teachers.map((teacher) => (
+            {humans.map((teacher) => (
               <TeacherCard
                 key={teacher.id}
                 teacher={teacher}
@@ -37,6 +42,25 @@ export default function TeachersPage() {
             ))}
           </div>
         </Section>
+
+        {/* AI 智能体：与真人教师分开，并在标题里说明用途 */}
+        {agents.length > 0 && (
+          <Section
+            title="AI 学习伙伴"
+            description="两位 AI 智能体分别负责试课诊断与阶段跟踪，作为教师的辅助工具，不直接授课，也不替代教师的判断。"
+            className="border-t border-ink-200"
+          >
+            <div className="grid gap-5 sm:grid-cols-2">
+              {agents.map((agent) => (
+                <TeacherCard
+                  key={agent.id}
+                  agent={agent}
+                  href={`#${encodeURIComponent(agent.id)}`}
+                />
+              ))}
+            </div>
+          </Section>
+        )}
 
         {/* 教师详情 */}
         <Section className="border-t border-ink-200">
@@ -47,7 +71,10 @@ export default function TeachersPage() {
                 id={teacher.id}
                 className="scroll-mt-24 border-b border-ink-100 pb-12 last:border-0 last:pb-0"
               >
-                <h2 className="text-xl font-medium text-ink-900">{teacher.name}</h2>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <h2 className="text-xl font-medium text-ink-900">{teacher.name}</h2>
+                  {teacher.kind === "ai" && <Badge tone="accent">AI 智能体</Badge>}
+                </div>
                 <p className="mt-1 text-sm text-ink-500">
                   {[teacher.role, teacher.years].filter((part) => part !== "").join(" ｜ ")}
                 </p>

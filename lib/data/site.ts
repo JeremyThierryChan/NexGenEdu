@@ -186,8 +186,12 @@ function toTeacher(section: Section): Teacher {
   const orderValue = Number.parseFloat(orderRaw);
   const status = fieldFrom(section, "状态");
 
+  const kindRaw = fieldFrom(section, "类型");
+
   return {
     id: section.name,
+    // 填「AI」即视为智能体；其余情况都是真人教师
+    kind: kindRaw.trim().toUpperCase() === "AI" ? "ai" : "teacher",
     name: section.name,
     role: fieldFrom(section, "职务"),
     subjects: splitList(fieldFrom(section, "科目")),

@@ -7,7 +7,10 @@ import { cn } from "@/lib/utils/cn";
 const MAX_CARD_SUBJECTS = 4;
 
 type TeacherCardProps = {
-  teacher: Teacher;
+  /** 教学角色（真人教师或 AI 智能体）。 */
+  teacher?: Teacher;
+  /** 语义别名：写 agent={{...}} 更易读，与 teacher 二选一。 */
+  agent?: Teacher;
   /** 点击跳转地址。传 null 时渲染为纯展示卡片（详情页内部使用）。 */
   href?: string | null;
   className?: string;
@@ -17,7 +20,16 @@ type TeacherCardProps = {
  * 教师卡片。
  * 没有照片时用姓名首字作为圆形头像，避免出现空白框。
  */
-export function TeacherCard({ teacher, href, className }: TeacherCardProps) {
+export function TeacherCard({
+  teacher: teacherProp,
+  agent,
+  href,
+  className,
+}: TeacherCardProps) {
+  const teacher = agent ?? teacherProp;
+  if (teacher === undefined) {
+    throw new Error("TeacherCard 需要传入 teacher 或 agent。");
+  }
   const content = (
     <>
       <div className="flex items-center gap-4">
@@ -28,7 +40,11 @@ export function TeacherCard({ teacher, href, className }: TeacherCardProps) {
           {teacher.name.slice(0, 1)}
         </span>
         <div className="min-w-0">
-          <h3 className="text-base font-medium text-ink-900">{teacher.name}</h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-base font-medium text-ink-900">{teacher.name}</h3>
+            {/* AI 智能体需要显著标注，避免家长误认为是真人教师 */}
+            {teacher.kind === "ai" && <Badge tone="accent">AI 智能体</Badge>}
+          </div>
           <p className="mt-0.5 text-sm text-ink-500">{teacher.role}</p>
         </div>
       </div>

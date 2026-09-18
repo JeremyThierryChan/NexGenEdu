@@ -160,7 +160,11 @@ export default function HomePage() {
           description={headings.teachers.description}
         >
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {teachers.slice(0, 3).map((teacher) => (
+            {/* 首页教师卡片只展示真人教师，AI 智能体在教师页单独分区 */}
+            {teachers
+              .filter((teacher) => teacher.kind === "teacher")
+              .slice(0, 3)
+              .map((teacher) => (
               <TeacherCard
                 key={teacher.id}
                 teacher={teacher}
