@@ -81,7 +81,14 @@ export default function CoursesPage() {
                 id={course.id}
                 className="scroll-mt-24 border-b border-ink-100 pb-12 last:border-0 last:pb-0"
               >
-                <h3 className="text-xl font-medium text-ink-900">{course.nameZh}</h3>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <h3 className="text-xl font-medium text-ink-900">{course.nameZh}</h3>
+                  {course.unavailable && (
+                    <span className="rounded-sm border border-warning-100 bg-warning-50 px-1.5 py-0.5 text-[11px] text-warning-600">
+                      暂未开放
+                    </span>
+                  )}
+                </div>
 
                 {course.lead !== "" && (
                   <div
@@ -119,7 +126,10 @@ export default function CoursesPage() {
             <div className="space-y-10">
               {electiveGroups.map((group) => (
                 <div key={group.title}>
-                  <h3 className="text-base font-medium text-ink-900">{group.title}</h3>
+                  {/* 只剩一个分组时不再重复一次标题（组名与区块标题相同） */}
+                  {electiveGroups.length > 1 && (
+                    <h3 className="text-base font-medium text-ink-900">{group.title}</h3>
+                  )}
                   <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                     {group.items.map((course) => (
                       <div

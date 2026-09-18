@@ -62,6 +62,15 @@ export function CourseColumns({ columns }: { columns: CourseColumn[] }) {
   );
 }
 
+/** 卡片右上角的「暂未开放」标记。 */
+function UnavailableBadge() {
+  return (
+    <span className="shrink-0 rounded-sm border border-warning-100 bg-warning-50 px-1.5 py-0.5 text-[11px] text-warning-600">
+      暂未开放
+    </span>
+  );
+}
+
 function ColumnCard({ card }: { card: CourseColumnCard }) {
   const href = bandAnchorHref(card.target);
   const hasTags = card.tags.length > 0;
@@ -72,24 +81,28 @@ function ColumnCard({ card }: { card: CourseColumnCard }) {
       <Link
         href={href}
         className={cn(
-          "flex items-center rounded-lg border border-ink-200 bg-white px-3.5 py-3",
+          "flex items-center justify-between gap-2 rounded-lg border border-ink-200 bg-white px-3.5 py-3",
           "text-sm font-medium text-ink-900 transition-colors",
           "hover:border-brand-300 hover:text-brand-700",
         )}
       >
         {card.title}
+        {card.unavailable && <UnavailableBadge />}
       </Link>
     );
   }
 
   return (
     <div className="flex flex-col rounded-lg border border-ink-200 bg-white px-3.5 py-3">
-      <Link
-        href={href}
-        className="text-sm font-medium text-ink-900 transition-colors hover:text-brand-700"
-      >
-        {card.title}
-      </Link>
+      <div className="flex items-start justify-between gap-2">
+        <Link
+          href={href}
+          className="text-sm font-medium text-ink-900 transition-colors hover:text-brand-700"
+        >
+          {card.title}
+        </Link>
+        {card.unavailable && <UnavailableBadge />}
+      </div>
 
       <div className="mt-2.5 flex flex-wrap gap-1.5">
         {card.tags.map((tag) => (

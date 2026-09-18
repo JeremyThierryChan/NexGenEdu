@@ -90,6 +90,8 @@ export type CourseColumnSubgroup = {
 export type CourseColumnCard = {
   /** 卡片名（即课程名，例如「小学语文」「高中物理」「雅思」）。 */
   title: string;
+  /** 是否暂未开放（数据里写 `· 状态: 暂未开放` 时为 true），页面上显示标记。 */
+  unavailable: boolean;
   /** 课程内部的细分标签；没有细分时为空数组。 */
   tags: CourseTag[];
   /**
@@ -142,6 +144,8 @@ export type CourseBand = {
 export type Course = {
   id: string;
   nameZh: string;
+  /** 是否暂未开放（分组里写 `- · 状态: 暂未开放` 时为 true）。 */
+  unavailable: boolean;
   /** 导语：`### 课程名` 与第一个 `#### 学段` 之间的文字（Markdown）。 */
   lead: string;
   /** 学段小节。语言类课程（雅思 / 法语等）没有小节，此时为空数组。 */

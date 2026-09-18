@@ -142,6 +142,8 @@ export function getCourseColumns(): CourseColumn[] {
     const columnTitle = /栏目\s*[:：]\s*([^·]+)/.exec(rest)?.[1]?.trim() ?? "";
     if (columnTitle === "") continue;
 
+    // 「暂未开放」写在卡片行里，页面上显示成卡片右上角的标记
+    const statusText = /状态\s*[:：]\s*([^·]+)/.exec(rest)?.[1]?.trim() ?? "";
     const tagText = /标签\s*[:：]\s*(.+)$/.exec(rest)?.[1]?.trim() ?? "";
     const tags: CourseTag[] = tagText
       .split(/[、,，]/)
@@ -155,6 +157,7 @@ export function getCourseColumns(): CourseColumn[] {
     const title = item.title.trim();
     const card: CourseColumnCard = {
       title,
+      unavailable: statusText === "暂未开放",
       tags,
       // 这门课自己有说明小节就指向它；否则退回到第一个标签（七选三这类没有总览小节）
       target: sections.has(title) ? title : (tags[0]?.target ?? title),
@@ -290,6 +293,8 @@ export function getCoursesPage(): {
   const courses = subjectGroups.map<Course>((group) => ({
     id: group.name,
     nameZh: group.name,
+    unavailable:
+      group.fields.find((field) => field.name === "状态")?.value.trim() === "暂未开放",
     lead: group.body.trim(),
     bands: group.children.map((child) => ({
       // Group 的字段名是 name；这里转成对外的 title
