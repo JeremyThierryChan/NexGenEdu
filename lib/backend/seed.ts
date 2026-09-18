@@ -1,6 +1,16 @@
 import { getTeachersPage } from "@/lib/data/site";
 import { CURRENT_VERSION } from "./version";
-import type { Classroom, Database, Enrollment, Lesson, Student, Teacher } from "./types";
+import type {
+  Assessment,
+  Classroom,
+  Database,
+  Enrollment,
+  HomeworkRecord,
+  Lesson,
+  LessonRecord,
+  Student,
+  Teacher,
+} from "./types";
 
 /**
  * 伪后端的初始数据（示例数据）。
@@ -100,6 +110,30 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     lesson("l7", "初中物理", "一对一定制课", "t1", "c3", ["s1"], day(now, -1, 17, 30), 60, "已上"),
   ];
 
+  /*
+   * 动态追踪的示例数据：给「昨天那节课」填课堂记录，给两位学生各配几条
+   * 作业记录与阶段测评 —— 这样打开页面就能看到趋势与统计的样子，
+   * 而不是一片空白。
+   */
+  const lessonRecords: LessonRecord[] = [
+    record("l7", "s1", "到课", "中", "一般", 3, "定理记不牢，讲第二遍才通。", now),
+    record("l7", "s2", "到课", "高", "主动", 4, "压轴题思路清楚，计算偶有跳步。", now),
+  ];
+
+  const homeworkRecords: HomeworkRecord[] = [
+    homework("s1", "初中数学", -3, "按时", 85, "二次函数最值", now),
+    homework("s1", "初中数学", -1, "迟交", 70, "几何辅助线", now),
+    homework("s1", "初中物理", -2, "按时", 92, "密度与浮力", now),
+    homework("s2", "中考数学", -2, "按时", 78, "圆与相似综合", now),
+  ];
+
+  const assessments: Assessment[] = [
+    assessment("s1", "初中数学", -30, 72, null, "函数与几何综合", now),
+    assessment("s1", "初中数学", -2, 81, 72, "几何辅助线", now),
+    assessment("s1", "初中物理", -2, 88, null, "电学计算", now),
+    assessment("s2", "中考数学", -2, 91, 84, "压轴题步骤规范", now),
+  ];
+
   return {
     // 必须是当前版本：写成旧版本会让新灌入的数据在下次读取时被迁移逻辑改写
     version: CURRENT_VERSION,
@@ -107,6 +141,9 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     teachers,
     classrooms,
     lessons,
+    lessonRecords,
+    homeworkRecords,
+    assessments,
     updatedAt: now.toISOString(),
   };
 }
@@ -141,6 +178,74 @@ function student(
     status,
     note,
     createdAt: now.toISOString(),
+  };
+}
+
+/** 造一条课堂记录。 */
+function record(
+  lessonId: string,
+  studentId: string,
+  attendance: LessonRecord["attendance"],
+  focus: LessonRecord["focus"],
+  interaction: LessonRecord["interaction"],
+  rating: number,
+  note: string,
+  now: Date,
+): LessonRecord {
+  return {
+    id: `lr_${lessonId}_${studentId}`,
+    lessonId,
+    studentId,
+    attendance,
+    focus,
+    interaction,
+    rating,
+    note,
+    recordedAt: day(now, -1, 19, 0),
+  };
+}
+
+/** 造一条作业记录；dayOffset 为相对今天的天数。 */
+function homework(
+  studentId: string,
+  subject: string,
+  dayOffset: number,
+  submission: HomeworkRecord["submission"],
+  accuracy: number,
+  weakPoints: string,
+  now: Date,
+): HomeworkRecord {
+  return {
+    id: `hw_${studentId}_${subject}_${dayOffset}`,
+    studentId,
+    date: day(now, dayOffset, 20, 0),
+    subject,
+    submission,
+    accuracy,
+    weakPoints,
+    note: "",
+  };
+}
+
+/** 造一条阶段测评。 */
+function assessment(
+  studentId: string,
+  subject: string,
+  dayOffset: number,
+  score: number,
+  previousScore: number | null,
+  weakPoints: string,
+  now: Date,
+): Assessment {
+  return {
+    id: `as_${studentId}_${subject}_${dayOffset}`,
+    studentId,
+    subject,
+    date: day(now, dayOffset, 18, 0),
+    score,
+    previousScore,
+    weakPoints,
+    note: "",
   };
 }
 

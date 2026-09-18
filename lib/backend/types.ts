@@ -148,6 +148,66 @@ export type Lesson = {
   note: string;
 };
 
+/** 课堂记录：一节课的每个学生一条（由上课老师在课后填写）。 */
+export type LessonRecord = {
+  id: string;
+  /** 关联的课节。 */
+  lessonId: string;
+  studentId: string;
+  attendance: Attendance;
+  focus: FocusLevel;
+  interaction: InteractionLevel;
+  /** 状态评分 1–5。 */
+  rating: number;
+  note: string;
+  /** 填写时间（ISO）。 */
+  recordedAt: string;
+};
+
+export const ATTENDANCE_OPTIONS = ["到课", "请假", "旷课"] as const;
+export type Attendance = (typeof ATTENDANCE_OPTIONS)[number];
+
+export const FOCUS_OPTIONS = ["高", "中", "低"] as const;
+export type FocusLevel = (typeof FOCUS_OPTIONS)[number];
+
+export const INTERACTION_OPTIONS = ["主动", "一般", "被动"] as const;
+export type InteractionLevel = (typeof INTERACTION_OPTIONS)[number];
+
+/** 作业记录（按次记录，因此挂学生而不是挂在课上）。 */
+export type HomeworkRecord = {
+  id: string;
+  studentId: string;
+  /** 作业日期（ISO）。 */
+  date: string;
+  subject: string;
+  submission: Submission;
+  /** 正确率 0–100；负数表示未统计。 */
+  accuracy: number;
+  /** 本次错题知识点。 */
+  weakPoints: string;
+  note: string;
+};
+
+export const SUBMISSION_OPTIONS = ["按时", "迟交", "未交"] as const;
+export type Submission = (typeof SUBMISSION_OPTIONS)[number];
+
+/** 阶段测评（按次记录，用于看趋势）。 */
+export type Assessment = {
+  id: string;
+  studentId: string;
+  subject: string;
+  date: string;
+  score: number;
+  /**
+   * 同科目的上一次分数，由服务在新增时自动带出（用于算趋势）。
+   * null 表示这是该科目的第一次测评。
+   */
+  previousScore: number | null;
+  /** 薄弱知识点。 */
+  weakPoints: string;
+  note: string;
+};
+
 /** 后台全部数据。 */
 export type Database = {
   /** 数据结构版本，将来加字段时用于迁移。 */
@@ -156,9 +216,20 @@ export type Database = {
   teachers: Teacher[];
   classrooms: Classroom[];
   lessons: Lesson[];
+  /** 动态追踪：课堂记录 / 作业记录 / 阶段测评。 */
+  lessonRecords: LessonRecord[];
+  homeworkRecords: HomeworkRecord[];
+  assessments: Assessment[];
   /** 最后一次写入时间（ISO）。 */
   updatedAt: string;
 };
+
+/** 课堂记录入参：id 与填写时间由服务生成。 */
+export type NewLessonRecord = Omit<LessonRecord, "id" | "recordedAt">;
+/** 作业记录入参。 */
+export type NewHomeworkRecord = Omit<HomeworkRecord, "id">;
+/** 阶段测评入参：上一次分数由服务自动带出。 */
+export type NewAssessment = Omit<Assessment, "id" | "previousScore">;
 
 /** 新建时的入参：id、报课集合与时间戳由服务生成。 */
 export type NewStudent = Omit<Student, "id" | "createdAt" | "enrollments" | "subjects"> & {

@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { AssessmentPanel } from "@/components/admin/AssessmentPanel";
 import { EnrollmentPanel } from "@/components/admin/EnrollmentPanel";
+import { HomeworkPanel } from "@/components/admin/HomeworkPanel";
 import { StudentProfileForm } from "@/components/admin/StudentProfileForm";
 import { StudentProfileView } from "@/components/admin/StudentProfileView";
 import { api, type Classroom, type Lesson, type Student, type Teacher } from "@/lib/backend/api";
@@ -32,7 +34,9 @@ export function StudentDetail({
 }) {
   const [student, setStudent] = useState<Student | null>(null);
   const [teachers, setTeachers] = useState<Teacher[]>([]);
-  const [tab, setTab] = useState<"enrollments" | "profile" | "lessons">("enrollments");
+  const [tab, setTab] = useState<
+    "enrollments" | "profile" | "lessons" | "homework" | "assessments"
+  >("enrollments");
   const [editingProfile, setEditingProfile] = useState(false);
 
   const load = useCallback(async () => {
@@ -98,6 +102,8 @@ export function StudentDetail({
             ["enrollments", "报课与课时"],
             ["profile", "信息采集表"],
             ["lessons", "排课记录"],
+            ["homework", "作业记录"],
+            ["assessments", "阶段测评"],
           ] as const
         ).map(([key, label]) => (
           <button
@@ -130,6 +136,8 @@ export function StudentDetail({
         ))}
 
       {tab === "lessons" && <StudentLessons studentId={student.id} />}
+      {tab === "homework" && <HomeworkPanel studentId={student.id} />}
+      {tab === "assessments" && <AssessmentPanel studentId={student.id} />}
     </section>
   );
 }

@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { Panel } from "@/components/admin/AdminFields";
 import { LessonForm } from "@/components/admin/LessonForm";
+import { LessonRecordPanel } from "@/components/admin/LessonRecordPanel";
 import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
 import {
@@ -35,6 +36,7 @@ export default function AdminLessonsPage() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [recordId, setRecordId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
 
   const load = useCallback(async () => {
@@ -174,7 +176,8 @@ export default function AdminLessonsPage() {
           </thead>
           <tbody>
             {lessons.map((lesson) => (
-              <tr key={lesson.id} className="border-b border-ink-50 last:border-0">
+              <Fragment key={lesson.id}>
+              <tr className="border-b border-ink-50 last:border-0">
                 <td className="px-4 py-2.5 font-mono text-xs tabular text-ink-900">
                   {formatTimeRange(lesson.startsAt, lesson.durationMinutes)}
                 </td>
@@ -224,6 +227,13 @@ export default function AdminLessonsPage() {
                     )}
                     <button
                       type="button"
+                      onClick={() => setRecordId(recordId === lesson.id ? null : lesson.id)}
+                      className="text-xs text-brand-700 transition-colors hover:text-brand-800"
+                    >
+                      {recordId === lesson.id ? "收起记录" : "课堂记录"}
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => setEditingId(editingId === lesson.id ? null : lesson.id)}
                       className="text-xs text-brand-700 transition-colors hover:text-brand-800"
                     >
@@ -239,6 +249,15 @@ export default function AdminLessonsPage() {
                   </div>
                 </td>
               </tr>
+              {/* 课堂记录：采集表要求「每节课后由上课老师填写」，因此挂在课节下面 */}
+              {recordId === lesson.id && (
+                <tr className="border-b border-ink-50 bg-ink-50/60">
+                  <td colSpan={7} className="p-0">
+                    <LessonRecordPanel lesson={lesson} />
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             ))}
 
             {!loading && lessons.length === 0 && (

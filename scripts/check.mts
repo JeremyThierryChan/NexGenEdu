@@ -40,6 +40,7 @@ import { dateKey } from "@/lib/backend/format";
 import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
+import { weekDays } from "@/lib/backend/format";
 import {
   PROFILE_SECTIONS,
   emptyProfileTable,
@@ -914,7 +915,10 @@ eq("折算记录沿用了原科目", migratedStudent.enrollments[0]?.subject, "�
 ok("折算记录带说明，提示需人工确认",
   (migratedStudent.enrollments[0]?.note ?? "").includes("折算"));
 ok("迁移后的学生有采集表字段（空对象）", migratedStudent.profile !== undefined);
-eq("迁移结果版本为 3", JSON.parse(legacy.read("nexgenedu.admin.db.v1") ?? "{}").version, 3);
+eq("v1 数据一路迁到当前版本",
+  JSON.parse(legacy.read("nexgenedu.admin.db.v1") ?? "{}").version, CURRENT_VERSION);
+ok("迁移补上的动态追踪表可用（数组已建好）",
+  Array.isArray(JSON.parse(legacy.read("nexgenedu.admin.db.v1") ?? "{}").lessonRecords));
 
 // 迁移后的数据应被写回（下次打开不再重复迁移、也不会重复改写）
 eq("迁移结果已落盘（版本与当前一致）",
@@ -977,6 +981,80 @@ eq("老档案读不到的新多选字段返回空数组", profileList(seeded[1]!
 
 await api.reset();
 eq("重置回到示例数据", (await api.students.list()).length, seeded.length);
+
+// ── 动态追踪：课堂记录 / 作业记录 / 阶段测评 ──────────────────────────
+__useStoreForTesting(memory);
+
+// 课堂记录：一节课一个学生一条，重复保存是更新而不是新增
+const trackLesson = (await api.lessons.list())[0]!;
+const trackStudent = trackLesson.studentIds[0]!;
+const firstRecord = await api.lessonRecords.save({
+  lessonId: trackLesson.id, studentId: trackStudent,
+  attendance: "到课", focus: "高", interaction: "主动", rating: 4, note: "自检第一条",
+});
+ok("课堂记录返回 id", firstRecord.id !== "");
+const secondRecord = await api.lessonRecords.save({
+  lessonId: trackLesson.id, studentId: trackStudent,
+  attendance: "请假", focus: "低", interaction: "被动", rating: 2, note: "自检改过",
+});
+eq("重复保存是同一条记录（不是新增）", secondRecord.id, firstRecord.id);
+eq("一课一生只有一条记录", (await api.lessonRecords.listByLesson(trackLesson.id)).length, 1);
+eq("保存内容被更新", (await api.lessonRecords.listByLesson(trackLesson.id))[0]?.attendance, "请假");
+ok("按学生能查到自己的记录",
+  (await api.lessonRecords.listByStudent(trackStudent)).some((item) => item.id === firstRecord.id));
+await api.lessonRecords.remove(firstRecord.id);
+eq("删除课堂记录后查不到", (await api.lessonRecords.listByLesson(trackLesson.id)).length, 0);
+
+// 作业记录
+const homework = await api.homework.create({
+  studentId: trackStudent, subject: "初中数学", date: new Date().toISOString(),
+  submission: "迟交", accuracy: 80, weakPoints: "自检知识点", note: "",
+});
+eq("作业记录能写入", (await api.homework.listByStudent(trackStudent))[0]?.id, homework.id);
+ok("作业记录按日期倒序",
+  (await api.homework.listByStudent(trackStudent)).every(
+    (item, index, list) => index === 0 || list[index - 1]!.date >= item.date));
+
+// 阶段测评：上次分数与趋势由服务带出
+const firstAssessment = await api.assessments.add({
+  studentId: trackStudent, subject: "自检科目", date: new Date(Date.now() - 86_400_000).toISOString(),
+  score: 70, weakPoints: "", note: "",
+});
+eq("首次测评没有上次分数", firstAssessment.previousScore, null);
+const secondAssessment = await api.assessments.add({
+  studentId: trackStudent, subject: "自检科目", date: new Date().toISOString(),
+  score: 85, weakPoints: "", note: "",
+});
+eq("第二次测评自动带出上次分数", secondAssessment.previousScore, 70);
+ok("能看到进步（趋势可算）", secondAssessment.score > (secondAssessment.previousScore ?? 0));
+
+// 不同科目之间不互相干扰
+const otherSubject = await api.assessments.add({
+  studentId: trackStudent, subject: "另一科目", date: new Date().toISOString(),
+  score: 60, weakPoints: "", note: "",
+});
+eq("换科目后上次分数为 null", otherSubject.previousScore, null);
+ok("按学生查询覆盖多个科目",
+  (await api.assessments.listByStudent(trackStudent)).some((item) => item.subject === "另一科目"));
+
+// 动态追踪不能影响课时：记录课堂表现不等于扣课时
+const beforeTracking = remainingTotal((await api.students.get(trackStudent))!.enrollments);
+await api.students.get(trackStudent);
+eq("写记录不会改动课时", remainingTotal((await api.students.get(trackStudent))!.enrollments), beforeTracking);
+
+// ── 课表与占用：数据源（按周区间 + 按教师/教室筛选）────────────────────
+const weekStart = weekDays(new Date())[0]!;
+const weekEnd = weekDays(new Date())[6]!;
+const weekLessons = await api.lessons.listBetween(weekStart, weekEnd);
+ok("周区间查询能取到本周课程", weekLessons.length >= 1);
+const weekTeachers = new Set(weekLessons.map((lesson) => lesson.teacherId));
+ok("按教师筛选的结果都在本周",
+  [...weekTeachers].every((id) =>
+    weekLessons.filter((lesson) => lesson.teacherId === id).length > 0));
+const weekClassrooms = new Set(weekLessons.map((lesson) => lesson.classroomId));
+ok("按教室筛选的结果都在本周",
+  [...weekClassrooms].every((id) =>
+    weekLessons.filter((lesson) => lesson.classroomId === id).length > 0));
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();

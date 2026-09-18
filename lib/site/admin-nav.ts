@@ -16,4 +16,9 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
   { href: "/admin/classrooms", label: "教室", description: "教室占用状态与空档" },
   { href: "/admin/lessons", label: "课程安排", description: "课程列表、排课与冲突检测" },
   { href: "/admin/calendar", label: "日历", description: "按日 / 周查看课程安排" },
+  {
+    href: "/admin/timetable",
+    label: "课表与占用",
+    description: "按周查看教师课表与教室占用（谁什么时候上、哪间教室空着）",
+  },
 ] as const;

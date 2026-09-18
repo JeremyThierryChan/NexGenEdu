@@ -5,10 +5,16 @@ import { CURRENT_VERSION } from "./version";
 import { enrollmentForLesson, remainingOf, remainingTotal } from "./enrollment";
 import type { StudentProfile } from "./student-profile";
 import type {
+  Assessment,
   Classroom,
   ClassroomAvailability,
   ClassroomKind,
   CompletionResult,
+  HomeworkRecord,
+  LessonRecord,
+  NewAssessment,
+  NewHomeworkRecord,
+  NewLessonRecord,
   ConflictReport,
   Database,
   Enrollment,
@@ -91,6 +97,11 @@ function load(): Database {
 
 /**
  * 老数据升级到当前结构版本。
+ *
+ * **分支必须按版本升序排列、逐级推进**：一次调用要把 v1 一路迁到当前版本。
+ * 这里踩过一次坑：把「v3 → v4」的分支写在「v1 → v2」之前，于是 v1 数据
+ * 迁到 v3 就停了（v3 分支已经执行过、不会再执行），migrate 返回 null，
+ * 调用方直接把数据重新灌成了示例数据 —— 用户看到的是「我的数据没了」。
  *
  * 返回 null 表示这份数据没法用（版本比当前还新，或结构不认识）——
  * 调用方会重新灌入示例数据，而不是带着缺字段的数据继续跑。
@@ -179,6 +190,14 @@ function migrate(db: Database): Database | null {
       } as Student;
     });
     db.version = 3;
+  }
+
+  if (db.version === 3) {
+    // v3 → v4：新增动态追踪三张表（课堂记录 / 作业记录 / 阶段测评）
+    db.lessonRecords = db.lessonRecords ?? [];
+    db.homeworkRecords = db.homeworkRecords ?? [];
+    db.assessments = db.assessments ?? [];
+    db.version = 4;
   }
 
   return db.version === CURRENT_VERSION ? db : null;
@@ -432,6 +451,96 @@ export const api = {
 
   classrooms: collection<Classroom>((db) => db.classrooms, "c"),
 
+  /**
+   * 课堂记录。
+   *
+   * 保存用 upsert 而不是 create：一节课一个学生只有一条记录，
+   * 老师改完再保存不应该多出一条（这是最容易被写成「每次保存都新增」的地方）。
+   */
+  lessonRecords: {
+    ...collection<LessonRecord>((db) => db.lessonRecords, "lr"),
+    listByLesson: async (lessonId: string): Promise<LessonRecord[]> => {
+      await delay();
+      return clone(load().lessonRecords.filter((item) => item.lessonId === lessonId));
+    },
+    listByStudent: async (studentId: string): Promise<LessonRecord[]> => {
+      await delay();
+      return clone(
+        load()
+          .lessonRecords.filter((item) => item.studentId === studentId)
+          .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt)),
+      );
+    },
+    /** 按「课节 + 学生」写入；已存在则更新。 */
+    async save(input: NewLessonRecord): Promise<LessonRecord> {
+      await delay();
+      const db = load();
+      const existing = db.lessonRecords.find(
+        (item) => item.lessonId === input.lessonId && item.studentId === input.studentId,
+      );
+
+      if (existing !== undefined) {
+        Object.assign(existing, input, { recordedAt: nowIso() });
+        persist(db);
+        return clone(existing);
+      }
+
+      const created: LessonRecord = { ...input, id: nextId("lr"), recordedAt: nowIso() };
+      db.lessonRecords.push(created);
+      persist(db);
+      return clone(created);
+    },
+  },
+
+  /** 作业记录（按次）。 */
+  homework: {
+    ...collection<HomeworkRecord>((db) => db.homeworkRecords, "hw"),
+    listByStudent: async (studentId: string): Promise<HomeworkRecord[]> => {
+      await delay();
+      return clone(
+        load()
+          .homeworkRecords.filter((item) => item.studentId === studentId)
+          .sort((a, b) => b.date.localeCompare(a.date)),
+      );
+    },
+  },
+
+  /**
+   * 阶段测评。
+   *
+   * create 时自动带出同科目上一次的分数作为 previousScore ——
+   * 「趋势」是这条记录的核心信息，让页面自己去找上一条容易算错，
+   * 也让「补录旧数据」时前后顺序对不上。
+   */
+  assessments: {
+    ...collection<Assessment>((db) => db.assessments, "as"),
+    listByStudent: async (studentId: string): Promise<Assessment[]> => {
+      await delay();
+      return clone(
+        load()
+          .assessments.filter((item) => item.studentId === studentId)
+          .sort((a, b) => b.date.localeCompare(a.date)),
+      );
+    },
+    async add(input: NewAssessment): Promise<Assessment> {
+      await delay();
+      const db = load();
+      const previous = db.assessments
+        .filter((item) => item.studentId === input.studentId && item.subject === input.subject)
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .at(-1);
+
+      const created: Assessment = {
+        ...input,
+        id: nextId("as"),
+        previousScore: previous?.score ?? null,
+      };
+      db.assessments.push(created);
+      persist(db);
+      return clone(created);
+    },
+  },
+
   lessons: {
     ...collection<Lesson>((db) => db.lessons, "l"),
 
@@ -639,10 +748,16 @@ export function __useStoreForTesting(backing: KeyValueStore): void {
 
 // 重新导出，便于页面只 import 这一处
 export type {
+  Assessment,
   Classroom,
   ClassroomAvailability,
   ClassroomKind,
   CompletionResult,
+  HomeworkRecord,
+  LessonRecord,
+  NewAssessment,
+  NewHomeworkRecord,
+  NewLessonRecord,
   Enrollment,
   NewEnrollment,
   ConflictReport,
@@ -657,4 +772,13 @@ export type {
   Teacher,
   TodaySummary,
 };
-export { CLASSROOM_KINDS, ENROLLMENT_STATUSES, STUDENT_STATUSES, LESSON_STATUSES } from "./types";
+export {
+  ATTENDANCE_OPTIONS,
+  CLASSROOM_KINDS,
+  ENROLLMENT_STATUSES,
+  FOCUS_OPTIONS,
+  INTERACTION_OPTIONS,
+  LESSON_STATUSES,
+  STUDENT_STATUSES,
+  SUBMISSION_OPTIONS,
+} from "./types";
