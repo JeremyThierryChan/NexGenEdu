@@ -62,7 +62,7 @@ import {
   PRICING_SOURCE_ADMIN,
   PRICING_SOURCE_CONTENT,
 } from "@/lib/backend/pricing";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { LEAVE_NOTICE_HOURS, decideCharge } from "@/lib/backend/attendance";
 import {
   CLASS_HOURS_PER_DAY,
@@ -226,7 +226,7 @@ const { courses: allCourses, columns, electiveGroups: electiveGroupList } = getC
  * 课程栏目的自检原则：**只校验性质，不校验具体名单**。
  *
  * content.md 是手工维护的，增删课程、改课程名都是正常操作，
- * 把 34 张卡片的名字逐个写进断言会让「改内容」和「自检通过」互相打架
+ * 把每张卡片的名字逐个写进断言会让「改内容」和「自检通过」互相打架
  * （而 check 会卡住部署，等于正常编辑也推不上去）。
  *
  * 因此这里守住的是结构性质与跳转完整性：
@@ -2066,6 +2066,38 @@ const studentsBeforeSearch = (await api.students.list()).length;
 await api.search("示例");
 eq("搜索不产生操作日志", (await api.logs.list(200)).length, logsBeforeSearch);
 eq("搜索不改动数据", (await api.students.list()).length, studentsBeforeSearch);
+
+// ── 文档一致性：索引里的文件必须存在，核心文档必须被索引 ──────────────────
+// 文档最容易「越写越漂」：索引指向一个被改名/删掉的文件，读者点进去是 404。
+// 这里只钉两件事：README 与 docs/README.md 里链接到的本地文档都要真的存在；
+// 核心文档必须出现在索引里（不写死数量，新增文档不会让自检变红）。
+const readmeRoot = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+const docsIndex = readFileSync(new URL("../docs/README.md", import.meta.url), "utf8");
+const docPathExists = (relative: string) =>
+  existsSync(new URL(`../${relative.replace(/^\.\//, "")}`, import.meta.url));
+const linkedDocs = (text: string): string[] =>
+  [...text.matchAll(/\]\((\.[^)]*\.md)\)/g)]
+    .map((match) => match[1]!.replace(/^\.\//, ""))
+    .filter((path) => path.startsWith("docs/") || path === "PROJECT.md" || path === "README.md");
+
+const README_LINKED_AT_LEAST = 5;
+const readmeLinks = linkedDocs(readmeRoot);
+ok(`README 至少链接到 ${README_LINKED_AT_LEAST} 份文档（当前 ${readmeLinks.length} 份）`,
+  readmeLinks.length >= README_LINKED_AT_LEAST);
+eq("README 里链接的文档都存在", readmeLinks.filter((path) => !docPathExists(path)), []);
+eq("docs 索引里链接的文档都存在",
+  linkedDocs(docsIndex)
+    .map((path) => path.replace(/^docs\//, "docs/"))
+    .filter((path) => !docPathExists(path)), []);
+
+// 核心文档：这五份是「员工会照做、开发者会照做」的东西，缺一份就是缺一条腿
+const CORE_DOCS = ["使用手册", "内容维护手册", "技术架构", "部署与发布", "后台API约定"];
+eq("docs 索引漏掉的核心文档",
+  CORE_DOCS.filter((name) => !docsIndex.includes(name)), []);
+eq("README 文档表漏掉的核心文档",
+  CORE_DOCS.filter((name) => !readmeRoot.includes(name)), []);
+ok("README 与 docs 索引都说明了伪后端边界（数据只在本机浏览器）",
+  readmeRoot.includes("这台电脑的浏览器") && docsIndex.includes("这台电脑的浏览器"));
 
 // ── 接口契约（第八组）─────────────────────────────────────────────────
 // 文档最容易「写完就过期」。这里让契约清单与代码互相校验：
