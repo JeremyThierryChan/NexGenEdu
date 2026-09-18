@@ -281,7 +281,7 @@ export default async function CourseSlugPage({ params }: PageProps) {
             </ul>
           ) : (
             <p className="mt-3 max-w-2xl text-sm leading-relaxed text-ink-600">
-              这门课的授课教师以咨询确认为准 —— 我们会按学生的年级与薄弱环节安排对应的教师。
+              授课教师会按学生的年级与薄弱环节安排，具体以咨询确认为准。
             </p>
           )}
         </Section>
