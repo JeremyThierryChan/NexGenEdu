@@ -1207,6 +1207,18 @@ export const api = {
         }
       }
 
+      /*
+       * 这个方法是**自定义覆盖**了通用集合的 update（为了处理课时撤销），
+       * 因此不会自动记日志 —— 必须自己写，否则「把别人的课挪走」这种
+       * 影响他人的改动会不留痕迹（自检里有一条断言专门盯着这点）。
+       */
+      writeLog(db, {
+        entity: "排课",
+        action: "修改",
+        targetId: id,
+        summary: `修改排课「${lesson.subject}」（${Object.keys(patch).join("、")}）`,
+      });
+
       persist(db);
       return clone(lesson);
     },

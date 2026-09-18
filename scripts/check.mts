@@ -2285,6 +2285,60 @@ eq("放弃后状态为已放弃", abandoned?.status, "已放弃");
 ok("放弃原因写进备注", (abandoned?.note ?? "").includes("自检放弃"));
 await api.inquiries.remove(createdInquiry.id);
 
+/*
+ * 端到端主线：新学生的时段被已有课挡住 → 把已有课挪走 → 再判定通过。
+ * 这是这个功能最典型的用法（「协调已有学生」），之前只分别验证了各段，
+ * 这里把整条路串起来走一遍。
+ */
+__useStoreForTesting(memory);
+const blockedTeacher = (await api.teachers.listActive())[0]!;
+const blockedRoom = (await api.classrooms.list())[0]!;
+const blockedStudent = (await api.students.list())[0]!;
+
+// 造一节已有课，把「下周六 10:00」占住
+const blockingStart = new Date();
+blockingStart.setDate(blockingStart.getDate() + ((6 - blockingStart.getDay() + 7) % 7 || 7));
+blockingStart.setHours(10, 0, 0, 0);
+const blockingLesson = await api.lessons.create({
+  subject: blockedStudent.subjects[0] ?? "初中数学", form: "", teacherId: blockedTeacher.id,
+  classroomId: blockedRoom.id, studentIds: [blockedStudent.id],
+  startsAt: blockingStart.toISOString(), durationMinutes: 60, status: "已排", note: "自检·挡路课",
+});
+
+const e2eInquiry = await api.inquiries.create({
+  studentName: "端到端自检学生", grade: "初二", guardian: "",
+  subject: blockedStudent.subjects[0] ?? "初中数学",
+  durationMinutes: 60, intervalWeeks: 1, plannedLessons: 2,
+  startsAt: new Date().toISOString(),
+  candidates: [{ id: "c1", weekday: 6, start: "10:00" }],
+  preferredTeacherId: blockedTeacher.id, preferredClassroomId: blockedRoom.id,
+  skipDates: [], status: "待确认", note: "",
+});
+
+const blockedReport = await api.inquiries.evaluate(e2eInquiry.id);
+eq("时段被已有课挡住 → 判定排不下", blockedReport?.slots[0]?.ok, false);
+eq("阻塞指向那节已有课", blockedReport?.slots[0]?.blockers[0]?.lessonId, blockingLesson.id);
+ok("阻塞里带上已有学生（界面要先显示再决定）",
+  (blockedReport?.slots[0]?.blockers[0]?.studentIds ?? []).includes(blockedStudent.id));
+
+// 系统给出可挪的时间，把挡住的那节课挪走
+const moves = await api.lessons.suggestMoves(blockingLesson.id);
+ok("挡住的那节课有可挪的时间", moves.length > 0);
+eq("挪课候选不与原时间相同", moves[0]?.startsAt !== blockingStart.toISOString(), true);
+await api.lessons.update(blockingLesson.id, { startsAt: moves[0]!.startsAt });
+
+// 再判定：应该通过了
+const freeReport = await api.inquiries.evaluate(e2eInquiry.id);
+eq("把挡路的课挪走后判定通过", freeReport?.slots[0]?.ok, true);
+eq("仍然指向原来的教师与场地", freeReport?.slots[0]?.assignment?.teacherId, blockedTeacher.id);
+ok("挪课留下了操作日志（不静默改动别人的课）",
+  (await api.logs.list(50)).some((log) => log.action === "修改" && log.targetId === blockingLesson.id));
+
+// 清理：把课挪回原时间、删掉自检课与咨询
+await api.lessons.update(blockingLesson.id, { startsAt: blockingStart.toISOString() });
+await api.lessons.remove(blockingLesson.id);
+await api.inquiries.remove(e2eInquiry.id);
+
 // 挪课建议：给已有课算出可用的新时间
 const moveTarget = (await api.lessons.list()).find((lesson) => lesson.status === "已排");
 if (moveTarget !== undefined) {
