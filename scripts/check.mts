@@ -41,6 +41,13 @@ import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
 import { weekDays } from "@/lib/backend/format";
+import {
+  buildDayTimeline,
+  dayLessonGaps,
+  formatGapDuration,
+  formatMinuteOfDay,
+  totalGapMinutes,
+} from "@/lib/backend/timetable";
 import { groupHits, searchAll } from "@/lib/backend/search";
 import {
   buildDateSeries,
@@ -1244,6 +1251,81 @@ const weekClassrooms = new Set(weekLessons.map((lesson) => lesson.classroomId));
 ok("按教室筛选的结果都在本周",
   [...weekClassrooms].every((id) =>
     weekLessons.filter((lesson) => lesson.classroomId === id).length > 0));
+
+// ── 课表的空档（两节课中间空出来的时间）──────────────────────────────
+/*
+ * 空档是课表上唯一「没写出来」的信息，而接新学生、安排补课都靠它。
+ * 口径必须钉死：只算课与课之间、已取消的课不算占用、重叠不产生假空档。
+ */
+const gapLesson = (
+  id: string,
+  startsAt: string,
+  durationMinutes: number,
+  status: Lesson["status"] = "已排",
+): Lesson => ({
+  id, subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1", studentIds: [],
+  startsAt: new Date(startsAt).toISOString(), durationMinutes, status, note: "", makeupForLessonId: "",
+});
+
+// 用户给的例子：17:30–18:30、19:00–20:30 两节课之间空 30 分钟
+const gapSample = [
+  gapLesson("g1", "2026-09-19T17:30:00", 60),
+  gapLesson("g2", "2026-09-19T19:00:00", 90),
+];
+const sampleGaps = dayLessonGaps(gapSample);
+eq("两节课之间的空档", sampleGaps.map((gap) => [gap.minutes, gap.label, gap.rangeLabel]),
+  [[30, "30 分钟", "18:30–19:00"]]);
+eq("空档记住了前后两节课（列表里插在后一节之前）",
+  [sampleGaps[0]?.afterLessonId, sampleGaps[0]?.beforeLessonId], ["g1", "g2"]);
+eq("时间线顺序是 课 / 空档 / 课",
+  buildDayTimeline(gapSample).map((item) => item.kind), ["lesson", "gap", "lesson"]);
+eq("时间线里的空档就是算出来的那段",
+  buildDayTimeline(gapSample).filter((item) => item.kind === "gap").map((item) => item.kind === "gap" ? item.gap.minutes : 0),
+  [30]);
+
+// 头尾不算：第一节课之前、最后一节课之后不是「中间空着」
+eq("只有一节课时没有空档", dayLessonGaps([gapLesson("g1", "2026-09-19T19:00:00", 60)]).length, 0);
+// 紧挨着也不算空档
+eq("紧挨着的两节课之间没有空档",
+  dayLessonGaps([gapLesson("a", "2026-09-19T17:30:00", 60), gapLesson("b", "2026-09-19T18:30:00", 60)]).length, 0);
+// 重叠（时间交叉）不产生负数或假空档
+eq("时间重叠不产生空档",
+  dayLessonGaps([
+    gapLesson("a", "2026-09-19T17:30:00", 90),
+    gapLesson("b", "2026-09-19T18:00:00", 60),
+  ]).length, 0);
+// 乱序输入也按时间算
+eq("乱序传入也能算出空档",
+  dayLessonGaps([
+    gapLesson("b", "2026-09-19T19:00:00", 60),
+    gapLesson("a", "2026-09-19T17:30:00", 60),
+  ])[0]?.minutes, 30);
+// 已取消的课不占时间：取消掉中间那节，前后就该连成一整段空档
+eq("已取消的课不参与空档计算",
+  dayLessonGaps([
+    gapLesson("a", "2026-09-19T17:30:00", 60),
+    gapLesson("x", "2026-09-19T18:30:00", 60, "已取消"),
+    gapLesson("b", "2026-09-19T19:30:00", 60),
+  ]).map((gap) => [gap.minutes, gap.rangeLabel]), [[60, "18:30–19:30"]]);
+// 一天里可能有多段空档
+const twoGaps = [
+  gapLesson("a", "2026-09-19T17:30:00", 60),
+  gapLesson("b", "2026-09-19T19:00:00", 90),
+  gapLesson("c", "2026-09-19T21:00:00", 60),
+];
+eq("一天里的多段空档", dayLessonGaps(twoGaps).map((gap) => gap.label), ["30 分钟", "30 分钟"]);
+eq("空档总时长", totalGapMinutes(twoGaps), 60);
+eq("没有课的一天没有空档", totalGapMinutes([]), 0);
+
+// 时长写法：45 分钟 / 整小时 / 小时+分钟
+eq("空档时长的人话写法",
+  [45, 60, 90, 125, 5].map(formatGapDuration),
+  ["45 分钟", "1 小时", "1 小时 30 分钟", "2 小时 5 分钟", "5 分钟"]);
+eq("空档时间段补零", formatMinuteOfDay(9 * 60 + 5), "09:05");
+
+// 页面用的时间线必须与传入的课节一一对应（不能凭空多出或漏掉课）
+const timelineLessons = buildDayTimeline(gapSample).filter((item) => item.kind === "lesson").length;
+eq("时间线里的课节数不变", timelineLessons, gapSample.length);
 
 // ── 导出与备份（第二组）──────────────────────────────────────────────
 // 导入是唯一能一次性毁掉全部数据的操作，因此这一组的重点全在「坏文件不能洗数据」。

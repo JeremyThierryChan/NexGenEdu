@@ -6,6 +6,7 @@ import { PageHeading } from "@/components/ui/PageHeading";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { api, type Classroom, type Lesson, type Teacher } from "@/lib/backend/api";
 import { formatDayLabel, formatTimeRange, dateKey, weekDays } from "@/lib/backend/format";
+import { buildDayTimeline } from "@/lib/backend/timetable";
 import { createIcs, downloadTextFile, stampForFilename } from "@/lib/backend/backup";
 import { cn } from "@/lib/utils/cn";
 
@@ -233,29 +234,48 @@ export default function AdminTimetablePage() {
                 <span className="text-xs text-ink-400">{dayLessons.length}</span>
               </header>
               <ul className="space-y-1.5 p-2">
-                {dayLessons.map((lesson) => (
-                  <li
-                    key={lesson.id}
-                    className={cn(
-                      "rounded-md border px-2 py-1.5 text-xs",
-                      lesson.status === "已取消"
-                        ? "border-ink-100 bg-ink-50 text-ink-400 line-through"
-                        : lesson.status === "已上"
-                          ? "border-success-100 bg-success-50 text-success-600"
-                          : "border-ink-200 text-ink-700",
-                    )}
-                  >
-                    <span className="block font-mono tabular">
-                      {formatTimeRange(lesson.startsAt, lesson.durationMinutes)}
-                    </span>
-                    <span className="mt-0.5 block truncate">{lesson.subject}</span>
-                    <span className="mt-0.5 block truncate text-[11px] opacity-80">
-                      {tab === "teacher"
-                        ? classrooms.find((item) => item.id === lesson.classroomId)?.name
-                        : teachers.find((item) => item.id === lesson.teacherId)?.name}
-                    </span>
-                  </li>
-                ))}
+                {buildDayTimeline(dayLessons).map((item) =>
+                  item.kind === "gap" ? (
+                    /*
+                     * 空档卡片：课表上唯一没写出来的信息。
+                     * 「两节课中间空着多久」决定了能不能再接一个学生 / 安排补课。
+                     */
+                    <li
+                      key={`gap-${item.gap.beforeLessonId}`}
+                      title={`${item.gap.rangeLabel} 空着`}
+                      className="flex items-baseline justify-between gap-2 rounded-md border border-dashed border-ink-300 bg-ink-50 px-2 py-1 text-[11px] text-ink-500"
+                    >
+                      <span className="font-mono tabular text-ink-400">
+                        {item.gap.rangeLabel}
+                      </span>
+                      <span>
+                        {tab === "teacher" ? "空档" : "教室空闲"} {item.gap.label}
+                      </span>
+                    </li>
+                  ) : (
+                    <li
+                      key={item.lesson.id}
+                      className={cn(
+                        "rounded-md border px-2 py-1.5 text-xs",
+                        item.lesson.status === "已取消"
+                          ? "border-ink-100 bg-ink-50 text-ink-400 line-through"
+                          : item.lesson.status === "已上"
+                            ? "border-success-100 bg-success-50 text-success-600"
+                            : "border-ink-200 text-ink-700",
+                      )}
+                    >
+                      <span className="block font-mono tabular">
+                        {formatTimeRange(item.lesson.startsAt, item.lesson.durationMinutes)}
+                      </span>
+                      <span className="mt-0.5 block truncate">{item.lesson.subject}</span>
+                      <span className="mt-0.5 block truncate text-[11px] opacity-80">
+                        {tab === "teacher"
+                          ? classrooms.find((entry) => entry.id === item.lesson.classroomId)?.name
+                          : teachers.find((entry) => entry.id === item.lesson.teacherId)?.name}
+                      </span>
+                    </li>
+                  ),
+                )}
                 {dayLessons.length === 0 && (
                   <li className="px-2 py-3 text-center text-xs text-ink-400">空档</li>
                 )}
