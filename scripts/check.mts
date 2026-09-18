@@ -193,6 +193,10 @@ ok("上课时间从 8:00 开始（早于营业时间）",
   brand.contact.classHours.includes("8:00") && brand.contact.businessHours.includes("9:00"));
 ok("上课时间到晚 22:00（晚于营业时间）",
   brand.contact.classHours.includes("22:00") && brand.contact.businessHours.includes("21:00"));
+// 节假日政策必须两处一致：一处写「含节假日」另一处不写，家长会不知道信哪个
+eq("营业时间与上课时间的节假日口径一致",
+  brand.contact.businessHours.includes("含节假日"),
+  brand.contact.classHours.includes("含节假日"));
 ok("中文名非空", brand.brandNameZh === "新锐教培");
 ok("联系方式非空", brand.contact.phone !== "");
 
