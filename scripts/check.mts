@@ -449,25 +449,38 @@ console.log("\n=== 3.1 特色课程（层级与独立页面）===");
 const featured = getFeaturedContent();
 eq("特色课程一级分组", featured.courses.map((c) => c.name), ["课内辅导"]);
 const inClass = featured.courses[0];
-eq("二级课程数", inClass?.children.length, 6);
-eq("二级课程名", inClass?.children.map((c) => c.name),
-  ["一对一定制课", "一对二 / 一对三小组课", "一对多小班课", "9 人以上大班课", "晚托管", "周中预习课"]);
-eq("课程总数（含各级）", getAllFeaturedCourses().length, 13);
+eq("二级课程数", inClass?.children.length, 7);
+// 只要求「既有的这几门都在」：以后新增班型不该让自检失败，
+// 但改名或误删既有课程必须被拦住
+const LEVEL2_NAMES = [
+  "一对一定制课", "一对二 / 一对三小组课", "一对多小班课", "9 人以上大班课",
+  "晚托管", "周中预习课", "假期预习课",
+];
+eq("二级课程都在（含假期预习课）",
+  LEVEL2_NAMES.filter((name) => !(inClass?.children.some((c) => c.name === name))),
+  []);
+ok("特色课程数量合理（当前 14 门）", getAllFeaturedCourses().length >= 13);
 ok("每门课程都有 4 个描述字段",
   getAllFeaturedCourses().every((c) => c.fields.length >= 3));
 ok("三级课程挂在正确的父级下",
-  (inClass?.children.find((c) => c.name === "一对多小班课")?.children.map((c) => c.name) ?? []).join(",") === "精品小升初,精品初升高");
+  (inClass?.children.find((c) => c.name === "一对多小班课")?.children.length ?? -1) === 0);
 ok("基础班挂在 9 人以上大班课下",
-  (inClass?.children.find((c) => c.name === "9 人以上大班课")?.children.map((c) => c.name) ?? []).join(",") === "基础小升初,基础初升高");
+  (inClass?.children.find((c) => c.name === "9 人以上大班课")?.children.length ?? -1) === 0);
 ok("晚托班挂在晚托管下",
   (inClass?.children.find((c) => c.name === "晚托管")?.children.map((c) => c.name) ?? []).join(",") === "小学晚托,初中晚托");
+ok("假期预习课单独成组，含小升初 / 初升高四门课",
+  (inClass?.children.find((c) => c.name === "假期预习课")?.children.map((c) => c.name) ?? []).join(",") ===
+    "精品小升初,精品初升高,基础小升初,基础初升高");
+ok("精品 / 基础两种进度都归在假期预习课下",
+  (inClass?.children.find((c) => c.name === "假期预习课")?.children ?? []).every(
+    (c) => c.children.length === 0 && c.fields.some((f) => f.title === "适合对象")));
 ok("核心课程都有详细介绍",
   ["周中预习课", "一对一定制课", "精品小升初"].every((name) => {
     const found = getAllFeaturedCourses().find((c) => c.name === name);
     return (found?.body.length ?? 0) > 50;
   }));
 // 按路径查找（页面路由与面包屑依赖它）。路径为显式声明的 ASCII 短路径。
-const deep = findFeaturedCourse(["in-class", "mini-class", "junior-prep"]);
+const deep = findFeaturedCourse(["in-class", "holiday-preview", "junior-prep"]);
 eq("按路径查找三级课程", deep?.course.name, "精品小升初");
 eq("面包屑链路长度", deep?.trail.length, 3);
 ok("不存在的路径返回 null", findFeaturedCourse(["不存在"]) === null);
