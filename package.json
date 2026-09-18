@@ -13,7 +13,9 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "sync-content": "node scripts/sync-content.mjs",
-    "check": "node --experimental-strip-types scripts/check.mjs"
+    "check": "node --experimental-strip-types scripts/check.mjs",
+    "check:404": "node scripts/check-404.mjs",
+    "check:all": "npm run check && npm run check:404"
   },
   "dependencies": {
     "next": "15.5.25",

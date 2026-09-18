@@ -2,7 +2,7 @@
  * 本文件由 scripts/sync-content.mjs 自动生成，请勿手工编辑。
  * 内容来源：data/site/content.md —— 修改后执行 npm run sync-content。
  */
-export const contentSyncedAt = "2026-09-18T06:59:21.901Z";
+export const contentSyncedAt = "2026-09-18T07:00:18.331Z";
 export const contentSource = `# NexGenEdu · 新锐教培 · 网站内容
 
 > **这一个文件就是整站的全部文案与数据。** 改完保存，刷新页面立刻生效。
