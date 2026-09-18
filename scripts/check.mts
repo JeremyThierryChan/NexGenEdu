@@ -738,9 +738,11 @@ const anchorLesson = await api.lessons.create({
   status: "已排", note: "",
 });
 
+// 科目刻意用该教师可带的科目：否则「教师科目不符」会混进冲突计数，
+// 让「撞课」的断言看起来失败（这是本组新增的校验，见下面的专门用例）
 const conflictsFor = (start: string, duration = 60) =>
   api.lessons.findConflicts({
-    subject: "测试", form: "", teacherId: teacher.id, classroomId: room.id,
+    subject: anchorSubject, form: "", teacherId: teacher.id, classroomId: room.id,
     studentIds: [pupil.id], startsAt: start, durationMinutes: duration,
     status: "已排", note: "",
   });
@@ -753,13 +755,55 @@ eq("完全重叠时教室冲突 1 处", report.classroom.length, 1);
 eq("完全重叠时学生冲突 1 处", report.students.length, 1);
 ok("冲突总数与三类之和一致", report.total === 3);
 
-// 相邻（前一场结束＝后一场开始）不算冲突
+// 相邻（前一场结束＝后一场开始）不算冲突，且不该触发任何其他警告
 const backToBack = slot(16);
-eq("相邻时段不算冲突", (await conflictsFor(backToBack.start)).total, 0);
+const backReport = await conflictsFor(backToBack.start);
+eq("相邻时段不算冲突", backReport.total, 0);
 
 // 跨天不算冲突
 const nextDay = slot(15, 0, 60, 1);
 eq("同时间但不同天不算冲突", (await conflictsFor(nextDay.start)).total, 0);
+
+// ── 容量校验：学生数不能超过教室容量 ──────────────────────────────────
+// 用容量最小的场地，并确保「学生数」确实超过它（示例学生只有 8 位，
+// 拿容量 8 的教室去测超员会得到 8 > 8 = false，测试就白写了）
+const tightRoom = (await api.classrooms.list()).reduce((smallest, item) =>
+  item.capacity < smallest.capacity ? item : smallest,
+);
+const overfilled = await api.lessons.findConflicts({
+  subject: anchorSubject, form: "", teacherId: teacher.id, classroomId: tightRoom.id,
+  studentIds: (await api.students.list()).slice(0, tightRoom.capacity + 2).map((item) => item.id),
+  startsAt: slot(7, 30).start, durationMinutes: 60, status: "已排", note: "",
+});
+eq("超过教室容量会被报出", overfilled.overCapacity,
+  { capacity: tightRoom.capacity, students: tightRoom.capacity + 2 });
+ok("超容量计入冲突总数", overfilled.total >= 1);
+
+const fitsRoom = await api.lessons.findConflicts({
+  subject: anchorSubject, form: "", teacherId: teacher.id, classroomId: tightRoom.id,
+  studentIds: (await api.students.list()).slice(0, tightRoom.capacity).map((item) => item.id),
+  startsAt: slot(7, 30).start, durationMinutes: 60, status: "已排", note: "",
+});
+eq("刚好坐满不算超容量", fitsRoom.overCapacity, null);
+
+// ── 教师科目校验：科目不在可带科目里要提示 ────────────────────────────
+const mathTeacher = (await api.teachers.list()).find((item) => item.subjects.includes("数学"));
+if (mathTeacher !== undefined) {
+  const wrongSubject = await api.lessons.findConflicts({
+    // 「编程入门」不在任何教师的可带科目里，用它才能测出「科目不符」
+    subject: "编程入门", form: "", teacherId: mathTeacher.id, classroomId: room.id,
+    studentIds: [pupil.id], startsAt: slot(7, 30).start, durationMinutes: 60,
+    status: "已排", note: "",
+  });
+  eq("科目与教师不符会被报出", wrongSubject.teacherSubjectMismatch, true);
+
+  const rightSubject = await api.lessons.findConflicts({
+    subject: "初中数学", form: "", teacherId: mathTeacher.id, classroomId: room.id,
+    studentIds: [pupil.id], startsAt: slot(7, 30).start, durationMinutes: 60,
+    status: "已排", note: "",
+  });
+  eq("科目匹配时不报", rightSubject.teacherSubjectMismatch, false);
+}
 
 // 编辑自己不算冲突
 const selfReport = await api.lessons.findConflicts({
@@ -778,7 +822,8 @@ const otherTeacher = (await api.teachers.list())[1];
 if (otherTeacher !== undefined) {
   const quiet = slot(7, 0);
   const quietReport = await api.lessons.findConflicts({
-    subject: "测试", form: "", teacherId: otherTeacher.id, classroomId: room.id,
+    subject: otherTeacher.subjects[0] ?? anchorSubject, form: "",
+    teacherId: otherTeacher.id, classroomId: room.id,
     studentIds: [pupil.id], startsAt: quiet.start, durationMinutes: 60,
     status: "已排", note: "",
   });
@@ -981,6 +1026,79 @@ eq("老档案读不到的新多选字段返回空数组", profileList(seeded[1]!
 
 await api.reset();
 eq("重置回到示例数据", (await api.students.list()).length, seeded.length);
+
+// ── 课时流水（账本）与撤销 ────────────────────────────────────────────
+// 账本的价值全在「与余额自洽」与「能撤销」两件事上，因此这两条必须钉死。
+const ledgerStudent = (await api.students.list()).find((item) => item.enrollments.length > 0)!;
+const ledgerEnrollment = ledgerStudent.enrollments[0]!;
+const ledgerBefore = await api.transactions.listByEnrollment(ledgerEnrollment.id);
+ok("示例数据的流水与课时自洽", (() => {
+  const effective = ledgerBefore.filter((item) => item.reversedAt === "");
+  const positive = effective.filter((item) => item.delta > 0).reduce((sum, item) => sum + item.delta, 0);
+  const negative = effective.filter((item) => item.delta < 0).reduce((sum, item) => sum + item.delta, 0);
+  return positive === ledgerEnrollment.totalLessons && -negative === ledgerEnrollment.usedLessons;
+})());
+// 不变式的通用校验：全部学生的每一条报课都要自洽（不只是抽样那一条）
+ok("所有报课记录的课时都与流水自洽", await (async () => {
+  const all = await api.students.list();
+  const transactions = await Promise.all(
+    all.flatMap((student) => student.enrollments.map((item) => api.transactions.listByEnrollment(item.id))),
+  );
+  const enrollments = all.flatMap((student) => student.enrollments);
+  return enrollments.every((enrollment, index) => {
+    const rows = (transactions[index] ?? []).filter((item) => item.reversedAt === "");
+    const positive = rows.filter((item) => item.delta > 0).reduce((sum, item) => sum + item.delta, 0);
+    const negative = rows.filter((item) => item.delta < 0).reduce((sum, item) => sum + item.delta, 0);
+    return positive === enrollment.totalLessons && -negative === enrollment.usedLessons;
+  });
+})());
+
+// 上课扣课时会记一笔「哪节课扣的」
+const ledgerLessonStart = new Date();
+ledgerLessonStart.setHours(7, 0, 0, 0);
+const ledgerLesson = await api.lessons.create({
+  subject: ledgerEnrollment.subject, form: "", teacherId: teacher.id, classroomId: room.id,
+  studentIds: [ledgerStudent.id], startsAt: ledgerLessonStart.toISOString(),
+  durationMinutes: 60, status: "已排", note: "",
+});
+await api.lessons.markCompleted(ledgerLesson.id);
+const afterComplete = await api.transactions.listByEnrollment(ledgerEnrollment.id);
+const usageEntry = afterComplete.find(
+  (item) => item.kind === "上课" && item.lessonId === ledgerLesson.id && item.reversedAt === "",
+);
+ok("扣课时留下可追溯到课节的流水", usageEntry !== undefined);
+eq("流水记的是 -1 节", usageEntry?.delta, -1);
+
+// 撤销「已上」要把课时退回来（老师点错时的补救）
+const beforeRevert = (await api.students.get(ledgerStudent.id))!.enrollments
+  .find((item) => item.id === ledgerEnrollment.id)!;
+await api.lessons.update(ledgerLesson.id, { status: "已排" });
+const afterRevert = (await api.students.get(ledgerStudent.id))!.enrollments
+  .find((item) => item.id === ledgerEnrollment.id)!;
+eq("撤销已上后退回 1 节课时", remainingOf(afterRevert), remainingOf(beforeRevert) + 1);
+ok("撤销是留痕而不是删除",
+  (await api.transactions.listByEnrollment(ledgerEnrollment.id))
+    .some((item) => item.id === usageEntry?.id && item.reversedAt !== ""));
+// 撤销之后、以及任何时刻，账本都必须与课时余额自洽（这是账本唯一的价值所在）
+// 注意要重新取流水：上面那几次读取都是快照，撤销只改了存储里的条目
+const ledgerInvariant = async (enrollmentId: string, total: number, used: number) => {
+  const rows = (await api.transactions.listByEnrollment(enrollmentId)).filter(
+    (item) => item.reversedAt === "",
+  );
+  const positive = rows.filter((item) => item.delta > 0).reduce((sum, item) => sum + item.delta, 0);
+  const negative = rows.filter((item) => item.delta < 0).reduce((sum, item) => sum + item.delta, 0);
+  return positive === total && -negative === used;
+};
+ok("撤销后账本仍与余额自洽",
+  await ledgerInvariant(ledgerEnrollment.id, afterRevert.totalLessons, afterRevert.usedLessons));
+
+// 再次标记已上应当重新扣一次（撤销之后再上这节课是正常的）
+await api.lessons.markCompleted(ledgerLesson.id);
+eq("重新标记已上会再扣 1 节",
+  remainingOf((await api.students.get(ledgerStudent.id))!.enrollments
+    .find((item) => item.id === ledgerEnrollment.id)!),
+  remainingOf(beforeRevert));
+await api.lessons.remove(ledgerLesson.id);
 
 // ── 动态追踪：课堂记录 / 作业记录 / 阶段测评 ──────────────────────────
 __useStoreForTesting(memory);

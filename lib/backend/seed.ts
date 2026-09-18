@@ -8,6 +8,7 @@ import type {
   HomeworkRecord,
   Lesson,
   LessonRecord,
+  LessonTransaction,
   Student,
   Teacher,
 } from "./types";
@@ -134,6 +135,47 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     assessment("s2", "中考数学", -2, 91, 84, "压轴题步骤规范", now),
   ];
 
+  /*
+   * 课时流水：示例数据的 usedLessons 是「历史消耗」，因此为每一条生成对应的
+   * 「上课」流水，课时余额与流水才自洽（自检里有一条不变式校验这一点）。
+   * 历史消耗没有关联到具体课节，lessonId 留空并注明。
+   */
+  const transactions: LessonTransaction[] = students.flatMap((student) =>
+    student.enrollments.flatMap((enrollment) => {
+      const rows: LessonTransaction[] = [
+        {
+          id: `tx_open_${enrollment.id}`,
+          studentId: student.id,
+          enrollmentId: enrollment.id,
+          subject: enrollment.subject,
+          delta: enrollment.totalLessons,
+          kind: "报课",
+          lessonId: "",
+          at: enrollment.startedAt,
+          note: "示例数据",
+          reversedAt: "",
+        },
+      ];
+
+      for (let index = 0; index < enrollment.usedLessons; index += 1) {
+        rows.push({
+          id: `tx_use_${enrollment.id}_${index}`,
+          studentId: student.id,
+          enrollmentId: enrollment.id,
+          subject: enrollment.subject,
+          delta: -1,
+          kind: "上课",
+          lessonId: "",
+          at: day(now, -1 - index, 19, 0),
+          note: "历史课时（未关联具体课节）",
+          reversedAt: "",
+        });
+      }
+
+      return rows;
+    }),
+  );
+
   return {
     // 必须是当前版本：写成旧版本会让新灌入的数据在下次读取时被迁移逻辑改写
     version: CURRENT_VERSION,
@@ -144,6 +186,7 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     lessonRecords,
     homeworkRecords,
     assessments,
+    transactions,
     updatedAt: now.toISOString(),
   };
 }

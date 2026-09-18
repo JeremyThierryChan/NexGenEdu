@@ -7,6 +7,7 @@ import type { StudentProfile } from "./student-profile";
 import type {
   Assessment,
   Classroom,
+  LessonTransaction,
   ClassroomAvailability,
   ClassroomKind,
   CompletionResult,
@@ -200,6 +201,53 @@ function migrate(db: Database): Database | null {
     db.version = 4;
   }
 
+  if (db.version === 4) {
+    /*
+     * v4 → v5：课时流水从「报课记录里内嵌的 history」变成独立账本。
+     *
+     * 折算规则：history 每条变成一笔流水（报课/续费为正、退课为 0），
+     * 并按 usedLessons 补出对应的「上课」流水 —— 两者相加必须与课时余额自洽，
+     * 否则升级后对账数字会对不上。
+     */
+    db.transactions = db.transactions ?? [];
+
+    for (const student of db.students) {
+      for (const enrollment of student.enrollments) {
+        for (const [index, item] of (enrollment.history ?? []).entries()) {
+          db.transactions.push({
+            id: `tx_mig_${enrollment.id}_${index}`,
+            studentId: student.id,
+            enrollmentId: enrollment.id,
+            subject: enrollment.subject,
+            delta: item.kind === "退课" ? 0 : item.lessons,
+            kind: item.kind,
+            lessonId: "",
+            at: item.at,
+            note: item.note,
+            reversedAt: "",
+          });
+        }
+
+        for (let index = 0; index < enrollment.usedLessons; index += 1) {
+          db.transactions.push({
+            id: `tx_mig_use_${enrollment.id}_${index}`,
+            studentId: student.id,
+            enrollmentId: enrollment.id,
+            subject: enrollment.subject,
+            delta: -1,
+            kind: "上课",
+            lessonId: "",
+            at: enrollment.startedAt,
+            note: "升级前的历史课时（未关联具体课节）",
+            reversedAt: "",
+          });
+        }
+      }
+    }
+
+    db.version = 5;
+  }
+
   return db.version === CURRENT_VERSION ? db : null;
 }
 
@@ -227,6 +275,26 @@ function syncSubjects(student: Student): void {
     }
   }
   student.subjects = subjects;
+}
+
+/**
+ * 记一笔课时流水。
+ *
+ * 所有课时变动都必须经这里：直接改 usedLessons 而不留流水，
+ * 以后就没法回答「这些课时去哪了」。自检里有一条不变式校验两者的关系。
+ */
+function addTransaction(
+  db: Database,
+  input: Omit<LessonTransaction, "id" | "at" | "reversedAt">,
+): LessonTransaction {
+  const created: LessonTransaction = {
+    ...input,
+    id: nextId("tx"),
+    at: nowIso(),
+    reversedAt: "",
+  };
+  db.transactions.push(created);
+  return created;
 }
 
 /** 通用集合：把「取数组 → 改 → 存」的重复代码收在一处。 */
@@ -451,6 +519,26 @@ export const api = {
 
   classrooms: collection<Classroom>((db) => db.classrooms, "c"),
 
+  /** 课时流水（只读；写入由报课 / 续费 / 上课 / 撤销等业务动作负责）。 */
+  transactions: {
+    listByStudent: async (studentId: string): Promise<LessonTransaction[]> => {
+      await delay();
+      return clone(
+        load()
+          .transactions.filter((item) => item.studentId === studentId)
+          .sort((a, b) => b.at.localeCompare(a.at)),
+      );
+    },
+    listByEnrollment: async (enrollmentId: string): Promise<LessonTransaction[]> => {
+      await delay();
+      return clone(
+        load()
+          .transactions.filter((item) => item.enrollmentId === enrollmentId)
+          .sort((a, b) => b.at.localeCompare(a.at)),
+      );
+    },
+  },
+
   /**
    * 课堂记录。
    *
@@ -545,6 +633,52 @@ export const api = {
     ...collection<Lesson>((db) => db.lessons, "l"),
 
     /**
+     * 更新课节。
+     *
+     * 这里多了一层业务规则：**状态从「已上」改成别的（回到已排 / 已取消）时，
+     * 要按流水把课时退回去**。之前只改状态不退课时 —— 老师点错「标记已上」
+     * 就白扣一节，而且没有痕迹可查。
+     *
+     * 退课时撤销的是「这节课对应的那些上课流水」（reversedAt 打上时间），
+     * 而不是简单地把 usedLessons 减 1：一张报课记录可能被这节课扣过不止一次
+     * （同一节课被反复标记的边界情形），按流水撤销才不会多退少退。
+     */
+    async update(id: string, patch: Partial<Omit<Lesson, "id">>): Promise<Lesson | null> {
+      await delay();
+      const db = load();
+      const lesson = db.lessons.find((item) => item.id === id);
+      if (lesson === undefined) return null;
+
+      const wasCompleted = lesson.status === "已上";
+      const becomesNotCompleted =
+        patch.status !== undefined && patch.status !== "已上";
+
+      Object.assign(lesson, patch);
+
+      if (wasCompleted && becomesNotCompleted) {
+        for (const transaction of db.transactions) {
+          if (
+            transaction.lessonId !== id ||
+            transaction.kind !== "上课" ||
+            transaction.reversedAt !== ""
+          ) {
+            continue;
+          }
+          transaction.reversedAt = nowIso();
+          const enrollment = db.students
+            .flatMap((student) => student.enrollments)
+            .find((item) => item.id === transaction.enrollmentId);
+          if (enrollment !== undefined) {
+            enrollment.usedLessons = Math.max(0, enrollment.usedLessons - 1);
+          }
+        }
+      }
+
+      persist(db);
+      return clone(lesson);
+    },
+
+    /**
      * 冲突检查：同一教师 / 同一教室 / 同一学生在时间上重叠。
      *
      * 刻意做成**独立查询**而不是塞进 create：页面需要在保存前就能提示
@@ -586,13 +720,40 @@ export const api = {
         room !== undefined &&
         !isWithinAvailability(room.availability, new Date(input.startsAt), input.durationMinutes);
 
+      /*
+       * 容量校验：学生数不能超过教室容量。
+       * 这类问题不会「撞课」，但会把学生塞进坐不下的房间 —— 属于排课时就该拦住的事。
+       */
+      const overCapacity =
+        room !== undefined && room.capacity > 0 && input.studentIds.length > room.capacity
+          ? { capacity: room.capacity, students: input.studentIds.length }
+          : null;
+
+      /*
+       * 教师科目校验：教师的「可带科目」里是否包含这节课的科目。
+       * 匹配规则与前台教师卡片一致（科目名出现在课程名里，如「物理」命中「高中物理」）；
+       * 教师没有登记科目时跳过 —— 没登记不等于不能带。
+       */
+      const assigned = db.teachers.find((item) => item.id === input.teacherId);
+      const teacherSubjectMismatch =
+        assigned !== undefined &&
+        assigned.subjects.length > 0 &&
+        !assigned.subjects.some((subject) => input.subject.includes(subject));
+
       return clone({
         teacher,
         classroom,
         students: uniqueStudents,
         classroomClosed,
+        overCapacity,
+        teacherSubjectMismatch,
         total:
-          teacher.length + classroom.length + uniqueStudents.length + (classroomClosed ? 1 : 0),
+          teacher.length +
+          classroom.length +
+          uniqueStudents.length +
+          (classroomClosed ? 1 : 0) +
+          (overCapacity !== null ? 1 : 0) +
+          (teacherSubjectMismatch ? 1 : 0),
       });
     },
 
@@ -635,6 +796,15 @@ export const api = {
           }
 
           enrollment.usedLessons += 1;
+          addTransaction(db, {
+            studentId,
+            enrollmentId: enrollment.id,
+            subject: enrollment.subject,
+            delta: -1,
+            kind: "上课",
+            lessonId: lesson.id,
+            note: `${lesson.subject} ${new Date(lesson.startsAt).toLocaleString("zh-CN")}`,
+          });
           deducted.push({
             studentId,
             subject: enrollment.subject,
@@ -750,6 +920,7 @@ export function __useStoreForTesting(backing: KeyValueStore): void {
 export type {
   Assessment,
   Classroom,
+  LessonTransaction,
   ClassroomAvailability,
   ClassroomKind,
   CompletionResult,
@@ -774,6 +945,7 @@ export type {
 };
 export {
   ATTENDANCE_OPTIONS,
+  TRANSACTION_KINDS,
   CLASSROOM_KINDS,
   ENROLLMENT_STATUSES,
   FOCUS_OPTIONS,

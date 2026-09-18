@@ -62,6 +62,37 @@ export type EnrollmentHistoryItem = {
   note: string;
 };
 
+/**
+ * 课时流水（账本）。
+ *
+ * 为什么需要一个账本，而不是只在报课记录上留个 usedLessons 数字：
+ * 家长问「我孩子上了 20 节，为什么扣了 22 节」时，光看数字答不出来；
+ * 老师点错了「标记已上」也必须能把课时退回去。因此每一次课时变动都留一条，
+ * 并且**撤销也是留痕**（reversedAt 非空）而不是删除。
+ *
+ * 不变式（自检会校验）：某条报课的 usedLessons 必须等于它的「上课」条目合计，
+ * totalLessons 必须等于「报课 + 续费」条目合计。
+ */
+export type LessonTransaction = {
+  id: string;
+  studentId: string;
+  enrollmentId: string;
+  /** 科目，冗余存一份：报名记录改名后流水仍读得懂。 */
+  subject: string;
+  /** 课时变动：上课为 -1，报课/续费为 +N，手工调整为 ±N。 */
+  delta: number;
+  kind: TransactionKind;
+  /** 关联课节；历史数据或手工调整时为空串。 */
+  lessonId: string;
+  at: string;
+  note: string;
+  /** 撤销时间；空串表示有效。撤销的条目保留，便于追溯。 */
+  reversedAt: string;
+};
+
+export const TRANSACTION_KINDS = ["报课", "续费", "上课", "调整", "退课"] as const;
+export type TransactionKind = (typeof TRANSACTION_KINDS)[number];
+
 export const ENROLLMENT_STATUSES = ["在读", "已退课"] as const;
 export type EnrollmentStatus = (typeof ENROLLMENT_STATUSES)[number];
 
@@ -220,6 +251,8 @@ export type Database = {
   lessonRecords: LessonRecord[];
   homeworkRecords: HomeworkRecord[];
   assessments: Assessment[];
+  /** 课时流水（账本）。 */
+  transactions: LessonTransaction[];
   /** 最后一次写入时间（ISO）。 */
   updatedAt: string;
 };
@@ -288,6 +321,16 @@ export type ConflictReport = {
    * 教室没有设置可用时段时永远为 false。
    */
   classroomClosed: boolean;
+  /**
+   * 学生数超过教室容量。null 表示没超（或教室没有登记容量）。
+   * 这类问题不会「撞课」，但会把学生塞进坐不下的房间。
+   */
+  overCapacity: { capacity: number; students: number } | null;
+  /**
+   * 教师不匹配这节课的科目（该教师的「可带科目」里没有这个科目）。
+   * 教师没有登记科目时永远为 false —— 没登记不等于不能带。
+   */
+  teacherSubjectMismatch: boolean;
   /** 三类冲突的合计条数，页面用它判断能不能保存。 */
   total: number;
 };

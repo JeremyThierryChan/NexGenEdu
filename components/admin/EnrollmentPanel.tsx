@@ -3,7 +3,15 @@
 import { useMemo, useState } from "react";
 import { TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { Button } from "@/components/ui/Button";
-import { api, type Enrollment, type Student, type Teacher } from "@/lib/backend/api";
+import { useEffect } from "react";
+import {
+  api,
+  type Enrollment,
+  type LessonTransaction,
+  type Student,
+  type Teacher,
+} from "@/lib/backend/api";
+import { cn } from "@/lib/utils/cn";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel } from "@/lib/backend/format";
 import { getFormOptions, getSubjectOptions } from "@/lib/backend/options";
@@ -31,6 +39,17 @@ export function EnrollmentPanel({
   const [adding, setAdding] = useState(false);
   const [pending, setPending] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [transactions, setTransactions] = useState<LessonTransaction[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.transactions.listByStudent(student.id).then((rows) => {
+      if (!cancelled) setTransactions(rows);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [student.id, student.enrollments]);
 
   const total = remainingTotal(student.enrollments);
   const active = student.enrollments.filter((item) => item.status === "在读");
@@ -92,6 +111,7 @@ export function EnrollmentPanel({
               expanded={expandedId === enrollment.id}
               onToggle={() => setExpandedId(expandedId === enrollment.id ? null : enrollment.id)}
               pending={pending}
+              transactions={transactions.filter((item) => item.enrollmentId === enrollment.id)}
               onRenew={(lessons) =>
                 run(() =>
                   api.students.renewEnrollment(student.id, enrollment.id, lessons, "续费"),
@@ -122,6 +142,7 @@ function EnrollmentRow({
   expanded,
   onToggle,
   pending,
+  transactions,
   onRenew,
   onRefund,
 }: {
@@ -130,6 +151,8 @@ function EnrollmentRow({
   expanded: boolean;
   onToggle: () => void;
   pending: boolean;
+  /** 这条报课的课时流水（含上课扣减与撤销记录）。 */
+  transactions: LessonTransaction[];
   onRenew: (lessons: number) => void | Promise<void>;
   onRefund: () => void | Promise<void>;
 }) {
@@ -195,16 +218,31 @@ function EnrollmentRow({
           {enrollment.note !== "" && (
             <p className="mt-1 text-xs text-ink-500">备注：{enrollment.note}</p>
           )}
-          <p className="mt-2 text-xs font-medium text-ink-600">流水</p>
-          <ul className="mt-1 space-y-0.5">
-            {enrollment.history.map((item, index) => (
-              <li key={`${item.at}-${index}`} className="text-xs text-ink-500">
-                {formatDayLabel(item.at)} · {item.kind}
-                {item.lessons !== 0 && ` ${item.lessons} 节`}
-                {item.note !== "" && ` · ${item.note}`}
-              </li>
-            ))}
-          </ul>
+          <p className="mt-2 text-xs font-medium text-ink-600">
+            课时流水（{transactions.length} 笔）
+          </p>
+          {transactions.length === 0 ? (
+            <p className="mt-1 text-xs text-ink-400">还没有流水。</p>
+          ) : (
+            <ul className="mt-1 space-y-0.5">
+              {transactions.map((item) => (
+                <li
+                  key={item.id}
+                  className={cn(
+                    "text-xs",
+                    item.reversedAt !== "" ? "text-ink-300 line-through" : "text-ink-500",
+                  )}
+                >
+                  {formatDayLabel(item.at)} · {item.kind} {item.delta > 0 ? `+${item.delta}` : item.delta} 节
+                  {item.note !== "" && ` · ${item.note}`}
+                  {item.reversedAt !== "" && " · 已撤销"}
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="mt-1.5 text-[11px] text-ink-400">
+            上课扣减会记录关联的课节；撤销「已上」时按流水退回，撤销记录保留可追溯。
+          </p>
         </div>
       )}
     </li>

@@ -78,7 +78,12 @@ export default function AdminLessonsPage() {
   }
 
   async function setStatus(lesson: Lesson, status: Lesson["status"]) {
+    const wasCompleted = lesson.status === "已上";
     await api.lessons.update(lesson.id, { status });
+    // 状态从「已上」改回去时，服务层会按流水把课时退回，这里如实告知
+    if (wasCompleted && status !== "已上") {
+      setNotice("已撤销「已上」状态，这节课扣掉的课时已按流水退回。");
+    }
     await load();
   }
 

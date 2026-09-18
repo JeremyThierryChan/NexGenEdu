@@ -146,7 +146,9 @@ export function LessonForm({
       setError(
         conflicts?.classroomClosed === true
           ? "所选教室在该时段不开放，请先调整时间或场地。"
-          : "存在时间冲突，请先调整。",
+          : conflicts?.overCapacity != null
+            ? "学生数超过场地容量，请换场地或拆课。"
+            : "存在冲突或校验未通过，请先按上方提示调整。",
       );
       return;
     }
@@ -294,15 +296,20 @@ export function LessonForm({
           <p className="text-sm font-medium text-warning-600">
             {conflicts.classroomClosed
               ? "所选教室在该时段不开放"
-              : `时间冲突：${conflicts.teacher.length > 0 ? `教师 ${conflicts.teacher.length} 处` : ""}${
-                  conflicts.classroom.length > 0
-                    ? `${conflicts.teacher.length > 0 ? "、" : ""}教室 ${conflicts.classroom.length} 处`
-                    : ""
-                }${
-                  conflicts.students.length > 0
-                    ? `${conflicts.teacher.length + conflicts.classroom.length > 0 ? "、" : ""}学生 ${conflicts.students.length} 处`
-                    : ""
-                }`}
+              : conflicts.overCapacity !== null
+                ? "学生数超过场地容量"
+                : conflicts.teacherSubjectMismatch &&
+                    conflicts.teacher.length + conflicts.classroom.length + conflicts.students.length === 0
+                  ? "任课教师的科目与这节课不符"
+                  : `时间冲突：${conflicts.teacher.length > 0 ? `教师 ${conflicts.teacher.length} 处` : ""}${
+                      conflicts.classroom.length > 0
+                        ? `${conflicts.teacher.length > 0 ? "、" : ""}教室 ${conflicts.classroom.length} 处`
+                        : ""
+                    }${
+                      conflicts.students.length > 0
+                        ? `${conflicts.teacher.length + conflicts.classroom.length > 0 ? "、" : ""}学生 ${conflicts.students.length} 处`
+                        : ""
+                    }`}
           </p>
           {conflicts.classroomClosed && (
             <p className="mt-1 text-xs text-warning-600">
@@ -311,6 +318,21 @@ export function LessonForm({
                 教室
               </a>
               里调整它的可用时段，或者换一个场地 / 改时间。
+            </p>
+          )}
+          {conflicts.overCapacity !== null && (
+            <p className="mt-1 text-xs text-warning-600">
+              选了 {conflicts.overCapacity.students} 位学生，但这间场地只能坐{" "}
+              {conflicts.overCapacity.capacity} 人。请换更大的场地，或拆成两节课。
+            </p>
+          )}
+          {conflicts.teacherSubjectMismatch && (
+            <p className="mt-1 text-xs text-warning-600">
+              所选教师的「可带科目」里没有「{subject}」。如果不是笔误，可以先到
+              <a href="/admin/teachers" className="mx-1 underline">
+                教师
+              </a>
+              里补上这门科目。
             </p>
           )}
           <ul className="mt-1.5 space-y-1 text-xs text-warning-600">
