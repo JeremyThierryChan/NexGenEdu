@@ -29,7 +29,7 @@ export function CourseColumnCards({
   const SubHeading = subHeadingLevel === 3 ? "h3" : "h4";
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       {column.subgroups.map((subgroup) => (
         <div key={subgroup.title}>
           {subgroup.title !== "" && (
@@ -51,7 +51,7 @@ export function CourseColumnCards({
 /** 全部栏目（课程页「课程总览」用）：栏目 h3、子标题 h4。 */
 export function CourseColumns({ columns }: { columns: CourseColumn[] }) {
   return (
-    <div className="space-y-12">
+    <div className="space-y-9">
       {columns.map((column) => (
         <section key={column.title}>
           <h3 className="mb-5 text-lg font-medium text-ink-900">{column.title}</h3>

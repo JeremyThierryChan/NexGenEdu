@@ -332,6 +332,23 @@ npm run sync-content # 手工同步 data/site/*.md（一般不需要）
 | Pages 配置 | `build_type: workflow`（已通过 API 设置，`https_enforced: true`） |
 | 产物 | 静态导出 `out/`（`output: "export"`） |
 
+工作流步骤：`lint` → `sync-content` → `typecheck` → **`check`** → `build`（注入 basePath）
+→ `.nojekyll` → **`check:404`** → 上传 → 部署。
+
+`check` 与 `check:404` 会**卡住部署**：内容结构被改错（卡片跳空、栏目错位）
+或 404 产物异常时构建直接失败，而不是把坏页面发到线上。
+`check:404` 的前缀按 `NEXT_PUBLIC_BASE_PATH` 推断，因此部署步骤里也注入了同一个变量。
+
+### 区块间距：Section 的 compact 档
+
+`Section` 默认留白很大（`py-16 sm:py-20`、标题下方 `mb-10`），单个区块里好看，
+但首页六个课程栏目依次排列时，上一个的下留白与下一个的上留白会**相加**
+（约 128–160px），中间像断了一截，页面显得很空。
+
+因此 `Section` 提供 `compact` 档：`py-6 sm:py-8`、标题下方 `mb-5`、说明文字降到 `text-sm`，
+栏目间距从约 128–160px 收到 48–64px，仍靠 `border-t` 分隔，不会糊成一片。
+**规则：连续排列的同类区块用 `compact`，独立的大区块保持默认。**
+
 ### 静态导出与子路径
 
 - `next.config.ts` 设置 `output: "export"` + `trailingSlash: true`，导出目录形式的 URL

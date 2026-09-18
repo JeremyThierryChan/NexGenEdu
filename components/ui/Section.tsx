@@ -10,6 +10,14 @@ type SectionProps = {
   className?: string;
   /** 内容区额外样式。 */
   contentClassName?: string;
+  /**
+   * 紧凑间距：区块上下留白与标题下方间距都收紧。
+   *
+   * 用于首页课程栏目这类**连续排列的同类区块**：默认的大留白在单个区块里好看，
+   * 但六个栏目依次叠起来时，上一个的下留白会和下一个的上留白相加
+   * （py-16×2 ≈ 128px，宽屏 160px），中间像断了一截。
+   */
+  compact?: boolean;
 };
 
 /**
@@ -23,13 +31,14 @@ export function Section({
   description,
   className,
   contentClassName,
+  compact = false,
 }: SectionProps) {
   const hasHeading = eyebrow !== undefined || title !== undefined || description !== undefined;
 
   return (
-    <section className={cn("py-16 sm:py-20", className)}>
+    <section className={cn(compact ? "py-6 sm:py-8" : "py-16 sm:py-20", className)}>
       {hasHeading && (
-        <header className="mb-10 max-w-2xl">
+        <header className={cn("max-w-2xl", compact ? "mb-5" : "mb-10")}>
           {eyebrow !== undefined && (
             <p className="mb-3 text-sm font-medium tracking-wide text-brand-600">
               {eyebrow}
@@ -39,7 +48,14 @@ export function Section({
             <h2 className="text-2xl font-medium sm:text-3xl">{title}</h2>
           )}
           {description !== undefined && (
-            <p className="mt-4 text-base leading-relaxed text-ink-600">{description}</p>
+            <p
+              className={cn(
+                "leading-relaxed text-ink-600",
+                compact ? "mt-2.5 text-sm" : "mt-4 text-base",
+              )}
+            >
+              {description}
+            </p>
           )}
         </header>
       )}

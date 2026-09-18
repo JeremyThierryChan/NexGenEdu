@@ -142,6 +142,7 @@ export default function HomePage() {
           {home.courseColumns.map((column, index) => (
             <Section
               key={column.title}
+              compact
               eyebrow={index === 0 ? headings.courses.eyebrow : undefined}
               title={column.title}
               description={index === 0 ? headings.courses.description : undefined}
@@ -151,7 +152,7 @@ export default function HomePage() {
             </Section>
           ))}
 
-          <Section className="pt-0">
+          <Section compact className="pt-0">
             <ButtonLink href={headings.coursesLink.href} variant="outline" size="sm">
               {headings.coursesLink.label}
             </ButtonLink>

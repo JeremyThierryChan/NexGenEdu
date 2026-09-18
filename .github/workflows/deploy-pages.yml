@@ -44,6 +44,11 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # 内容与报价自检：栏目→卡片结构与课程页锚点的双向校验都在这里，
+      # 结构改错时直接让部署失败，而不是把跳空的卡片发到线上。
+      - name: Check content and pricing
+        run: npm run check
+
       - name: Build static export
         # 项目站点部署在 https://<user>.github.io/<repo>/，必须注入仓库名作为子路径前缀。
         # 用 ${{ github.event.repository.name }} 而非写死仓库名，fork 后无需修改。
@@ -55,6 +60,13 @@ jobs:
         # GitHub Pages 默认用 Jekyll 处理静态文件，会忽略以 _ 开头的目录
         # （Next 导出的 _next/ 正好命中），必须放置 .nojekyll 跳过该步骤。
         run: touch out/.nojekyll
+
+      - name: Check 404 artifact
+        # 校验 out/404.html 的自定义文案与站内链接前缀。
+        # 前缀按 NEXT_PUBLIC_BASE_PATH 推断，这里必须与构建时一致。
+        run: npm run check:404
+        env:
+          NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
