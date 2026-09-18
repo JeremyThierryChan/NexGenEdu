@@ -35,6 +35,12 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # 先生成内容模块：data/site/*.ts 由 sync-content 从 Markdown 生成，
+      # 其中 .sync-stamp.ts 未纳入版本库，必须先同步再类型检查，
+      # 否则全新 checkout 上会报「找不到模块 './.sync-stamp'」。
+      - name: Sync content modules
+        run: npm run sync-content
+
       - name: Typecheck
         run: npm run typecheck
 

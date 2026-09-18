@@ -7,10 +7,12 @@
  * 打包器会判定「未变化」而跳过重新编译，页面继续使用旧产物
  * （表现为内容改好了却仍是旧的，需重启开发服务器）。
  * 把时间戳放在单独文件里，就既能强制缓存失效，又不会让每次同步都改动本文件。
+ * 该文件未纳入版本库，因此类型检查依赖 types/sync-stamp.d.ts 的模块声明。
  */
 import { syncStamp } from "./.sync-stamp";
 
-export const faqSyncedAt = syncStamp;
+// 该文件未纳入版本库，CI 全新 checkout 时可能不存在，因此保留兜底值
+export const faqSyncedAt = syncStamp ?? "unbuilt";
 export const faqSource = `# NexGenEdu · 新锐教培 · 常见问题
 
 > 这个文件决定「常见问题」页面 \`/faq\` 的内容。
