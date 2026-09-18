@@ -42,6 +42,12 @@ import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
 import { weekDays } from "@/lib/backend/format";
 import {
+  FOLLOWUP_RULES,
+  buildFollowUps,
+  followUpsToText,
+  summarizeFollowUps,
+} from "@/lib/backend/followup";
+import {
   discountAmount,
   findRefundPolicy,
   formatMoney,
@@ -1399,6 +1405,224 @@ eq("金额显示带货币符号", formatMoney(1280), "¥1,280");
 eq("金额显示保留两位小数（非整数）", formatMoney(1280.5), "¥1,280.50");
 
 eq("学生数没有被这些操作改变", (await api.students.list()).length, beforeMoney);
+
+// ── 待跟进清单（第四组）──────────────────────────────────────────────
+// 规则引擎是纯函数，因此这里逐条造数据验证：命中、不命中、以及「没有数据时不误报」。
+const followNow = new Date("2026-09-18T10:00:00");
+
+/** 造一个最小可用的学生（带一条报课）。 */
+const makeStudent = (over: Partial<Student> = {}): Student => ({
+  id: "fs1",
+  name: "自检学生",
+  grade: "初二",
+  guardian: "138-0000-0000",
+  subjects: ["初中数学"],
+  profile: {},
+  enrollments: [
+    {
+      // 默认课时充足（剩 15 节）：各用例需要触发「课时不足」时再各自调整，
+      // 否则每个用例都会被这条规则命中
+      id: "fe1", subject: "初中数学", form: "", teacherId: "",
+      totalLessons: 20, usedLessons: 5,
+      unitPrice: 200, agreedAmount: 4000, paidAmount: 4000,
+      startedAt: followNow.toISOString(), endedAt: "", status: "在读", note: "", history: [],
+    },
+  ],
+  status: "在读",
+  note: "",
+  createdAt: followNow.toISOString(),
+  ...over,
+});
+
+/**
+ * 「未来已排课」的夹具。
+ *
+ * 为什么几乎每个用例都要带上它：有剩余课时但未来 7 天没课，本来就会命中
+ * 「久未排课」（这是正确的规则）。不带上它，验证别的规则时会被这条干扰 ——
+ * 我第一次写这组用例就踩了这个坑，「干净数据」用例报出 2 条待办。
+ */
+const scheduledLessons = (studentId: string): Lesson[] => [
+  {
+    id: `fl_${studentId}`, subject: "初中数学", form: "", teacherId: "", classroomId: "",
+    studentIds: [studentId],
+    startsAt: new Date(followNow.getTime() + 2 * 86_400_000).toISOString(),
+    durationMinutes: 60, status: "已排", note: "",
+  },
+];
+
+const build = (over: {
+  students?: Student[];
+  lessons?: Lesson[];
+  assessments?: Assessment[];
+  homeworks?: HomeworkRecord[];
+  lessonRecords?: LessonRecord[];
+}) =>
+  buildFollowUps({
+    students: over.students ?? [],
+    lessons: over.lessons ?? [],
+    assessments: over.assessments ?? [],
+    homeworks: over.homeworks ?? [],
+    lessonRecords: over.lessonRecords ?? [],
+    now: followNow,
+  });
+
+// 干净数据：什么都不报（不能凭「没有记录」就当成表现不好）
+eq("没有异常时不产生待办", build({ students: [makeStudent()], lessons: scheduledLessons("fs1") }).length, 0);
+
+// 课时不足：剩余 5 节提醒、2 节紧急
+const lowStudent = makeStudent({
+  enrollments: [{ ...makeStudent().enrollments[0]!, usedLessons: 15, totalLessons: 20 }],
+});
+eq(`课时剩 ${FOLLOWUP_RULES.lowLessons} 节 → 提醒`,
+  build({ students: [lowStudent] })[0]?.severity, "提醒");
+const urgentStudent = makeStudent({
+  enrollments: [{ ...makeStudent().enrollments[0]!, usedLessons: 18 }],
+});
+eq(`课时剩 ${FOLLOWUP_RULES.lowLessonsUrgent} 节 → 紧急`,
+  build({ students: [urgentStudent] })[0]?.severity, "紧急");
+eq("课时剩 6 节不报",
+  build({
+    students: [makeStudent({ enrollments: [{ ...makeStudent().enrollments[0]!, usedLessons: 14 }] })],
+    lessons: scheduledLessons("fs1"),
+  }).length, 0);
+
+// 已退课的报课不参与判断
+eq("已退课的课时不触发提醒",
+  build({
+    students: [
+      makeStudent({
+        enrollments: [{ ...makeStudent().enrollments[0]!, usedLessons: 19, status: "已退课" }],
+      }),
+    ],
+  }).length, 0);
+
+// 欠费：按约定应缴 − 实收
+const owingStudent = makeStudent({
+  enrollments: [{ ...makeStudent().enrollments[0]!, agreedAmount: 4000, paidAmount: 2500 }],
+});
+const owingItems = build({ students: [owingStudent] });
+eq("欠费被挑出来", owingItems.some((item) => item.kind === "欠费"), true);
+eq("欠费条目标为紧急", owingItems.find((item) => item.kind === "欠费")?.severity, "紧急");
+ok("欠费话术里有金额", (owingItems.find((item) => item.kind === "欠费")?.message ?? "").includes("1,500"));
+
+// 作业异常：最近 5 次里未交 2 次
+const homeworkStudent = makeStudent();
+const hw = (daysAgo: number, submission: HomeworkRecord["submission"]): HomeworkRecord => ({
+  id: `hw${daysAgo}`, studentId: "fs1", subject: "初中数学",
+  date: new Date(followNow.getTime() - daysAgo * 86_400_000).toISOString(),
+  submission, accuracy: 80, weakPoints: "二次函数", note: "",
+});
+eq(`未交 ${FOLLOWUP_RULES.missedHomework} 次 → 报作业异常`,
+  build({ students: [homeworkStudent], homeworks: [hw(1, "未交"), hw(2, "未交"), hw(3, "按时")] })
+    .some((item) => item.kind === "作业异常"), true);
+eq("只迟交 1 次不报",
+  build({
+    students: [homeworkStudent],
+    lessons: scheduledLessons("fs1"),
+    homeworks: [hw(1, "迟交"), hw(2, "按时"), hw(3, "按时")],
+  }).length, 0);
+eq("窗口外的旧记录不参与判断",
+  build({
+    students: [homeworkStudent],
+    lessons: scheduledLessons("fs1"),
+    homeworks: [hw(1, "按时"), hw(2, "按时"), hw(3, "按时"), hw(4, "按时"), hw(5, "按时"), hw(6, "未交"), hw(7, "未交")],
+  }).length, 0);
+
+// 测评下滑：只看每个科目的最近一次
+const assessmentStudent = makeStudent();
+const as = (subject: string, daysAgo: number, score: number, previous: number | null): Assessment => ({
+  id: `as${subject}${daysAgo}`, studentId: "fs1", subject,
+  date: new Date(followNow.getTime() - daysAgo * 86_400_000).toISOString(),
+  score, previousScore: previous, weakPoints: "几何", note: "",
+});
+const dropItems = build({
+  students: [assessmentStudent],
+  assessments: [as("初中数学", 10, 90, 80), as("初中数学", 2, 70, 90)],
+});
+eq("分数下降被挑出来", dropItems.some((item) => item.kind === "测评下滑"), true);
+eq("下降 20 分 → 提醒", dropItems.find((item) => item.kind === "测评下滑")?.severity, "提醒");
+eq("分数上升不报",
+  build({ students: [assessmentStudent], assessments: [as("初中数学", 10, 70, 60), as("初中数学", 2, 85, 70)] })
+    .some((item) => item.kind === "测评下滑"), false);
+
+// 出勤异常：请假 2 次或旷课 1 次
+const attendanceStudent = makeStudent();
+const lr = (daysAgo: number, attendance: LessonRecord["attendance"]): { record: LessonRecord; lesson: Lesson } => ({
+  record: {
+    id: `lr${daysAgo}`, lessonId: `fl${daysAgo}`, studentId: "fs1",
+    attendance, focus: "中", interaction: "一般", rating: 3, note: "",
+    recordedAt: followNow.toISOString(),
+  },
+  lesson: {
+    id: `fl${daysAgo}`, subject: "初中数学", form: "", teacherId: "", classroomId: "",
+    studentIds: ["fs1"],
+    startsAt: new Date(followNow.getTime() - daysAgo * 86_400_000).toISOString(),
+    durationMinutes: 60, status: "已上", note: "",
+  },
+});
+const attendanceCase = [lr(1, "请假"), lr(2, "请假"), lr(3, "到课")];
+eq("请假 2 次 → 出勤异常",
+  build({
+    students: [attendanceStudent],
+    lessonRecords: attendanceCase.map((item) => item.record),
+    lessons: attendanceCase.map((item) => item.lesson),
+  }).some((item) => item.kind === "出勤异常"), true);
+const absentCase = [lr(1, "旷课"), lr(2, "到课")];
+eq("旷课 1 次就报",
+  build({
+    students: [attendanceStudent],
+    lessonRecords: absentCase.map((item) => item.record),
+    lessons: absentCase.map((item) => item.lesson),
+  }).some((item) => item.kind === "出勤异常"), true);
+eq("全勤不报",
+  build({
+    students: [attendanceStudent],
+    lessonRecords: [lr(1, "到课")].map((item) => item.record),
+    // 这里既有历史出勤记录、也要有已排课，否则会被「久未排课」命中
+    lessons: [...[lr(1, "到课")].map((item) => item.lesson), ...scheduledLessons("fs1")],
+  }).length, 0);
+
+// 久未排课：有课时但未来 7 天没课
+const staleStudent = makeStudent({
+  enrollments: [{ ...makeStudent().enrollments[0]!, usedLessons: 5 }],
+});
+eq("未来 7 天没课 → 久未排课",
+  build({ students: [staleStudent] }).some((item) => item.kind === "久未排课"), true);
+const futureLesson: Lesson = {
+  id: "fl_future", subject: "初中数学", form: "", teacherId: "", classroomId: "",
+  studentIds: ["fs1"],
+  startsAt: new Date(followNow.getTime() + 2 * 86_400_000).toISOString(),
+  durationMinutes: 60, status: "已排", note: "",
+};
+eq("已排课则不报久未排课",
+  build({ students: [staleStudent], lessons: [futureLesson] }).some((item) => item.kind === "久未排课"), false);
+eq("已取消的课不算排课",
+  build({ students: [staleStudent], lessons: [{ ...futureLesson, status: "已取消" }] })
+    .some((item) => item.kind === "久未排课"), true);
+
+// 结课学生不参与
+eq("结课学生不出现在清单里",
+  build({ students: [makeStudent({ status: "结课", enrollments: [] })] }).length, 0);
+
+// 排序：紧急在前
+const mixed = build({ students: [urgentStudent, owingStudent] });
+eq("清单按严重度排序（紧急在前）", mixed[0]?.severity, "紧急");
+
+// 汇总与整份文本
+const summaryRows = summarizeFollowUps(mixed);
+ok("汇总覆盖所有类别", summaryRows.length === 6);
+eq("汇总合计等于清单条数",
+  summaryRows.reduce((sum, row) => sum + row.count, 0), mixed.length);
+ok("整份文本包含学生与话术",
+  followUpsToText(mixed).includes(mixed[0]!.studentName) &&
+    followUpsToText(mixed).includes(mixed[0]!.message));
+eq("空清单的文本有明确说法", followUpsToText([]).includes("无"), true);
+
+// 真实数据上也能跑（不报错、条数合理）
+const realFollowUps = await api.followups(new Date());
+ok("真实数据上能生成清单", Array.isArray(realFollowUps));
+ok("真实清单里每条都有原因与话术",
+  realFollowUps.every((item) => item.reason !== "" && item.message.length > 20));
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();

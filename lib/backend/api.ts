@@ -4,6 +4,7 @@ import { isWithinAvailability } from "./availability";
 import { CURRENT_VERSION } from "./version";
 import { enrollmentForLesson, remainingOf, remainingTotal } from "./enrollment";
 import { databaseStats, validateImportedDatabase, type ImportOutcome } from "./backup";
+import { buildFollowUps, type FollowUpItem } from "./followup";
 import {
   monthRange,
   outstandingAmount,
@@ -726,6 +727,27 @@ export const api = {
     });
   },
 
+  /**
+   * 待跟进清单。
+   *
+   * 服务层只负责「把数据凑齐交给规则引擎」，规则本身在 lib/backend/followup.ts。
+   * 这样将来服务端实现时可以整体搬到后端，页面不用改。
+   */
+  async followups(now: Date = new Date()): Promise<FollowUpItem[]> {
+    await delay();
+    const db = load();
+    return clone(
+      buildFollowUps({
+        students: db.students,
+        lessons: db.lessons,
+        assessments: db.assessments,
+        homeworks: db.homeworkRecords,
+        lessonRecords: db.lessonRecords,
+        now,
+      }),
+    );
+  },
+
   /** 学生维度的欠费合计（列表里显示）。 */
   async outstandingByStudent(): Promise<Array<{ studentId: string; amount: number }>> {
     await delay();
@@ -1220,6 +1242,7 @@ export function __useStoreForTesting(backing: KeyValueStore): void {
 export type {
   Assessment,
   Classroom,
+  FollowUpItem,
   LessonTransaction,
   Payment,
   ClassroomAvailability,
