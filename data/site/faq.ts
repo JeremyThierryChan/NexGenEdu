@@ -2,7 +2,7 @@
  * 本文件由 scripts/sync-content.mjs 自动生成，请勿手工编辑。
  * 内容来源：data/site/faq.md —— 修改后执行 npm run sync-content。
  */
-export const faqSyncedAt = "2026-09-18T07:00:18.333Z";
+export const faqSyncedAt = "2026-09-18T07:05:59.062Z";
 export const faqSource = `# NexGenEdu · 新锐教培 · 常见问题
 
 > 这个文件决定「常见问题」页面 \`/faq\` 的内容。
