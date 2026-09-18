@@ -1,6 +1,9 @@
 import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createSeedDatabase } from "./seed";
 import { isWithinAvailability } from "./availability";
+import { CURRENT_VERSION } from "./version";
+import { enrollmentForLesson, remainingOf, remainingTotal } from "./enrollment";
+import type { StudentProfile } from "./student-profile";
 import type {
   Classroom,
   ClassroomAvailability,
@@ -8,7 +11,9 @@ import type {
   CompletionResult,
   ConflictReport,
   Database,
+  Enrollment,
   LessonInput,
+  NewEnrollment,
   Lesson,
   NewClassroom,
   NewLesson,
@@ -39,14 +44,7 @@ import type {
 
 const STORAGE_KEY = "nexgenedu.admin.db.v1";
 
-/**
- * 当前数据结构版本。
- *
- * v1 → v2：教室增加「用途」（上课用教室 / 自习室）与「可用时段」。
- * 改结构时必须同时写迁移，否则别人浏览器里那份旧数据会缺字段，
- * 界面上就会出现 undefined。
- */
-const CURRENT_VERSION = 2;
+// 版本号与变更记录见 lib/backend/version.ts（seed 与迁移必须用同一个值）
 
 /** 模拟网络延迟，让加载态、按钮禁用等交互在开发时就暴露出来。 */
 const LATENCY_MS = 120;
@@ -97,6 +95,17 @@ function load(): Database {
  * 返回 null 表示这份数据没法用（版本比当前还新，或结构不认识）——
  * 调用方会重新灌入示例数据，而不是带着缺字段的数据继续跑。
  */
+/** 是否是 v2 及更早的学生结构（课时挂在学生身上的总数）。 */
+function isLegacyStudent(student: Student): boolean {
+  const legacy = student as unknown as {
+    remainingLessons?: number;
+    enrollments?: unknown;
+  };
+  return (
+    typeof legacy.remainingLessons === "number" || !Array.isArray(legacy.enrollments)
+  );
+}
+
 function migrate(db: Database): Database | null {
   if (db.version > CURRENT_VERSION) return null;
 
@@ -110,6 +119,68 @@ function migrate(db: Database): Database | null {
     db.version = 2;
   }
 
+  /*
+   * v2 → v3 只在**确实是旧结构**时执行：判据是「有 remainingLessons 字段」
+   * 或「没有 enrollments 数组」。只比较版本号是不够的 —— 曾因为 seed 写错版本
+   * 让新数据被当成旧数据迁移，把报课记录压成了一条。数据迁移宁可少做不可做错。
+   */
+  if (db.version === 2 && db.students.some(isLegacyStudent)) {
+    /*
+     * v2 的学生是 { subjects, remainingLessons }；v3 改为档案 + 按科目记账。
+     * 折算规则：剩余课时变成一条「未指定科目」的报课记录（total = 剩余、used = 0），
+     * 科目沿用原来的 subjects 列表 —— 一条总数无法拆成多科，因此不猜，
+     * 让管理员在界面上按实际情况调整到具体科目。
+     */
+    db.students = db.students.map((legacy) => {
+      // 已经是新结构的（理论上不该出现）原样返回，避免无谓改写
+      if (!isLegacyStudent(legacy)) return legacy;
+
+      const student = legacy as Student & {
+        remainingLessons?: number;
+        subjects?: string[];
+      };
+      const remaining = Math.max(0, Math.trunc(student.remainingLessons ?? 0));
+      const subjects = student.subjects ?? [];
+
+      const enrollments: Enrollment[] =
+        remaining > 0 || subjects.length > 0
+          ? [
+              {
+                id: `e_legacy_${student.id}`,
+                subject: subjects.length === 1 ? (subjects[0] ?? "") : "未指定科目",
+                form: "",
+                teacherId: "",
+                totalLessons: remaining,
+                usedLessons: 0,
+                startedAt: student.createdAt,
+                endedAt: "",
+                status: "在读",
+                note: "由旧版「剩余课时」折算，请按实际情况调整科目与课时",
+                history: [
+                  {
+                    at: nowIso(),
+                    kind: "报课",
+                    lessons: remaining,
+                    note: "旧数据折算",
+                  },
+                ],
+              },
+            ]
+          : [];
+
+      // 旧的 remainingLessons 字段被报课记录取代，这里显式丢掉（不留在数据里）
+      const { remainingLessons: _legacyLessons, ...rest } = student;
+      void _legacyLessons;
+      return {
+        ...rest,
+        profile: student.profile ?? {},
+        enrollments,
+        subjects: subjects.length > 0 ? subjects : enrollments.map((item) => item.subject),
+      } as Student;
+    });
+    db.version = 3;
+  }
+
   return db.version === CURRENT_VERSION ? db : null;
 }
 
@@ -120,6 +191,23 @@ function persist(db: Database): void {
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/**
+ * 把学生的「报读科目」同步为在读报课的科目。
+ *
+ * subjects 是给人看的摘要（列表标签、搜索），因此不单独维护、只由报课推导，
+ * 避免出现「退了课但科目列表还挂着」。
+ */
+function syncSubjects(student: Student): void {
+  const subjects: string[] = [];
+  for (const enrollment of student.enrollments) {
+    if (enrollment.status !== "在读") continue;
+    if (enrollment.subject.trim() !== "" && !subjects.includes(enrollment.subject)) {
+      subjects.push(enrollment.subject);
+    }
+  }
+  student.subjects = subjects;
 }
 
 /** 通用集合：把「取数组 → 改 → 存」的重复代码收在一处。 */
@@ -181,23 +269,139 @@ const studentCollection = collection<Student>((db) => db.students, "s");
 export const api = {
   students: {
     ...studentCollection,
-    /** 建档时间由服务生成，调用方不用管。 */
+    /** 建档时间由服务生成；新建时不带报课记录（报课走 enroll()）。 */
     async create(input: NewStudent): Promise<Student> {
-      return studentCollection.create({ ...input, createdAt: new Date().toISOString() });
+      const { subjects, ...rest } = input;
+      return studentCollection.create({
+        ...rest,
+        subjects: subjects ?? [],
+        profile: input.profile ?? {},
+        enrollments: [],
+        createdAt: new Date().toISOString(),
+      });
     },
     /**
-     * 调整剩余课时（delta 可为负）。
+     * 报课：新开一条报课记录。
      *
-     * 单独成一个方法而不是让页面「读出对象、加一下、整体写回」：
-     * 将来接服务端时，扣课时必须是一次服务端原子操作（还要写流水），
-     * 页面按这个签名调用就不用改。
+     * 同科目同班型的在读记录不会被合并 —— 合并会掩盖「报了两次」的事实，
+     * 续费请用 renewEnrollment()，那条会累加课时并留下流水。
      */
-    async adjustLessons(id: string, delta: number): Promise<Student | null> {
+    async enroll(studentId: string, input: NewEnrollment): Promise<Student | null> {
+      await delay();
+      const db = load();
+      const student = db.students.find((item) => item.id === studentId);
+      if (student === undefined) return null;
+
+      const lessons = Math.max(0, Math.trunc(input.lessons));
+      student.enrollments.push({
+        id: nextId("e"),
+        subject: input.subject.trim(),
+        form: input.form.trim(),
+        teacherId: input.teacherId,
+        totalLessons: lessons,
+        usedLessons: 0,
+        startedAt: input.startedAt !== "" ? input.startedAt : nowIso(),
+        endedAt: "",
+        status: "在读",
+        note: input.note.trim(),
+        history: [{ at: nowIso(), kind: "报课", lessons, note: input.note.trim() }],
+      });
+
+      syncSubjects(student);
+      persist(db);
+      return clone(student);
+    },
+
+    /** 续费：给某条报课累加课时，并留下流水。 */
+    async renewEnrollment(
+      studentId: string,
+      enrollmentId: string,
+      lessons: number,
+      note = "",
+    ): Promise<Student | null> {
+      await delay();
+      const db = load();
+      const student = db.students.find((item) => item.id === studentId);
+      const enrollment = student?.enrollments.find((item) => item.id === enrollmentId);
+      if (student === undefined || enrollment === undefined) return null;
+      if (enrollment.status !== "在读") return clone(student);
+
+      const added = Math.max(0, Math.trunc(lessons));
+      enrollment.totalLessons += added;
+      enrollment.history.push({ at: nowIso(), kind: "续费", lessons: added, note: note.trim() });
+
+      syncSubjects(student);
+      persist(db);
+      return clone(student);
+    },
+
+    /**
+     * 退课：把报课记录置为已退课并记下日期。
+     *
+     * 采用「标记退课」而不是删除记录：剩余课时与历史必须留痕，
+     * 否则以后对账时说不清「这些课时去哪了」。
+     */
+    async refundEnrollment(
+      studentId: string,
+      enrollmentId: string,
+      note = "",
+    ): Promise<Student | null> {
+      await delay();
+      const db = load();
+      const student = db.students.find((item) => item.id === studentId);
+      const enrollment = student?.enrollments.find((item) => item.id === enrollmentId);
+      if (student === undefined || enrollment === undefined) return null;
+
+      enrollment.status = "已退课";
+      enrollment.endedAt = nowIso();
+      enrollment.history.push({
+        at: nowIso(),
+        kind: "退课",
+        lessons: 0,
+        note: note.trim(),
+      });
+
+      syncSubjects(student);
+      persist(db);
+      return clone(student);
+    },
+
+    /** 直接改一条报课的课时（补录 / 纠错用），同样留流水。 */
+    async adjustEnrollmentLessons(
+      studentId: string,
+      enrollmentId: string,
+      delta: number,
+      note = "",
+    ): Promise<Student | null> {
+      await delay();
+      const db = load();
+      const student = db.students.find((item) => item.id === studentId);
+      const enrollment = student?.enrollments.find((item) => item.id === enrollmentId);
+      if (student === undefined || enrollment === undefined) return null;
+
+      enrollment.totalLessons = Math.max(0, enrollment.totalLessons + Math.trunc(delta));
+      enrollment.history.push({
+        at: nowIso(),
+        kind: "续费",
+        lessons: Math.trunc(delta),
+        note: note.trim() === "" ? "手工调整" : note.trim(),
+      });
+
+      syncSubjects(student);
+      persist(db);
+      return clone(student);
+    },
+
+    /** 保存信息采集表（整份覆盖；调用方传完整对象）。 */
+    async saveProfile(
+      id: string,
+      profile: StudentProfile,
+    ): Promise<Student | null> {
       await delay();
       const db = load();
       const student = db.students.find((item) => item.id === id);
       if (student === undefined) return null;
-      student.remainingLessons = Math.max(0, student.remainingLessons + delta);
+      student.profile = profile;
       persist(db);
       return clone(student);
     },
@@ -294,31 +498,45 @@ export const api = {
       const db = load();
       const lesson = db.lessons.find((item) => item.id === id);
       if (lesson === undefined) {
-        return { lesson: null, deducted: [], alreadyCompleted: false };
+        return { lesson: null, deducted: [], skipped: [], alreadyCompleted: false };
       }
 
       const alreadyCompleted = lesson.status === "已上";
+      const deducted: CompletionResult["deducted"] = [];
+      const skipped: CompletionResult["skipped"] = [];
+
       if (!alreadyCompleted) {
         lesson.status = "已上";
+
         for (const studentId of lesson.studentIds) {
           const student = db.students.find((item) => item.id === studentId);
-          if (student !== undefined) {
-            student.remainingLessons = Math.max(0, student.remainingLessons - 1);
+          if (student === undefined) {
+            skipped.push({ studentId, reason: "学生档案不存在" });
+            continue;
           }
+
+          // 扣哪一条报课：按这节课的科目匹配（见 lib/backend/enrollment.ts）
+          const enrollment = enrollmentForLesson(student.enrollments, lesson.subject);
+          if (enrollment === null) {
+            skipped.push({
+              studentId,
+              reason: `没有「${lesson.subject}」的在读报课记录，未扣课时`,
+            });
+            continue;
+          }
+
+          enrollment.usedLessons += 1;
+          deducted.push({
+            studentId,
+            subject: enrollment.subject,
+            remainingLessons: remainingOf(enrollment),
+          });
         }
+
         persist(db);
       }
 
-      const deducted = lesson.studentIds.map((studentId) => ({
-        studentId,
-        remainingLessons: db.students.find((item) => item.id === studentId)?.remainingLessons ?? 0,
-      }));
-
-      return clone({
-        lesson,
-        deducted: alreadyCompleted ? [] : deducted,
-        alreadyCompleted,
-      });
+      return clone({ lesson, deducted, skipped, alreadyCompleted });
     },
     /** 某一天的课，按开始时间升序。 */
     async listByDate(date: Date): Promise<Lesson[]> {
@@ -392,8 +610,10 @@ export const api = {
       totalMinutes: todays.reduce((total, lesson) => total + lesson.durationMinutes, 0),
       classroomUsage,
       lowLessonStudents: db.students
-        .filter((student) => student.status !== "结课" && student.remainingLessons <= 5)
-        .map((student) => ({ student, remainingLessons: student.remainingLessons }))
+        .filter((student) => student.status !== "结课")
+        .map((student) => ({ student, remainingLessons: remainingTotal(student.enrollments) }))
+        // 没有任何在读报课的学生也算「需要跟进」，否则会从预警里消失
+        .filter((item) => item.remainingLessons <= 5)
         .sort((a, b) => a.remainingLessons - b.remainingLessons),
       studentCount: db.students.length,
       activeTeacherCount: db.teachers.filter((teacher) => teacher.active).length,
@@ -423,6 +643,8 @@ export type {
   ClassroomAvailability,
   ClassroomKind,
   CompletionResult,
+  Enrollment,
+  NewEnrollment,
   ConflictReport,
   Database,
   LessonInput,
@@ -435,4 +657,4 @@ export type {
   Teacher,
   TodaySummary,
 };
-export { CLASSROOM_KINDS, STUDENT_STATUSES, LESSON_STATUSES } from "./types";
+export { CLASSROOM_KINDS, ENROLLMENT_STATUSES, STUDENT_STATUSES, LESSON_STATUSES } from "./types";

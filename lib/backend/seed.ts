@@ -1,5 +1,6 @@
 import { getTeachersPage } from "@/lib/data/site";
-import type { Classroom, Database, Lesson, Student, Teacher } from "./types";
+import { CURRENT_VERSION } from "./version";
+import type { Classroom, Database, Enrollment, Lesson, Student, Teacher } from "./types";
 
 /**
  * 伪后端的初始数据（示例数据）。
@@ -59,15 +60,34 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     },
   ];
 
+  // 学生的科目与课时都由「报课记录」决定（不再有单独的科目/课时字段），
+  // 因此这里给每人 1–2 条报课；其中两位刻意留成低课时，用来看课时预警
   const students: Student[] = [
-    student("s1", "示例·李同学", "初二", "138-0000-0001", ["初中数学", "初中物理"], 12, "在读", "几何证明薄弱，需固定节奏。", now),
-    student("s2", "示例·王同学", "初三", "138-0000-0002", ["中考数学"], 4, "在读", "中考冲刺，重点压轴题。", now),
-    student("s3", "示例·陈同学", "小学五年级", "138-0000-0003", ["小学数学", "小学英语"], 6, "在读", "计算习惯需要纠正。", now),
-    student("s4", "示例·张同学", "高一", "138-0000-0004", ["高中数学", "高中物理"], 2, "在读", "课时快用完，需要提醒续课。", now),
-    student("s5", "示例·刘同学", "初一", "138-0000-0005", ["初中英语"], 18, "在读", "语法体系刚建立。", now),
-    student("s6", "示例·赵同学", "小学六年级", "138-0000-0006", ["小学数学"], 9, "在读", "小升初衔接。", now),
-    student("s7", "示例·孙同学", "高二", "138-0000-0007", ["高中数学"], 0, "暂停", "暂停中，等月考后再排。", now),
-    student("s8", "示例·周同学", "初三", "138-0000-0008", ["中考英语"], 3, "在读", "写作是主要失分点。", now),
+    student("s1", "示例·李同学", "初二", "138-0000-0001", "在读", "几何证明薄弱，需固定节奏。", now, [
+      enroll("e1", "初中数学", "一对一定制课", 10, 3, now),
+      enroll("e2", "初中物理", "一对二 / 一对三小组课", 6, 1, now),
+    ]),
+    student("s2", "示例·王同学", "初三", "138-0000-0002", "在读", "中考冲刺，重点压轴题。", now, [
+      enroll("e3", "中考数学", "一对多小班课", 8, 4, now),
+    ]),
+    student("s3", "示例·陈同学", "小学五年级", "138-0000-0003", "在读", "计算习惯需要纠正。", now, [
+      enroll("e4", "小学数学", "一对一定制课", 8, 2, now),
+    ]),
+    student("s4", "示例·张同学", "高一", "138-0000-0004", "在读", "课时快用完，需要提醒续课。", now, [
+      enroll("e5", "高中数学", "一对一定制课", 4, 2, now),
+    ]),
+    student("s5", "示例·刘同学", "初一", "138-0000-0005", "在读", "语法体系刚建立。", now, [
+      enroll("e6", "初中英语", "一对二 / 一对三小组课", 20, 2, now),
+    ]),
+    student("s6", "示例·赵同学", "小学六年级", "138-0000-0006", "在读", "小升初衔接。", now, [
+      enroll("e7", "小学数学", "一对多小班课", 12, 3, now),
+    ]),
+    student("s7", "示例·孙同学", "高二", "138-0000-0007", "暂停", "暂停中，等月考后再排。", now, [
+      enroll("e8", "高中数学", "一对一定制课", 6, 6, now),
+    ]),
+    student("s8", "示例·周同学", "初三", "138-0000-0008", "在读", "写作是主要失分点。", now, [
+      enroll("e9", "中考英语", "一对多小班课", 6, 3, now),
+    ]),
   ];
 
   const lessons: Lesson[] = [
@@ -81,7 +101,8 @@ export function createSeedDatabase(now: Date = new Date()): Database {
   ];
 
   return {
-    version: 1,
+    // 必须是当前版本：写成旧版本会让新灌入的数据在下次读取时被迁移逻辑改写
+    version: CURRENT_VERSION,
     students,
     teachers,
     classrooms,
@@ -103,13 +124,48 @@ function student(
   name: string,
   grade: string,
   guardian: string,
-  subjects: string[],
-  remainingLessons: number,
   status: Student["status"],
   note: string,
   now: Date,
+  enrollments: Enrollment[],
 ): Student {
-  return { id, name, grade, guardian, subjects, remainingLessons, status, note, createdAt: now.toISOString() };
+  return {
+    id,
+    name,
+    grade,
+    guardian,
+    // 报读科目由报课推导，与 syncSubjects() 的口径一致
+    subjects: enrollments.filter((item) => item.status === "在读").map((item) => item.subject),
+    profile: {},
+    enrollments,
+    status,
+    note,
+    createdAt: now.toISOString(),
+  };
+}
+
+/** 造一条报课记录：total 已购课时，used 已消耗课时。 */
+function enroll(
+  id: string,
+  subject: string,
+  form: string,
+  total: number,
+  used: number,
+  now: Date,
+): Enrollment {
+  return {
+    id,
+    subject,
+    form,
+    teacherId: "",
+    totalLessons: total,
+    usedLessons: used,
+    startedAt: now.toISOString(),
+    endedAt: "",
+    status: "在读",
+    note: "",
+    history: [{ at: now.toISOString(), kind: "报课", lessons: total, note: "示例数据" }],
+  };
 }
 
 function lesson(

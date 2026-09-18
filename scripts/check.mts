@@ -38,6 +38,19 @@ import { __useStoreForTesting, api } from "@/lib/backend/api";
 import { createMemoryStore } from "@/lib/backend/storage";
 import { dateKey } from "@/lib/backend/format";
 import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
+import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
+import { CURRENT_VERSION } from "@/lib/backend/version";
+import {
+  PROFILE_SECTIONS,
+  emptyProfileTable,
+  profileCompletion,
+  profileList,
+  profileTable,
+  profileText,
+} from "@/lib/backend/student-profile";
+import { createSeedDatabase } from "@/lib/backend/seed";
+
+const seedDb = createSeedDatabase();
 import {
   __credentialsForTesting,
   __useSessionStoreForTesting,
@@ -605,20 +618,20 @@ ok("教室沿用站点的场地名称",
 
 const created = await api.students.create({
   name: "示例·自检同学", grade: "初二", guardian: "138-0000-9999",
-  subjects: ["初中数学"], remainingLessons: 8, status: "在读", note: "",
+  status: "在读", note: "", profile: {},
 });
 ok("新建学生返回 id", created.id !== "");
 ok("新建后总数 +1", (await api.students.list()).length === seeded.length + 1);
 ok("按 id 能取回", (await api.students.get(created.id))?.name === "示例·自检同学");
 ok("搜索能命中", (await api.students.search("自检")).some((s) => s.id === created.id));
 
-const updated = await api.students.update(created.id, { remainingLessons: 7 });
-ok("更新生效", updated?.remainingLessons === 7);
+const updated = await api.students.update(created.id, { grade: "初三" });
+ok("更新基础字段生效", updated?.grade === "初三");
 
 // 关键：把服务重新挂到同一个存储上（等价于刷新页面后新建实例），数据仍应在
 __useStoreForTesting(memory);
 ok("写入已落盘（新实例仍能读到）",
-  (await api.students.get(created.id))?.remainingLessons === 7);
+  (await api.students.get(created.id))?.grade === "初三");
 
 ok("删除生效", (await api.students.remove(created.id)) === true);
 ok("删除后取不到", (await api.students.get(created.id)) === null);
@@ -646,14 +659,39 @@ ok("排课的教师 / 教室 / 学生都真实存在",
     allClassrooms.some((room) => room.id === lesson.classroomId) &&
     lesson.studentIds.every((id) => allStudents.some((student) => student.id === id))));
 
-// 课时调整：上课扣减 / 续课增加，且不会扣成负数
+/*
+ * 课时按科目记账：报课 / 续费 / 退课 / 手工调整四种动作都要验证。
+ * 这里特意用了「同一学生两门课」，才能验证「退一门不影响另一门」。
+ */
 const target = seeded[0]!;
-const before = target.remainingLessons;
-eq("上课扣 1 节", (await api.students.adjustLessons(target.id, -1))?.remainingLessons, before - 1);
-eq("续课加 2 节", (await api.students.adjustLessons(target.id, 2))?.remainingLessons, before + 1);
-const zeroed = await api.students.update(target.id, { remainingLessons: 0 });
-ok("已归零", zeroed?.remainingLessons === 0);
-eq("课时不会扣成负数", (await api.students.adjustLessons(target.id, -5))?.remainingLessons, 0);
+const beforeTotal = remainingTotal(target.enrollments);
+ok("示例学生有报课记录", target.enrollments.length >= 1);
+
+const enrolled = await api.students.enroll(target.id, {
+  subject: "自检科目", form: "一对一定制课", teacherId: "",
+  lessons: 10, startedAt: new Date().toISOString(), note: "自检",
+});
+eq("报课后剩余合计增加 10 节", remainingTotal(enrolled!.enrollments), beforeTotal + 10);
+
+const added = enrolled!.enrollments.find((item) => item.subject === "自检科目")!;
+const renewed = await api.students.renewEnrollment(target.id, added.id, 5, "续费自检");
+eq("续费后该科目剩 15 节",
+  remainingOf(renewed!.enrollments.find((item) => item.id === added.id)!), 15);
+eq("续费流水有两条（报课 + 续费）",
+  renewed!.enrollments.find((item) => item.id === added.id)!.history.length, 2);
+
+const refunded = await api.students.refundEnrollment(target.id, added.id, "退课自检");
+eq("退课后剩余合计回到原值", remainingTotal(refunded!.enrollments), beforeTotal);
+ok("退课记录被保留（不是删除）",
+  refunded!.enrollments.some((item) => item.id === added.id && item.status === "已退课"));
+ok("退课后的科目从「在读科目」里移除", !refunded!.subjects.includes("自检科目"));
+eq("退课不影响其他科目",
+  remainingTotal(refunded!.enrollments.filter((item) => item.id !== added.id)),
+  beforeTotal);
+
+const adjusted = await api.students.adjustEnrollmentLessons(target.id, added.id, -20, "自检");
+eq("手工调减不会变成负数",
+  remainingOf(adjusted!.enrollments.find((item) => item.id === added.id)!), 0);
 
 // 按关系查询（学生 / 教师 / 教室详情用）：结果必须真的相关
 const someLesson = (await api.lessons.list())[0]!;
@@ -678,7 +716,7 @@ const room =
 const teacher = (await api.teachers.list())[0]!;
 // 刻意挑一个课时充足的学生：前面「不会扣成负数」的用例已经把第一个学生清零了，
 // 拿零课时的学生来验证扣减会得到 0，看不出是否真的扣了
-const pupil = (await api.students.list()).find((student) => student.remainingLessons > 5)!;
+const pupil = (await api.students.list()).find((student) => remainingTotal(student.enrollments) > 5)!;
 const base = new Date();
 base.setHours(15, 0, 0, 0);
 
@@ -691,8 +729,10 @@ const slot = (hour: number, minute = 0, duration = 60, dayOffset = 0) => {
 };
 
 const first = slot(15);
+// 科目刻意用该学生**已报课**的科目：扣课时是按科目找报课记录的
+const anchorSubject = pupil.subjects[0] ?? "未指定科目";
 const anchorLesson = await api.lessons.create({
-  subject: "自检课", form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
+  subject: anchorSubject, form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
   studentIds: [pupil.id], startsAt: first.start, durationMinutes: first.duration,
   status: "已排", note: "",
 });
@@ -722,7 +762,7 @@ eq("同时间但不同天不算冲突", (await conflictsFor(nextDay.start)).tota
 
 // 编辑自己不算冲突
 const selfReport = await api.lessons.findConflicts({
-  id: anchorLesson.id, subject: "自检课", form: "", teacherId: teacher.id,
+  id: anchorLesson.id, subject: anchorSubject, form: "", teacherId: teacher.id,
   classroomId: room.id, studentIds: [pupil.id], startsAt: first.start,
   durationMinutes: first.duration, status: "已排", note: "",
 });
@@ -745,19 +785,33 @@ if (otherTeacher !== undefined) {
 }
 
 // ── 标记已上：扣课时且幂等 ────────────────────────────────────────────
-const pupilBefore = (await api.students.get(pupil.id))!.remainingLessons;
+// 「标记已上」扣的是**该节课科目**对应的报课记录
+const pupilBefore = remainingTotal((await api.students.get(pupil.id))!.enrollments);
 const completed = await api.lessons.markCompleted(anchorLesson.id);
 eq("标记已上后状态为已上", completed.lesson?.status, "已上");
 eq("标记已上扣 1 节课时",
-  (await api.students.get(pupil.id))!.remainingLessons, pupilBefore - 1);
+  remainingTotal((await api.students.get(pupil.id))!.enrollments), pupilBefore - 1);
 eq("本次扣减明细含该学生", completed.deducted.map((item) => item.studentId), [pupil.id]);
+eq("扣减明细带上所扣科目", completed.deducted[0]?.subject, anchorLesson.subject);
 
 // 幂等：再点一次不能重复扣课时（最容易出错的地方）
 const again = await api.lessons.markCompleted(anchorLesson.id);
 eq("重复标记被识别为已完成", again.alreadyCompleted, true);
 eq("重复标记不再扣课时",
-  (await api.students.get(pupil.id))!.remainingLessons, pupilBefore - 1);
+  remainingTotal((await api.students.get(pupil.id))!.enrollments), pupilBefore - 1);
 eq("重复标记不返回扣减明细", again.deducted.length, 0);
+
+// 没有对应科目的报课记录时：不扣课时，但要如实说明为什么
+const strangerLesson = await api.lessons.create({
+  subject: "自检·无人报课的科目", form: "", teacherId: teacher.id, classroomId: room.id,
+  studentIds: [pupil.id], startsAt: slot(9, 0).start, durationMinutes: 60,
+  status: "已排", note: "",
+});
+const strangerResult = await api.lessons.markCompleted(strangerLesson.id);
+eq("无对应报课记录时不扣课时", strangerResult.deducted.length, 0);
+eq("并且说明原因", strangerResult.skipped.length, 1);
+ok("原因里点名了科目", (strangerResult.skipped[0]?.reason ?? "").includes("无人报课的科目"));
+await api.lessons.remove(strangerLesson.id);
 
 await api.lessons.remove(anchorLesson.id);
 eq("删除排课后查不到", await api.lessons.get(anchorLesson.id), null);
@@ -840,7 +894,7 @@ legacy.write(
   "nexgenedu.admin.db.v1",
   JSON.stringify({
     version: 1,
-    students: [{ id: "s9", name: "旧数据学生", grade: "初一", guardian: "", subjects: [],
+    students: [{ id: "s9", name: "旧数据学生", grade: "初一", guardian: "", subjects: ["初中数学"],
       remainingLessons: 3, status: "在读", note: "", createdAt: new Date().toISOString() }],
     teachers: [],
     classrooms: [{ id: "c9", name: "旧教室", capacity: 6, note: "" }],
@@ -852,9 +906,74 @@ const migratedRooms = await api.classrooms.list();
 eq("旧数据里的教室被补上用途", migratedRooms[0]?.kind, "上课用教室");
 eq("旧数据里的教室被补上用空时段", migratedRooms[0]?.availability, []);
 eq("迁移不影响其他数据", (await api.students.list())[0]?.name, "旧数据学生");
+// v2 的「剩余课时总数」折算成一条报课记录：total=3、used=0
+const migratedStudent = (await api.students.get("s9"))!;
+eq("旧课时折算成一条报课记录", migratedStudent.enrollments.length, 1);
+eq("折算后的剩余课时不变", remainingTotal(migratedStudent.enrollments), 3);
+eq("折算记录沿用了原科目", migratedStudent.enrollments[0]?.subject, "初中数学");
+ok("折算记录带说明，提示需人工确认",
+  (migratedStudent.enrollments[0]?.note ?? "").includes("折算"));
+ok("迁移后的学生有采集表字段（空对象）", migratedStudent.profile !== undefined);
+eq("迁移结果版本为 3", JSON.parse(legacy.read("nexgenedu.admin.db.v1") ?? "{}").version, 3);
 
-// 迁移后的数据应被写回（下次打开不再重复迁移）
-ok("迁移结果已落盘", (legacy.read("nexgenedu.admin.db.v1") ?? "").includes('"version":2'));
+// 迁移后的数据应被写回（下次打开不再重复迁移、也不会重复改写）
+eq("迁移结果已落盘（版本与当前一致）",
+  JSON.parse(legacy.read("nexgenedu.admin.db.v1") ?? "{}").version, CURRENT_VERSION);
+
+// 关键回归：已迁移好的数据再读一次，报课记录不能被再次改写
+const beforeSecondRead = JSON.stringify((await api.students.get("s9"))?.enrollments);
+__useStoreForTesting(legacy);
+const afterSecondRead = JSON.stringify((await api.students.get("s9"))?.enrollments);
+eq("重复打开不会再次迁移", afterSecondRead, beforeSecondRead);
+
+// 数据结构版本必须与 seed 写出的一致（曾因 seed 写旧版本导致新数据被误迁移）
+eq("示例数据的版本等于当前版本", seedDb.version, CURRENT_VERSION);
+
+// ── 信息采集表 ────────────────────────────────────────────────────────
+// 注意：上面的迁移用例把服务切到了另一份存储（legacy），这里必须先切回来，
+// 否则会对着一份没有这些学生的数据做断言（表现为「保存失败」）。
+__useStoreForTesting(memory);
+// 采集表是键值对 + 字段定义，因此这里守两件事：
+//   1. 定义本身是完整的（键唯一、选择项有候选项、表格有列）；
+//   2. 存取走得通（保存后能读回来），并且加字段不需要迁移。
+const profileKeys = PROFILE_SECTIONS.flatMap((section) => section.fields.map((field) => field.key));
+eq("采集表字段键不重复", profileKeys.filter((k, i) => profileKeys.indexOf(k) !== i), []);
+ok("采集表字段数量与模板相当（≥ 60 项）", profileKeys.length >= 60);
+ok("选择型字段都给了候选项",
+  PROFILE_SECTIONS.flatMap((section) => section.fields)
+    .filter((field) => field.type === "select" || field.type === "multi")
+    .every((field) => (field.options ?? []).length > 0));
+ok("表格型字段都定义了列",
+  PROFILE_SECTIONS.flatMap((section) => section.fields)
+    .filter((field) => field.type === "table")
+    .every((field) => (field.columns ?? []).length > 0));
+ok("心理与情绪健康一节标了敏感",
+  PROFILE_SECTIONS.filter((section) => section.sensitive === true)
+    .some((section) => section.title.includes("心理")));
+
+const profileSaved = await api.students.saveProfile(target.id, {
+  gender: "男",
+  school: "示例中学",
+  preferredLearningStyles: ["老师板书", "互动讨论"],
+  baselineScores: [{ baseline: "88", recent: "92", note: "" }],
+});
+ok("采集表能保存", profileSaved !== null);
+const profileReloaded = (await api.students.get(target.id))!;
+eq("文本字段读回一致", profileText(profileReloaded.profile, "gender"), "男");
+eq("多选字段读回一致", profileList(profileReloaded.profile, "preferredLearningStyles"),
+  ["老师板书", "互动讨论"]);
+eq("表格字段读回一致", profileTable(profileReloaded.profile, "baselineScores")[0]?.recent, "92");
+
+const completion = profileCompletion(profileReloaded.profile);
+eq("填写进度：已填 4 项", completion.filled, 4);
+ok("总项数等于字段数", completion.total === profileKeys.length);
+eq("空档案进度为 0", profileCompletion({}).filled, 0);
+ok("表格型字段的空表按行定义生成",
+  emptyProfileTable(PROFILE_SECTIONS.flatMap((s) => s.fields).find((f) => f.key === "availableTimes")!).length === 7);
+
+// 加到采集表里的新字段对老档案是空值，不需要迁移
+eq("老档案读不到的新字段返回空串", profileText(seeded[1]!.profile, "不存在的字段"), "");
+eq("老档案读不到的新多选字段返回空数组", profileList(seeded[1]!.profile, "不存在的字段"), []);
 
 await api.reset();
 eq("重置回到示例数据", (await api.students.list()).length, seeded.length);

@@ -11,17 +11,68 @@ export type Student = {
   name: string;
   /** 年级，例如「初二」。 */
   grade: string;
-  /** 家长联系方式（电话或微信）。 */
+  /** 家长联系方式（电话或微信）；监护人的姓名/微信等详见档案采集表。 */
   guardian: string;
-  /** 报读科目。 */
+  /**
+   * 报读科目：由报课记录推导（见 lib/backend/enrollment.ts），
+   * 不再单独维护一份，避免「改了报课、科目列表没变」。
+   */
   subjects: string[];
-  /** 剩余课时；排课与上课会消耗它。 */
-  remainingLessons: number;
+  /**
+   * 信息采集表（键 → 值），字段定义见 lib/backend/student-profile.ts。
+   * 用键值对存储是为了加字段不用迁移数据：老档案读不到新字段就是空。
+   */
+  profile: StudentProfile;
+  /** 报课记录：一门课一条，承载课时与退课状态。 */
+  enrollments: Enrollment[];
   status: StudentStatus;
   /** 备注：薄弱点、家长诉求等。 */
   note: string;
   /** 建档时间（ISO）。 */
   createdAt: string;
+};
+
+/** 一条报课记录（含续费与退课）。 */
+export type Enrollment = {
+  id: string;
+  /** 科目，例如「初中数学」；与课程名用同一套叫法。 */
+  subject: string;
+  /** 班型，例如「一对一定制课」。 */
+  form: string;
+  /** 指定教师；空串表示未指定。 */
+  teacherId: string;
+  /** 已购课时总数（含续费累加）。 */
+  totalLessons: number;
+  /** 已消耗课时（上课时扣减）。 */
+  usedLessons: number;
+  /** 报课日期（ISO）。 */
+  startedAt: string;
+  /** 退课 / 结课日期；空串表示仍在生效。 */
+  endedAt: string;
+  status: EnrollmentStatus;
+  note: string;
+  /** 报课 / 续费 / 退课流水，便于家长对账。 */
+  history: EnrollmentHistoryItem[];
+};
+
+export type EnrollmentHistoryItem = {
+  at: string;
+  kind: "报课" | "续费" | "退课";
+  lessons: number;
+  note: string;
+};
+
+export const ENROLLMENT_STATUSES = ["在读", "已退课"] as const;
+export type EnrollmentStatus = (typeof ENROLLMENT_STATUSES)[number];
+
+/** 报课入参。 */
+export type NewEnrollment = {
+  subject: string;
+  form: string;
+  teacherId: string;
+  lessons: number;
+  startedAt: string;
+  note: string;
 };
 
 export const STUDENT_STATUSES = ["在读", "暂停", "结课"] as const;
@@ -109,11 +160,15 @@ export type Database = {
   updatedAt: string;
 };
 
-/** 新建时的入参：id 与时间戳由服务生成。 */
-export type NewStudent = Omit<Student, "id" | "createdAt">;
+/** 新建时的入参：id、报课集合与时间戳由服务生成。 */
+export type NewStudent = Omit<Student, "id" | "createdAt" | "enrollments" | "subjects"> & {
+  subjects?: string[];
+};
 export type NewTeacher = Omit<Teacher, "id">;
 export type NewClassroom = Omit<Classroom, "id">;
 export type NewLesson = Omit<Lesson, "id">;
+
+import type { StudentProfile } from "./student-profile";
 
 /** 今日概览的汇总数据。 */
 export type TodaySummary = {
@@ -169,8 +224,13 @@ export type ConflictReport = {
 /** 「标记已上」的结果：课时扣减明细。 */
 export type CompletionResult = {
   lesson: Lesson | null;
-  /** 本次实际扣减的学生（已上过的课重复标记时为空）。 */
-  deducted: Array<{ studentId: string; remainingLessons: number }>;
+  /** 本次实际扣减的学生及其扣后剩余课时。 */
+  deducted: Array<{ studentId: string; subject: string; remainingLessons: number }>;
+  /**
+   * 没能扣课时的学生（例如没有该科目的在读报课记录）。
+   * 如实上报而不是随便找一条记录扣 —— 排课与课时对不上时，这里就是线索。
+   */
+  skipped: Array<{ studentId: string; reason: string }>;
   /** 这节课之前是否已经是「已上」状态。 */
   alreadyCompleted: boolean;
 };

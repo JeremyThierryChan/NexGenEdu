@@ -14,6 +14,7 @@ import {
   type Teacher,
 } from "@/lib/backend/api";
 import { getFormOptions, getSubjectOptions } from "@/lib/backend/options";
+import { remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
 
 /**
@@ -266,7 +267,7 @@ export function LessonForm({
                     />
                     <span className="min-w-0 truncate text-ink-800">{student.name}</span>
                     <span className="ml-auto shrink-0 text-xs text-ink-400">
-                      剩 {student.remainingLessons}
+                      剩 {remainingTotal(student.enrollments)}
                     </span>
                   </label>
                 );

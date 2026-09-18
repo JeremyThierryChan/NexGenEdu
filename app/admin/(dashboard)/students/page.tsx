@@ -8,6 +8,7 @@ import { StudentDetail } from "@/components/admin/StudentDetail";
 import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { api, type Lesson, type Student } from "@/lib/backend/api";
+import { remainingTotal } from "@/lib/backend/enrollment";
 
 /**
  * 学生模块。
@@ -149,18 +150,29 @@ export default function AdminStudentsPage() {
                   {student.subjects.join("、") || "—"}
                 </td>
                 <td className="px-4 py-2.5">
-                  <span
-                    className={
-                      student.remainingLessons <= 5
-                        ? "tabular font-medium text-warning-600"
-                        : "tabular text-ink-700"
-                    }
-                  >
-                    {student.remainingLessons} 节
-                  </span>
-                  {student.remainingLessons <= 5 && student.status === "在读" && (
-                    <span className="ml-1.5 text-[11px] text-warning-600">需提醒</span>
-                  )}
+                  {(() => {
+                    // 课时按科目记账，这里显示合计（明细在详情的「报课与课时」里）
+                    const remaining = remainingTotal(student.enrollments);
+                    return (
+                      <>
+                        <span
+                          className={
+                            remaining <= 5
+                              ? "tabular font-medium text-warning-600"
+                              : "tabular text-ink-700"
+                          }
+                        >
+                          {remaining} 节
+                        </span>
+                        <span className="ml-1.5 text-[11px] text-ink-400">
+                          {student.enrollments.filter((item) => item.status === "在读").length} 门
+                        </span>
+                        {remaining <= 5 && student.status === "在读" && (
+                          <span className="ml-1.5 text-[11px] text-warning-600">需提醒</span>
+                        )}
+                      </>
+                    );
+                  })()}
                 </td>
                 <td className="px-4 py-2.5">
                   <StatusBadge status={student.status} />

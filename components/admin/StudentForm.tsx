@@ -1,19 +1,19 @@
 "use client";
 
 import { useState } from "react";
-import { NumberInput, SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
+import { SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { Button } from "@/components/ui/Button";
 import { api, STUDENT_STATUSES, type Student } from "@/lib/backend/api";
 
 /**
- * 学生表单：新建与编辑共用。
+ * 学生表单（基础信息）：新建与编辑共用。
  *
- * 几个刻意的处理：
- * - 「报读科目」用逗号分隔的自由文本 + 站点已有课程名作为候选（datalist），
- *   既快又不容易写错科目标签；
- * - 剩余课时在**编辑**时可以手改（补录历史数据用），但日常增减走详情页的
- *   「±1 节」按钮 —— 那是扣课时的正常入口；
- * - 提交时做基本校验（姓名 / 年级必填），错误就地显示，不用弹窗。
+ * 这里只放「快速建档」需要的字段。**报读科目与课时不在这里**：
+ * 它们由「报课记录」决定（见「报课与课时」面板），
+ * 信息采集表的几十个字段在「信息采集表」面板里填。
+ *
+ * 这样分的理由：建档时家长通常只给得出姓名、年级、联系方式，
+ * 其余信息是在沟通过程中逐步补齐的 —— 表单不该一上来就要八十个字段。
  */
 export function StudentForm({
   student,
@@ -29,10 +29,6 @@ export function StudentForm({
   const [name, setName] = useState(student?.name ?? "");
   const [grade, setGrade] = useState(student?.grade ?? "");
   const [guardian, setGuardian] = useState(student?.guardian ?? "");
-  const [subjects, setSubjects] = useState((student?.subjects ?? []).join("、"));
-  const [remainingLessons, setRemainingLessons] = useState(
-    `${student?.remainingLessons ?? 0}`,
-  );
   const [status, setStatus] = useState<Student["status"]>(student?.status ?? "在读");
   const [note, setNote] = useState(student?.note ?? "");
   const [error, setError] = useState("");
@@ -53,17 +49,12 @@ export function StudentForm({
       name: name.trim(),
       grade: grade.trim(),
       guardian: guardian.trim(),
-      subjects: subjects
-        .split(/[、,，]/)
-        .map((item) => item.trim())
-        .filter((item) => item !== ""),
-      remainingLessons: Math.max(0, Math.trunc(Number(remainingLessons) || 0)),
       status,
       note: note.trim(),
     };
 
     if (editing) await api.students.update(student.id, payload);
-    else await api.students.create(payload);
+    else await api.students.create({ ...payload, profile: {} });
 
     setPending(false);
     await onSaved();
@@ -92,20 +83,6 @@ export function StudentForm({
           onChange={(event) => setGuardian(event.target.value)}
           placeholder="电话或微信"
         />
-        <TextField
-          label="报读科目"
-          hint="用顿号或逗号分隔，例如「初中数学、初中物理」"
-          value={subjects}
-          onChange={(event) => setSubjects(event.target.value)}
-          list="student-subject-options"
-        />
-        <NumberInput
-          label="剩余课时"
-          suffix="节"
-          value={remainingLessons}
-          onChange={(event) => setRemainingLessons(event.target.value)}
-          hint={editing ? "补录历史数据时手改；日常增减用详情页的 ±1 节" : undefined}
-        />
         <SelectInput
           label="状态"
           value={status}
@@ -113,6 +90,12 @@ export function StudentForm({
           options={STUDENT_STATUSES.map((value) => ({ value, label: value }))}
         />
       </div>
+
+      <p className="mt-3 text-xs text-ink-500">
+        {editing
+          ? "报读科目与课时在下方「报课与课时」里维护；信息采集表在「信息采集表」里填写。"
+          : "建档后可以在详情里报课（记录科目与课时），并填写信息采集表。"}
+      </p>
 
       <div className="mt-3">
         <TextAreaField
