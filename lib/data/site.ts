@@ -14,6 +14,7 @@ import type {
   Course,
   CourseColumn,
   CourseColumnCard,
+  CourseColumnPageData,
   CoursePageData,
   CourseStage,
   CourseTag,
@@ -164,6 +165,8 @@ export function getCourseColumns(): CourseColumn[] {
 
     // 「暂未开放」写在卡片行里，页面上显示成卡片右上角的标记
     const statusText = /状态\s*[:：]\s*([^·]+)/.exec(rest)?.[1]?.trim() ?? "";
+    // 「班型」写的是「特色课程」里的班型名，用顿号分隔
+    const formsText = /班型\s*[:：]\s*([^·]+)/.exec(rest)?.[1]?.trim() ?? "";
     const tagText = /标签\s*[:：]\s*(.+)$/.exec(rest)?.[1]?.trim() ?? "";
     const tags: CourseTag[] = tagText
       .split(/[、,，]/)
@@ -179,6 +182,10 @@ export function getCourseColumns(): CourseColumn[] {
       title,
       path: cardPath !== "" ? cardPath : slugifyFallback(title),
       unavailable: statusText === "暂未开放",
+      forms: formsText
+        .split(/[、,，]/)
+        .map((item) => item.trim())
+        .filter((item) => item !== ""),
       tags,
       // 这门课自己有说明小节就指向它；否则退回到第一个标签（七选三这类没有总览小节）
       target: sections.has(title) ? title : (tags[0]?.target ?? title),
@@ -406,6 +413,31 @@ function courseStageIndex(): {
   return { bands, subjects, electives };
 }
 
+/**
+ * 栏目的页面路径。
+ *
+ * 栏目名是**结构**（自检固定了六个），因此这里直接映射；
+ * 一旦有人改了栏目名，自检会立刻报「栏目缺路径」，不会静默 404。
+ */
+export const COLUMN_PATHS: Record<string, string> = {
+  小学课内: "primary",
+  初中课内: "junior",
+  高中课内: "senior",
+  外语: "languages",
+  课外兴趣: "interests",
+  成人课程: "adults",
+};
+
+/** 正文第一段，用作科目/卡片的一句话简介。 */
+function firstParagraph(markdown: string): string {
+  const paragraph = markdown
+    .split(/\n\s*\n/)
+    .map((part) => part.trim())
+    // 列表行（核心能力）不当作简介
+    .find((part) => part !== "" && !part.startsWith("- "));
+  return (paragraph ?? "").replace(/[*_`]/g, "");
+}
+
 /** 全部卡片页路径（静态导出用）。 */
 export function getAllCoursePageSlugs(): string[] {
   return getCourseColumns().flatMap((column) =>
@@ -500,7 +532,85 @@ export function getCoursePageData(slug: string): CoursePageData | null {
     (item) => item.path !== slug && !sameSubjectPaths.has(item.path),
   );
 
-  return { card, column, subgroup, intro, overview, stages, sameSubject, sameColumn };
+  return {
+    card,
+    column,
+    subgroup,
+    intro,
+    overview,
+    stages,
+    sameSubject,
+    sameColumn,
+    forms: card.forms,
+    teachers: teachersForCourse(card, stages),
+  };
+}
+
+/**
+ * 能带这门课的教师。
+ *
+ * 判据是教师页的「科目」字段：只要教师的某个科目出现在卡片名或它的阶段名里，
+ * 就认为这位教师可以带这门课（例如 陈老师 的「物理」命中「高中物理」，
+ * 「德语」命中「高考外语」的阶段「德语B2」）。
+ *
+ * 刻意不做「猜」：科目对不上就不显示，页面会给出「以咨询确认为准」的说明，
+ * 而不是硬塞一位老师上去。
+ */
+function teachersForCourse(card: CourseColumnCard, stages: CourseStage[]): Teacher[] {
+  const haystack = [card.title, ...stages.map((stage) => stage.anchor)].join(" ");
+  return getTeachersPage().teachers.filter(
+    (teacher) =>
+      teacher.kind === "teacher" &&
+      teacher.subjects.some((subject) => subject !== "" && haystack.includes(subject)),
+  );
+}
+
+/** 栏目（学段）页：该栏目下各科目的简介。 */
+export function getCourseColumnPageData(slug: string): CourseColumnPageData | null {
+  const columns = getCourseColumns();
+  const column = columns.find((item) => COLUMN_PATHS[item.title] === slug);
+  if (column === undefined) return null;
+
+  const index = courseStageIndex();
+
+  /** 科目简介：学科导语 → 选修课介绍 → 第一个阶段正文的第一段。 */
+  const summaryOf = (card: CourseColumnCard): string => {
+    const subjectLead = firstParagraph(index.subjects.get(card.title)?.lead ?? "");
+    if (subjectLead !== "") return subjectLead;
+
+    const elective = index.electives.get(card.title);
+    if (elective !== undefined && elective !== "") return elective;
+
+    if (card.tags.length > 0) {
+      const first = index.bands.get(card.tags[0]?.target ?? "");
+      const text = firstParagraph(first?.stage.body ?? "");
+      if (text !== "") return text;
+    }
+
+    const own = index.bands.get(card.title);
+    const ownText = firstParagraph(own?.stage.body ?? "");
+    if (ownText !== "") return ownText;
+
+    return index.bands.get(card.title)?.stage.lead ?? "";
+  };
+
+  return {
+    title: column.title,
+    subgroups: column.subgroups.map((subgroup) => ({
+      title: subgroup.title,
+      cards: subgroup.cards.map((card) => ({ ...card, summary: summaryOf(card) })),
+    })),
+    otherColumns: columns
+      .filter((item) => item.title !== column.title)
+      .map((item) => ({ title: item.title, href: `/courses/${COLUMN_PATHS[item.title] ?? ""}` })),
+  };
+}
+
+/** 全部栏目页路径（静态导出用）。 */
+export function getAllCourseColumnSlugs(): string[] {
+  return getCourseColumns()
+    .map((column) => COLUMN_PATHS[column.title])
+    .filter((slug): slug is string => slug !== undefined && slug !== "");
 }
 
 // ── 教师页 ────────────────────────────────────────────────────────────────

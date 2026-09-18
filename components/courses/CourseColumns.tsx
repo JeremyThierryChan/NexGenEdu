@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { cn } from "@/lib/utils/cn";
+import { COLUMN_PATHS } from "@/lib/data/site";
 import { cardPageHref, courseStageHref } from "@/lib/site/featured-routes";
 import type { CourseColumn, CourseColumnCard } from "@/lib/types/site";
 
@@ -48,13 +49,29 @@ export function CourseColumnCards({
   );
 }
 
-/** 全部栏目（课程页「课程总览」用）：栏目 h3、子标题 h4。 */
+/**
+ * 全部栏目（课程页「课程总览」用）：栏目 h3、子标题 h4。
+ *
+ * 栏目标题可点，进入该栏目的学段页（`/courses/<栏目路径>`）——
+ * 那里有各科目的简介，供「先定学段再看科目」的家长使用。
+ */
 export function CourseColumns({ columns }: { columns: CourseColumn[] }) {
   return (
     <div className="space-y-9">
       {columns.map((column) => (
         <section key={column.title}>
-          <h3 className="mb-5 text-lg font-medium text-ink-900">{column.title}</h3>
+          <h3 className="mb-5 text-lg font-medium text-ink-900">
+            {COLUMN_PATHS[column.title] !== undefined ? (
+              <Link
+                href={`/courses/${COLUMN_PATHS[column.title]}`}
+                className="transition-colors hover:text-brand-700"
+              >
+                {column.title} →
+              </Link>
+            ) : (
+              column.title
+            )}
+          </h3>
           <CourseColumnCards column={column} subHeadingLevel={4} />
         </section>
       ))}

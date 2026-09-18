@@ -94,6 +94,8 @@ export type CourseColumnCard = {
   path: string;
   /** 是否暂未开放（数据里写 `· 状态: 暂未开放` 时为 true），页面上显示标记。 */
   unavailable: boolean;
+  /** 这个科目开设的班型（`· 班型:`，取自「特色课程」里的班型名）。 */
+  forms: string[];
   /** 课程内部的细分标签；没有细分时为空数组。 */
   tags: CourseTag[];
   /**
@@ -302,6 +304,18 @@ export type CourseStage = {
   body: string;
 };
 
+/** 栏目（学段）页的数据（/courses/<栏目路径>）。 */
+export type CourseColumnPageData = {
+  title: string;
+  /** 该栏目下的科目卡片，每张带一句简介。 */
+  subgroups: Array<{
+    title: string;
+    cards: Array<CourseColumnCard & { summary: string }>;
+  }>;
+  /** 相邻栏目，用于页内互跳。 */
+  otherColumns: Array<{ title: string; href: string }>;
+};
+
 /** 课程卡片页的全部数据（/courses/<路径>）。 */
 export type CoursePageData = {
   card: CourseColumnCard;
@@ -322,4 +336,8 @@ export type CoursePageData = {
   sameSubject: CourseColumnCard[];
   /** 同栏目（有子栏目时同子栏目）的其他课程。 */
   sameColumn: CourseColumnCard[];
+  /** 这门课开设的班型。 */
+  forms: string[];
+  /** 可带这门课的教师（按教师页的「科目」字段匹配）。 */
+  teachers: Teacher[];
 };

@@ -5,12 +5,32 @@ import { PageHeader } from "@/components/site/PageHeader";
 import { Breadcrumbs } from "@/components/ui/Breadcrumbs";
 import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
-import { getAllCoursePageSlugs, getCoursePageData } from "@/lib/data/site";
+import { CourseColumnPage } from "@/components/courses/CourseColumnPage";
+import {
+  COLUMN_PATHS,
+  getAllCourseColumnSlugs,
+  getAllCoursePageSlugs,
+  getCourseColumnPageData,
+  getCoursePageData,
+} from "@/lib/data/site";
 import { renderMarkdown } from "@/lib/markdown";
-import { COURSES_HREF, cardPageHref } from "@/lib/site/featured-routes";
+import {
+  COURSES_HREF,
+  FEATURED_INDEX_HREF,
+  cardPageHref,
+} from "@/lib/site/featured-routes";
 import type { CourseColumnCard } from "@/lib/types/site";
 
 /**
+ * 课程页：一个动态段承载两层内容。
+ *
+ *   /courses/<栏目路径>   → 学段（栏目）页：这一阶段各科目的简介
+ *   /courses/<卡片路径>   → 课程卡片页：这门课的具体内容
+ *
+ * 两层用同一段路径，靠路径表区分：栏目路径（primary / junior / senior /
+ * languages / interests / adults）与卡片路径不重叠，自检会校验这一点，
+ * 避免哪天有人把卡片路径写成栏目路径导致某一层被遮住。
+ *
  * 课程卡片页：`/courses/<路径>`。
  *
  * 一张卡片 = 一个页面。卡片上的标签**不是**独立页面，而是同一页面内的阶段
@@ -33,26 +53,71 @@ const PROSE_CLASS =
   "[&_ul]:mt-3 [&_ul]:list-disc [&_ul]:pl-5";
 
 export function generateStaticParams(): Array<{ slug: string }> {
-  return getAllCoursePageSlugs().map((slug) => ({ slug }));
+  return [...getAllCourseColumnSlugs(), ...getAllCoursePageSlugs()].map((slug) => ({ slug }));
 }
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { slug } = await params;
-  const data = getCoursePageData(decodeURIComponent(slug));
-  if (data === null) return { title: "课程未找到" };
+  const key = decodeURIComponent(slug);
 
-  return {
-    title: data.card.title,
-    description: data.intro !== "" ? data.intro : `${data.card.title} 课程说明`,
-  };
+  const data = getCoursePageData(key);
+  if (data !== null) {
+    return {
+      title: data.card.title,
+      description: data.intro !== "" ? data.intro : `${data.card.title} 课程说明`,
+    };
+  }
+
+  const columnPage = getCourseColumnPageData(key);
+  if (columnPage !== null) {
+    return {
+      title: `课程 · ${columnPage.title}`,
+      description: `${columnPage.title}开设的科目与课程。`,
+    };
+  }
+
+  return { title: "课程未找到" };
 }
 
-export default async function CourseCardPage({ params }: PageProps) {
+export default async function CourseSlugPage({ params }: PageProps) {
   const { slug } = await params;
-  const data = getCoursePageData(decodeURIComponent(slug));
+  const key = decodeURIComponent(slug);
+
+  // ── 学段（栏目）页 ────────────────────────────────────────────────────
+  const columnPage = getCourseColumnPageData(key);
+  if (columnPage !== null) {
+    return (
+      <>
+        <PageHeader
+          eyebrow="课程"
+          title={columnPage.title}
+          description={`${columnPage.title}开设的科目与课程，点科目名进入该科目的课程内容。`}
+        >
+          <Breadcrumbs
+            className="mt-6"
+            items={[
+              { label: "首页", href: "/" },
+              { label: "课程", href: COURSES_HREF },
+              { label: columnPage.title },
+            ]}
+          />
+        </PageHeader>
+
+        <Container>
+          <Section>
+            <CourseColumnPage data={columnPage} />
+          </Section>
+        </Container>
+      </>
+    );
+  }
+
+  // ── 课程卡片页 ────────────────────────────────────────────────────────
+  const data = getCoursePageData(key);
   if (data === null) notFound();
 
-  const { card, column, subgroup, intro, overview, stages, sameSubject, sameColumn } = data;
+  const { card, column, subgroup, intro, overview, stages, sameSubject, sameColumn, forms, teachers } =
+    data;
 
   return (
     <>
@@ -66,10 +131,12 @@ export default async function CourseCardPage({ params }: PageProps) {
           items={[
             { label: "首页", href: "/" },
             { label: "课程", href: COURSES_HREF },
-            { label: column, href: COURSES_HREF },
-            ...(subgroup !== ""
-              ? [{ label: subgroup, href: COURSES_HREF }]
-              : []),
+            // 栏目指向学段页（这一阶段各科目的简介），子栏目没有独立页面，留在末级
+            {
+              label: column,
+              href: COLUMN_PATHS[column] !== undefined ? `/courses/${COLUMN_PATHS[column]}` : COURSES_HREF,
+            },
+            ...(subgroup !== "" ? [{ label: subgroup }] : []),
             { label: card.title },
           ]}
         />
@@ -155,6 +222,68 @@ export default async function CourseCardPage({ params }: PageProps) {
               返回课程总览
             </Link>
           </div>
+        </Section>
+
+        {/* 开设班型：同一门课按人数分成几种班型，都来自「特色课程」里的班型 */}
+        {forms.length > 0 && (
+          <Section className="border-t border-ink-200">
+            <h2 className="text-sm font-medium text-ink-900">这门课开设的班型</h2>
+            <p className="mt-2 max-w-2xl text-xs leading-relaxed text-ink-500">
+              同一门课可以按人数选择班型，人数越少教师给到单个学生的注意力越多。
+            </p>
+            <ul className="mt-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+              {forms.map((form) => (
+                <li
+                  key={form}
+                  className="rounded-lg border border-ink-200 bg-white px-3.5 py-2.5 text-sm font-medium text-ink-900"
+                >
+                  {form}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-4">
+              <Link
+                href={FEATURED_INDEX_HREF}
+                className="text-sm text-brand-700 transition-colors hover:text-brand-800"
+              >
+                查看各班型的具体说明 →
+              </Link>
+            </p>
+          </Section>
+        )}
+
+        {/* 谁来上这门课：按教师页的「科目」字段匹配，匹配不到就说明以咨询确认为准 */}
+        <Section className={forms.length > 0 ? "pt-0" : "border-t border-ink-200"}>
+          <h2 className="text-sm font-medium text-ink-900">这门课谁来上</h2>
+          {teachers.length > 0 ? (
+            <ul className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {teachers.map((teacher) => (
+                <li
+                  key={teacher.id}
+                  className="rounded-lg border border-ink-200 bg-white p-4"
+                >
+                  <Link
+                    href={`/teachers#${encodeURIComponent(teacher.id)}`}
+                    className="text-sm font-medium text-ink-900 transition-colors hover:text-brand-700"
+                  >
+                    {teacher.name}
+                  </Link>
+                  {teacher.role !== "" && (
+                    <p className="mt-1 text-xs text-ink-500">{teacher.role}</p>
+                  )}
+                  {teacher.summary !== "" && (
+                    <p className="mt-2 text-xs leading-relaxed text-ink-600">
+                      {teacher.summary}
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-3 max-w-2xl text-sm leading-relaxed text-ink-600">
+              这门课的授课教师以咨询确认为准 —— 我们会按学生的年级与薄弱环节安排对应的教师。
+            </p>
+          )}
         </Section>
 
         {/* 与其他阶段的关联 */}

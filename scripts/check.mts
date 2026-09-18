@@ -17,7 +17,10 @@ import { pricingSource } from "@/data/site/pricing";
 import {
   getAboutContent,
   getContactContent,
+  COLUMN_PATHS,
+  getAllCourseColumnSlugs,
   getAllCoursePageSlugs,
+  getCourseColumnPageData,
   getCourseColumns,
   getCoursePageData,
   getCoursesPage,
@@ -186,6 +189,33 @@ ok("外语栏目每张语言卡都有级别标签",
 const slugs = allCards.map((c) => c.path);
 ok("每张卡片都有路径", slugs.every((slug) => slug !== ""));
 eq("卡片路径不重复", slugs.filter((s, i) => slugs.indexOf(s) !== i), []);
+// 栏目路径与卡片路径共用 /courses/<一段>：不能重叠，否则某层会被遮住
+const columnSlugs = getAllCourseColumnSlugs();
+eq("六个栏目都有页面路径", columnSlugs.length, columns.length);
+eq("栏目路径不重复", columnSlugs.filter((x, i) => columnSlugs.indexOf(x) !== i), []);
+eq("栏目路径与卡片路径不重叠",
+  columnSlugs.filter((slug) => slugs.includes(slug)), []);
+eq("每个栏目页都能取到数据",
+  columns.filter((c) => getCourseColumnPageData(COLUMN_PATHS[c.title] ?? "") === null).map((c) => c.title), []);
+ok("栏目页每个科目都有一句简介",
+  columns.every((c) =>
+    (getCourseColumnPageData(COLUMN_PATHS[c.title] ?? "")?.subgroups ?? [])
+      .flatMap((g) => g.cards)
+      .every((card) => card.summary !== "" || card.unavailable)));
+
+// 班型：写的是「特色课程」里的班型名，必须真的存在，避免写出不存在的班型
+const featuredNames = new Set(
+  getFeaturedContent().courses.flatMap((c) => c.children.map((child) => child.name)),
+);
+eq("卡片上写的班型都存在于特色课程",
+  allCards.flatMap((c) => c.forms.filter((form) => !featuredNames.has(form)).map((form) => `${c.title} → ${form}`)),
+  []);
+
+// 教师关联：不能编造，只认教师页「科目」字段的匹配
+const physicsPage = getCoursePageData("senior-physics");
+ok("高中物理页面能关联到教师", (physicsPage?.teachers.length ?? 0) >= 1);
+ok("关联的教师确实包含该科目",
+  (physicsPage?.teachers ?? []).every((t) => t.subjects.some((subject) => "高中物理".includes(subject))));
 eq("卡片路径是 ASCII（中文名进 URL 会踩百分号编码的坑）",
   slugs.filter((slug) => !/^[a-z0-9-]+$/.test(slug)), []);
 
