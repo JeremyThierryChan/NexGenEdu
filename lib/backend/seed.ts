@@ -1,4 +1,5 @@
 import { getTeachersPage } from "@/lib/data/site";
+import { pricingConfigFromContent } from "./pricing";
 import { CURRENT_VERSION } from "./version";
 import type {
   Assessment,
@@ -235,6 +236,12 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     logs: [],
     // 咨询线索也从空开始：这是一次性录入的真实对话，示例数据编不出意义
     inquiries: [],
+    /*
+     * 报价配置：用站点内容（data/site/pricing.md）初始化，而不是在种子里
+     * 再抄一份价格。抄一份的后果是「宣传页一个价、后台算出来另一个价」，
+     * 而家长会先看到宣传页的价。
+     */
+    pricing: pricingConfigFromContent(),
     updatedAt: now.toISOString(),
   };
 }

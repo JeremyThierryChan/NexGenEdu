@@ -42,6 +42,11 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     description: "本月收入、收款流水、欠费清单与退费口径",
   },
   {
+    href: "/admin/pricing",
+    label: "报价",
+    description: "基础价、科目 / 班级系数与计费规则，并可直接给家长试算",
+  },
+  {
     href: "/admin/data",
     label: "数据与备份",
     description: "导出 / 导入全部数据，导出课表到手机日历",

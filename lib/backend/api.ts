@@ -27,6 +27,15 @@ import {
 } from "./stats";
 import { weekDays } from "./format";
 import {
+  PRICING_SOURCE_ADMIN,
+  pricingConfigFromContent,
+  pricingConfigToMarkdown,
+  quoteSelection,
+  validatePricingConfig,
+} from "./pricing";
+import type { PricingConfig, QuoteResult, QuoteSelection } from "./pricing";
+export type { PricingConfig, QuoteResult, QuoteSelection } from "./pricing";
+import {
   monthRange,
   outstandingAmount,
   round2,
@@ -342,6 +351,18 @@ function migrate(db: Database): Database | null {
     db.version = 9;
   }
 
+  if (db.version === 9) {
+    /*
+     * v9 → v10：报价配置进入数据库。
+     *
+     * 老库没有这份配置 → 用站点内容初始化（价格与迁移前完全一致，
+     * 因此升级不会让任何一节课变价）。分支必须接在 v9 之后，
+     * 顺序错了迁移链会断在这里、整库被当成坏数据重新灌种子。
+     */
+    db.pricing = db.pricing ?? pricingConfigFromContent();
+    db.version = 10;
+  }
+
   return db.version === CURRENT_VERSION ? db : null;
 }
 
@@ -523,6 +544,55 @@ function writeLog(
 }
 
 /** 导入日志的一句话摘要。 */
+/**
+ * 一句话说清这次改价改了什么。
+ *
+ * 日志要能回答「这个月价格是谁改的、改成多少了」——只写「修改了报价配置」
+ * 等于没写：真出问题时得靠它回溯，所以这里把变动列出来。
+ */
+function describePricingChange(before: PricingConfig, after: PricingConfig): string {
+  const parts: string[] = [];
+  const priceLabel = (config: PricingConfig): string => {
+    const total = config.stages.reduce((sum, stage) => sum + stage.courses.length, 0);
+    return `课程 ${total} 门`;
+  };
+  for (const stage of after.stages) {
+    const old = before.stages.find((item) => item.name === stage.name);
+    for (const course of stage.courses) {
+      const previous = old?.courses.find((item) => item.name === course.name);
+      if (previous === undefined) {
+        parts.push(`新增课程「${course.name}」`);
+      } else if (previous.basePrice !== course.basePrice) {
+        parts.push(
+          `「${course.name}」${previous.basePrice ?? "未开放"} → ${course.basePrice ?? "未开放"}`,
+        );
+      }
+    }
+  }
+  for (const subject of after.subjects) {
+    const previous = before.subjects.find(
+      (item) => item.name === subject.name && item.stageName === subject.stageName,
+    );
+    if (previous !== undefined && previous.coefficient !== subject.coefficient) {
+      parts.push(`「${subject.name}」科目系数 ${previous.coefficient} → ${subject.coefficient}`);
+    }
+  }
+  for (const classType of after.classTypes) {
+    const previous = before.classTypes.find((item) => item.name === classType.name);
+    if (previous !== undefined && previous.coefficient !== classType.coefficient) {
+      parts.push(`「${classType.name}」班级系数 ${previous.coefficient ?? "—"} → ${classType.coefficient ?? "—"}`);
+    }
+  }
+  if (before.rules.singleLessonFeePercent !== after.rules.singleLessonFeePercent) {
+    parts.push(`手续费 ${before.rules.singleLessonFeePercent}% → ${after.rules.singleLessonFeePercent}%`);
+  }
+  if (before.rules.freeTrialMinLessons !== after.rules.freeTrialMinLessons) {
+    parts.push(`试课免费门槛 ${before.rules.freeTrialMinLessons} 节 → ${after.rules.freeTrialMinLessons} 节`);
+  }
+  const changes = parts.length > 0 ? parts.join("；") : `未改动价格（${priceLabel(after)}）`;
+  return `修改报价配置：${changes}`;
+}
+
 function fileSummary(fromVersion: number, db: Database): string {
   return `v${fromVersion} → v${db.version}，${db.students.length} 名学生、${db.lessons.length} 节课`;
 }
@@ -1736,6 +1806,85 @@ export const api = {
       });
       persist(db);
       return count;
+    },
+  },
+
+  /**
+   * 报价配置：改价、改系数、改规则，以及**给家长试算**。
+   *
+   * 为什么放在后台：价格是业务信息，不是代码。原先调价要改 `lib/pricing/quote.ts`
+   * 再重新构建；现在改这里即可，而且咨询时能当场算给家长听。
+   *
+   * 必须知道的一件事：伪后端的数据只在**这台浏览器**里（localStorage）。
+   * 家长看到的报价页读的是站点内容，因此后台改完价要「导出配置」，
+   * 把导出内容替换进 `data/site/pricing.md` 才会真正上线 —— 详见导出的说明。
+   */
+  pricing: {
+    /** 当前报价配置。 */
+    async get(): Promise<PricingConfig> {
+      await delay();
+      return clone(load().pricing);
+    },
+
+    /**
+     * 保存报价配置。
+     *
+     * 校验在服务端这一侧做（`validatePricingConfig`）：系数写 0 会让所有报价变 0，
+     * 写错类型会让价格变成 NaN —— 这些都会安静地显示给家长，必须在保存前拦住。
+     */
+    async update(input: PricingConfig): Promise<PricingConfig> {
+      await delay();
+      const problems = validatePricingConfig(input);
+      if (problems.length > 0) {
+        throw new Error(`报价配置不合法，未保存：${problems.join("；")}`);
+      }
+      const db = load();
+      const before = db.pricing;
+      db.pricing = {
+        ...clone(input),
+        source: PRICING_SOURCE_ADMIN,
+        updatedAt: nowIso(),
+      };
+      writeLog(db, {
+        entity: "报价",
+        action: "修改配置",
+        targetId: "pricing",
+        summary: describePricingChange(before, db.pricing),
+      });
+      persist(db);
+      return clone(db.pricing);
+    },
+
+    /** 恢复为站点内容里的价格（改乱了可以退回）。 */
+    async reset(): Promise<PricingConfig> {
+      await delay();
+      const db = load();
+      const before = db.pricing;
+      db.pricing = pricingConfigFromContent();
+      writeLog(db, {
+        entity: "报价",
+        action: "恢复默认",
+        targetId: "pricing",
+        summary: `报价配置恢复为站点内容（原为${before.source}）`,
+      });
+      persist(db);
+      return clone(db.pricing);
+    },
+
+    /**
+     * 按选择试算报价（后台给家长算价、核对「这个方案多少钱」）。
+     *
+     * 只发选择、不发价格：价格一律由这边查，避免前端改个数字就改了价。
+     */
+    async quote(selection: QuoteSelection): Promise<QuoteResult> {
+      await delay();
+      return quoteSelection(load().pricing, selection);
+    },
+
+    /** 导出成可直接替换 `data/site/pricing.md` 的 Markdown 片段。 */
+    async exportMarkdown(): Promise<string> {
+      await delay();
+      return pricingConfigToMarkdown(load().pricing);
     },
   },
 

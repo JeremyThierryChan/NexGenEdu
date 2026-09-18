@@ -5,6 +5,8 @@
  * 将来把实现从 localStorage 换成真实的服务端 API 时，类型不变、页面不改。
  */
 
+import type { PricingConfig } from "./pricing";
+
 /** 学生档案。 */
 export type Student = {
   id: string;
@@ -401,6 +403,13 @@ export type Database = {
   logs: OperationLog[];
   /** 咨询线索。 */
   inquiries: Inquiry[];
+  /**
+   * 报价配置（基础价、科目系数、班级系数、计费规则）。
+   *
+   * 它是**算钱的依据**，因此与业务数据一样存在库里、可迁移、可备份，
+   * 而不是散在代码里。首次由站点内容（data/site/pricing.md）初始化。
+   */
+  pricing: PricingConfig;
   /** 最后一次写入时间（ISO）。 */
   updatedAt: string;
 };

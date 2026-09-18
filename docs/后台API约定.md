@@ -17,10 +17,10 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 - 全部方法都是 `async`，**页面里没有一处直接读写 localStorage**；
 - 对外形状由 `lib/backend/types.ts` 定义，`export type BackendApi = typeof api`
   就是服务端要满足的那份形状；
-- 数据类型带 `version`（当前 v8），升级链在 `api.ts` 的 `migrate()`，
+- 数据类型带 `version`（当前 v10），升级链在 `api.ts` 的 `migrate()`，
   **必须按版本升序逐级推进**（历史上写反过一次顺序，导致老数据被重新灌成示例数据）。
 
-## 二、接口分组（共 91 个方法）
+## 二、接口分组（共 96 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -93,7 +93,41 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 - `lessons.suggestMoves` 给已有课算出可挪的时间（用于「协调已有学生」），
   走同一套判定，因此挪过去不会再制造冲突。
 
-### 5. 看板与统计（只读）
+### 5. 报价配置（价格是数据，不是代码）
+
+`pricing.get`、`pricing.update`、`pricing.reset`、`pricing.quote`、`pricing.exportMarkdown`。
+
+报价原先只有一份公式写在页面侧（`lib/pricing/quote.ts`），规则还硬编码在里面：
+调一次价要改代码、重新构建，后台也看不到家长会被报多少。
+现在价格与规则都是**数据**（`PricingConfig`），公式只有一份实现
+（`lib/backend/pricing.ts`），前台报价页与后台试算器调的是同一个函数。
+
+计价模型（每个系数各管一件事，互不重叠）：
+
+| 维度 | 含义 | 默认 |
+| --- | --- | --- |
+| 基础价 | 一对一、1 小时、报 2 节及以上的价格（元 / 节），所有换算的基准 | 分阶段设定 |
+| 科目系数 | 同一阶段内不同科目的师资 / 难度差异 | 1.0 |
+| 班级系数 | 人越多每人越便宜 | 一对二 0.7、一对三 0.6、一对多 0.5 |
+| 时长乘数 | 一节课上多久 | 1 / 1.5 / 2 小时 → 1.0 / 1.5 / 2.0 |
+| 手续费 | 只报 1 节时加收 | 10% |
+| 试课 | 报满多少节后试课免费，否则按原价收 1 节 | 10 节 |
+
+两个例外：**班课**按「教师课时总费用 ÷ 班级人数」分摊（不用班级系数）；
+**试课费**永远按课程基础价原价收（不带任何系数与手续费）。
+
+服务端实现时注意：
+
+- `pricing.quote` 只接受「课程名 / 科目名 / 班型 / 时长 / 节数」，**不接受价格**；
+- `pricing.update` 必须自己复核配置合法性（系数为正、手续费 0–100、课程名不重复），
+  否则系数写 0 会让所有报价变 0、写错类型会变成 ¥NaN，而这些会直接显示给家长；
+- 改价要留审计（谁在什么时候把哪门课从多少改到多少）；
+- 站点侧的规则来自内容文件（`data/site/pricing.md` 的「计费规则」分组）。
+  伪后端阶段后台改价只存在管理员本机，因此 `pricing.exportMarkdown` 导出与
+  `data/site/pricing.md` 同构的片段，替换进内容文件后才算真正上线 ——
+  这也是 `npm run check` 里「前后台同一份配置必须算出同一个价」那条断言的由来。
+
+### 6. 看板与统计（只读）
 
 `today`、`stats`、`followups`、`finance`、`outstandingByStudent`、`search`、
 `lessons.findConflicts`、`lessons.suggestMoves`。
@@ -103,7 +137,7 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 「为什么这么定」（利用率分母、退课按课时算、预警阈值、空档日的定义）。
 `lessons.findConflicts` 可以保留给前端做即时提示，但保存时服务端仍要自己再判一次。
 
-### 6. 运维与审计
+### 7. 运维与审计
 
 `exportDatabase`、`importDatabase`、`hasBackup`、`restoreBackup`、`reset`、
 `setOperator`、`logs.list`、`logs.clear`。
@@ -129,6 +163,8 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 8. **登录与鉴权**：口令校验、会话签发、接口鉴权全在服务端；
    现在前端那份登录（`lib/auth/session.ts`）口令写在代码里，只是门不是锁。
 9. **审计日志**：记录操作人、时间、对象与摘要，且前端不可篡改。
+10. **报价合法性**：基础价与系数为正、手续费 0–100、试课门槛 ≥ 1 的整数、课程名不重复。
+11. **报价金额由服务端计算**：不接受前端传来的单价或总价。
 
 ## 四、从 localStorage 搬到服务端
 

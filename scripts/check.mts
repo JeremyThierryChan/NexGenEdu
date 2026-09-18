@@ -30,7 +30,7 @@ import {
   getSiteBrand,
   getTeachersPage,
 } from "@/lib/data/site";
-import { getPricingData } from "@/lib/data/pricing";
+import { getPricingData, parsePricingSource } from "@/lib/data/pricing";
 import { getCasesContent, getFaqContent, getScheduleContent } from "@/lib/data/pages";
 import { findFeaturedCourse, getAllFeaturedCourses, getFeaturedContent } from "@/lib/data/featured";
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
@@ -48,6 +48,14 @@ import {
   teachersForSubject,
 } from "@/lib/backend/inquiry";
 import { API_CONTRACT, MIGRATION_STEPS, SERVER_MUST_VALIDATE } from "@/lib/backend/contract";
+import {
+  pricingConfigCore,
+  pricingConfigFromContent,
+  pricingConfigFromSource,
+  validatePricingConfig,
+  PRICING_SOURCE_ADMIN,
+  PRICING_SOURCE_CONTENT,
+} from "@/lib/backend/pricing";
 import { readFileSync } from "node:fs";
 import { LEAVE_NOTICE_HOURS, decideCharge } from "@/lib/backend/attendance";
 import {
@@ -186,7 +194,7 @@ ok("法语各级都写了核心能力",
 
 const pricingDoc = parseDocument(pricingSource);
 const pricingPage = pricingDoc.pages.get("智能报价");
-eq("报价页分组", pricingPage?.groups.map((g) => g.name), ["学习阶段", "班级类型", "课时选择", "试课", "其他项目"]);
+eq("报价页分组", pricingPage?.groups.map((g) => g.name), ["学习阶段", "班级类型", "课时选择", "试课", "计费规则", "其他项目"]);
 
 console.log("\n=== 2. 数据访问层 ===");
 const brand = getSiteBrand();
@@ -2347,6 +2355,195 @@ if (moveTarget !== undefined) {
   ok("候选都不与原时间相同",
     moves.every((move) => move.startsAt !== moveTarget.startsAt));
 }
+
+console.log("\n=== 8. 报价在后端（价格是数据，不是代码）===");
+
+/*
+ * 报价搬到后端之后，最不能出的事故是「宣传页一个价、后台另一个价」——
+ * 家长先看到宣传页的价，后台却按另一个数字收钱。因此这一组的主线是
+ * **同一份选择在前台公式与后台服务上必须算出同一个数**。
+ *
+ * 前台公式读站点内容（静态站点的家长浏览器里只有内容），
+ * 后台服务读库里的配置（初始化的来源就是同一份内容）。
+ * 两边分叉说明后台改了价但还没导出上线 —— 这正是后台报价页顶部警告的那件事。
+ */
+__useStoreForTesting(memory);
+
+// 规则本身来自内容文件（改数字不用改代码，这是这次搬家的目的）
+eq("内容里的计费规则", [
+  pricing.rules.singleLessonFeePercent,
+  pricing.rules.freeTrialMinLessons,
+  pricing.rules.chargeTrialWhenNotFree,
+], [10, 10, true]);
+eq("站点内容里的报价配置通过校验", validatePricingConfig(pricingConfigFromContent()), []);
+
+// 科目系数的写法：`物理 ×1.1`；省略即按 1 计（老内容不用改）
+const pbMini = parsePricingSource(`# NexGenEdu · 新锐教培 · 报价数据
+
+## 页面: 智能报价
+
+## 学习阶段
+
+### 小学
+
+#### 课程: 小学课内: 150
+
+#### 科目: 语文、物理 ×1.1
+
+#### 科目: 化学 x1.05
+`);
+eq("科目系数：省略按 1、× 与 x 都能识别",
+  pbMini.subjectGroups[0]?.subjects.map((item) => `${item.name}=${item.coefficient}`),
+  ["语文=1", "物理=1.1", "化学=1.05"]);
+eq("没写「计费规则」分组时用默认规则",
+  [pbMini.rules.singleLessonFeePercent, pbMini.rules.freeTrialMinLessons],
+  [10, 10]);
+
+// 库里的配置由站点内容初始化（价格与宣传页一致，不是另抄一份）
+const pbConfig = await api.pricing.get();
+eq("种子报价配置来自站点内容", pbConfig.source, PRICING_SOURCE_CONTENT);
+eq("库里的基础价与宣传页完全一致",
+  pbConfig.stages.map((stage) => stage.courses.map((course) => `${course.name}:${course.basePrice}`)),
+  pricing.stages.map((stage) => stage.courses.map((course) => `${course.name}:${course.price}`)));
+
+/** 按名字向**后台服务**报价（页面只发选择，不发价格）。 */
+const pbQuote = (
+  courseName: string,
+  subjectName: string,
+  classTypeName: string,
+  durationName: string,
+  lessons: number,
+  extra: Record<string, number> = {},
+) =>
+  api.pricing.quote({
+    courseName,
+    subjectName: subjectName === "" ? undefined : subjectName,
+    classTypeName,
+    durationName,
+    lessons,
+    ...extra,
+  });
+
+// 主线：同一方案，前台公式与后台服务必须一致
+const pbParityCases: Array<[string, string, string, string, number, Record<string, number>]> = [
+  ["九年级课本", "数学", "一对二", "1.5 小时", 5, {}],
+  ["九年级课本", "数学", "一对二", "1 小时", 1, {}],
+  ["九年级课本", "数学", "一对一", "1 小时", 10, {}],
+  ["八年级课本", "数学", "班课（9-20）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 }],
+  ["小学课内", "语文", "一对三", "2 小时", 20, {}],
+  ["医学", "", "一对一", "1 小时", 5, {}],
+  ["九年级课本", "数学", "一对一", "1 小时", 0, {}],
+];
+for (const [course, subject, classType, duration, lessons, extra] of pbParityCases) {
+  const front = quote(course, subject, classType, duration, lessons, extra);
+  const back = await pbQuote(course, subject, classType, duration, lessons, extra);
+  eq(
+    `前后台一致：${course} / ${subject || "不分科目"} / ${classType} / ${duration} / ${lessons} 节`,
+    [back.ok, back.unitPrice, back.lessonsPrice, back.trialFee, back.totalPrice, back.reason ?? ""],
+    [front.ok, front.unitPrice, front.lessonsPrice, front.trialFee, front.totalPrice, front.reason ?? ""],
+  );
+}
+
+// 选择里有名字对不上时要说清是哪一项（而不是安静地按 0 元算）
+const pbUnknownCourse = await pbQuote("没有这门课", "数学", "一对一", "1 小时", 5);
+ok("未知课程会被指出", pbUnknownCourse.ok === false && (pbUnknownCourse.reason ?? "").includes("没有课程"));
+const pbUnknownClass = await pbQuote("九年级课本", "数学", "没有这种班型", "1 小时", 5);
+ok("未知班型会被指出", pbUnknownClass.ok === false && (pbUnknownClass.reason ?? "").includes("班型"));
+const pbUnknownSubject = await pbQuote("九年级课本", "没有这个科目", "一对一", "1 小时", 5);
+ok("科目不属于该阶段会被指出",
+  pbUnknownSubject.ok === false && (pbUnknownSubject.reason ?? "").includes("科目"));
+
+// 服务端必须自己复核配置：系数写 0 会让所有报价变 0，不能进库
+const pbBadConfig = JSON.parse(JSON.stringify(pbConfig));
+pbBadConfig.subjects[0].coefficient = 0;
+ok("系数为 0 的配置校验不通过", validatePricingConfig(pbBadConfig).length > 0);
+const pbBadFee = JSON.parse(JSON.stringify(pbConfig));
+pbBadFee.rules.singleLessonFeePercent = 120;
+ok("手续费超过 100% 校验不通过", validatePricingConfig(pbBadFee).length > 0);
+const pbBadPrice = JSON.parse(JSON.stringify(pbConfig));
+pbBadPrice.stages[0].courses[0].basePrice = -1;
+ok("负的基础价校验不通过", validatePricingConfig(pbBadPrice).length > 0);
+const pbDupCourse = JSON.parse(JSON.stringify(pbConfig));
+pbDupCourse.stages[1].courses[0].name = pbDupCourse.stages[0].courses[0].name;
+ok("课程重名校验不通过（按名字查课程，重名会报错价）",
+  validatePricingConfig(pbDupCourse).some((problem) => problem.includes("重复")));
+
+let pbRejected = false;
+try {
+  await api.pricing.update(pbBadConfig);
+} catch {
+  pbRejected = true;
+}
+ok("服务层拒绝保存不合法的配置", pbRejected);
+eq("拒绝后库里的配置没被改动", (await api.pricing.get()).source, PRICING_SOURCE_CONTENT);
+
+// 改价真的会影响报价，并且留下日志（价格变动必须可追溯）
+const pbRaised = JSON.parse(JSON.stringify(pbConfig));
+pbRaised.stages.forEach((stage: { courses: Array<{ name: string; basePrice: number | null }> }) => {
+  for (const course of stage.courses) if (course.name === "九年级课本") course.basePrice = 330;
+});
+pbRaised.subjects.forEach((subject: { name: string; stageName: string; coefficient: number }) => {
+  if (subject.name === "数学") subject.coefficient = 1.2;
+});
+const pbSaved = await api.pricing.update(pbRaised);
+eq("保存后标记为后台修改", pbSaved.source, PRICING_SOURCE_ADMIN);
+// 330 × 数学 1.2 × 一对二 0.7 × 1.5 小时 = 415.8；1 节另加 10% 手续费不是本例
+const pbRaisedQuote = await pbQuote("九年级课本", "数学", "一对二", "1.5 小时", 5);
+eq("改价后后台按新价报", pbRaisedQuote.unitPrice, 415.8); // 330 × 1.2 × 0.7 × 1.5
+eq("试课费按课程原价收（不带科目与班级系数）", pbRaisedQuote.trialFee, 330);
+const pbRaiseLogs = await api.logs.list(20);
+ok("改价留下操作日志",
+  pbRaiseLogs.some((log) => log.entity === "报价" && log.action === "修改配置"));
+ok("日志写明了从多少改到多少",
+  pbRaiseLogs.some((log) => log.summary.includes("330")));
+
+// 导出 → 回读：导出的必须是**能用的内容**，而不是看起来像的文本
+const pbExported = await api.pricing.exportMarkdown();
+ok("导出的 Markdown 提到学习阶段与计费规则",
+  pbExported.includes("## 学习阶段") && pbExported.includes("## 计费规则"));
+const pbRoundTrip = pricingConfigFromSource(`# NexGenEdu · 新锐教培 · 报价数据
+
+## 页面: 智能报价
+
+---
+result_title: 报价结果
+---
+
+${pbExported}`);
+eq("导出内容回读后与后台配置完全一致",
+  pricingConfigCore(pbRoundTrip), pricingConfigCore(pbSaved));
+ok("导出内容带上了科目系数（1.2 能读回来）",
+  pbRoundTrip.subjects.some((subject) => subject.name === "数学" && subject.coefficient === 1.2));
+ok("导出内容带上了未开放课程",
+  pbRoundTrip.stages.some((stage) => stage.courses.some((course) => course.basePrice === null)));
+
+// 恢复默认：退回站点内容里的价格
+const pbRestored = await api.pricing.reset();
+eq("恢复后来源回到站点内容", pbRestored.source, PRICING_SOURCE_CONTENT);
+eq("恢复后的价格就是宣传页的价格",
+  pbRestored.stages[0]?.courses.map((course) => course.basePrice),
+  pricing.stages[0]?.courses.map((course) => course.price));
+const pbRestoredQuote = await pbQuote("九年级课本", "数学", "一对二", "1.5 小时", 5);
+eq("恢复后报价回到原值", pbRestoredQuote, quote("九年级课本", "数学", "一对二", "1.5 小时", 5));
+
+// 老库升级：pbV9 没有报价配置，升级后要按站点内容补齐（不能是空的，也不能变价）
+const pbLegacyStore = createMemoryStore();
+__useStoreForTesting(pbLegacyStore);
+const pbV9 = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown>;
+delete pbV9.pricing;
+pbV9.version = 9;
+pbLegacyStore.write("nexgenedu.admin.db.v1", JSON.stringify(pbV9));
+const pbUpgraded = await api.pricing.get();
+eq("pbV9 老库升级后有了报价配置", pbUpgraded.source, PRICING_SOURCE_CONTENT);
+eq("升级补上的价格与站点内容一致",
+  pbUpgraded.stages[1]?.courses.map((course) => course.basePrice),
+  pricing.stages[1]?.courses.map((course) => course.price));
+eq("升级后的版本号是当前版本",
+  JSON.parse(pbLegacyStore.read("nexgenedu.admin.db.v1") ?? "{}").version, CURRENT_VERSION);
+
+// 收尾：切回主存储，并确保报价配置没有留下自检改动的痕迹
+__useStoreForTesting(memory);
+eq("主存储的报价配置未被自检改坏", (await api.pricing.get()).source, PRICING_SOURCE_CONTENT);
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();
