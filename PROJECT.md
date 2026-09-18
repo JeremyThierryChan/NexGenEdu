@@ -384,7 +384,7 @@ title: 让学习真正发生      ← 该页面的短字段（frontmatter）
 | Phase 1 | 项目基础：Next.js + TS + Tailwind + Layout + 基础 UI + 宣传网站骨架 | ✅ 已完成 |
 | Phase 2 | Markdown 数据层：类型 + 数据访问层 + 示例数据 | ⏳ 下一步 |
 | Phase 3 | 宣传网站内容接入 Markdown | 待开始 |
-| Phase 4 | 后台：Dashboard / 学生 / 教师 / 教室 / 课程 / 日历 | 🚧 框架已搭建（仅布局 + 概览页） |
+| Phase 4 | 后台：Dashboard / 学生 / 教师 / 教室 / 课程 / 日历 | 🚧 伪后端 + 假登录 + 今日概览已完成，其余模块进行中 |
 | Phase 5 | 核心业务：排课 / 冲突检测 / 课程状态 / 课时扣减 / 搜索 | 待开始 |
 | — | 宣传网站「智能报价」页：阶段 / 科目 / 班级 / 报课数量四级报价 + 其他项目 | ✅ 已完成 |
 | — | 首页与课程页「栏目 → 子标题 → 卡片」结构（6 栏目、34 张卡片、双向锚点校验） | ✅ 已完成 |
@@ -505,6 +505,45 @@ npm run sync-content # 手工同步 data/site/*.md（一般不需要）
 - **`app/(site)` 路由组**：让宣传网站与后台拥有各自独立的 layout，互不干扰。
 - **`cn()` 不做 Tailwind 冲突消解**：保持零依赖与可预测性，约定调用方 `className` 最后拼接。
 - **`next.config.ts` 显式设置 `outputFileTracingRoot`**：本机 HOME 下存在其它 lockfile，需固定项目根目录。
+
+### 教务后台的「伪后端」架构（当前阶段）
+
+服务端还没有，但后台的所有页面都按「将来会有服务端」的样子写：
+
+```
+页面（app/admin/*，客户端组件）
+   ↓ 只调用这一层，方法签名与 REST 一致
+lib/backend/api.ts        list / get / create / update / remove / today / reset
+   ↓ 读写一份 JSON 快照
+lib/backend/storage.ts    KeyValueStore 抽象：浏览器里是 localStorage，Node 里是内存
+   ↓ 首次访问灌入
+lib/backend/seed.ts       示例数据（教师与教室取自站点真实数据，学生/排课为示例）
+```
+
+三个设计要点：
+
+- **异步到底**：所有方法都是 `async` 并带轻微延迟，页面上不会出现「同步读
+  localStorage」这种接服务端时必须重写的写法。
+- **存储可替换**：`KeyValueStore` 让同一套服务层既能在浏览器里跑（localStorage），
+  也能在 Node 里跑（内存）—— 因此 `npm run check` 能完整验证增删改查与「刷新后还在」。
+- **换真后端时**：只替换 `lib/backend/api.ts` 的实现（改成 `fetch`），
+  `types.ts` 与全部页面代码不动。
+
+数据边界（不是 bug，是「纯前端」的边界）：数据只存在当前浏览器，换设备看不到、
+清缓存会丢、多标签页并发写入以最后写入为准；界面上有「示例数据」提示条与
+一键重置入口（`components/admin/DataNotice.tsx`）。
+
+### 假登录：只是门，不是锁
+
+`admin` / `689992` 写在 `lib/auth/session.ts` 里。**静态站点没有服务端，
+口令必然在客户端代码里，而且仓库是公开的** —— 它只能挡住误点进来的访客，
+不能保护任何数据（数据本来也在访问者自己的浏览器里）。因此：
+
+- 登录页与代码注释都如实写明「不是安全机制」，避免后来的人误判；
+- 后台整棵子树包在 `components/admin/RequireAuth.tsx` 里，**未登录不渲染界面**
+  （静态 HTML 里只有「正在检查登录状态…」占位，不含后台内容）；
+- 前后端分离后，登录必须改为服务端校验（口令存服务端、签发 token、接口鉴权），
+  届时替换 `session.ts` 的实现，页面调用方式（login / logout / getSession）不变。
 
 ### 管理后台数据变更方案（Phase 5 决策）
 

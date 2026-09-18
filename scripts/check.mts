@@ -34,6 +34,16 @@ import { getPricingData } from "@/lib/data/pricing";
 import { getCasesContent, getFaqContent, getScheduleContent } from "@/lib/data/pages";
 import { findFeaturedCourse, getAllFeaturedCourses, getFeaturedContent } from "@/lib/data/featured";
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
+import { __useStoreForTesting, api } from "@/lib/backend/api";
+import { createMemoryStore } from "@/lib/backend/storage";
+import {
+  __credentialsForTesting,
+  __useSessionStoreForTesting,
+  getSession,
+  isLoggedIn,
+  login,
+  logout,
+} from "@/lib/auth/session";
 
 let failures = 0;
 
@@ -568,6 +578,86 @@ ok("节数为 0 时报错", f.ok === false);
 // 试课规则边界
 eq("试课免费门槛", [isTrialFree(9), isTrialFree(10)], [false, true]);
 eq("试课费", [trialFeeFor(9, 300), trialFeeFor(10, 300)], [300, 0]);
+
+console.log("\n=== 6. 教务后台伪后端（localStorage 服务层）===");
+
+/*
+ * 这一节用**内存存储**跑完整的增删改查，不需要浏览器：
+ * 伪后端刻意把存储抽象成 KeyValueStore（见 lib/backend/storage.ts），
+ * 因此在 Node 里也能验证。要守住的是三件事：
+ *   1. 首次访问会灌入示例数据；
+ *   2. 写入会落盘、且能被新实例读回来（「刷新后还在」的本质）；
+ *   3. 汇总统计（今日概览）算得对。
+ */
+const memory = createMemoryStore();
+__useStoreForTesting(memory);
+
+const seeded = await api.students.list();
+ok("首次访问灌入示例学生", seeded.length >= 5);
+ok("示例学生都有年级与家长联系方式",
+  seeded.every((student) => student.grade !== "" && student.guardian !== ""));
+ok("教师档案来自站点的真实教师（非 AI）",
+  (await api.teachers.list()).every((teacher) => !teacher.name.includes("·")));
+ok("教室沿用站点的场地名称",
+  (await api.classrooms.list()).some((room) => room.name.includes("301")));
+
+const created = await api.students.create({
+  name: "示例·自检同学", grade: "初二", guardian: "138-0000-9999",
+  subjects: ["初中数学"], remainingLessons: 8, status: "在读", note: "",
+});
+ok("新建学生返回 id", created.id !== "");
+ok("新建后总数 +1", (await api.students.list()).length === seeded.length + 1);
+ok("按 id 能取回", (await api.students.get(created.id))?.name === "示例·自检同学");
+ok("搜索能命中", (await api.students.search("自检")).some((s) => s.id === created.id));
+
+const updated = await api.students.update(created.id, { remainingLessons: 7 });
+ok("更新生效", updated?.remainingLessons === 7);
+
+// 关键：把服务重新挂到同一个存储上（等价于刷新页面后新建实例），数据仍应在
+__useStoreForTesting(memory);
+ok("写入已落盘（新实例仍能读到）",
+  (await api.students.get(created.id))?.remainingLessons === 7);
+
+ok("删除生效", (await api.students.remove(created.id)) === true);
+ok("删除后取不到", (await api.students.get(created.id)) === null);
+
+// 今日概览：统计口径
+const todayLessons = await api.lessons.listByDate(new Date());
+const summary = await api.today();
+eq("今日课程数与按日查询一致", summary.lessonCount, todayLessons.length);
+eq("今日课时总时长等于各节之和", summary.totalMinutes,
+  todayLessons.reduce((total, lesson) => total + lesson.durationMinutes, 0));
+ok("教室占用覆盖全部教室", summary.classroomUsage.length === (await api.classrooms.list()).length);
+ok("课时预警只含剩余 ≤ 5 节的学生",
+  summary.lowLessonStudents.every((item) => item.remainingLessons <= 5));
+// 引用完整性：排课里出现的教师 / 教室 / 学生都必须在档案里存在，
+// 否则界面上会出现「—」这种查不到的名字
+const [allTeachers, allClassrooms, allStudents, allLessons] = await Promise.all([
+  api.teachers.list(),
+  api.classrooms.list(),
+  api.students.list(),
+  api.lessons.list(),
+]);
+ok("排课的教师 / 教室 / 学生都真实存在",
+  allLessons.every((lesson) =>
+    allTeachers.some((teacher) => teacher.id === lesson.teacherId) &&
+    allClassrooms.some((room) => room.id === lesson.classroomId) &&
+    lesson.studentIds.every((id) => allStudents.some((student) => student.id === id))));
+
+await api.reset();
+eq("重置回到示例数据", (await api.students.list()).length, seeded.length);
+
+console.log("\n=== 7. 假登录（纯前端演示）===");
+const sessionMemory = createMemoryStore();
+__useSessionStoreForTesting(sessionMemory);
+eq("初始未登录", isLoggedIn(), false);
+const badLogin = await login("admin", "错的密码");
+eq("错误口令被拒", badLogin.ok, false);
+const okLogin = await login(__credentialsForTesting.username, __credentialsForTesting.password);
+eq("正确口令通过", okLogin.ok, true);
+ok("登录后可读到会话", getSession()?.username === "admin");
+logout();
+eq("退出后未登录", isLoggedIn(), false);
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
 process.exit(failures === 0 ? 0 : 1);
