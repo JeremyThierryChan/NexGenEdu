@@ -5,15 +5,33 @@ import { DataNotice } from "@/components/admin/DataNotice";
 import { NumberInput, Panel, TextField } from "@/components/admin/AdminFields";
 import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
-import { api, type Classroom, type Lesson } from "@/lib/backend/api";
+import {
+  api,
+  CLASSROOM_KINDS,
+  type Classroom,
+  type ClassroomAvailability,
+  type ClassroomKind,
+  type Lesson,
+} from "@/lib/backend/api";
+import {
+  WEEKDAY_LABELS,
+  describeAvailability,
+  describeWeekdays,
+  toMinutes,
+} from "@/lib/backend/availability";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
+import { cn } from "@/lib/utils/cn";
 
 /**
  * 教室模块。
  *
- * 关注的是「场地够不够用」：每个教室的容量、今天排了几节、当前是否在用。
- * 冲突检测（同一教室 / 同一教师时间重叠）放在课程安排模块里做，
- * 这里只呈现占用情况，并把「今天该教室的课」列出来。
+ * 每个场地有三层信息：
+ *   1. **用途**：上课用教室 / 自习室 —— 前者按班型排课，后者是学生自习的座位；
+ *   2. **容量**：可容纳人数（自习室即座位数）；
+ *   3. **可用时段**：一周中哪几天、哪个时间段开放；**留空表示不限**。
+ *
+ * 可用时段不只是展示：排课时会检查「这节课是否落在教室开放时间内」，
+ * 落在开放时间之外会在保存前提示（见 components/admin/LessonForm.tsx）。
  */
 export default function AdminClassroomsPage() {
   const [classrooms, setClassrooms] = useState<Classroom[]>([]);
@@ -22,6 +40,7 @@ export default function AdminClassroomsPage() {
   const [creating, setCreating] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [kindFilter, setKindFilter] = useState<"全部" | ClassroomKind>("全部");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -38,7 +57,13 @@ export default function AdminClassroomsPage() {
     void load();
   }, [load]);
 
-  /** 每个教室今天的课（按开始时间升序）。 */
+  const visible = useMemo(
+    () =>
+      kindFilter === "全部" ? classrooms : classrooms.filter((room) => room.kind === kindFilter),
+    [classrooms, kindFilter],
+  );
+
+  /** 每个场地今天的课（按开始时间升序）。 */
   const todayByRoom = useMemo(() => {
     const map = new Map<string, Lesson[]>();
     const todayKey = new Date().toDateString();
@@ -52,8 +77,8 @@ export default function AdminClassroomsPage() {
 
   async function remove(room: Classroom) {
     const count = lessons.filter((lesson) => lesson.classroomId === room.id).length;
-    const extra = count > 0 ? `\n该教室还有 ${count} 节课，删除后这些课会查不到教室。` : "";
-    if (!window.confirm(`删除教室「${room.name}」？${extra}`)) return;
+    const extra = count > 0 ? `\n该场地还有 ${count} 节课，删除后这些课会查不到场地。` : "";
+    if (!window.confirm(`删除「${room.name}」？${extra}`)) return;
     await api.classrooms.remove(room.id);
     setOpenId((current) => (current === room.id ? null : current));
     await load();
@@ -61,12 +86,19 @@ export default function AdminClassroomsPage() {
 
   return (
     <>
-      <PageHeading title="教室" description="教室容量、今天的排课与占用时段。" />
+      <PageHeading
+        title="教室"
+        description="上课用教室与自习室：容量、可用时段，以及今天的排课。"
+      />
 
       <DataNotice onReset={load} />
 
       {creating && (
-        <Panel className="mt-6" title="新增教室">
+        <Panel
+          className="mt-6"
+          title="新增场地"
+          description="可用时段留空表示不限（营业时间内都可用）。"
+        >
           <ClassroomForm
             onCancel={() => setCreating(false)}
             onSaved={async () => {
@@ -78,40 +110,61 @@ export default function AdminClassroomsPage() {
       )}
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
+        <div className="flex gap-1">
+          {(["全部", ...CLASSROOM_KINDS] as const).map((kind) => (
+            <button
+              key={kind}
+              type="button"
+              onClick={() => setKindFilter(kind)}
+              className={cn(
+                "rounded-md px-2.5 py-1 text-sm transition-colors",
+                kindFilter === kind
+                  ? "bg-brand-50 font-medium text-brand-700"
+                  : "text-ink-600 hover:bg-ink-100",
+              )}
+            >
+              {kind}
+            </button>
+          ))}
+        </div>
         <span className="text-xs text-ink-500">
-          {loading ? "加载中…" : `${classrooms.length} 个场地`}
+          {loading ? "加载中…" : `${visible.length} 个场地`}
         </span>
         <div className="ml-auto">
           <Button size="sm" onClick={() => setCreating((value) => !value)}>
-            {creating ? "收起表单" : "新增教室"}
+            {creating ? "收起表单" : "新增场地"}
           </Button>
         </div>
       </div>
 
       <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {classrooms.map((room) => {
+        {visible.map((room) => {
           const todays = todayByRoom.get(room.id) ?? [];
           const totalMinutes = todays.reduce((sum, lesson) => sum + lesson.durationMinutes, 0);
           return (
             <section key={room.id} className="rounded-lg border border-ink-200 bg-white">
-              <header className="flex items-start justify-between gap-2 border-b border-ink-100 px-4 py-3">
-                <div className="min-w-0">
+              <header className="border-b border-ink-100 px-4 py-3">
+                <div className="flex items-start justify-between gap-2">
                   <h2 className="text-sm font-medium text-ink-900">{room.name}</h2>
-                  <p className="mt-0.5 text-xs text-ink-500">
-                    容量 {room.capacity} 人
-                    {room.note !== "" && ` · ${room.note}`}
-                  </p>
+                  <span className={kindClass(room.kind)}>{room.kind}</span>
                 </div>
-                <span className="shrink-0 rounded-sm bg-ink-100 px-1.5 py-0.5 text-[11px] text-ink-600">
-                  今天 {todays.length} 节 · {Math.round((totalMinutes / 60) * 10) / 10} 小时
-                </span>
+                <p className="mt-1 text-xs text-ink-500">
+                  {room.kind === "自习室" ? `${room.capacity} 个座位` : `容纳 ${room.capacity} 人`}
+                  {room.note !== "" && ` · ${room.note}`}
+                </p>
+                <p className="mt-1 text-xs text-ink-500">
+                  可用时段：{describeAvailability(room.availability)}
+                </p>
               </header>
 
               <div className="px-4 py-3">
+                <p className="text-xs text-ink-500">
+                  今天 {todays.length} 节 · {Math.round((totalMinutes / 60) * 10) / 10} 小时
+                </p>
                 {todays.length === 0 ? (
-                  <p className="text-sm text-ink-500">今天空闲。</p>
+                  <p className="mt-1.5 text-sm text-ink-500">今天空闲。</p>
                 ) : (
-                  <ul className="space-y-1.5">
+                  <ul className="mt-1.5 space-y-1.5">
                     {todays.map((lesson) => (
                       <li key={lesson.id} className="flex gap-3 text-xs">
                         <span className="w-24 shrink-0 font-mono tabular text-ink-900">
@@ -167,9 +220,9 @@ export default function AdminClassroomsPage() {
           );
         })}
 
-        {!loading && classrooms.length === 0 && (
+        {!loading && visible.length === 0 && (
           <p className="rounded-lg border border-ink-200 bg-white px-4 py-8 text-center text-sm text-ink-500 sm:col-span-2 lg:col-span-3">
-            还没有登记教室。
+            {classrooms.length === 0 ? "还没有登记场地。" : `没有「${kindFilter}」类型的场地。`}
           </p>
         )}
       </div>
@@ -185,7 +238,13 @@ export default function AdminClassroomsPage() {
   );
 }
 
-/** 某个教室的全部排课。 */
+function kindClass(kind: ClassroomKind): string {
+  return kind === "自习室"
+    ? "shrink-0 rounded-sm border border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[11px] text-ink-600"
+    : "shrink-0 rounded-sm border border-brand-100 bg-brand-50 px-1.5 py-0.5 text-[11px] text-brand-700";
+}
+
+/** 某个场地的全部排课。 */
 function RoomSchedule({
   classroomId,
   classroomName,
@@ -218,7 +277,8 @@ function RoomSchedule({
           {lessons.map((lesson) => (
             <li key={lesson.id} className="flex flex-wrap gap-x-4 gap-y-0.5 px-4 py-2">
               <span className="w-40 text-xs text-ink-900">
-                {formatDayLabel(lesson.startsAt)} {formatTimeRange(lesson.startsAt, lesson.durationMinutes)}
+                {formatDayLabel(lesson.startsAt)}{" "}
+                {formatTimeRange(lesson.startsAt, lesson.durationMinutes)}
               </span>
               <span className="text-sm text-ink-800">{lesson.subject}</span>
               <span className="text-xs text-ink-500">{lesson.form}</span>
@@ -235,7 +295,19 @@ function RoomSchedule({
   );
 }
 
-/** 教室表单：新建与编辑共用。 */
+/** 时段行 id：只在表单内部使用，不需要持久化语义。 */
+let rowSeq = 0;
+function newRowId(): string {
+  rowSeq += 1;
+  return `row_${Date.now().toString(36)}_${rowSeq}`;
+}
+
+/**
+ * 场地表单：新建与编辑共用。
+ *
+ * 「可用时段」做成可增删的行：一行 = 若干星期 + 一个时间段，
+ * 覆盖「周一至周五 17:00–21:00」这种最常见的写法；一行都不加就是「不限时段」。
+ */
 function ClassroomForm({
   classroom,
   onCancel,
@@ -247,16 +319,49 @@ function ClassroomForm({
 }) {
   const editing = classroom !== undefined;
   const [name, setName] = useState(classroom?.name ?? "");
+  const [kind, setKind] = useState<ClassroomKind>(classroom?.kind ?? "上课用教室");
   const [capacity, setCapacity] = useState(`${classroom?.capacity ?? 8}`);
   const [note, setNote] = useState(classroom?.note ?? "");
+  const [rows, setRows] = useState<ClassroomAvailability[]>(
+    classroom?.availability.map((row) => ({ ...row })) ?? [],
+  );
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
 
+  function addRow() {
+    setRows((current) => [
+      ...current,
+      { id: newRowId(), weekdays: [1, 2, 3, 4, 5], start: "17:00", end: "21:30" },
+    ]);
+  }
+
+  function updateRow(id: string, patch: Partial<ClassroomAvailability>) {
+    setRows((current) => current.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+  }
+
+  function removeRow(id: string) {
+    setRows((current) => current.filter((row) => row.id !== id));
+  }
+
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
     if (name.trim() === "") {
-      setError("教室名称必填。");
+      setError("名称必填。");
       return;
+    }
+    // 时段行必须选星期且结束晚于开始，否则排课时的可用性判断会失效
+    for (const row of rows) {
+      if (row.weekdays.length === 0) {
+        setError(`时段「${row.start}–${row.end}」没有选择星期。`);
+        return;
+      }
+      const start = toMinutes(row.start);
+      const end = toMinutes(row.end);
+      if (start === null || end === null || end <= start) {
+        setError(`时段「${row.start}–${row.end}」不合法：结束时间必须晚于开始时间。`);
+        return;
+      }
     }
 
     setPending(true);
@@ -264,7 +369,9 @@ function ClassroomForm({
 
     const payload = {
       name: name.trim(),
+      kind,
       capacity: Math.max(1, Math.trunc(Number(capacity) || 1)),
+      availability: rows,
       note: note.trim(),
     };
 
@@ -282,16 +389,112 @@ function ClassroomForm({
           label="名称"
           value={name}
           onChange={(event) => setName(event.target.value)}
-          placeholder="例如 301 教室"
+          placeholder="例如 301 教室 / 自习区"
           required
         />
+        <label className="block">
+          <span className="text-xs font-medium text-ink-600">用途</span>
+          <select
+            value={kind}
+            onChange={(event) => setKind(event.target.value as ClassroomKind)}
+            className="mt-1 block w-full rounded-md border border-ink-300 bg-white px-2.5 py-1.5 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+          >
+            {CLASSROOM_KINDS.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
         <NumberInput
-          label="容量"
+          label={kind === "自习室" ? "座位数" : "容纳人数"}
           suffix="人"
           value={capacity}
           onChange={(event) => setCapacity(event.target.value)}
           min={1}
         />
+      </div>
+
+      {/* 可用时段 */}
+      <div className="mt-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-medium text-ink-600">
+            可用时段{rows.length === 0 && "（留空 = 不限时段）"}
+          </span>
+          <Button type="button" size="sm" variant="outline" onClick={addRow}>
+            + 添加时段
+          </Button>
+        </div>
+
+        {rows.length === 0 ? (
+          <p className="mt-1.5 text-xs text-ink-400">不限时段：营业时间内都可以排课。</p>
+        ) : (
+          <ul className="mt-2 space-y-2">
+            {rows.map((row) => (
+              <li
+                key={row.id}
+                className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-ink-200 bg-white px-3 py-2"
+              >
+                <div className="flex flex-wrap gap-1">
+                  {WEEKDAY_LABELS.map((day) => {
+                    const checked = row.weekdays.includes(day.value);
+                    return (
+                      <button
+                        key={day.value}
+                        type="button"
+                        aria-pressed={checked}
+                        onClick={() =>
+                          updateRow(row.id, {
+                            weekdays: checked
+                              ? row.weekdays.filter((value) => value !== day.value)
+                              : [...row.weekdays, day.value].sort((a, b) => a - b),
+                          })
+                        }
+                        className={cn(
+                          "size-7 rounded-md text-xs transition-colors",
+                          checked
+                            ? "bg-brand-50 font-medium text-brand-700"
+                            : "text-ink-500 hover:bg-ink-100",
+                        )}
+                      >
+                        {day.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <span className="text-xs text-ink-400">{describeWeekdays(row.weekdays)}</span>
+
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="time"
+                    value={row.start}
+                    onChange={(event) => updateRow(row.id, { start: event.target.value })}
+                    className="rounded-md border border-ink-300 px-2 py-1 text-xs tabular outline-none focus:border-brand-500"
+                  />
+                  <span className="text-xs text-ink-400">–</span>
+                  <input
+                    type="time"
+                    value={row.end}
+                    onChange={(event) => updateRow(row.id, { end: event.target.value })}
+                    className="rounded-md border border-ink-300 px-2 py-1 text-xs tabular outline-none focus:border-brand-500"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => removeRow(row.id)}
+                  className="ml-auto text-xs text-ink-500 transition-colors hover:text-danger-600"
+                >
+                  删除这一行
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="mt-3">
         <TextField
           label="备注"
           value={note}

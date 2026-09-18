@@ -37,6 +37,7 @@ import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
 import { __useStoreForTesting, api } from "@/lib/backend/api";
 import { createMemoryStore } from "@/lib/backend/storage";
 import { dateKey } from "@/lib/backend/format";
+import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import {
   __credentialsForTesting,
   __useSessionStoreForTesting,
@@ -669,7 +670,11 @@ ok("按教室查课只返回该教室的课",
 // ── 排课与冲突检测 ────────────────────────────────────────────────────
 // 冲突检测是排课工具的底线，因此这里把边界情形逐条钉死：
 // 相邻不算冲突、已取消不占时间、编辑自己不算冲突、跨天不算冲突。
-const room = (await api.classrooms.list())[0]!;
+// 撞课用例必须用「不限时段」的场地：否则教室在 15:00 本来就不开放，
+// 会把「教室不开放」也算进冲突总数，掩盖了真正要验证的撞课逻辑
+const room =
+  (await api.classrooms.list()).find((item) => item.availability.length === 0) ??
+  (await api.classrooms.list())[0]!;
 const teacher = (await api.teachers.list())[0]!;
 // 刻意挑一个课时充足的学生：前面「不会扣成负数」的用例已经把第一个学生清零了，
 // 拿零课时的学生来验证扣减会得到 0，看不出是否真的扣了
@@ -772,6 +777,84 @@ ok("区间查询只返回该周范围内的课",
   }));
 ok("区间查询结果按时间升序",
   inWeek.every((lesson, index) => index === 0 || inWeek[index - 1]!.startsAt <= lesson.startsAt));
+
+// ── 教室的用途与可用时段 ──────────────────────────────────────────────
+// 可用时段是排课能用得上的信息，因此边界规则要逐条钉死：
+// 没设时段＝不限、完整落在某行内才算开放、跨天行视为无效、星期要对得上。
+const roomList = await api.classrooms.list();
+ok("教室都有用途", roomList.every((room) => room.kind === "上课用教室" || room.kind === "自习室"));
+ok("教室都有可用时段字段（可为空数组表示不限）",
+  roomList.every((room) => Array.isArray(room.availability)));
+
+// 造一间只开放「周一 17:00–21:00」的教室
+const monday17 = (() => {
+  const date = new Date(base);
+  // 距离下一个周一还有几天：isoWeekday 是 1=周一 … 7=周日
+  const offset = (1 - isoWeekday(date) + 7) % 7;
+  date.setDate(date.getDate() + offset);
+  date.setHours(17, 0, 0, 0);
+  return date;
+})();
+const monday2030 = new Date(monday17);
+monday2030.setHours(20, 30, 0, 0);
+
+const limited = await api.classrooms.create({
+  name: "自检·限时教室",
+  kind: "自习室",
+  capacity: 4,
+  availability: [{ id: "r1", weekdays: [1], start: "17:00", end: "21:00" }],
+  note: "",
+});
+eq("新建教室保留用途", limited.kind, "自习室");
+eq("新建教室保留可用时段", limited.availability.length, 1);
+
+ok("时段内排课视为开放", isWithinAvailability(limited.availability, monday17, 60));
+ok("结束时间超出视为不开放", !isWithinAvailability(limited.availability, monday17, 300));
+ok("开始时间早于开放时间视为不开放", !isWithinAvailability(limited.availability, new Date(monday17.getTime() - 3600_000), 60));
+ok("非开放星期视为不开放",
+  !isWithinAvailability(limited.availability, new Date(monday17.getTime() + 86_400_000), 60));
+ok("没有设置时段＝不限", isWithinAvailability([], monday17, 600));
+ok("结束早于开始的无效行不匹配",
+  !isWithinAvailability([{ id: "bad", weekdays: [1], start: "21:00", end: "17:00" }], monday17, 60));
+
+// 排课时的冲突检查也要覆盖「教室该时段不开放」
+const closedReport = await api.lessons.findConflicts({
+  subject: "测试", form: "", teacherId: teacher.id, classroomId: limited.id,
+  studentIds: [pupil.id], startsAt: monday2030.toISOString(), durationMinutes: 120,
+  status: "已排", note: "",
+});
+eq("超出教室可用时段会被标记", closedReport.classroomClosed, true);
+ok("教室不开放计入冲突总数", closedReport.total >= 1);
+
+const openReport = await api.lessons.findConflicts({
+  subject: "测试", form: "", teacherId: teacher.id, classroomId: limited.id,
+  studentIds: [pupil.id], startsAt: monday17.toISOString(), durationMinutes: 90,
+  status: "已排", note: "",
+});
+eq("时段内排课不报教室不开放", openReport.classroomClosed, false);
+
+// ── 老数据迁移：v1 的教室没有用途与时段，打开后台不能出现 undefined ──
+const legacy = createMemoryStore();
+__useStoreForTesting(legacy);
+legacy.write(
+  "nexgenedu.admin.db.v1",
+  JSON.stringify({
+    version: 1,
+    students: [{ id: "s9", name: "旧数据学生", grade: "初一", guardian: "", subjects: [],
+      remainingLessons: 3, status: "在读", note: "", createdAt: new Date().toISOString() }],
+    teachers: [],
+    classrooms: [{ id: "c9", name: "旧教室", capacity: 6, note: "" }],
+    lessons: [],
+    updatedAt: new Date().toISOString(),
+  }),
+);
+const migratedRooms = await api.classrooms.list();
+eq("旧数据里的教室被补上用途", migratedRooms[0]?.kind, "上课用教室");
+eq("旧数据里的教室被补上用空时段", migratedRooms[0]?.availability, []);
+eq("迁移不影响其他数据", (await api.students.list())[0]?.name, "旧数据学生");
+
+// 迁移后的数据应被写回（下次打开不再重复迁移）
+ok("迁移结果已落盘", (legacy.read("nexgenedu.admin.db.v1") ?? "").includes('"version":2'));
 
 await api.reset();
 eq("重置回到示例数据", (await api.students.list()).length, seeded.length);

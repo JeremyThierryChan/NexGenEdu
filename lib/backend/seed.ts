@@ -25,10 +25,38 @@ export function createSeedDatabase(now: Date = new Date()): Database {
       active: true,
     }));
 
+  // 可用时段刻意留了两种形态：工作日晚上 + 周末全天（上课教室），
+  // 以及自习室的全周开放 —— 方便一眼看出「不限时段」与「有时段」的区别
   const classrooms: Classroom[] = [
-    { id: "c1", name: "301 教室", capacity: 8, note: "白板 + 投影" },
-    { id: "c2", name: "302 教室", capacity: 20, note: "大班课 / 晚托" },
-    { id: "c3", name: "自习区", capacity: 6, note: "独立自习位" },
+    {
+      id: "c1",
+      name: "301 教室",
+      kind: "上课用教室",
+      capacity: 8,
+      availability: [
+        { id: "c1-a1", weekdays: [1, 2, 3, 4, 5], start: "17:00", end: "21:30" },
+        { id: "c1-a2", weekdays: [6, 7], start: "08:00", end: "21:30" },
+      ],
+      note: "白板 + 投影，小组课与一对一",
+    },
+    {
+      id: "c2",
+      name: "302 教室",
+      kind: "上课用教室",
+      capacity: 20,
+      availability: [
+        { id: "c2-a1", weekdays: [1, 2, 3, 4, 5, 6, 7], start: "08:00", end: "21:30" },
+      ],
+      note: "大班课 / 晚托",
+    },
+    {
+      id: "c3",
+      name: "自习区",
+      kind: "自习室",
+      capacity: 6,
+      availability: [],
+      note: "独立自习位，不限时段",
+    },
   ];
 
   const students: Student[] = [

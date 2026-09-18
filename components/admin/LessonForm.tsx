@@ -142,7 +142,11 @@ export function LessonForm({
       return;
     }
     if (hasConflict) {
-      setError("存在时间冲突，请先调整。");
+      setError(
+        conflicts?.classroomClosed === true
+          ? "所选教室在该时段不开放，请先调整时间或场地。"
+          : "存在时间冲突，请先调整。",
+      );
       return;
     }
 
@@ -224,7 +228,10 @@ export function LessonForm({
           onChange={(event) => setClassroomId(event.target.value)}
           options={classrooms.map((room) => ({
             value: room.id,
-            label: `${room.name}（${room.capacity} 人）`,
+            label:
+              room.kind === "自习室"
+                ? `${room.name}（自习室 · ${room.capacity} 座）`
+                : `${room.name}（${room.capacity} 人）`,
           }))}
         />
       </div>
@@ -284,12 +291,27 @@ export function LessonForm({
       {!checking && hasConflict && conflicts !== null && (
         <div className="mt-3 rounded-md border border-warning-100 bg-warning-50 px-3 py-2.5">
           <p className="text-sm font-medium text-warning-600">
-            时间冲突：{conflicts.teacher.length > 0 && `教师 ${conflicts.teacher.length} 处`}
-            {conflicts.classroom.length > 0 &&
-              `${conflicts.teacher.length > 0 ? "、" : ""}教室 ${conflicts.classroom.length} 处`}
-            {conflicts.students.length > 0 &&
-              `${conflicts.teacher.length + conflicts.classroom.length > 0 ? "、" : ""}学生 ${conflicts.students.length} 处`}
+            {conflicts.classroomClosed
+              ? "所选教室在该时段不开放"
+              : `时间冲突：${conflicts.teacher.length > 0 ? `教师 ${conflicts.teacher.length} 处` : ""}${
+                  conflicts.classroom.length > 0
+                    ? `${conflicts.teacher.length > 0 ? "、" : ""}教室 ${conflicts.classroom.length} 处`
+                    : ""
+                }${
+                  conflicts.students.length > 0
+                    ? `${conflicts.teacher.length + conflicts.classroom.length > 0 ? "、" : ""}学生 ${conflicts.students.length} 处`
+                    : ""
+                }`}
           </p>
+          {conflicts.classroomClosed && (
+            <p className="mt-1 text-xs text-warning-600">
+              这个时间段落在该场地的可用时段之外。可以去
+              <a href="/admin/classrooms" className="mx-1 underline">
+                教室
+              </a>
+              里调整它的可用时段，或者换一个场地 / 改时间。
+            </p>
+          )}
           <ul className="mt-1.5 space-y-1 text-xs text-warning-600">
             {conflicts.teacher.map((item) => (
               <li key={`t-${item.id}`}>

@@ -1,7 +1,10 @@
 import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createSeedDatabase } from "./seed";
+import { isWithinAvailability } from "./availability";
 import type {
   Classroom,
+  ClassroomAvailability,
+  ClassroomKind,
   CompletionResult,
   ConflictReport,
   Database,
@@ -36,6 +39,15 @@ import type {
 
 const STORAGE_KEY = "nexgenedu.admin.db.v1";
 
+/**
+ * 当前数据结构版本。
+ *
+ * v1 → v2：教室增加「用途」（上课用教室 / 自习室）与「可用时段」。
+ * 改结构时必须同时写迁移，否则别人浏览器里那份旧数据会缺字段，
+ * 界面上就会出现 undefined。
+ */
+const CURRENT_VERSION = 2;
+
 /** 模拟网络延迟，让加载态、按钮禁用等交互在开发时就暴露出来。 */
 const LATENCY_MS = 120;
 
@@ -62,10 +74,11 @@ function load(): Database {
   const raw = store.read(STORAGE_KEY);
   if (raw !== null) {
     try {
-      const parsed = JSON.parse(raw) as Database;
-      // 结构版本不一致时先不做迁移（当前只有 v1），直接重新灌入并保留提示
-      if (parsed.version === 1) {
+      const parsed = migrate(JSON.parse(raw) as Database);
+      if (parsed !== null) {
         cache = parsed;
+        // 迁移过就立刻落盘，避免每次打开都迁移一遍
+        if (parsed.version !== JSON.parse(raw).version) persist(cache);
         return cache;
       }
     } catch {
@@ -76,6 +89,28 @@ function load(): Database {
   cache = createSeedDatabase();
   persist(cache);
   return cache;
+}
+
+/**
+ * 老数据升级到当前结构版本。
+ *
+ * 返回 null 表示这份数据没法用（版本比当前还新，或结构不认识）——
+ * 调用方会重新灌入示例数据，而不是带着缺字段的数据继续跑。
+ */
+function migrate(db: Database): Database | null {
+  if (db.version > CURRENT_VERSION) return null;
+
+  if (db.version === 1) {
+    // v1 的教室只有 name / capacity / note
+    db.classrooms = db.classrooms.map((room) => ({
+      ...room,
+      kind: room.kind ?? "上课用教室",
+      availability: room.availability ?? [],
+    }));
+    db.version = 2;
+  }
+
+  return db.version === CURRENT_VERSION ? db : null;
 }
 
 function persist(db: Database): void {
@@ -232,11 +267,19 @@ export const api = {
         ...new Map(students.map((item) => [`${item.studentId}-${item.lesson.id}`, item])).values(),
       ];
 
+      // 教室在该时段是否开放：没设可用时段的教室视为不限，永远为 false
+      const room = db.classrooms.find((item) => item.id === input.classroomId);
+      const classroomClosed =
+        room !== undefined &&
+        !isWithinAvailability(room.availability, new Date(input.startsAt), input.durationMinutes);
+
       return clone({
         teacher,
         classroom,
         students: uniqueStudents,
-        total: teacher.length + classroom.length + uniqueStudents.length,
+        classroomClosed,
+        total:
+          teacher.length + classroom.length + uniqueStudents.length + (classroomClosed ? 1 : 0),
       });
     },
 
@@ -377,6 +420,8 @@ export function __useStoreForTesting(backing: KeyValueStore): void {
 // 重新导出，便于页面只 import 这一处
 export type {
   Classroom,
+  ClassroomAvailability,
+  ClassroomKind,
   CompletionResult,
   ConflictReport,
   Database,
@@ -390,4 +435,4 @@ export type {
   Teacher,
   TodaySummary,
 };
-export { STUDENT_STATUSES, LESSON_STATUSES } from "./types";
+export { CLASSROOM_KINDS, STUDENT_STATUSES, LESSON_STATUSES } from "./types";

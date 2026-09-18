@@ -40,13 +40,38 @@ export type Teacher = {
   active: boolean;
 };
 
+/** 教室用途。自习室也能被排课（学生来自习），因此两者都在同一个列表里，只是用途不同。 */
+export const CLASSROOM_KINDS = ["上课用教室", "自习室"] as const;
+export type ClassroomKind = (typeof CLASSROOM_KINDS)[number];
+
+/**
+ * 教室可用时段的一行：一周中的几天 + 一个时间区间。
+ *
+ * 为什么是「几天 + 一段」而不是每天一行：实际使用中「周一至周五 17:00–21:00」
+ * 是常态，每天一行要录入五次且容易前后不一致。
+ */
+export type ClassroomAvailability = {
+  /** 行自身的 id（表单增删行用，与教室 id 无关）。 */
+  id: string;
+  /** 适用星期：1=周一 … 7=周日。 */
+  weekdays: number[];
+  /** 开始时间「HH:MM」。 */
+  start: string;
+  /** 结束时间「HH:MM」，必须晚于开始时间。 */
+  end: string;
+};
+
 /** 教室 / 场地。 */
 export type Classroom = {
   id: string;
   /** 名称，例如「301 教室」。 */
   name: string;
-  /** 可容纳人数。 */
+  /** 用途：上课用教室 / 自习室。 */
+  kind: ClassroomKind;
+  /** 可容纳人数（自习室即座位数）。 */
   capacity: number;
+  /** 可用时段；**留空表示不限**（营业时间内都可用）。 */
+  availability: ClassroomAvailability[];
   note: string;
 };
 
@@ -131,6 +156,12 @@ export type ConflictReport = {
   teacher: Lesson[];
   classroom: Lesson[];
   students: Array<{ studentId: string; lesson: Lesson }>;
+  /**
+   * 时段落在教室可用时段之外（教室在该时段不开放）。
+   * 与「撞课」不同：这不是两节课冲突，而是这间教室此时根本不用。
+   * 教室没有设置可用时段时永远为 false。
+   */
+  classroomClosed: boolean;
   /** 三类冲突的合计条数，页面用它判断能不能保存。 */
   total: number;
 };
