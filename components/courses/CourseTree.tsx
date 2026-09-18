@@ -4,22 +4,48 @@ import type { CourseDetail } from "@/lib/types/site";
 
 type CourseTreeProps = {
   courses: CourseDetail[];
-  /** 卡片列数类名，默认三列（宽屏）。 */
-  className?: string;
 };
 
 /**
- * 特色课程卡片网格：每门课程一张卡片，卡片内列出它的下级班型。
+ * 特色课程：父课程作为分组标题，每门课程一张卡片，整张卡片可点进入独立页面。
  *
- * 为什么用卡片而不是缩进列表：三层结构用缩进列表会拉得很长，
- * 而层级关系可以用「下级班型作为卡片内的小链接」表达，
- * 家长扫一遍就能看出有哪些课、彼此是什么关系。
+ * 两个刻意的处理：
+ * - 父课程（如课内辅导）也做成可点卡片：它有自己的说明页与下级导航
+ * - 卡片容器用 div 而不是 a：三级课程需要作为卡片内的独立链接，
+ *   若整张卡片是链接，就会出现 `<a>` 嵌套 `<a>`（无效 HTML，
+ *   且点击区域互相抢占）。因此标题与说明各自成链接，视觉上仍是一张卡片。
  */
-export function CourseTree({ courses, className }: CourseTreeProps) {
+export function CourseTree({ courses }: CourseTreeProps) {
   return (
-    <div className={className ?? "grid gap-5 sm:grid-cols-2 lg:grid-cols-3"}>
+    <div className="space-y-12">
       {courses.map((course) => (
-        <CourseCard key={course.slug} course={course} />
+        <section key={course.slug}>
+          <div className="max-w-2xl">
+            <h2 className="text-lg font-medium text-ink-900">
+              <Link
+                href={courseHref(course.path)}
+                className="transition-colors hover:text-brand-700"
+              >
+                {course.name}
+              </Link>
+            </h2>
+            {course.fields
+              .filter((field) => field.title === "课程定位")
+              .map((field) => (
+                <p key={field.title} className="mt-2 text-sm leading-relaxed text-ink-600">
+                  {field.value}
+                </p>
+              ))}
+          </div>
+
+          {course.children.length > 0 && (
+            <div className="mt-5 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+              {course.children.map((child) => (
+                <CourseCard key={child.slug} course={child} />
+              ))}
+            </div>
+          )}
+        </section>
       ))}
     </div>
   );
@@ -28,30 +54,28 @@ export function CourseTree({ courses, className }: CourseTreeProps) {
 function CourseCard({ course }: { course: CourseDetail }) {
   const position = course.fields.find((field) => field.title === "课程定位");
   const audience = course.fields.find((field) => field.title === "适合对象");
+  const href = courseHref(course.path);
 
   return (
-    <div className="flex flex-col rounded-lg border border-ink-200 bg-white p-6">
+    <div className="flex flex-col rounded-lg border border-ink-200 bg-white p-5 transition-colors hover:border-brand-300">
       <h3 className="text-base font-medium text-ink-900">
-        <Link
-          href={courseHref(course.path)}
-          className="transition-colors hover:text-brand-700"
-        >
+        <Link href={href} className="transition-colors hover:text-brand-700">
           {course.name}
         </Link>
       </h3>
 
       {position !== undefined && (
-        <p className="mt-2 text-sm leading-relaxed text-ink-600">{position.value}</p>
+        <Link href={href} className="mt-2 block text-sm leading-relaxed text-ink-600">
+          {position.value}
+        </Link>
       )}
 
       {audience !== undefined && (
-        <p className="mt-3 text-xs leading-relaxed text-ink-500">
-          适合：{audience.value}
-        </p>
+        <p className="mt-3 text-xs leading-relaxed text-ink-500">适合：{audience.value}</p>
       )}
 
       {course.children.length > 0 && (
-        <ul className="mt-4 space-y-1.5 border-t border-ink-100 pt-4">
+        <ul className="mt-4 space-y-1.5 border-t border-ink-100 pt-3">
           {course.children.map((child) => (
             <li key={child.slug}>
               <Link
@@ -64,15 +88,6 @@ function CourseCard({ course }: { course: CourseDetail }) {
           ))}
         </ul>
       )}
-
-      <div className="mt-auto pt-4">
-        <Link
-          href={courseHref(course.path)}
-          className="text-sm text-ink-500 transition-colors hover:text-brand-700"
-        >
-          查看课程说明
-        </Link>
-      </div>
     </div>
   );
 }
