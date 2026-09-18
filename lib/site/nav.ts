@@ -45,6 +45,40 @@ export const SECONDARY_NAV: readonly NavItem[] = [
   { href: "/contact", label: "联系我们" },
 ] as const;
 
+/**
+ * 页脚导航分组。
+ *
+ * 以前页脚是把主导航 + 补充导航平铺成一列（10 个入口混在一起）：
+ * 家长在页脚找「报价」要先扫一遍「首页 / 学生案例 / 常见问题」。
+ * 现在按**他要做什么**分三组，每组只放相关的入口。
+ *
+ * 注意：「首页」不进页脚 —— 页头 Logo 就是回首页的入口，
+ * 在页脚再放一条只是浪费一行。
+ */
+export const FOOTER_GROUPS: ReadonlyArray<{
+  title: string;
+  items: readonly NavItem[];
+}> = [
+  {
+    title: "选课与价格",
+    items: [
+      { href: "/courses", label: "课程总览" },
+      { href: "/courses/featured", label: "特色课程与班型" },
+      { href: "/quote", label: "智能报价" },
+      { href: "/schedule", label: "课程时间安排" },
+    ],
+  },
+  {
+    title: "了解我们",
+    items: [
+      { href: "/teachers", label: "教师团队" },
+      { href: "/cases", label: "学生案例" },
+      { href: "/faq", label: "常见问题" },
+      { href: "/about", label: "关于我们" },
+    ],
+  },
+] as const;
+
 /** 页头右上角的行动按钮。文案与链接属于可自定义内容，当前为代码内固定值，后续可迁移到 content.md。 */
 export const HEADER_CTA = {
   label: "预约试听",
