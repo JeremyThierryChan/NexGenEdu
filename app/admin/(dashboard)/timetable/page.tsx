@@ -6,9 +6,21 @@ import { PageHeading } from "@/components/ui/PageHeading";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { api, type Classroom, type Lesson, type Teacher } from "@/lib/backend/api";
 import { formatDayLabel, formatTimeRange, dateKey, weekDays } from "@/lib/backend/format";
-import { buildDayTimeline } from "@/lib/backend/timetable";
+import {
+  buildDayTimeline,
+  formatGapDuration,
+  gapText,
+  totalGapMinutes,
+} from "@/lib/backend/timetable";
+import { getClassHoursWindow } from "@/lib/backend/options";
 import { createIcs, downloadTextFile, stampForFilename } from "@/lib/backend/backup";
 import { cn } from "@/lib/utils/cn";
+
+/**
+ * 空档计算选项：窗口取自站点内容的「上课时间」，因此课前 / 课后两段空档
+ * 会随内容改动而变（改内容 → 重新构建 → 课表跟着变），不在代码里写死时间。
+ */
+const GAP_OPTIONS = { window: getClassHoursWindow() };
 
 /**
  * 课表与占用。
@@ -231,10 +243,16 @@ export default function AdminTimetablePage() {
                 <span className={cn("text-xs font-medium", isToday ? "text-brand-700" : "text-ink-600")}>
                   {formatDayLabel(day)}
                 </span>
-                <span className="text-xs text-ink-400">{dayLessons.length}</span>
+                <span className="text-xs text-ink-400">
+                  {dayLessons.length}
+                  {(() => {
+                    const idle = totalGapMinutes(dayLessons, GAP_OPTIONS);
+                    return idle > 0 ? ` · 空 ${formatGapDuration(idle)}` : "";
+                  })()}
+                </span>
               </header>
               <ul className="space-y-1.5 p-2">
-                {buildDayTimeline(dayLessons).map((item) =>
+                {buildDayTimeline(dayLessons, GAP_OPTIONS).map((item) =>
                   item.kind === "gap" ? (
                     /*
                      * 空档卡片：课表上唯一没写出来的信息。
@@ -248,9 +266,7 @@ export default function AdminTimetablePage() {
                       <span className="font-mono tabular text-ink-400">
                         {item.gap.rangeLabel}
                       </span>
-                      <span>
-                        {tab === "teacher" ? "空档" : "教室空闲"} {item.gap.label}
-                      </span>
+                      <span>{gapText(item.gap)}</span>
                     </li>
                   ) : (
                     <li

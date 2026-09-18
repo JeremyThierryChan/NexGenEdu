@@ -46,8 +46,11 @@ import {
   dayLessonGaps,
   formatGapDuration,
   formatMinuteOfDay,
+  gapText,
+  parseGapWindow,
   totalGapMinutes,
 } from "@/lib/backend/timetable";
+import { getClassHoursWindow } from "@/lib/backend/options";
 import { groupHits, searchAll } from "@/lib/backend/search";
 import {
   buildDateSeries,
@@ -1326,6 +1329,61 @@ eq("空档时间段补零", formatMinuteOfDay(9 * 60 + 5), "09:05");
 // 页面用的时间线必须与传入的课节一一对应（不能凭空多出或漏掉课）
 const timelineLessons = buildDayTimeline(gapSample).filter((item) => item.kind === "lesson").length;
 eq("时间线里的课节数不变", timelineLessons, gapSample.length);
+
+// ── 课表的课前 / 课后空档（按「上课时间」窗口）─────────────────────────
+/*
+ * 头尾两段要靠「上课时间」才成立，因此窗口从内容里解析，代码不写死 8:00–22:00。
+ * 这里同时钉住三件事：窗口解析、头尾的边界（课排在窗口外不算空档）、三段文案。
+ */
+eq("上课时间窗口来自内容的「上课时间」字段",
+  getClassHoursWindow(), parseGapWindow(brand.contact.classHours));
+eq("默认上课时间解析成 8:00–22:00",
+  getClassHoursWindow(), { startMinutes: 8 * 60, endMinutes: 22 * 60 });
+eq("窗口写法兼容「至 / 到 / ~ / -」与全角破折号",
+  ["每日 8:00–22:00（含节假日）", "8:00-22:00", "8:00 至 22:00", "8:00~22:00", "8:00到22:00"]
+    .map((text) => parseGapWindow(text)?.startMinutes),
+  [480, 480, 480, 480, 480]);
+eq("解析不出时间时返回 null（不猜）",
+  ["每日", "9:00 开始", "", "22:00–8:00"].map((text) => parseGapWindow(text)), [null, null, null, null]);
+
+const gapWindow = { startMinutes: 8 * 60, endMinutes: 22 * 60 };
+const windowedGaps = dayLessonGaps(gapSample, { window: gapWindow });
+eq("带上课时间后有三段空档（课前 / 课间 / 课后）",
+  windowedGaps.map((gap) => [gap.kind, gap.minutes, gap.rangeLabel]),
+  [
+    ["head", 570, "08:00–17:30"],
+    ["between", 30, "18:30–19:00"],
+    ["tail", 90, "20:30–22:00"],
+  ]);
+eq("三段空档的文案分别是课前 / 课间 / 课后",
+  windowedGaps.map(gapText), ["上课前空 9 小时 30 分钟", "两节课之间空 30 分钟", "下课后空 1 小时 30 分钟"]);
+eq("课前空档没有「前一节课」、课后空档没有「后一节课」",
+  [windowedGaps[0]?.afterLessonId, windowedGaps[0]?.beforeLessonId,
+   windowedGaps[2]?.afterLessonId, windowedGaps[2]?.beforeLessonId],
+  ["", "g1", "g2", ""]);
+eq("一天的空档合计（含头尾）", totalGapMinutes(gapSample, { window: gapWindow }), 570 + 30 + 90);
+
+const windowedTimeline = buildDayTimeline(gapSample, { window: gapWindow });
+eq("时间线是 空档 / 课 / 空档 / 课 / 空档",
+  windowedTimeline.map((item) => item.kind === "gap" ? item.gap.kind : "lesson"),
+  ["head", "lesson", "between", "lesson", "tail"]);
+
+// 边界：课排在窗口之外时，不该凭空生出空档（否则会出现负数或「课前空 -2 小时」）
+eq("第一节课早于上课时间时没有课前空档",
+  dayLessonGaps([gapLesson("a", "2026-09-19T07:00:00", 60), gapLesson("b", "2026-09-19T19:00:00", 60)],
+    { window: gapWindow }).map((gap) => gap.kind),
+  ["between", "tail"]);
+eq("最后一节课超过上课时间结束时没有课后空档",
+  dayLessonGaps([gapLesson("a", "2026-09-19T20:00:00", 180)], { window: gapWindow }).map((gap) => gap.kind),
+  ["head"]);
+// 一节课都没有：整天空着由空状态表达，不再画一张 14 小时的卡片
+eq("没有课的一天不产生空档", dayLessonGaps([], { window: gapWindow }), []);
+// 已取消的课同样不参与头尾计算
+eq("取消掉唯一一节课后不产生空档",
+  dayLessonGaps([gapLesson("x", "2026-09-19T17:00:00", 60, "已取消")], { window: gapWindow }), []);
+// 不传窗口时行为不变（只算课间），保证调用方可以不知道营业/上课时间
+eq("不传窗口时只算课间空档",
+  dayLessonGaps(gapSample).map((gap) => gap.kind), ["between"]);
 
 // ── 导出与备份（第二组）──────────────────────────────────────────────
 // 导入是唯一能一次性毁掉全部数据的操作，因此这一组的重点全在「坏文件不能洗数据」。

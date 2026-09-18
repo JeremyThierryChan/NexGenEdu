@@ -1,6 +1,7 @@
 import { getFeaturedContent } from "@/lib/data/featured";
 import { getScheduleContent } from "@/lib/data/pages";
-import { getCourseColumns } from "@/lib/data/site";
+import { getSiteBrand, getCourseColumns } from "@/lib/data/site";
+import { parseGapWindow, type GapWindow } from "./timetable";
 
 /**
  * 后台表单里的候选项。
@@ -48,6 +49,21 @@ export function getStandardSlots(): Array<{ label: string; start: string }> {
     return slots;
   } catch {
     return [];
+  }
+}
+
+/**
+ * 上课时间窗口（课表里「课前 / 课后」两段空档按它算）。
+ *
+ * 取自站点内容的「上课时间」字段（形如「每日 8:00–22:00（含节假日）」），
+ * **刻意不写死 8:00–22:00**：机构改上课时间，课表的空档要跟着变。
+ * 解析不出来时返回 null，调用方就只算课与课之间的空档 —— 宁可少显示，也不猜错。
+ */
+export function getClassHoursWindow(): GapWindow | null {
+  try {
+    return parseGapWindow(getSiteBrand().contact.classHours);
+  } catch {
+    return null;
   }
 }
 

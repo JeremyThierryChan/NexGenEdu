@@ -3,6 +3,13 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { DataNotice } from "@/components/admin/DataNotice";
+import {
+  buildDayTimeline,
+  formatGapDuration,
+  gapText,
+  totalGapMinutes,
+} from "@/lib/backend/timetable";
+import { getClassHoursWindow } from "@/lib/backend/options";
 import { PageHeading } from "@/components/ui/PageHeading";
 import {
   api,
@@ -25,6 +32,9 @@ import {
  * 数据来自伪后端服务（lib/backend/api.ts），因此这里是客户端组件：
  * 先渲染加载态，挂载后再取数。
  */
+/** 空档计算选项：窗口取自站点内容的「上课时间」（课前 / 课后两段按它算）。 */
+const GAP_OPTIONS = { window: getClassHoursWindow() };
+
 export default function AdminTodayPage() {
   const [summary, setSummary] = useState<TodaySummary | null>(null);
   const [lessons, setLessons] = useState<Lesson[]>([]);
@@ -100,7 +110,16 @@ export default function AdminTodayPage() {
         {/* 今日课程 */}
         <section className="rounded-lg border border-ink-200 bg-white">
           <header className="flex items-center justify-between gap-3 border-b border-ink-100 px-4 py-3">
-            <h2 className="text-sm font-medium text-ink-900">今日课程</h2>
+            <h2 className="text-sm font-medium text-ink-900">
+              今日课程
+              {lessons.length > 0 && (
+                <span className="ml-2 text-xs font-normal text-ink-500">
+                  {lessons.length} 节
+                  {totalGapMinutes(lessons, GAP_OPTIONS) > 0 &&
+                    ` · 空 ${formatGapDuration(totalGapMinutes(lessons, GAP_OPTIONS))}`}
+                </span>
+              )}
+            </h2>
             <Link
               href="/admin/lessons"
               className="text-xs text-brand-700 transition-colors hover:text-brand-800"
@@ -124,22 +143,45 @@ export default function AdminTodayPage() {
             </p>
           ) : (
             <ul className="divide-y divide-ink-100">
-              {lessons.map((lesson) => (
-                <li key={lesson.id} className="flex flex-wrap gap-x-4 gap-y-1 px-4 py-3">
-                  <span className="w-24 font-mono text-sm tabular text-ink-900">
-                    {timeRange(lesson.startsAt, lesson.durationMinutes)}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="text-sm font-medium text-ink-900">{lesson.subject}</span>
-                    <span className="ml-2 text-xs text-ink-500">{lesson.form}</span>
-                    <span className="mt-1 block text-xs text-ink-500">
-                      {teacherName(lesson.teacherId)} · {classroomName(lesson.classroomId)} ·{" "}
-                      {studentNames(lesson.studentIds)}
+              {buildDayTimeline(lessons, GAP_OPTIONS).map((item) =>
+                item.kind === "gap" ? (
+                  /*
+                   * 空档：今天没人上课的时间段（课前 / 课间 / 课后）。
+                   * 它决定了「还能不能接一个新学生、安排一节补课」，
+                   * 因此和课程一样列在这里 —— 今天的空闲时间也是一种资源。
+                   */
+                  <li
+                    key={`gap-${item.gap.kind}-${item.gap.startMinutes}`}
+                    className="flex flex-wrap items-center gap-x-4 gap-y-1 bg-ink-50/60 px-4 py-2"
+                  >
+                    <span className="w-24 font-mono text-xs tabular text-ink-400">
+                      {item.gap.rangeLabel}
                     </span>
-                  </span>
-                  <StatusTag status={lesson.status} />
-                </li>
-              ))}
+                    <span className="text-xs text-ink-500">{gapText(item.gap)}</span>
+                  </li>
+                ) : (
+                  <li
+                    key={item.lesson.id}
+                    className="flex flex-wrap gap-x-4 gap-y-1 px-4 py-3"
+                  >
+                    <span className="w-24 font-mono text-sm tabular text-ink-900">
+                      {timeRange(item.lesson.startsAt, item.lesson.durationMinutes)}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="text-sm font-medium text-ink-900">
+                        {item.lesson.subject}
+                      </span>
+                      <span className="ml-2 text-xs text-ink-500">{item.lesson.form}</span>
+                      <span className="mt-1 block text-xs text-ink-500">
+                        {teacherName(item.lesson.teacherId)} ·{" "}
+                        {classroomName(item.lesson.classroomId)} ·{" "}
+                        {studentNames(item.lesson.studentIds)}
+                      </span>
+                    </span>
+                    <StatusTag status={item.lesson.status} />
+                  </li>
+                ),
+              )}
             </ul>
           )}
         </section>
