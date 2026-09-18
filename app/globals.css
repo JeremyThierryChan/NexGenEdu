@@ -124,3 +124,22 @@
 @utility tabular {
   font-variant-numeric: tabular-nums;
 }
+
+/* ==========================================================================
+   404 分流：网站版 / 教务后台版
+   --------------------------------------------------------------------------
+   静态托管只认站点根目录的一个 404.html，服务器无法按路径返回不同内容，
+   因此两版都渲染进同一个文件，由 app/not-found.tsx 里的内联脚本读取
+   location.pathname 打上 data-nf-route，再由下面的规则决定显示哪一版。
+
+   默认（没有该属性，或 JS 没跑）显示网站版；两处 !important 是必需的：
+   Tailwind 的 preflight 用 `[hidden]:where(...){display:none!important}` 压制
+   了 hidden 属性，要让后台版显示出来必须用同等权重覆盖。
+   ========================================================================== */
+html[data-nf-route="backoffice"] .nf-public {
+  display: none !important;
+}
+
+html[data-nf-route="backoffice"] .nf-backoffice[hidden] {
+  display: flex !important;
+}
