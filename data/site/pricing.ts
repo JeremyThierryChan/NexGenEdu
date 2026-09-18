@@ -1,8 +1,16 @@
 /**
  * 本文件由 scripts/sync-content.mjs 自动生成，请勿手工编辑。
  * 内容来源：data/site/pricing.md —— 修改后执行 npm run sync-content。
+ *
+ * 这里额外引入一个同步时间戳（data/site/.sync-stamp.ts，未纳入版本库）：
+ * 生成的内容是纯字符串常量，内容改回原样后与上一次编译结果逐字节相同，
+ * 打包器会判定「未变化」而跳过重新编译，页面继续使用旧产物
+ * （表现为内容改好了却仍是旧的，需重启开发服务器）。
+ * 把时间戳放在单独文件里，就既能强制缓存失效，又不会让每次同步都改动本文件。
  */
-export const pricingSyncedAt = "2026-09-18T08:14:29.012Z";
+import { syncStamp } from "./.sync-stamp";
+
+export const pricingSyncedAt = syncStamp;
 export const pricingSource = `# NexGenEdu · 新锐教培 · 报价数据
 
 > 这个文件决定报价页面的可选项与价格。**公式不在这里** —— 公式在 \`lib/pricing/quote.ts\`。

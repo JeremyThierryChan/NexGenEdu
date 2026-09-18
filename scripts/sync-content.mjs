@@ -17,6 +17,14 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetDir = path.join(root, "data", "site");
 const names = ["content", "pricing", "faq", "cases", "schedule", "featured"];
 
+// 独立的同步时间戳文件：每次同步都不同，用于强制打包器重新编译。
+// 放在单独文件且未纳入版本库，避免每次同步都修改内容文件造成提交噪音。
+writeFileSync(
+  path.join(targetDir, ".sync-stamp.ts"),
+  `/** 本文件由 scripts/sync-content.mjs 生成，请勿手工编辑，也未纳入版本库。 */\nexport const syncStamp = ${JSON.stringify(new Date().toISOString())};\n`,
+  "utf8",
+);
+
 for (const name of names) {
   const source = readFileSync(path.join(targetDir, `${name}.md`), "utf8");
 
@@ -26,21 +34,19 @@ for (const name of names) {
     .replace(/`/g, "\\`")
     .replace(/\$\{/g, "\\${");
 
-  /**
-   * 写入生成时间戳，让每次同步都产生一个可见差异。
-   *
-   * 为什么需要：生成的是纯字符串常量，内容改回原样后与上一次编译结果逐字节相同，
-   * 打包器会判定「未变化」而跳过重新编译，页面继续使用旧的编译产物 ——
-   * 表现为改了内容还是报错，必须重启开发服务器才恢复。
-   * 加一个每次同步都不同的时间戳即可强制失效缓存。
-   */
-  const stamp = `${name}SyncedAt = "${new Date().toISOString()}"`;
-
   const out = `/**
  * 本文件由 scripts/sync-content.mjs 自动生成，请勿手工编辑。
  * 内容来源：data/site/${name}.md —— 修改后执行 npm run sync-content。
+ *
+ * 这里额外引入一个同步时间戳（data/site/.sync-stamp.ts，未纳入版本库）：
+ * 生成的内容是纯字符串常量，内容改回原样后与上一次编译结果逐字节相同，
+ * 打包器会判定「未变化」而跳过重新编译，页面继续使用旧产物
+ * （表现为内容改好了却仍是旧的，需重启开发服务器）。
+ * 把时间戳放在单独文件里，就既能强制缓存失效，又不会让每次同步都改动本文件。
  */
-export const ${stamp};
+import { syncStamp } from "./.sync-stamp";
+
+export const ${name}SyncedAt = syncStamp;
 export const ${name}Source = \`${escaped}\`;
 `;
 

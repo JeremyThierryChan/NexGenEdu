@@ -36,3 +36,6 @@ yarn-error.log*
 
 # local tooling cache (this machine keeps npm's global cache read-only)
 .npm-cache/
+
+# 同步时间戳（每次同步都会变，仅用于让打包器重新编译）
+data/site/.sync-stamp.ts
