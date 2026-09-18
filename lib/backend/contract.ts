@@ -83,15 +83,29 @@ export const API_CONTRACT: ContractGroup[] = [
     methods: [
       "students.enroll", "students.renewEnrollment", "students.refundEnrollment",
       "students.adjustEnrollmentLessons", "students.saveProfile",
-      "lessons.markCompleted", "lessons.createMakeup",
+      "lessons.markCompleted", "lessons.createMakeup", "lessons.suggestMoves",
       "lessonRecords.save",
       "assessments.add",
       "payments.record",
     ],
   },
   {
+    id: "inquiries",
+    title: "四、咨询线索（新家长咨询 → 能不能接）",
+    note:
+      "家长口头咨询后登记，判定「这个安排能不能接」，不可行时给最接近的方案。" +
+      "判定的关键在**检查的是一串日期而不是一天**（每周一次 × 12 节 = 12 个时段都得空），" +
+      "以及**不可行要说清挡路的是谁**（哪节课、哪位老师、哪位已有学生）——" +
+      "因为接着要决定是让新学生换时段、还是去协调那位已有学生。" +
+      "`accept` 落库前必须**再复核一次**：判定是「看」，落库是「改」，中间的时间差不能忽略。",
+    methods: [
+      "inquiries.list", "inquiries.get", "inquiries.create", "inquiries.update", "inquiries.remove",
+      "inquiries.evaluate", "inquiries.accept", "inquiries.abandon",
+    ],
+  },
+  {
     id: "dashboards",
-    title: "四、看板与统计（只读）",
+    title: "五、看板与统计（只读）",
     note:
       "对应报表接口，可以加缓存。算法已经写成纯函数（`lib/backend/followup.ts`、`stats.ts`、" +
       "`finance.ts`），服务端可以原样搬过去 —— 但**口径不要改**：利用率分母、退课按课时算、" +
@@ -106,7 +120,7 @@ export const API_CONTRACT: ContractGroup[] = [
   },
   {
     id: "ops",
-    title: "五、运维与审计",
+    title: "六、运维与审计",
     note:
       "导入导出在纯前端阶段是「备份」；接服务端后它变成**迁移工具**（把浏览器里的数据搬到服务端）。" +
       "导入必须仍然保持三道保险：结构校验、导入前备份、版本迁移。" +

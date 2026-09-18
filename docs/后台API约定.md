@@ -20,7 +20,7 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 - 数据类型带 `version`（当前 v8），升级链在 `api.ts` 的 `migrate()`，
   **必须按版本升序逐级推进**（历史上写反过一次顺序，导致老数据被重新灌成示例数据）。
 
-## 二、接口分组（共 82 个方法）
+## 二、接口分组（共 91 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -77,17 +77,33 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 全部要求**幂等**：重复提交不能重复扣课时、重复收款（前端已按此实现，服务端要用
 唯一约束或事务锁保证）。
 
-### 4. 看板与统计（只读）
+### 4. 咨询线索（新家长咨询 → 能不能接）
+
+`inquiries.list`、`inquiries.get`、`inquiries.create`、`inquiries.update`、
+`inquiries.remove`、`inquiries.evaluate`、`inquiries.accept`、`inquiries.abandon`。
+
+家长口头问「每周六上午十点、指定陈老师，能不能排」——这类问题要**当场**给答复。
+因此这一组的关键是判定本身（`lib/backend/inquiry.ts`，纯函数）：
+
+- **检查的是一串日期，不是一天**：每周一次 × 12 节 = 未来 12 个同一时段都得空着；
+- 候选时段是**备选**而不是「全要」：依次尝试，第一个能排下的就用它；
+- 不可行要说清**挡路的是谁**（哪节课 / 哪位老师 / 哪位已有学生），
+  因为接着要决定是新学生换时段，还是去协调那位已有学生；
+- `accept` 落库前**再复核一次**：判定是「看」、落库是「改」，中间的时间差不能忽略；
+- `lessons.suggestMoves` 给已有课算出可挪的时间（用于「协调已有学生」），
+  走同一套判定，因此挪过去不会再制造冲突。
+
+### 5. 看板与统计（只读）
 
 `today`、`stats`、`followups`、`finance`、`outstandingByStudent`、`search`、
-`lessons.findConflicts`。
+`lessons.findConflicts`、`lessons.suggestMoves`。
 
 算法在 `lib/backend/followup.ts`、`stats.ts`、`finance.ts`、`search.ts` 里，
 都是纯函数，可以原样搬到服务端。**口径不要改** —— 每个文件顶部都写了
 「为什么这么定」（利用率分母、退课按课时算、预警阈值、空档日的定义）。
 `lessons.findConflicts` 可以保留给前端做即时提示，但保存时服务端仍要自己再判一次。
 
-### 5. 运维与审计
+### 6. 运维与审计
 
 `exportDatabase`、`importDatabase`、`hasBackup`、`restoreBackup`、`reset`、
 `setOperator`、`logs.list`、`logs.clear`。

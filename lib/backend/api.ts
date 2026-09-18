@@ -8,6 +8,14 @@ import { databaseStats, validateImportedDatabase, type ImportOutcome } from "./b
 import { buildFollowUps, type FollowUpItem } from "./followup";
 import { searchAll } from "./search";
 import {
+  buildDateSeries,
+  checkAssignment,
+  evaluateSlot,
+  minutesToTime,
+  slotMinutes,
+} from "./inquiry";
+import type { FeasibilityReport } from "./inquiry";
+import {
   churnStats,
   hourlyLoad,
   rangeSummary,
@@ -41,6 +49,9 @@ import type {
   NewAssessment,
   NewHomeworkRecord,
   NewLessonRecord,
+  Inquiry,
+  InquirySlot,
+  NewInquiry,
   NewPayment,
   OperationLog,
   PaymentMethod,
@@ -322,6 +333,12 @@ function migrate(db: Database): Database | null {
     // v7 → v8：新增操作日志表。老数据没有日志 → 空数组，不伪造历史记录
     db.logs = db.logs ?? [];
     db.version = 8;
+  }
+
+  if (db.version === 8) {
+    // v8 → v9：新增咨询线索表（从空开始，不伪造历史咨询）
+    db.inquiries = db.inquiries ?? [];
+    db.version = 9;
   }
 
   return db.version === CURRENT_VERSION ? db : null;
@@ -1434,6 +1451,79 @@ export const api = {
       return clone(rows.sort((a, b) => a.original.startsAt.localeCompare(b.original.startsAt)));
     },
 
+    /**
+     * 某节已有课的可选新时间。
+     *
+     * 用于「协调已有学生」：这节课挡住了新学生，可以把它挪到哪几个时间？
+     * 复用同一套判定（整串日期都可行），因此挪过去不会制造新冲突。
+     */
+    async suggestMoves(lessonId: string, max = 6): Promise<
+      Array<{ startsAt: string; change: string }>
+    > {
+      await delay();
+      const db = load();
+      const lesson = db.lessons.find((item) => item.id === lessonId);
+      if (lesson === undefined) return [];
+
+      const results: Array<{ startsAt: string; change: string }> = [];
+      const original = new Date(lesson.startsAt);
+      const baseMinutes = original.getHours() * 60 + original.getMinutes();
+
+      for (const delta of [60, -60, 30, -30, 120, -120, 180, -180, 1440, -1440]) {
+        if (results.length >= max) break;
+        const shifted = baseMinutes + delta;
+        const dayShift = Math.floor(shifted / 1440);
+        const minutes = ((shifted % 1440) + 1440) % 1440;
+        if (shifted < 0) continue;
+
+        const target = new Date(original);
+        target.setDate(target.getDate() + dayShift);
+        target.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+        if (target.getTime() === original.getTime()) continue;
+
+        const slot: InquirySlot = {
+          id: "move",
+          weekday: target.getDay() === 0 ? 7 : target.getDay(),
+          start: minutesToTime(minutes),
+        };
+        const dates = [target];
+
+        const teacherOk =
+          checkAssignment({
+            dates,
+            slot,
+            durationMinutes: lesson.durationMinutes,
+            blockingLessons: db.lessons.filter(
+              (item) => item.id !== lesson.id && item.teacherId === lesson.teacherId,
+            ),
+          }).length === 0;
+        if (!teacherOk) continue;
+
+        const room = db.classrooms.find((item) => item.id === lesson.classroomId);
+        const roomOk =
+          checkAssignment({
+            dates,
+            slot,
+            durationMinutes: lesson.durationMinutes,
+            blockingLessons: db.lessons.filter(
+              (item) => item.id !== lesson.id && item.classroomId === lesson.classroomId,
+            ),
+            classroom: room,
+          }).length === 0;
+        if (!roomOk) continue;
+
+        results.push({
+          startsAt: target.toISOString(),
+          change:
+            dayShift === 0
+              ? `同一时段改到 ${minutesToTime(minutes)}`
+              : `改到 ${target.getMonth() + 1}月${target.getDate()}日 ${minutesToTime(minutes)}`,
+        });
+      }
+
+      return clone(results);
+    },
+
     /** 某个学生的课，按时间升序（学生详情用）。 */
     async listByStudent(studentId: string): Promise<Lesson[]> {
       await delay();
@@ -1636,6 +1726,160 @@ export const api = {
   },
 
   /**
+   * 咨询线索：登记、判定可行性、采用方案（一次性建整串课）、放弃。
+   *
+   * 判定逻辑在 lib/backend/inquiry.ts（纯函数）。这里只负责凑数据与落库。
+   */
+  inquiries: {
+    ...collection<Inquiry>((db) => db.inquiries, "iq", "咨询"),
+
+    /**
+     * 判定这条咨询的可行性。
+     *
+     * 会把「每个候选时段能不能排下整串课」算出来，不可行时给最接近的方案。
+     * 只看不改：真正落库要管理员点「采用」。
+     */
+    async evaluate(id: string): Promise<FeasibilityReport | null> {
+      await delay();
+      const db = load();
+      const inquiry = db.inquiries.find((item) => item.id === id);
+      if (inquiry === undefined) return null;
+
+      // 注意别把这个局部变量叫 load：会遮蔽模块级的 load()（读数据库的那个）
+      const loadByTeacher = new Map<string, number>();
+      for (const row of teacherWorkload(db.teachers, db.lessons)) {
+        loadByTeacher.set(row.teacher.id, row.minutes);
+      }
+
+      const slots = inquiry.candidates.map((slot) =>
+        evaluateSlot({
+          inquiry,
+          slot,
+          teachers: db.teachers,
+          classrooms: db.classrooms,
+          lessons: db.lessons,
+          load: loadByTeacher,
+        }),
+      );
+
+      return clone({
+        inquiryId: inquiry.id,
+        slots,
+        recommendedSlotId: slots.find((slot) => slot.ok)?.slotId ?? "",
+      });
+    },
+
+    /**
+     * 采用某个方案：一次性把整串课建出来，并把线索标记为已安排。
+     *
+     * 建之前**再检查一次**：判定与实际落库之间可能已经有人排了别的课
+     * （判定是「看」，落库是「改」，中间的时间差不能忽略）。
+     */
+    async accept(
+      id: string,
+      input: { slotId: string; teacherId: string; classroomId: string },
+    ): Promise<{ ok: true; lessonIds: string[] } | { ok: false; error: string }> {
+      await delay();
+      const db = load();
+      const inquiry = db.inquiries.find((item) => item.id === id);
+      if (inquiry === undefined) return { ok: false, error: "咨询记录不存在。" };
+
+      const slot = inquiry.candidates.find((item) => item.id === input.slotId);
+      if (slot === undefined) return { ok: false, error: "候选时段不存在。" };
+
+      const dates = buildDateSeries({
+        startsAt: inquiry.startsAt,
+        weekday: slot.weekday,
+        intervalWeeks: inquiry.intervalWeeks,
+        plannedLessons: inquiry.plannedLessons,
+        skipDates: inquiry.skipDates,
+      });
+
+      const startMinutes = slotMinutes(slot);
+      if (startMinutes === null) return { ok: false, error: "时间格式不对。" };
+
+      const blockers = checkAssignment({
+        dates,
+        slot,
+        durationMinutes: inquiry.durationMinutes,
+        blockingLessons: db.lessons.filter((lesson) => lesson.teacherId === input.teacherId),
+      });
+      if (blockers.length > 0) {
+        return { ok: false, error: `落库前复核发现冲突：${blockers[0]?.detail ?? ""}` };
+      }
+      const roomBlockers = checkAssignment({
+        dates,
+        slot,
+        durationMinutes: inquiry.durationMinutes,
+        blockingLessons: db.lessons.filter((lesson) => lesson.classroomId === input.classroomId),
+        classroom: db.classrooms.find((room) => room.id === input.classroomId),
+      });
+      if (roomBlockers.length > 0) {
+        return { ok: false, error: `落库前复核发现冲突：${roomBlockers[0]?.detail ?? ""}` };
+      }
+
+      const lessonIds: string[] = [];
+      for (const date of dates) {
+        const startsAt = new Date(
+          date.getFullYear(),
+          date.getMonth(),
+          date.getDate(),
+          Math.floor(startMinutes / 60),
+          startMinutes % 60,
+          0,
+          0,
+        );
+        const lesson: Lesson = {
+          id: nextId("l"),
+          subject: inquiry.subject,
+          form: "",
+          teacherId: input.teacherId,
+          classroomId: input.classroomId,
+          // 新学生此时还没有档案，先把姓名记在备注里；建档后再补学生名单
+          studentIds: [],
+          startsAt: startsAt.toISOString(),
+          durationMinutes: inquiry.durationMinutes,
+          status: "已排",
+          note: `咨询安排 · ${inquiry.studentName}`,
+          makeupForLessonId: "",
+        };
+        db.lessons.push(lesson);
+        lessonIds.push(lesson.id);
+      }
+
+      inquiry.status = "已安排";
+      inquiry.scheduledLessonIds = lessonIds;
+
+      writeLog(db, {
+        entity: "咨询",
+        action: "安排",
+        targetId: inquiry.id,
+        summary: `${inquiry.studentName} 咨询已安排：${inquiry.subject} 共 ${lessonIds.length} 节`,
+      });
+      persist(db);
+      return { ok: true, lessonIds };
+    },
+
+    /** 放弃这条咨询（记原因）。 */
+    async abandon(id: string, reason: string): Promise<Inquiry | null> {
+      await delay();
+      const db = load();
+      const inquiry = db.inquiries.find((item) => item.id === id);
+      if (inquiry === undefined) return null;
+      inquiry.status = "已放弃";
+      inquiry.note = reason.trim() === "" ? inquiry.note : reason.trim();
+      writeLog(db, {
+        entity: "咨询",
+        action: "放弃",
+        targetId: inquiry.id,
+        summary: `${inquiry.studentName} 咨询已放弃${reason.trim() !== "" ? `：${reason.trim()}` : ""}`,
+      });
+      persist(db);
+      return clone(inquiry);
+    },
+  },
+
+  /**
    * 全局搜索（学生 / 教师 / 教室 / 排课 / 课程）。
    *
    * 匹配规则在 lib/backend/search.ts；服务层负责把数据快照与课程列表凑齐。
@@ -1701,6 +1945,9 @@ export type {
   NewAssessment,
   NewHomeworkRecord,
   NewLessonRecord,
+  Inquiry,
+  InquirySlot,
+  NewInquiry,
   NewPayment,
   OperationLog,
   PaymentMethod,

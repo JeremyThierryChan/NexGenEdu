@@ -233,6 +233,8 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     payments,
     // 操作日志从空开始：示例数据不需要伪造「谁改过什么」
     logs: [],
+    // 咨询线索也从空开始：这是一次性录入的真实对话，示例数据编不出意义
+    inquiries: [],
     updatedAt: now.toISOString(),
   };
 }

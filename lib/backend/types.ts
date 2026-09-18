@@ -326,6 +326,61 @@ export type SearchHit = {
   href: string;
 };
 
+/**
+ * 咨询线索：家长口头咨询后登记，用来判断「这个安排能不能接」。
+ *
+ * 为什么值得单独存一条：家长问的多半是「每周六上午能排吗？指定陈老师行不行？」——
+ * 这类对话当场就要给答复，事后再翻聊天记录找不着。存下来还能变成线索清单
+ * （谁还没落定、谁已经安排了）。
+ */
+export type Inquiry = {
+  id: string;
+  /** 咨询时登记的学生信息（此时还没有学生档案）。 */
+  studentName: string;
+  grade: string;
+  guardian: string;
+  /** 想上的科目（用课程名，如「初中数学」）。 */
+  subject: string;
+  /** 单次时长（分钟）。 */
+  durationMinutes: number;
+  /** 间隔：每 1 周一次 / 每 2 周一次。 */
+  intervalWeeks: number;
+  /** 计划总节数（用来算要占未来多少个时段）。 */
+  plannedLessons: number;
+  /** 从哪一天开始（ISO）。 */
+  startsAt: string;
+  /**
+   * 候选时段：家长给的备选，按优先级排列。
+   * 判定时依次尝试，第一个能排下的就用它。
+   */
+  candidates: InquirySlot[];
+  /** 指定教师；空串表示不限（系统按当周课时量推荐）。 */
+  preferredTeacherId: string;
+  /** 指定场地；空串表示不限。 */
+  preferredClassroomId: string;
+  /** 要跳过的日期（`YYYY-MM-DD`）：假期、考试周等。 */
+  skipDates: string[];
+  status: InquiryStatus;
+  note: string;
+  createdAt: string;
+  /** 已安排时记录生成的课节，便于回溯与撤销。 */
+  scheduledLessonIds: string[];
+};
+
+export const INQUIRY_STATUSES = ["待确认", "已安排", "已放弃"] as const;
+export type InquiryStatus = (typeof INQUIRY_STATUSES)[number];
+
+/** 一个候选时段：任意时间（不限于学校标准时段）。 */
+export type InquirySlot = {
+  id: string;
+  /** 1=周一 … 7=周日。 */
+  weekday: number;
+  /** 开始时间「HH:MM」。 */
+  start: string;
+};
+
+export type NewInquiry = Omit<Inquiry, "id" | "createdAt" | "scheduledLessonIds">;
+
 /** 后台全部数据。 */
 export type Database = {
   /** 数据结构版本，将来加字段时用于迁移。 */
@@ -344,6 +399,8 @@ export type Database = {
   payments: Payment[];
   /** 操作日志（谁在什么时候改了什么）。 */
   logs: OperationLog[];
+  /** 咨询线索。 */
+  inquiries: Inquiry[];
   /** 最后一次写入时间（ISO）。 */
   updatedAt: string;
 };

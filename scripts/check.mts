@@ -42,6 +42,11 @@ import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
 import { weekDays } from "@/lib/backend/format";
 import { groupHits, searchAll } from "@/lib/backend/search";
+import {
+  buildDateSeries,
+  evaluateSlot,
+  teachersForSubject,
+} from "@/lib/backend/inquiry";
 import { API_CONTRACT, MIGRATION_STEPS, SERVER_MUST_VALIDATE } from "@/lib/backend/contract";
 import { readFileSync } from "node:fs";
 import { LEAVE_NOTICE_HOURS, decideCharge } from "@/lib/backend/attendance";
@@ -2097,6 +2102,197 @@ const mentionedInDoc = (name: string) =>
   new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z])`).test(apiDoc);
 eq("API 文档漏掉的方法", realMethods.filter((name) => !mentionedInDoc(name)), []);
 ok("API 文档提到服务端必须复核的校验", apiDoc.includes("服务端") && apiDoc.includes("复核"));
+
+// ── 咨询可行性（第九组）───────────────────────────────────────────────
+// 这个功能的错误代价是「当场答应家长、事后排不出课」，因此判定必须逐条钉死：
+// 尤其「检查的是一串日期而不是一天」这一条，是最容易写错的地方。
+const iqNow = new Date("2026-09-14T10:00:00"); // 周一
+
+const mkInquiry = (over: Partial<Inquiry> = {}): Inquiry => ({
+  id: "iq1",
+  studentName: "咨询学生",
+  grade: "初二",
+  guardian: "138-0000-0000",
+  subject: "初中数学",
+  durationMinutes: 60,
+  intervalWeeks: 1,
+  plannedLessons: 3,
+  startsAt: iqNow.toISOString(),
+  candidates: [{ id: "c1", weekday: 6, start: "10:00" }],
+  preferredTeacherId: "",
+  preferredClassroomId: "",
+  skipDates: [],
+  status: "待确认",
+  note: "",
+  createdAt: iqNow.toISOString(),
+  scheduledLessonIds: [],
+  ...over,
+});
+
+// 日期串：每周一次 / 每两周一次 / 跳过某几周
+eq("每周一次生成 3 个周六",
+  buildDateSeries({ startsAt: iqNow.toISOString(), weekday: 6, intervalWeeks: 1, plannedLessons: 3, skipDates: [] })
+    .map((d) => dateKey(d)),
+  ["2026-09-19", "2026-09-26", "2026-10-03"]);
+eq("每两周一次间隔 14 天",
+  buildDateSeries({ startsAt: iqNow.toISOString(), weekday: 6, intervalWeeks: 2, plannedLessons: 3, skipDates: [] })
+    .map((d) => dateKey(d)),
+  ["2026-09-19", "2026-10-03", "2026-10-17"]);
+eq("跳过的日期会顺延（总节数不变）",
+  buildDateSeries({
+    startsAt: iqNow.toISOString(), weekday: 6, intervalWeeks: 1, plannedLessons: 3,
+    skipDates: ["2026-09-26"],
+  }).map((d) => dateKey(d)),
+  ["2026-09-19", "2026-10-03", "2026-10-10"]);
+eq("起始日之后的第一个周六才算第一次",
+  buildDateSeries({ startsAt: "2026-09-20T00:00:00", weekday: 6, intervalWeeks: 1, plannedLessons: 1, skipDates: [] })
+    .map((d) => dateKey(d)),
+  ["2026-09-26"]);
+
+// 教师匹配：科目名出现在教师可带科目里
+const iqTeachers: Teacher[] = [
+  { id: "it1", name: "数学老师", subjects: ["数学"], role: "", phone: "", active: true },
+  { id: "it2", name: "英语老师", subjects: ["英语"], role: "", phone: "", active: true },
+  { id: "it3", name: "离职数学", subjects: ["数学"], role: "", phone: "", active: false },
+];
+eq("按科目筛教师（在职且科目匹配）",
+  teachersForSubject(iqTeachers, "初中数学").map((t) => t.id), ["it1"]);
+
+const iqRooms: Classroom[] = [
+  { id: "ic1", name: "小教室", kind: "上课用教室", capacity: 4, availability: [], note: "" },
+  { id: "ic2", name: "限时教室", kind: "上课用教室", capacity: 8,
+    availability: [{ id: "r", weekdays: [6], start: "09:00", end: "12:00" }], note: "" },
+];
+const iqLessons: Lesson[] = [
+  { id: "il1", subject: "初中数学", form: "", teacherId: "it1", classroomId: "ic2",
+    studentIds: ["s1"], startsAt: "2026-09-19T10:00:00", durationMinutes: 60,
+    status: "已排", note: "", makeupForLessonId: "" },
+];
+
+/** 用一组固定数据评估一条咨询。 */
+const evalIq = (inquiry: Inquiry, lessons: Lesson[] = [], rooms: Classroom[] = iqRooms) => {
+  const teachers = iqTeachers.filter((t) => t.active);
+  const capacity = new Map<string, number>();
+  for (const teacher of teachers) capacity.set(teacher.id, 0);
+  return inquiry.candidates.map((slot) =>
+    evaluateSlot({ inquiry, slot, teachers, classrooms: rooms, lessons, load: capacity }),
+  );
+};
+
+// 可行：无人占用
+const okReport = evalIq(mkInquiry());
+eq("空档时段判定为可行", okReport[0]?.ok, true);
+eq("给出了教师与场地", okReport[0]?.assignment?.teacherId, "it1");
+ok("给出排课日期预览", (okReport[0]?.dates.length ?? 0) > 0);
+
+// 不可行：老师在同一时段已有课 → 必须报出「挡路的那节课」
+const clashReport = evalIq(mkInquiry({ preferredTeacherId: "it1" }), iqLessons);
+eq("教师冲突判定为不可行", clashReport[0]?.ok, false);
+eq("阻塞类型是教师忙", clashReport[0]?.blockers[0]?.kind, "教师忙");
+eq("阻塞里给出挡路的课节", clashReport[0]?.blockers[0]?.lessonId, "il1");
+ok("阻塞里带上受影响的已有学生（界面要先显示再决定动不动）",
+  (clashReport[0]?.blockers[0]?.studentIds ?? []).includes("s1"));
+
+// 关键：冲突发生在**系列的中间那一节**，也不能漏
+const laterClash: Lesson[] = [
+  { id: "il2", subject: "初中数学", form: "", teacherId: "it1", classroomId: "ic1",
+    studentIds: ["s2"], startsAt: "2026-10-03T10:00:00", durationMinutes: 60,
+    status: "已排", note: "", makeupForLessonId: "" },
+];
+eq("系列中途撞课也要判定为不可行（不是只看第一次）",
+  evalIq(mkInquiry({ preferredTeacherId: "it1" }), laterClash)[0]?.ok, false);
+eq("并指出撞的是哪一天",
+  evalIq(mkInquiry({ preferredTeacherId: "it1" }), laterClash)[0]?.blockers[0]?.date, "2026-10-03");
+
+// 取消的课不占时间
+eq("已取消的课不算冲突",
+  evalIq(mkInquiry({ preferredTeacherId: "it1" }), [{ ...iqLessons[0]!, status: "已取消" }])[0]?.ok,
+  true);
+
+// 教室不开放
+eq("教室在该时段不开放会被报出",
+  evalIq(mkInquiry({ preferredClassroomId: "ic2" }), [{ ...iqLessons[0]!, teacherId: "it2" }])[0]
+    ?.blockers[0]?.kind,
+  "教师忙");
+const closedRoom = evalIq(
+  mkInquiry({ preferredClassroomId: "ic2", candidates: [{ id: "c1", weekday: 6, start: "08:00" }] }),
+);
+eq("教室开放时间之外判定为不可行", closedRoom[0]?.ok, false);
+eq("阻塞类型是教室不开放", closedRoom[0]?.blockers[0]?.kind, "教室不开放");
+
+// 没人能带这门课
+const noTeacher = evalIq(mkInquiry({ subject: "书法" }));
+eq("没人能带这门课会被报出", noTeacher[0]?.blockers[0]?.kind, "无人能带该科目");
+ok("并给出可操作的建议",
+  (noTeacher[0]?.blockers[0]?.detail ?? "").includes("教师页"));
+
+// 最接近的方案：教师被占时，应给出「同一天换个时间」或「换老师」
+const altReport = evalIq(mkInquiry({ preferredTeacherId: "it1" }), iqLessons);
+ok("不可行时给出最接近的方案", (altReport[0]?.alternatives.length ?? 0) > 0);
+ok("方案里说明了改什么",
+  (altReport[0]?.alternatives[0]?.change ?? "").length > 0);
+ok("方案的时段与原时段不同",
+  JSON.stringify(altReport[0]?.alternatives[0]?.slot) !== JSON.stringify(mkInquiry().candidates[0]));
+
+// 多个候选：依次尝试，第一个可行的被推荐
+const twoCandidates = evalIq(
+  mkInquiry({
+    preferredTeacherId: "it1",
+    candidates: [
+      { id: "c1", weekday: 6, start: "10:00" },
+      { id: "c2", weekday: 6, start: "14:00" },
+    ],
+  }),
+  iqLessons,
+);
+eq("第一个候选不可行、第二个可行", [twoCandidates[0]?.ok, twoCandidates[1]?.ok], [false, true]);
+
+// ── 服务层：登记 → 判定 → 采用（一次建整串课）→ 放弃 ────────────────────
+__useStoreForTesting(memory);
+const createdInquiry = await api.inquiries.create({
+  studentName: "咨询自检学生", grade: "初二", guardian: "138-0000-0000",
+  subject: "初中数学", durationMinutes: 60, intervalWeeks: 1, plannedLessons: 3,
+  startsAt: new Date(Date.now() + 3 * 86_400_000).toISOString(),
+  candidates: [{ id: "c1", weekday: 6, start: "10:00" }],
+  preferredTeacherId: "", preferredClassroomId: "", skipDates: [],
+  status: "待确认", note: "",
+});
+ok("咨询能登记", createdInquiry.id !== "");
+const iqReport = await api.inquiries.evaluate(createdInquiry.id);
+ok("服务层能给出可行性报告", iqReport !== null && iqReport.slots.length === 1);
+eq("报告里标出推荐的候选", iqReport?.recommendedSlotId, iqReport?.slots[0]?.ok ? "c1" : "");
+
+if (iqReport?.slots[0]?.ok === true && iqReport.slots[0].assignment !== null) {
+  const accepted = await api.inquiries.accept(createdInquiry.id, {
+    slotId: "c1",
+    teacherId: iqReport.slots[0].assignment.teacherId,
+    classroomId: iqReport.slots[0].assignment.classroomId,
+  });
+  eq("采用方案成功", accepted.ok, true);
+  eq("一次建出整串课（3 节）", accepted.ok ? accepted.lessonIds.length : 0, 3);
+  const inquiryAfter = (await api.inquiries.get(createdInquiry.id))!;
+  eq("线索状态改为已安排", inquiryAfter.status, "已安排");
+  eq("线索记录了生成的课节", inquiryAfter.scheduledLessonIds.length, 3);
+  ok("生成的课都落在约定的星期几与时间",
+    (await Promise.all(accepted.ok ? accepted.lessonIds.map((id) => api.lessons.get(id)) : []))
+      .every((lesson) => lesson !== null && new Date(lesson.startsAt).getDay() === 6));
+  // 清理
+  for (const id of accepted.ok ? accepted.lessonIds : []) await api.lessons.remove(id);
+}
+
+const abandoned = await api.inquiries.abandon(createdInquiry.id, "自检放弃");
+eq("放弃后状态为已放弃", abandoned?.status, "已放弃");
+ok("放弃原因写进备注", (abandoned?.note ?? "").includes("自检放弃"));
+await api.inquiries.remove(createdInquiry.id);
+
+// 挪课建议：给已有课算出可用的新时间
+const moveTarget = (await api.lessons.list()).find((lesson) => lesson.status === "已排");
+if (moveTarget !== undefined) {
+  const moves = await api.lessons.suggestMoves(moveTarget.id);
+  ok("能给出挪课候选", Array.isArray(moves));
+  ok("候选都不与原时间相同",
+    moves.every((move) => move.startsAt !== moveTarget.startsAt));
+}
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();
