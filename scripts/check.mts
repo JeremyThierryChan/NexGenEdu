@@ -162,8 +162,17 @@ ok("案例页有免责说明", cases.notice.includes("家长同意"));
 
 const schedule = getScheduleContent();
 eq("时间安排分组数", schedule.groups.length, 4);
+eq("时间安排分组名", schedule.groups.map((g) => g.title),
+  ["工作日排课", "周末排课", "晚辅导", "全日托"]);
 ok("每组都有时段", schedule.groups.every((g) => g.items.length > 0));
-ok("时间安排含晚托", schedule.groups.some((g) => g.title.includes("晚托")));
+const slots = (title: string) =>
+  schedule.groups.find((g) => g.title === title)?.items.map((i) => `${i.title}|${i.value}`) ?? [];
+eq("工作日排课时段", slots("工作日排课"), ["晚第一节|17:30–19:30", "晚第二节|19:30–21:30"]);
+eq("周末排课时段", slots("周末排课"), [
+  "第一节|08:00–10:00", "第二节|10:00–12:00", "第三节|13:00–15:00",
+  "第四节|15:00–17:00", "第五节|18:00–20:00", "第六节|20:00–22:00",
+]);
+eq("晚辅导时段", slots("晚辅导"), ["小学|17:30–19:30", "初中|18:00–21:00"]);
 
 console.log("\n=== 4. 报价数据 ===");
 const pricing = getPricingData();
