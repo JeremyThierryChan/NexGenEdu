@@ -3,6 +3,7 @@ import { createSeedDatabase } from "./seed";
 import { isWithinAvailability } from "./availability";
 import { CURRENT_VERSION } from "./version";
 import { enrollmentForLesson, remainingOf, remainingTotal } from "./enrollment";
+import { databaseStats, validateImportedDatabase, type ImportOutcome } from "./backup";
 import type { StudentProfile } from "./student-profile";
 import type {
   Assessment,
@@ -50,6 +51,9 @@ import type {
  */
 
 const STORAGE_KEY = "nexgenedu.admin.db.v1";
+
+/** 「导入前」的备份键：导入是唯一能一次性毁掉全部数据的操作，留一颗后悔药。 */
+const BACKUP_KEY = "nexgenedu.admin.db.backup.v1";
 
 // 版本号与变更记录见 lib/backend/version.ts（seed 与迁移必须用同一个值）
 
@@ -897,6 +901,81 @@ export const api = {
       studentCount: db.students.length,
       activeTeacherCount: db.teachers.filter((teacher) => teacher.active).length,
     });
+  },
+
+  /**
+   * 导出整库（供下载备份）。
+   *
+   * 返回的是**深拷贝**：调用方改它不会影响存储里的数据。
+   */
+  async exportDatabase(): Promise<Database> {
+    await delay();
+    return clone(load());
+  },
+
+  /**
+   * 导入整库。
+   *
+   * 三道保险，因为「导入」是唯一能一次性毁掉全部数据的操作：
+   *   1. 先做结构校验，不合格直接拒绝（不碰现有数据）；
+   *   2. 导入前把当前数据存到备份键，随时可以「恢复导入前的数据」；
+   *   3. 通过 migrate() 迁到当前版本，再整体替换。
+   */
+  async importDatabase(text: string): Promise<ImportOutcome> {
+    await delay();
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return { ok: false, error: "文件不是合法的 JSON。" };
+    }
+
+    const validated = validateImportedDatabase(parsed);
+    if (!validated.ok) return { ok: false, error: validated.error };
+
+    // migrate() 是**原地修改**：先记下原始版本，否则下面比较版本时拿到的
+    // 已经是升级后的值，「已升级」的提示永远不会出现（这里踩过一次）
+    const fromVersion = validated.database.version;
+    const migrated = migrate(validated.database);
+    if (migrated === null) {
+      return { ok: false, error: "文件的数据结构无法识别，已保持现状。" };
+    }
+
+    // 备份当前数据（只保留最近一次，避免存储被备份撑满）
+    store.write(BACKUP_KEY, JSON.stringify(load()));
+
+    cache = migrated;
+    persist(cache);
+
+    const stats = databaseStats(cache);
+    const note =
+      fromVersion === stats.version
+        ? `已导入 v${stats.version} 数据`
+        : `已导入并升级 v${fromVersion} → v${stats.version}`;
+    return { ok: true, stats, note };
+  },
+
+  /** 是否存在「导入前的备份」。 */
+  hasBackup(): boolean {
+    return store.read(BACKUP_KEY) !== null;
+  },
+
+  /** 恢复导入前的数据（后悔药）。 */
+  async restoreBackup(): Promise<ImportOutcome> {
+    await delay();
+    const raw = store.read(BACKUP_KEY);
+    if (raw === null) return { ok: false, error: "没有可恢复的备份。" };
+
+    try {
+      const restored = migrate(JSON.parse(raw) as Database);
+      if (restored === null) return { ok: false, error: "备份数据结构无法识别。" };
+      cache = restored;
+      persist(cache);
+      return { ok: true, stats: databaseStats(cache), note: "已恢复导入前的数据" };
+    } catch {
+      return { ok: false, error: "备份已损坏，无法恢复。" };
+    }
   },
 
   /** 清空并重新灌入示例数据（开发与演示用）。 */

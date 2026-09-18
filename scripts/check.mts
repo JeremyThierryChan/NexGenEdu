@@ -42,6 +42,14 @@ import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
 import { weekDays } from "@/lib/backend/format";
 import {
+  createCsv,
+  createIcs,
+  databaseStats,
+  escapeIcsText,
+  icsLocalTime,
+  serializeDatabase,
+} from "@/lib/backend/backup";
+import {
   PROFILE_SECTIONS,
   emptyProfileTable,
   profileCompletion,
@@ -1173,6 +1181,112 @@ const weekClassrooms = new Set(weekLessons.map((lesson) => lesson.classroomId));
 ok("按教室筛选的结果都在本周",
   [...weekClassrooms].every((id) =>
     weekLessons.filter((lesson) => lesson.classroomId === id).length > 0));
+
+// ── 导出与备份（第二组）──────────────────────────────────────────────
+// 导入是唯一能一次性毁掉全部数据的操作，因此这一组的重点全在「坏文件不能洗数据」。
+__useStoreForTesting(memory);
+
+const exported = await api.exportDatabase();
+ok("导出包含全部表", exported.students.length > 0 && Array.isArray(exported.transactions));
+const exportedText = serializeDatabase(exported);
+ok("导出的 JSON 可被解析回同样条数", (() => {
+  const parsed = JSON.parse(exportedText) as typeof exported;
+  return parsed.students.length === exported.students.length;
+})());
+
+// 结构校验：这些文件必须被拒绝（而不是把数据洗掉）
+const rejects: Array<[string, string]> = [
+  ["空对象", "{}"],
+  ["不是 JSON", "这不是 json"],
+  ["数组而不是对象", "[]"],
+  ["缺少 version", JSON.stringify({ students: [], teachers: [], classrooms: [], lessons: [] })],
+  ["未来版本", JSON.stringify({ ...exported, version: CURRENT_VERSION + 1 })],
+  ["缺 classrooms", JSON.stringify({ version: 1, students: [], teachers: [], lessons: [] })],
+  ["记录缺 id", JSON.stringify({ version: 1, students: [{ name: "无 id" }], teachers: [], classrooms: [], lessons: [] })],
+];
+for (const [label, text] of rejects) {
+  const result = await api.importDatabase(text);
+  eq(`拒绝导入：${label}`, result.ok, false);
+}
+
+// 被拒绝之后数据必须原封不动
+eq("拒绝导入后学生数不变", (await api.students.list()).length, exported.students.length);
+
+// 备份后悔药：导入合法文件后可恢复
+const studentsBeforeImport = (await api.students.list()).length;
+const emptyButValid = serializeDatabase({
+  ...exported,
+  students: [],
+  lessons: [],
+  transactions: [],
+});
+const imported = await api.importDatabase(emptyButValid);
+eq("合法文件可以导入", imported.ok, true);
+eq("导入后学生被清空（说明确实替换了）", (await api.students.list()).length, 0);
+ok("导入前自动留了备份", api.hasBackup());
+const restored = await api.restoreBackup();
+eq("可以恢复导入前的数据", restored.ok, true);
+eq("恢复后学生数回到导入前", (await api.students.list()).length, studentsBeforeImport);
+
+// 老版本文件导入时自动升级
+const oldFile = JSON.stringify({
+  version: 2,
+  students: [{
+    id: "s_old", name: "旧文件学生", grade: "初二", guardian: "", subjects: ["初中数学"],
+    remainingLessons: 5, status: "在读", note: "", createdAt: new Date().toISOString(),
+  }],
+  teachers: [], classrooms: [], lessons: [],
+  updatedAt: new Date().toISOString(),
+});
+const upgraded = await api.importDatabase(oldFile);
+eq("旧版本文件导入成功", upgraded.ok, true);
+ok("提示里说明了升级", (upgraded.ok ? upgraded.note : "").includes("升级"));
+const upgradedStudent = (await api.students.get("s_old"))!;
+eq("旧文件的课时被折算成报课记录", remainingTotal(upgradedStudent.enrollments), 5);
+await api.restoreBackup();
+
+// ── ICS 日历文件 ──────────────────────────────────────────────────────
+const icsStart = new Date();
+icsStart.setHours(17, 30, 0, 0);
+const ics = createIcs(
+  [
+    {
+      uid: "lesson-abc@nexgenedu",
+      title: "初中数学 · 一对一定制课",
+      location: "301 教室",
+      description: "教师：陈老师\n备注：带,逗号;分号",
+      startsAt: icsStart.toISOString(),
+      durationMinutes: 90,
+    },
+  ],
+  "陈老师 课表",
+);
+ok("ICS 有开始与结束标记", ics.startsWith("BEGIN:VCALENDAR") && ics.trimEnd().endsWith("END:VCALENDAR"));
+ok("ICS 含一个事件", (ics.match(/BEGIN:VEVENT/g) ?? []).length === 1);
+ok("ICS 时间是本地格式（无 Z）", /DTSTART:\d{8}T\d{6}\r\n/.test(ics));
+ok("ICS 结束时间＝开始 + 时长", ics.includes("DTEND:" + icsLocalTime(
+  new Date(icsStart.getTime() + 90 * 60_000).toISOString(),
+)));
+ok("ICS 转义了逗号与分号", ics.includes("\\,") || ics.includes("\\;"));
+ok("ICS 用 CRLF 换行", ics.includes("\r\n"));
+eq("ICS 转义函数：逗号", escapeIcsText("提高班,周六"), "提高班\\,周六");
+eq("ICS 转义函数：换行", escapeIcsText("第一行\n第二行"), "第一行\\n第二行");
+
+// ── CSV ───────────────────────────────────────────────────────────────
+const csv = createCsv(["姓名", "备注"], [["李同学", '带,逗号与"引号"'], ["王同学", "换\n行"]]);
+ok("CSV 带 BOM（Excel 打开中文不乱码）", csv.startsWith("\uFEFF"));
+ok("CSV 转义了逗号", csv.includes('"带,逗号与""引号"""'));
+ok("CSV 转义了换行", csv.includes('"换\n行"'));
+eq("CSV 行数 = 表头 + 数据行", csv.trimEnd().split("\r\n").length, 3);
+
+// 统计信息（导出确认与界面展示都用它）
+const stats = databaseStats(exported);
+eq("统计里的学生数与数据一致", stats.students, exported.students.length);
+eq("统计里的版本与数据一致", stats.version, exported.version);
+
+// ── 课表导出用的区间与筛选（与课表页口径一致）─────────────────────────
+const icsRange = await api.lessons.listBetween(weekDays(new Date())[0]!, weekDays(new Date())[6]!);
+ok("ICS 导出的数据源能取到本周课程", Array.isArray(icsRange));
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();

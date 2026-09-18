@@ -1,10 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { api, type Classroom, type Lesson, type Teacher } from "@/lib/backend/api";
 import { formatDayLabel, formatTimeRange, dateKey, weekDays } from "@/lib/backend/format";
+import { createIcs, downloadTextFile, stampForFilename } from "@/lib/backend/backup";
 import { cn } from "@/lib/utils/cn";
 
 /**
@@ -180,6 +182,35 @@ export default function AdminTimetablePage() {
         <span className="text-xs text-ink-500">
           {focusName} 本周 {filtered.length} 节 · {Math.round((totalMinutes / 60) * 10) / 10} 小时
         </span>
+        {/* 导出当前焦点的本周课表：老师把它导进手机日历，就不用来后台查课 */}
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={loading || filtered.length === 0}
+          onClick={() => {
+            const ics = createIcs(
+              filtered.map((lesson) => ({
+                uid: `lesson-${lesson.id}@nexgenedu`,
+                title: `${lesson.subject}${lesson.form !== "" ? ` · ${lesson.form}` : ""}`,
+                location:
+                  tab === "teacher"
+                    ? (classrooms.find((item) => item.id === lesson.classroomId)?.name ?? "")
+                    : (teachers.find((item) => item.id === lesson.teacherId)?.name ?? ""),
+                description: tab === "classroom" ? "" : "来自 NexGenEdu 教务后台",
+                startsAt: lesson.startsAt,
+                durationMinutes: lesson.durationMinutes,
+              })),
+              `${focusName} 课表`,
+            );
+            downloadTextFile(
+              `课表-${focusName}-${stampForFilename()}.ics`,
+              ics,
+              "text/calendar",
+            );
+          }}
+        >
+          导出本周课表（ICS）
+        </Button>
       </div>
 
       {/* 本周课表网格 */}
