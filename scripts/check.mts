@@ -468,8 +468,13 @@ eq("联系方式条数", contact.methods.length, 5);
 
 console.log("\n=== 3. 新增页面（案例 / 常见问题 / 时间安排）===");
 const faq = getFaqContent();
-eq("常见问题分组数", faq.groups.map((g) => g.title), ["试课与报名", "课时与收费", "班级与排课", "服务形式"]);
-eq("常见问题总数", faq.count, 17);
+// 分组名是结构（家长按主题找答案），因此固定住；条数会随内容增长，只设下限
+eq("常见问题分组数", faq.groups.map((g) => g.title),
+  ["试课与报名", "课时与收费", "班级与排课", "请假与补课", "老师与教学", "学习过程与反馈", "服务形式", "特殊情况"]);
+ok(`常见问题总数不少于 30（当前 ${faq.count} 条）`, faq.count >= 30);
+ok("每组都有问题", faq.groups.every((group) => group.items.length > 0));
+ok("答案不重复粘贴（每条问题独立）",
+  new Set(faq.groups.flatMap((g) => g.items.map((i) => i.question))).size === faq.count);
 ok("每个问题都有答案", faq.groups.every((g) => g.items.every((i) => i.question.length > 2 && i.answer.length > 10)));
 ok("试课规则答案与业务一致", faq.groups.some((g) => g.items.some((i) => i.answer.includes("满 10 节"))));
 
