@@ -40,7 +40,7 @@ export function CourseColumnCards({
           )}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
             {subgroup.cards.map((card) => (
-              <ColumnCard key={`${subgroup.title}-${card.title}`} card={card} />
+              <CourseColumnCardTile key={`${subgroup.title}-${card.title}`} card={card} />
             ))}
           </div>
         </div>
@@ -88,7 +88,13 @@ function UnavailableBadge() {
   );
 }
 
-function ColumnCard({ card }: { card: CourseColumnCard }) {
+/**
+ * 一张课程卡片（标题 + 阶段标签 + 暂未开放标记）。
+ *
+ * 导出供班型页复用：班型页的「开设这个班型的科目」也用这套卡片，
+ * 保证同一份数据在不同页面上的观感一致。
+ */
+export function CourseColumnCardTile({ card }: { card: CourseColumnCard }) {
   // 整张卡片指向这门课自己的页面
   const href = cardPageHref(card.path);
   const hasTags = card.tags.length > 0;

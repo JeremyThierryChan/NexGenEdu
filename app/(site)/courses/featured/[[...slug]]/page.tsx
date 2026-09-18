@@ -1,14 +1,15 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { CourseColumnCardTile } from "@/components/courses/CourseColumns";
 import { CourseTree } from "@/components/courses/CourseTree";
 import { PageHeader } from "@/components/site/PageHeader";
 import { Breadcrumbs } from "@/components/ui/Breadcrumbs";
 import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
 import { findFeaturedCourse, getAllFeaturedCourses, getFeaturedContent } from "@/lib/data/featured";
-import { getCardsForForm } from "@/lib/data/site";
+import { getFormSubjectGroups } from "@/lib/data/site";
 import { renderMarkdown } from "@/lib/markdown";
-import { COURSES_HREF, cardPageHref, courseHref, courseTrail } from "@/lib/site/featured-routes";
+import { COURSES_HREF, courseHref, courseTrail } from "@/lib/site/featured-routes";
 import Link from "next/link";
 
 /**
@@ -121,11 +122,11 @@ export default async function FeaturedCoursePage({ params }: PageProps) {
    * 反向关联：这个班型下有哪些学科开设。
    * 关系来自课程卡片行里的 `· 班型:`，所以卡片上改了班型，这里自动跟着变。
    */
-  const subjects = getCardsForForm(course.name);
-  const subjectsByColumn = new Map<string, typeof subjects>();
-  for (const item of subjects) {
-    subjectsByColumn.set(item.column, [...(subjectsByColumn.get(item.column) ?? []), item]);
-  }
+  const subjectGroups = getFormSubjectGroups(course.name);
+  const subjectCount = subjectGroups.reduce(
+    (total, group) => total + group.subgroups.reduce((n, sub) => n + sub.cards.length, 0),
+    0,
+  );
 
   return (
     <>
@@ -179,37 +180,6 @@ export default async function FeaturedCoursePage({ params }: PageProps) {
             </div>
           </div>
 
-          {/* 侧栏：这个班型下有哪些学科 */}
-          {subjects.length > 0 && (
-            <aside className="rounded-lg border border-ink-200 bg-white p-5">
-              <h2 className="text-sm font-medium text-ink-900">
-                开设这个班型的科目
-              </h2>
-              <p className="mt-2 text-xs leading-relaxed text-ink-500">
-                共 {subjects.length} 门课，按栏目分组。
-              </p>
-              <div className="mt-4 space-y-4">
-                {[...subjectsByColumn].map(([column, items]) => (
-                  <div key={column}>
-                    <p className="text-xs font-medium text-ink-500">{column}</p>
-                    <ul className="mt-1.5 space-y-1.5">
-                      {items.map((item) => (
-                        <li key={item.card.path}>
-                          <Link
-                            href={cardPageHref(item.card.path)}
-                            className="text-sm text-brand-700 transition-colors hover:text-brand-800"
-                          >
-                            {item.card.title} →
-                          </Link>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ))}
-              </div>
-            </aside>
-          )}
-
           {/* 侧栏：下级课程 */}
           {course.children.length > 0 && (
             <aside className="rounded-lg border border-ink-200 bg-white p-5">
@@ -229,6 +199,51 @@ export default async function FeaturedCoursePage({ params }: PageProps) {
             </aside>
           )}
         </Section>
+
+        {/*
+          开设这个班型的科目：32 门课平铺成一列会很长、不好找，
+          因此按「阶段（栏目）→ 子栏目」分组，用与课程总览一致的卡片网格。
+        */}
+        {subjectGroups.length > 0 && (
+          <Section
+            className="border-t border-ink-200"
+            title="开设这个班型的科目"
+            description={`共 ${subjectCount} 门课，按阶段分组；点卡片进入该科目的课程内容。`}
+          >
+            <div className="space-y-9">
+              {subjectGroups.map((group) => (
+                <section key={group.column}>
+                  <h3 className="mb-5 text-lg font-medium text-ink-900">
+                    <Link
+                      href={group.columnHref}
+                      className="transition-colors hover:text-brand-700"
+                    >
+                      {group.column} →
+                    </Link>
+                  </h3>
+                  <div className="space-y-6">
+                    {group.subgroups.map((subgroup) => (
+                      <div key={subgroup.title}>
+                        {/* 只有一个分组、且组名与栏目名相同时不重复标题 */}
+                        {subgroup.title !== "" &&
+                          !(group.subgroups.length === 1 && subgroup.title === group.column) && (
+                            <h4 className="mb-3 text-sm font-medium text-ink-700">
+                              {subgroup.title}
+                            </h4>
+                          )}
+                        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+                          {subgroup.cards.map((card) => (
+                            <CourseColumnCardTile key={card.path} card={card} />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </Section>
+        )}
       </Container>
     </>
   );

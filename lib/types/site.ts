@@ -316,6 +316,15 @@ export type CourseColumnPageData = {
   otherColumns: Array<{ title: string; href: string }>;
 };
 
+/** 班型页里的「开设这个班型的科目」，按阶段（栏目 → 子栏目）分组。 */
+export type FormSubjectGroup = {
+  /** 栏目名（小学课内 / 高中课内 / …）。 */
+  column: string;
+  /** 该栏目页路径。 */
+  columnHref: string;
+  subgroups: Array<{ title: string; cards: CourseColumnCard[] }>;
+};
+
 /** 课程卡片页的全部数据（/courses/<路径>）。 */
 export type CoursePageData = {
   card: CourseColumnCard;

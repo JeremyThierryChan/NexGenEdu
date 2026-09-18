@@ -41,13 +41,26 @@ const siteLink = new RegExp(
   `href="${basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/(courses|quote|faq|cases|schedule)/"`,
 );
 
-/** 产物样式表全文（压缩后属性值的引号会被去掉，因此匹配不带引号）。 */
+/**
+ * 产物样式表全文（压缩后属性值的引号会被去掉，因此匹配不带引号）。
+ *
+ * 注意：css 目录下可能还有子目录（Next 会按路由分组生成，如 css/app/），
+ * 因此必须递归收集，不能直接对目录项 readFileSync —— 那会抛 EISDIR。
+ */
 function builtCss() {
   const dir = path.join(root, "out", "_next", "static", "css");
   if (!existsSync(dir)) return "";
-  return readdirSync(dir)
-    .map((name) => readFileSync(path.join(dir, name), "utf8"))
-    .join("\n");
+
+  const collect = (current) =>
+    readdirSync(current, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) return collect(full);
+      return entry.isFile() && entry.name.endsWith(".css")
+        ? [readFileSync(full, "utf8")]
+        : [];
+    });
+
+  return collect(dir).join("\n");
 }
 
 const css = builtCss();

@@ -21,6 +21,7 @@ import {
   getAllCourseColumnSlugs,
   getAllCoursePageSlugs,
   getCardsForForm,
+  getFormSubjectGroups,
   getCourseColumnPageData,
   getCourseColumns,
   getCoursePageData,
@@ -218,6 +219,15 @@ const reverseMismatch = formNames.flatMap((form) => {
   return [...missing.map((p) => `${form} 少了 ${p}`), ...extra.map((p) => `${form} 多了 ${p}`)];
 });
 eq("班型页列出的科目与卡片上写的班型一致", reverseMismatch, []);
+// 班型页按阶段分组展示：分组结果必须与卡片本身一一对应
+const grouped = getFormSubjectGroups("一对一定制课").flatMap((g) =>
+  g.subgroups.flatMap((sub) => sub.cards.map((card) => card.path)),
+);
+eq("班型页分组展示不漏卡片",
+  allCards.filter((c) => c.forms.includes("一对一定制课") && !grouped.includes(c.path)).map((c) => c.title),
+  []);
+ok("班型页分组都带栏目页路径",
+  getFormSubjectGroups("一对一定制课").every((g) => g.columnHref.startsWith("/courses/")));
 ok("四种按人数的班型都有关联科目",
   ["一对一定制课", "一对二 / 一对三小组课", "一对多小班课", "9 人以上大班课"]
     .every((form) => getCardsForForm(form).length >= 20));

@@ -7,6 +7,7 @@ import {
   type PageBlock,
   type Section,
 } from "@/lib/data/content";
+import { COURSES_HREF } from "@/lib/site/featured-routes";
 import type {
   AboutContent,
   ElectiveCourse,
@@ -17,6 +18,7 @@ import type {
   CourseColumnPageData,
   CoursePageData,
   CourseStage,
+  FormSubjectGroup,
   CourseTag,
   HomeContent,
   SectionHeading,
@@ -622,6 +624,34 @@ export function getCardsForForm(
         .map((card) => ({ card, column: column.title, subgroup: subgroup.title })),
     ),
   );
+}
+
+/**
+ * 班型页里的「开设这个班型的科目」，按阶段分组。
+ *
+ * 页面用卡片网格展示，而卡片是横向铺开的 —— 32 门课平铺成一列会很长、
+ * 不好找，因此这里按「栏目 → 子栏目」组织，页面只需照着渲染。
+ */
+export function getFormSubjectGroups(form: string): FormSubjectGroup[] {
+  const groups: FormSubjectGroup[] = [];
+
+  for (const column of getCourseColumns()) {
+    const subgroups: FormSubjectGroup["subgroups"] = [];
+    for (const subgroup of column.subgroups) {
+      const cards = subgroup.cards.filter((card) => card.forms.includes(form));
+      if (cards.length > 0) subgroups.push({ title: subgroup.title, cards });
+    }
+    if (subgroups.length === 0) continue;
+
+    const path = COLUMN_PATHS[column.title];
+    groups.push({
+      column: column.title,
+      columnHref: path !== undefined ? `/courses/${path}` : COURSES_HREF,
+      subgroups,
+    });
+  }
+
+  return groups;
 }
 
 /** 全部栏目页路径（静态导出用）。 */
