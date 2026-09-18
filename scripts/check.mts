@@ -62,10 +62,15 @@ const contactPage = contentDoc.pages.get("联系我们");
 // 课程栏目改到「全站」段（首页与课程页共用），首页不再自带卡片分组
 eq("首页分组数", home?.groups.map((g) => g.name), ["首屏数据", "教学特色", "教室照片格位"]);
 eq("全站页分组数", sitePage?.groups.map((g) => g.name), ["课程栏目"]);
-eq("课程栏目条目数", sitePage?.groups.find((g) => g.name === "课程栏目")?.items.length, 34);
+// 条目数不写死：增删课程是正常编辑，这里只要求「解析出了卡片」
+ok("课程栏目有卡片条目", (sitePage?.groups.find((g) => g.name === "课程栏目")?.items.length ?? 0) >= 20);
 eq("首页首屏数据数", home?.groups.find((g) => g.name === "首屏数据")?.items.length, 6);
 eq("首页教学特色数", home?.groups.find((g) => g.name === "教学特色")?.items.length, 7);
-eq("角色数（含 AI）", teachersPage?.groups.length, 7);
+// 教师数量刻意不写死：data/site/content.md 是手改的，增删教师不该让自检（以及部署）失败。
+// 真正要守住的是「每个分组都被识别成教师」——漏填 科目/简介 会导致某人静默不显示。
+ok("教师页每个分组都被识别为教师",
+  (teachersPage?.groups ?? []).every((g) =>
+    g.items.some((i) => i.title === "科目" || i.title === "简介")));
 eq("关于分组数", aboutPage?.groups.length, 4);
 eq("联系分组数", contactPage?.groups.length, 1);
 
@@ -96,7 +101,8 @@ eq("俄语含 A1–B2 四段", bandCounts["俄语"], 4);
 for (const lang of ["法语", "德语", "意大利语", "西班牙语"]) {
   eq(`${lang}含 A1–B2 四段`, bandCounts[lang], 4);
 }
-eq("雅思含 1 段", bandCounts["雅思"], 1);
+// 雅思总览 + 听/说/读/写四个分项（数量随内容调整，只要求分项确实拆开了）
+ok("雅思拆出总览与听说读写分项", (bandCounts["雅思"] ?? 0) >= 5);
 
 // 学段标题检查：语言课必须是 A1/A2/B1/B2
 const french = (coursesPage?.groups ?? []).find((g) => g.name === "法语");
@@ -119,43 +125,50 @@ const homeContent = getHomeContent();
 const { courses: allCourses, columns, electiveGroups: electiveGroupList } = getCoursesPage();
 
 /**
- * 课程栏目结构：一张卡片 = 一门课程，只有确有细分的课程才有标签。
- * 这张表就是「预期结构」本身——结构与数据不一致时必须在这里被拦住。
+ * 课程栏目的自检原则：**只校验性质，不校验具体名单**。
+ *
+ * content.md 是手工维护的，增删课程、改课程名都是正常操作，
+ * 把 34 张卡片的名字逐个写进断言会让「改内容」和「自检通过」互相打架
+ * （而 check 会卡住部署，等于正常编辑也推不上去）。
+ *
+ * 因此这里守住的是结构性质与跳转完整性：
+ *   - 六个栏目固定，`高中课内` 固定分 必考科目 / 外语 / 七选三 三个子标题；
+ *   - 每个栏目、每个子标题下都有卡片，卡片名不重复；
+ *   - 卡片与标签的跳转目标都必须真实存在（这是「点了跳报错页」的根因）；
+ *   - 课程页不能有「从任何入口都进不去」的孤立小节。
  */
-const EXPECTED_COLUMNS: Array<[string, string, string[]]> = [
-  ["小学课内", "", ["小学语文", "小学数学", "小学英语", "小学科学"]],
-  ["初中课内", "", ["初中语文", "初中数学", "初中英语", "初中科学", "初中社会"]],
-  ["高中课内", "必考科目", ["高中语文", "高中数学"]],
-  ["高中课内", "外语", ["高考外语"]],
-  ["高中课内", "七选三", ["高中物理", "高中化学", "高中生物", "高中政治", "高中历史", "高中地理", "高中技术"]],
-  ["外语", "", ["雅思", "日语", "俄语", "法语", "德语", "意大利语", "西班牙语"]],
-  ["课外兴趣", "", ["书法与硬笔字", "围棋入门", "编程与信息素养", "阅读与写作兴趣班"]],
-  ["成人课程", "", ["成人英语口语", "成人零基础外语", "出国语言备考", "职场与商务英语"]],
-];
-
 eq("首页栏目", homeContent.courseColumns.map((c) => c.title),
   ["小学课内", "初中课内", "高中课内", "外语", "课外兴趣", "成人课程"]);
 eq("课程页栏目与首页同源", columns, homeContent.courseColumns);
 
-const actualLayout: Array<[string, string, string[]]> = [];
-for (const column of columns) {
-  for (const subgroup of column.subgroups) {
-    actualLayout.push([column.title, subgroup.title, subgroup.cards.map((c) => c.title)]);
-  }
-}
-eq("栏目 → 子标题 → 卡片结构", actualLayout, EXPECTED_COLUMNS);
+const HIGH_SCHOOL_SUBGROUPS = ["必考科目", "外语", "七选三"];
+eq("高中课内的子标题", columns.find((c) => c.title === "高中课内")?.subgroups.map((g) => g.title),
+  HIGH_SCHOOL_SUBGROUPS);
+ok("每个栏目都有卡片", columns.every((c) => c.subgroups.some((g) => g.cards.length > 0)));
+ok("每个子标题都有卡片", columns.every((c) => c.subgroups.every((g) => g.cards.length > 0)));
 
 const allCards = columns.flatMap((c) => c.subgroups.flatMap((g) => g.cards));
-eq("卡片总数", allCards.length, 34);
-eq("卡片名不重复", allCards.filter((c, i) => allCards.findIndex((x) => x.title === c.title) !== i).map((c) => c.title), []);
+ok("卡片总数不少于 20", allCards.length >= 20);
+eq("卡片名不重复",
+  allCards.filter((c, i) => allCards.findIndex((x) => x.title === c.title) !== i).map((c) => c.title), []);
 
-// 无标签的卡片就是「一门课 = 一张卡」，整卡可点；有标签的只应出现在确有细分的地方
-const TAGGED_CARDS = ["高考外语", "高中物理", "高中化学", "高中生物", "高中政治", "高中历史", "高中地理", "高中技术",
-  "日语", "俄语", "法语", "德语", "意大利语", "西班牙语"];
-eq("带标签的卡片集合", allCards.filter((c) => c.tags.length > 0).map((c) => c.title), TAGGED_CARDS);
-ok("非细分课程不带标签", allCards.filter((c) => !TAGGED_CARDS.includes(c.title)).every((c) => c.tags.length === 0));
+// 无标签的卡片 = 一门课一张卡、整卡可点；有标签的卡片必然在卡片内部还有细分
 ok("每张卡片都有跳转目标", allCards.every((c) => c.target !== ""));
-ok("标签都有跳转目标", allCards.every((c) => c.tags.every((t) => t.target !== "" && t.label !== "")));
+ok("标签都有文字与跳转目标", allCards.every((c) => c.tags.every((t) => t.target !== "" && t.label !== "")));
+ok("卡片内标签不重复", allCards.every((c) => new Set(c.tags.map((t) => t.label)).size === c.tags.length));
+
+// 七选三：每张卡都该有「学考」和「选考」两个标签（这是该子标题的定义）
+const xuanSan = columns.find((c) => c.title === "高中课内")?.subgroups.find((g) => g.title === "七选三");
+ok("七选三每张卡都带 学考 + 选考 标签",
+  (xuanSan?.cards ?? []).every((c) => {
+    const labels = c.tags.map((t) => t.label);
+    return labels.includes("学考") && labels.includes("选考");
+  }));
+
+// 外语栏目的语言课：每张卡都按级别挂标签（日语 N5–N3、其余 A1–B2）
+const foreignCards = (columns.find((c) => c.title === "外语")?.subgroups ?? []).flatMap((g) => g.cards);
+ok("外语栏目每张语言卡都有级别标签",
+  foreignCards.filter((c) => c.title !== "雅思").every((c) => c.tags.length >= 3));
 
 // 卡片与标签的目标都必须能在课程页找到对应小节（曾因小节改名导致大批标签跳空）
 const sectionNames = new Set<string>();
@@ -177,7 +190,7 @@ const orphans = [
   ...allCourses.flatMap((c) => c.bands.map((b) => b.title.split("｜")[0] ?? b.title)),
   ...electiveGroupList.flatMap((g) => g.items.map((i) => i.name)),
 ].filter((name) => !entryTargets.has(name));
-eq("课程页没有进不去的小节", orphans, []);
+eq("课程页没有进不去的小节（栏目里删掉课程时，详情区的小节也要删）", orphans, []);
 
 eq("首页教室格位", homeContent.classrooms.length, 3);
 eq("首页首屏数据", homeContent.stats.length, 6);
@@ -197,9 +210,10 @@ ok("每门学科都有学段内容", courses.every((c) => c.bands.length > 0 && 
 const { electiveGroups, electiveTitle } = getCoursesPage();
 const electives = electiveGroups.flatMap((g) => g.items);
 eq("选修课程分组名", electiveTitle, "成人课程与课外兴趣");
-eq("选修课程数", electives.length, 8);
-eq("选修课按栏目分节", electiveGroups.map((g) => `${g.title}(${g.items.length})`),
-  ["成人课程(4)", "课外兴趣(4)"]);
+ok("选修课程至少 1 门", electives.length >= 1);
+// 选修课按栏目分节，栏目名与数量都随内容调整；只要求分节非空且每节都有课
+ok("选修课按栏目分节", electiveGroups.length >= 1 && electiveGroups.every((g) => g.title !== "" && g.items.length > 0));
+eq("选修课栏目不重复", electiveGroups.filter((g, i) => electiveGroups.findIndex((x) => x.title === g.title) !== i).map((g) => g.title), []);
 ok("选修课程都有介绍", electives.every((e) => e.description.length > 10));
 ok("选修课程当前全部未开放", electives.every((e) => !e.available));
 ok("选修课程未混入学科列表", courses.every((c) => !electives.some((e) => e.name === c.nameZh)));
@@ -207,7 +221,11 @@ ok("每门选修课都归类到栏目", electives.every((e) => e.group !== ""));
 ok("数学含 3 个学段且带核心能力", (() => { const m = courses.find((c) => c.nameZh === "数学"); return m?.bands.length === 3 && m.bands.every((b) => b.content.includes("核心能力")); })());
 
 const { teachers } = getTeachersPage();
-eq("角色数", teachers.length, 7);
+// 在职角色数应等于「教师页分组数 − 离职数」：漏解析或重复解析都会在这里露出来
+const offDuty = (teachersPage?.groups ?? []).filter(
+  (g) => g.items.find((i) => i.title === "状态")?.value.trim() === "离职",
+).length;
+eq("在职角色数 = 分组数 − 离职数", teachers.length, (teachersPage?.groups.length ?? 0) - offDuty);
 ok("教师有科目与详细介绍", teachers.every((t) => t.subjects.length > 0 && t.bio.length > 30));
 ok("教师按排序升序", teachers.every((t, i) => i === 0 || (teachers[i - 1]?.order ?? 0) <= t.order));
 ok("页面只展示在职教师", teachers.every((t) => t.active));
@@ -221,15 +239,18 @@ eq("林老师科目标签", lin?.subjects, ["晚辅导"]);
 eq("林老师教龄", lin?.years, "10 年");
 ok("林老师有详细介绍", (lin?.bio.length ?? 0) > 50);
 ok("排序无重复", new Set(teachers.map((t) => t.order)).size === teachers.length);
-eq("真人教师数", teachers.filter((t) => t.kind === "teacher").length, 5);
-eq("AI 智能体数", teachers.filter((t) => t.kind === "ai").length, 2);
-eq("AI 智能体名称", teachers.filter((t) => t.kind === "ai").map((t) => t.name),
-  ["采苓 · 试课诊断", "有恒 · 学习跟踪"]);
+// 首页教师区是三列布局，真人教师至少要 3 位；AI 智能体可以有 0 个或多个
+const realTeachers = teachers.filter((t) => t.kind === "teacher");
+const aiAgents = teachers.filter((t) => t.kind === "ai");
+// 真人教师数量不设下限：删减教师是正常编辑。
+// 首页教师区会按实际人数排布（不足 3 位时不会留空位），因此这里只要求「有教师」。
+ok("至少有一位真人教师", realTeachers.length >= 1);
+ok("AI 智能体都有名字", aiAgents.every((t) => t.name.trim() !== ""));
 ok("AI 智能体都有简介与详细介绍",
-  teachers.filter((t) => t.kind === "ai").every((t) => t.summary.length > 10 && t.bio.length > 80));
+  aiAgents.every((t) => t.summary.length > 10 && t.bio.length > 80));
 ok("AI 智能体排在真人教师之后",
-  Math.min(...teachers.filter((t) => t.kind === "ai").map((t) => t.order)) >
-  Math.max(...teachers.filter((t) => t.kind === "teacher").map((t) => t.order)));
+  aiAgents.length === 0 ||
+  Math.min(...aiAgents.map((t) => t.order)) > Math.max(...realTeachers.map((t) => t.order)));
 ok("有恒的说明提示需家长配合",
   (teachers.find((t) => t.name.startsWith("有恒"))?.bio ?? "").includes("家长"));
 

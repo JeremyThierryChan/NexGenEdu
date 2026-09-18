@@ -100,6 +100,26 @@ export function getSiteBrand(): SiteBrand {
 // ── 课程栏目（首页与课程页共用） ──────────────────────────────────────────
 
 /**
+ * 课程页上真实存在的锚点集合：学科名 + 小节名（取「｜」之前）+ 选修课名。
+ *
+ * 用来决定「卡片标题点哪里」——卡片代表一门课，优先指向这门课自己的说明；
+ * 只有当这门课没有独立说明（例如「高中物理」拆成了学考/选考两节）时，
+ * 才退回到它的第一个标签。
+ */
+function courseSectionNames(): Set<string> {
+  const page = getPageBlock("课程");
+  const names = new Set<string>();
+  for (const group of page.groups) {
+    // 带「｜」子条目的分组是学科：分组名本身就是详情区的锚点
+    if (group.children.some((child) => child.name.includes("｜"))) names.add(group.name);
+    for (const child of group.children) {
+      names.add((child.name.split("｜")[0] ?? child.name).trim());
+    }
+  }
+  return names;
+}
+
+/**
  * 课程栏目结构：`栏目 → 子标题 → 卡片`。
  *
  * 数据格式（content.md「页面: 全站 → ### 课程栏目」）：
@@ -112,6 +132,7 @@ export function getSiteBrand(): SiteBrand {
  */
 export function getCourseColumns(): CourseColumn[] {
   const page = getPageBlock("全站");
+  const sections = courseSectionNames();
   const columns: CourseColumn[] = [];
 
   for (const item of getGroup(page, "课程栏目").items) {
@@ -135,8 +156,8 @@ export function getCourseColumns(): CourseColumn[] {
     const card: CourseColumnCard = {
       title,
       tags,
-      // 有标签时卡片本身指向第一个标签；无标签时指向与卡片同名的小节
-      target: tags[0]?.target ?? title,
+      // 这门课自己有说明小节就指向它；否则退回到第一个标签（七选三这类没有总览小节）
+      target: sections.has(title) ? title : (tags[0]?.target ?? title),
     };
 
     let column = columns.find((c) => c.title === columnTitle);
