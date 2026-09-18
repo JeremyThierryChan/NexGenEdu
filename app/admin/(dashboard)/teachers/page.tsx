@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { Panel, TextField } from "@/components/admin/AdminFields";
+import { MultiSelect } from "@/components/admin/MultiSelect";
+import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { api, type Lesson, type Teacher } from "@/lib/backend/api";
@@ -269,7 +271,12 @@ function TeacherForm({
   const editing = teacher !== undefined;
   const [name, setName] = useState(teacher?.name ?? "");
   const [role, setRole] = useState(teacher?.role ?? "");
-  const [subjects, setSubjects] = useState((teacher?.subjects ?? []).join("、"));
+  const [subjects, setSubjects] = useState<string[]>(teacher?.subjects ?? []);
+  /*
+   * 可带科目用复选下拉：候选来自课程库（网站课程 + 机构自己加的课），
+   * 不再让人手打 —— 手打最容易出现「围棋」与「围棋课」这种两个名字的同一门课。
+   */
+  const { options: subjectOptions } = useSubjectOptions();
   const [phone, setPhone] = useState(teacher?.phone ?? "");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
@@ -287,10 +294,7 @@ function TeacherForm({
     const payload = {
       name: name.trim(),
       role: role.trim(),
-      subjects: subjects
-        .split(/[、,，]/)
-        .map((item) => item.trim())
-        .filter((item) => item !== ""),
+      subjects: subjects.map((item) => item.trim()).filter((item) => item !== ""),
       phone: phone.trim(),
       active: teacher?.active ?? true,
     };
@@ -318,12 +322,16 @@ function TeacherForm({
           onChange={(event) => setRole(event.target.value)}
           placeholder="例如 全科教师"
         />
-        <TextField
+        <MultiSelect
           label="可带科目"
-          hint="顿号或逗号分隔"
+          hint="从课程库里勾选（排课时只列这些科目）"
+          options={subjectOptions.map((option) => ({
+            value: option.name,
+            group: option.category === "" ? undefined : option.category,
+          }))}
           value={subjects}
-          onChange={(event) => setSubjects(event.target.value)}
-          placeholder="数学、物理"
+          onChange={setSubjects}
+          placeholder="点击勾选可带科目"
         />
         <TextField
           label="联系方式"

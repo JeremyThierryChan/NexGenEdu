@@ -7,6 +7,40 @@
 
 import type { PricingConfig } from "./pricing";
 
+/** 课程来源：网站内容里的卡片，还是后台自己加的。 */
+export const COURSE_ORIGINS = ["网站", "后台"] as const;
+export type CourseOrigin = (typeof COURSE_ORIGINS)[number];
+
+/** 课程状态：开放（可以排课）/ 暂未开放（先建着，不排课）。 */
+export const COURSE_STATUSES = ["开放", "暂未开放"] as const;
+export type CourseStatus = (typeof COURSE_STATUSES)[number];
+
+/**
+ * 课程库里的一门课。
+ *
+ * 它是后台的**课程台账**：排课的科目、教师可带科目、报课记录里的科目都按名字引用它。
+ * 网站上的课程卡片会自动进来（`origin: "网站"`），机构自己加的课是 `origin: "后台"`。
+ *
+ * 边界：在后台加课程**不会**让宣传网站上多出一张卡片 —— 网站是静态内容，
+ * 要上线得改 `data/site/content.md`（见内容维护手册）。后台的课程库解决的是
+ * 「这门课要能排课、能记课时」，不是「这门课要在网站上展示」。
+ */
+export type Course = {
+  /** id：网站课程用 `course-site-<卡片路径>`（稳定，重复同步不会重复添加）。 */
+  id: string;
+  /** 课程名（唯一）：排课科目、教师可带科目、报课科目都用这个名字。 */
+  name: string;
+  /** 分类：网站栏目名，或后台自定义（如「兴趣才艺」）。 */
+  category: string;
+  /** 可开班型（取自特色课程的班型名）；空数组表示还没填。 */
+  forms: string[];
+  origin: CourseOrigin;
+  status: CourseStatus;
+  note: string;
+  /** 建档时间（ISO）；网站同步进来的课程为空串。 */
+  createdAt: string;
+};
+
 /** 学生档案。 */
 export type Student = {
   id: string;
@@ -403,6 +437,8 @@ export type Database = {
   logs: OperationLog[];
   /** 咨询线索。 */
   inquiries: Inquiry[];
+  /** 课程库：后台的课程台账（网站课程 + 后台新增）。 */
+  courses: Course[];
   /**
    * 报价配置（基础价、科目系数、班级系数、计费规则）。
    *

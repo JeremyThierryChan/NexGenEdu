@@ -2826,6 +2826,109 @@ eq("升级后版本号是当前版本",
 __useStoreForTesting(memory);
 eq("主存储的报价配置未被自检改坏", (await api.pricing.get()).source, PRICING_SOURCE_CONTENT);
 
+console.log("\n=== 9. 课程库（课程台账）===");
+
+/*
+ * 课程名是**引用键**：排课科目、教师可带科目、报课科目都按名字记。
+ * 因此这一组守三件事：网站课程要自动进来、机构自己加的课要能立刻用上、
+ * 重名与「删掉网站课程」这两件会造成对不上账的事必须拦住。
+ */
+__useStoreForTesting(memory);
+
+const pbLibrary = await api.courses.list();
+ok(`课程库从网站内容播种（${pbLibrary.length} 门，至少 20 门）`, pbLibrary.length >= 20);
+ok("网站课程都标为「网站」来源", pbLibrary.every((course) => course.origin === "网站"));
+ok("每门网站课程都有分类", pbLibrary.every((course) => course.category.trim() !== ""));
+ok("网站课程的卡片班型被带进来",
+  pbLibrary.some((course) => course.forms.length > 0));
+
+const pbOptions = await api.courses.options();
+ok(`科目候选非空（${pbOptions.length} 项）`, pbOptions.length >= 20);
+eq("科目候选里没有重复名字",
+  pbOptions.filter((option, index) => pbOptions.findIndex((item) => item.name === option.name) !== index),
+  []);
+ok("科目候选带分类（下拉要按栏目分组）", pbOptions.every((option) => option.category !== ""));
+
+// 机构自己加一门网站上还没有的课：围棋
+const pbWeiqi = await api.courses.create({
+  name: "围棋", category: "兴趣才艺", forms: ["一对一定制课"], origin: "后台",
+  status: "开放", note: "自检用", createdAt: new Date().toISOString(),
+});
+eq("新建课程的来源是「后台」", pbWeiqi.origin, "后台");
+ok("新课程立刻出现在科目候选里（排课马上能选到）",
+  (await api.courses.options()).some((option) => option.name === "围棋"));
+ok("新课程出现在课程库统计里",
+  (await api.courses.summary()).fromAdmin >= 1);
+
+// 重名必须拦住：两门「围棋」会让课时扣到哪一门说不清
+let pbDupRejected = false;
+try {
+  await api.courses.create({
+    name: "围棋", category: "兴趣才艺", forms: [], origin: "后台",
+    status: "开放", note: "", createdAt: new Date().toISOString(),
+  });
+} catch {
+  pbDupRejected = true;
+}
+ok("同名课程被拒绝", pbDupRejected);
+let pbEmptyRejected = false;
+try {
+  await api.courses.create({
+    name: "  ", category: "兴趣才艺", forms: [], origin: "后台",
+    status: "开放", note: "", createdAt: new Date().toISOString(),
+  });
+} catch {
+  pbEmptyRejected = true;
+}
+ok("课程名为空被拒绝", pbEmptyRejected);
+
+// 网站来源的课程不能删（删了下次同步又回来），但可以设为暂未开放
+const pbSiteCourse = pbLibrary[0]!;
+let pbSiteRemoveRejected = false;
+try {
+  await api.courses.remove(pbSiteCourse.id);
+} catch {
+  pbSiteRemoveRejected = true;
+}
+ok("网站来源的课程不能删除", pbSiteRemoveRejected);
+eq("网站课程可以设为暂未开放",
+  (await api.courses.update(pbSiteCourse.id, { status: "暂未开放" }))?.status, "暂未开放");
+eq("改回开放",
+  (await api.courses.update(pbSiteCourse.id, { status: pbSiteCourse.status }))?.status, pbSiteCourse.status);
+
+// 后台新增的课程可以删
+eq("后台新增的课程可以删除", await api.courses.remove(pbWeiqi.id), true);
+ok("删除后不再出现在科目候选里",
+  !(await api.courses.options()).some((option) => option.name === "围棋"));
+
+// 从网站同步：只增不改、可重复执行
+const pbSync = await api.courses.syncFromSite();
+eq("重复同步不会重复添加", pbSync.added, []);
+eq("同步后的总数与课程库一致", pbSync.total, (await api.courses.list()).length);
+
+// 教师可带科目直接存课程名（含后台新增的课）
+const pbTeacher = await api.teachers.create({
+  name: "自检老师", role: "", subjects: ["初中数学", "围棋"], phone: "", active: true,
+});
+eq("教师可带科目可以写后台新增的课程名", pbTeacher.subjects, ["初中数学", "围棋"]);
+await api.teachers.remove(pbTeacher.id);
+
+// 老库（v11 没有课程表）升级后要按网站内容补齐，否则科目候选会空
+const pbV11Store = createMemoryStore();
+__useStoreForTesting(pbV11Store);
+const pbV11 = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown>;
+delete pbV11.courses;
+pbV11.version = 11;
+pbV11Store.write("nexgenedu.admin.db.v1", JSON.stringify(pbV11));
+const pbMigratedCourses = await api.courses.list();
+eq("v11 老库升级后课程库按网站内容补齐", pbMigratedCourses.length, pbLibrary.length);
+eq("升级后版本号是当前版本",
+  JSON.parse(pbV11Store.read("nexgenedu.admin.db.v1") ?? "{}").version, CURRENT_VERSION);
+
+// 收尾：切回主存储
+__useStoreForTesting(memory);
+eq("主存储的课程库未被自检改坏", (await api.courses.list()).length, pbLibrary.length);
+
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();
 __useSessionStoreForTesting(sessionMemory);

@@ -13,9 +13,10 @@ import {
   type Student,
   type Teacher,
 } from "@/lib/backend/api";
-import { getFormOptions, getSubjectOptions } from "@/lib/backend/options";
+import { getFormOptions } from "@/lib/backend/options";
 import { remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
+import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 
 /**
  * 排课表单：新建与编辑共用，带**冲突检测**。
@@ -68,7 +69,8 @@ export function LessonForm({
   const [status, setStatus] = useState<Lesson["status"]>(lesson?.status ?? "已排");
   const [note, setNote] = useState(lesson?.note ?? "");
 
-  const subjectOptions = useMemo(() => getSubjectOptions(), []);
+  // 科目候选来自课程库（网站课程 + 机构自己加的课），见 useSubjectOptions
+  const { names: subjectOptions } = useSubjectOptions();
   const formOptions = useMemo(() => getFormOptions(), []);
 
   useEffect(() => {

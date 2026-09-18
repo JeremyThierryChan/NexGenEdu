@@ -49,6 +49,7 @@ export type {
   TeacherFeeResult,
   TeacherFeeSelection,
 } from "./pricing";
+export type { CourseOption, CourseSummary } from "./courses";
 import {
   monthRange,
   outstandingAmount,
@@ -59,6 +60,15 @@ import {
 } from "./finance";
 import type { StudentProfile } from "./student-profile";
 import { getCourseColumns } from "@/lib/data/site";
+import {
+  canRemoveCourse,
+  courseOptions,
+  coursesFromSite,
+  mergeSiteCourses,
+  summarizeCourses,
+  validateCourse,
+} from "./courses";
+import type { CourseOption, CourseSummary } from "./courses";
 import type {
   Assessment,
   Classroom,
@@ -93,6 +103,9 @@ import type {
   Teacher,
   TodaySummary,
   SearchHit,
+  Course,
+  CourseOrigin,
+  CourseStatus,
 } from "./types";
 
 /**
@@ -389,6 +402,15 @@ function migrate(db: Database): Database | null {
       teacherShare: db.pricing.teacherShare ?? DEFAULT_TEACHER_SHARE_RULES,
     };
     db.version = 11;
+  }
+
+  if (db.version === 11) {
+    /*
+     * v11 → v12：新增课程库。老库没有课程表 → 用网站内容里的课程卡片灌入，
+     * 与迁移前「科目候选来自网站内容」完全一致，因此升级不会让任何一节课的科目失效。
+     */
+    db.courses = db.courses ?? coursesFromSite();
+    db.version = 12;
   }
 
   return db.version === CURRENT_VERSION ? db : null;
@@ -969,6 +991,121 @@ export const api = {
             .includes(text),
         ),
       );
+    },
+  },
+
+  /**
+   * 课程库：后台的课程台账（排课科目、教师可带科目、报课科目都按名字引用它）。
+   *
+   * 网站上的课程在首次访问与「从网站同步」时自动进来；机构自己加的课
+   * （围棋、书法这类网站上还没有的）与它们平起平坐，都能排课、能记课时。
+   *
+   * 注意边界：这里加课程**不会**让宣传网站上多出一张卡片 —— 网站是静态内容。
+   */
+  courses: {
+    ...collection<Course>((db) => db.courses, "course", "课程"),
+
+    /**
+     * 新建课程（先校验再落库）。
+     *
+     * 课程名是引用键（排课、教师科目、报课记录都按名字记），重名必须拦住：
+     * 「数学」有两门课时，课时扣到哪一门就说不清了。
+     */
+    async create(input: Omit<Course, "id">): Promise<Course> {
+      await delay();
+      const db = load();
+      const problems = validateCourse(input, db.courses);
+      if (problems.length > 0) throw new Error(problems.join("；"));
+
+      const created: Course = { ...input, id: nextId("course") };
+      db.courses.push(created);
+      writeLog(db, {
+        entity: "课程",
+        action: "新建",
+        targetId: created.id,
+        summary: `新建课程「${created.name}」（${created.category}${created.origin === "后台" ? " · 后台新增" : ""}）`,
+      });
+      persist(db);
+      return clone(created);
+    },
+
+    /** 修改课程：改名同样要防重名；网站来源的课程也能改状态 / 班型 / 分类 / 备注。 */
+    async update(id: string, patch: Partial<Omit<Course, "id">>): Promise<Course | null> {
+      await delay();
+      const db = load();
+      const target = db.courses.find((item) => item.id === id);
+      if (target === undefined) return null;
+
+      const next = { ...target, ...patch };
+      const problems = validateCourse(next, db.courses, id);
+      if (problems.length > 0) throw new Error(problems.join("；"));
+
+      Object.assign(target, next);
+      writeLog(db, {
+        entity: "课程",
+        action: "修改",
+        targetId: id,
+        summary: `修改课程「${target.name}」（${Object.keys(patch).join("、")}）`,
+      });
+      persist(db);
+      return clone(target);
+    },
+
+    /**
+     * 删除课程。
+     *
+     * 网站来源的课程不让删（删了下次同步又会回来），改成「暂未开放」即可 ——
+     * 理由写清楚，而不是给一个会自己复原的删除按钮。
+     */
+    async remove(id: string): Promise<boolean> {
+      await delay();
+      const db = load();
+      const index = db.courses.findIndex((item) => item.id === id);
+      if (index === -1) return false;
+
+      const target = db.courses[index]!;
+      const verdict = canRemoveCourse(target);
+      if (!verdict.ok) throw new Error(verdict.reason);
+
+      db.courses.splice(index, 1);
+      writeLog(db, {
+        entity: "课程",
+        action: "删除",
+        targetId: id,
+        summary: `删除课程「${target.name}」`,
+      });
+      persist(db);
+      return true;
+    },
+
+    /** 科目候选：网站课程 + 后台新增（按内容顺序，后台的接在后面）。 */
+    async options(): Promise<CourseOption[]> {
+      await delay();
+      return clone(courseOptions(load().courses));
+    },
+
+    /** 从网站内容同步新增的课程卡片（**只增不改**：不动机构在后台维护的信息）。 */
+    async syncFromSite(): Promise<{ added: string[]; total: number }> {
+      await delay();
+      const db = load();
+      const merged = mergeSiteCourses(db.courses);
+      if (merged.added.length > 0) {
+        db.courses = merged.courses;
+        writeLog(db, {
+          entity: "课程",
+          action: "同步",
+          targetId: "",
+          summary: `从网站同步了 ${merged.added.length} 门课程：${merged.added.join("、")}`,
+        });
+        persist(db);
+      }
+      return { added: merged.added, total: db.courses.length };
+    },
+
+    /** 课程库统计（列表页顶部）。 */
+    async summary(): Promise<CourseSummary> {
+      await delay();
+      return clone(summarizeCourses(load().courses));
     },
   },
 
@@ -2190,6 +2327,9 @@ export type {
   Student,
   Teacher,
   TodaySummary,
+  Course,
+  CourseOrigin,
+  CourseStatus,
 };
 export {
   ATTENDANCE_OPTIONS,
@@ -2203,5 +2343,7 @@ export {
   INTERACTION_OPTIONS,
   LESSON_STATUSES,
   STUDENT_STATUSES,
+  COURSE_ORIGINS,
+  COURSE_STATUSES,
   SUBMISSION_OPTIONS,
 } from "./types";

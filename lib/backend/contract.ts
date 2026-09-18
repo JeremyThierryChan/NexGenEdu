@@ -36,7 +36,7 @@ export type ContractGroup = {
 export const API_CONTRACT: ContractGroup[] = [
   {
     id: "crud",
-    title: "一、通用 CRUD（8 个资源 × 5 个方法）",
+    title: "一、通用 CRUD（9 个资源 × 5 个方法）",
     note:
       "学生 / 教师 / 教室 / 排课 / 课堂记录 / 作业记录 / 阶段测评 / 收款记录。" +
       "服务端用一套 REST 即可：GET 列表、GET 单项、POST 新建、PATCH 修改、DELETE 删除。" +
@@ -51,6 +51,7 @@ export const API_CONTRACT: ContractGroup[] = [
       "homework.list", "homework.get", "homework.create", "homework.update", "homework.remove",
       "assessments.list", "assessments.get", "assessments.create", "assessments.update", "assessments.remove",
       "payments.list", "payments.get", "payments.create", "payments.update", "payments.remove",
+      "courses.list", "courses.get", "courses.create", "courses.update", "courses.remove",
     ],
   },
   {
@@ -61,6 +62,7 @@ export const API_CONTRACT: ContractGroup[] = [
       "数据量一上来就会拖垮页面。`students.search` 是模糊查询：本项目**刻意不做拼音/模糊匹配**，" +
       "只做不区分大小写的子串匹配，「张」和「章」必须区分开。",
     methods: [
+      "courses.options",
       "students.search",
       "teachers.listActive",
       "payments.listByStudent", "payments.listByEnrollment", "payments.listBetween",
@@ -87,6 +89,7 @@ export const API_CONTRACT: ContractGroup[] = [
       "lessonRecords.save",
       "assessments.add",
       "payments.record",
+      "courses.syncFromSite",
     ],
   },
   {
@@ -135,6 +138,7 @@ export const API_CONTRACT: ContractGroup[] = [
       // 因此单独说明：服务端可以保留这个接口给前端做即时提示，
       // 但保存时仍要自己再判一次（前端结果不可信）
       "lessons.findConflicts",
+      "courses.summary",
     ],
   },
   {
@@ -208,6 +212,11 @@ export const SERVER_MUST_VALIDATE: ServerValidation[] = [
   {
     rule: "报价金额必须由服务端按配置计算，不接受前端传来的单价或总价",
     why: "这是整套系统里唯一直接对外报价的接口，前端传来的价格等于让家长自己定价",
+    done: false,
+  },
+  {
+    rule: "课程名唯一且非空：课程名是排课、教师可带科目与报课记录的引用键",
+    why: "两门都叫「数学」的课程会让课时扣到哪一门说不清，而这件事往往到期末对账才暴露",
     done: false,
   },
   {

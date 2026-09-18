@@ -19,6 +19,11 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
   { href: "/admin/students", label: "学生", description: "学生档案、剩余课时与下一节课" },
   { href: "/admin/teachers", label: "教师", description: "教师档案与今日本周课程" },
   { href: "/admin/classrooms", label: "教室", description: "教室占用状态与空档" },
+  {
+    href: "/admin/courses",
+    label: "课程库",
+    description: "课程台账：网站课程 + 机构自己加的课（围棋、书法），排课与教师科目都取自这里",
+  },
   { href: "/admin/lessons", label: "课程安排", description: "课程列表、排课与冲突检测" },
   { href: "/admin/calendar", label: "日历", description: "按日 / 周查看课程安排" },
   {

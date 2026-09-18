@@ -17,17 +17,18 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 - 全部方法都是 `async`，**页面里没有一处直接读写 localStorage**；
 - 对外形状由 `lib/backend/types.ts` 定义，`export type BackendApi = typeof api`
   就是服务端要满足的那份形状；
-- 数据类型带 `version`（当前 v11），升级链在 `api.ts` 的 `migrate()`，
+- 数据类型带 `version`（当前 v12），升级链在 `api.ts` 的 `migrate()`，
   **必须按版本升序逐级推进**（历史上写反过一次顺序，导致老数据被重新灌成示例数据）。
 
-## 二、接口分组（共 97 个方法）
+## 二、接口分组（共 105 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
 
-### 1. 通用 CRUD（8 个资源 × 5 个方法）
+### 1. 通用 CRUD（9 个资源 × 5 个方法）
 
-八个资源，每个都有 `list` / `get` / `create` / `update` / `remove` 五个方法：
+九个资源（学生 / 教师 / 教室 / 排课 / 课堂记录 / 作业记录 / 阶段测评 / 收款记录 / 课程库），
+每个都有 `list` / `get` / `create` / `update` / `remove` 五个方法：
 
 | 资源 | 方法 |
 | --- | --- |
@@ -45,6 +46,12 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 - 删除要分清楚：课时流水（`transactions`）、收款（`payments`）、退课记录
   **一律留痕不删**（否则「这些课时/钱去哪了」说不清）；只有档案类允许真删。
 
+**课程库**（`courses.list`、`courses.get`、`courses.create`、`courses.update`、`courses.remove`）：
+课程名是**引用键** —— 排课科目、教师可带科目、报课科目都按名字记它，因此服务端必须
+自己复核「课程名非空且唯一」，两门都叫「数学」的课会让课时扣到哪一门说不清。
+`courses.remove` 只允许删后台新增的课程；网站来源的课程跟着内容文件走，删了下次
+`courses.syncFromSite` 又会回来，不想再排应改成「暂未开放」。
+
 ### 2. 关联查询
 
 `students.search`、`teachers.listActive`、`payments.listByStudent`、
@@ -58,6 +65,10 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
   **不要在前端做全表过滤**；
 - `students.search` 只做**不区分大小写的子串**匹配：本项目刻意不做拼音/模糊匹配，
   「张」和「章」必须区分开 —— 宁可搜不到，也不要搜错人。
+
+其中 `courses.options` 是「科目候选」：网站课程 + 机构自己加的课（围棋、书法这类
+网站上还没有的），后台所有「选科目」的表单都取它 —— 服务端实现时注意它是**并集**，
+不要只查课程表（否则网站课程会从候选里消失）。
 
 ### 3. 业务动作（服务端必须在一个事务里完成）
 
@@ -143,6 +154,9 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 服务端按配置算（教师工资同样不能由前端传数字）。后台报价页把这条规则翻译成人话、
 连同一张人数对照表展示，老师问「这个班多少钱」直接看表。
 
+`courses.syncFromSite` 是「把网站内容里新增的课程卡片拉进课程库」：**只增不改**
+（不动机构在后台维护的状态、班型、备注），并且必须可重复执行（第二次不产生新增）。
+
 ### 6. 看板与统计（只读）
 
 `today`、`stats`、`followups`、`finance`、`outstandingByStudent`、`search`、
@@ -152,6 +166,8 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 都是纯函数，可以原样搬到服务端。**口径不要改** —— 每个文件顶部都写了
 「为什么这么定」（利用率分母、退课按课时算、预警阈值、空档日的定义）。
 `lessons.findConflicts` 可以保留给前端做即时提示，但保存时服务端仍要自己再判一次。
+
+`courses.summary` 给出课程库的规模（总数 / 开放 / 暂未开放 / 网站 / 后台 / 按分类）。
 
 ### 7. 运维与审计
 
@@ -179,8 +195,9 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 8. **登录与鉴权**：口令校验、会话签发、接口鉴权全在服务端；
    现在前端那份登录（`lib/auth/session.ts`）口令写在代码里，只是门不是锁。
 9. **审计日志**：记录操作人、时间、对象与摘要，且前端不可篡改。
-10. **报价合法性**：基础价与系数为正、手续费 0–100、试课门槛 ≥ 1 的整数、课程名不重复。
-11. **报价金额由服务端计算**：不接受前端传来的单价或总价。
+10. **课程名唯一且非空**：课程名是排课、教师科目与报课记录的引用键。
+11. **报价合法性**：基础价与系数为正、手续费 0–100、试课门槛 ≥ 1 的整数、课程名不重复。
+12. **报价金额由服务端计算**：不接受前端传来的单价或总价。
 
 ## 四、从 localStorage 搬到服务端
 

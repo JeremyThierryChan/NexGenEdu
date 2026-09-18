@@ -4,9 +4,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type Assessment } from "@/lib/backend/api";
 import { Button } from "@/components/ui/Button";
 import { TextAreaField, TextField } from "@/components/admin/AdminFields";
-import { getSubjectOptions } from "@/lib/backend/options";
+
 import { formatDayLabel } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
+import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 
 /**
  * 阶段测评（按次）。
@@ -149,7 +150,8 @@ function AssessmentForm({
   onCancel: () => void;
   onSaved: () => void | Promise<void>;
 }) {
-  const subjects = useMemo(() => getSubjectOptions(), []);
+  // 科目候选来自课程库（网站课程 + 机构自己加的课），见 useSubjectOptions
+  const { names: subjects } = useSubjectOptions();
   const [subject, setSubject] = useState("");
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [score, setScore] = useState("");

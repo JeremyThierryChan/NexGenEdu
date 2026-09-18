@@ -24,7 +24,8 @@ import {
 import { cn } from "@/lib/utils/cn";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel } from "@/lib/backend/format";
-import { getFormOptions, getSubjectOptions } from "@/lib/backend/options";
+import { getFormOptions } from "@/lib/backend/options";
+import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 
 /**
  * 报课与课时面板。
@@ -72,7 +73,8 @@ export function EnrollmentPanel({
     .filter((item) => item.status === "在读")
     .reduce((sum, item) => sum + outstandingAmount(item), 0);
   const active = student.enrollments.filter((item) => item.status === "在读");
-  const subjectOptions = useMemo(() => getSubjectOptions(), []);
+  // 科目候选来自课程库（网站课程 + 机构自己加的课），见 useSubjectOptions
+  const { names: subjectOptions } = useSubjectOptions();
   const formOptions = useMemo(() => getFormOptions(), []);
 
   async function run(action: () => Promise<unknown>) {

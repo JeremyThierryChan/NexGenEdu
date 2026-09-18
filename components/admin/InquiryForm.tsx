@@ -4,9 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 import { NumberInput, SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { Button } from "@/components/ui/Button";
 import { api, type Classroom, type InquirySlot, type Teacher } from "@/lib/backend/api";
-import { getStandardSlots, getSubjectOptions } from "@/lib/backend/options";
+import { getStandardSlots } from "@/lib/backend/options";
 import { weekdayLabel } from "@/lib/backend/inquiry";
 import { cn } from "@/lib/utils/cn";
+import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 
 /**
  * 咨询登记表。
@@ -49,7 +50,8 @@ export function InquiryForm({
   const [skipInput, setSkipInput] = useState("");
   const [quickWeekday, setQuickWeekday] = useState("6");
 
-  const subjects = useMemo(() => getSubjectOptions(), []);
+  // 科目候选来自课程库（网站课程 + 机构自己加的课），见 useSubjectOptions
+  const { names: subjects } = useSubjectOptions();
   const standardSlots = useMemo(() => getStandardSlots(), []);
 
   useEffect(() => {

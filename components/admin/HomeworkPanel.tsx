@@ -5,9 +5,10 @@ import { SUBMISSION_OPTIONS, api, type HomeworkRecord } from "@/lib/backend/api"
 import { Button } from "@/components/ui/Button";
 import { TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { useMemo } from "react";
-import { getSubjectOptions } from "@/lib/backend/options";
+
 import { formatDayLabel } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
+import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 
 /**
  * 作业记录（按次）。
@@ -145,7 +146,8 @@ function HomeworkForm({
   onCancel: () => void;
   onSaved: () => void | Promise<void>;
 }) {
-  const subjects = useMemo(() => getSubjectOptions(), []);
+  // 科目候选来自课程库（网站课程 + 机构自己加的课），见 useSubjectOptions
+  const { names: subjects } = useSubjectOptions();
   const [subject, setSubject] = useState("");
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [submission, setSubmission] = useState<HomeworkRecord["submission"]>("按时");

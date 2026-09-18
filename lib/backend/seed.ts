@@ -1,4 +1,5 @@
 import { getTeachersPage } from "@/lib/data/site";
+import { coursesFromSite } from "./courses";
 import { pricingConfigFromContent } from "./pricing";
 import { CURRENT_VERSION } from "./version";
 import type {
@@ -236,6 +237,11 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     logs: [],
     // 咨询线索也从空开始：这是一次性录入的真实对话，示例数据编不出意义
     inquiries: [],
+    /*
+     * 课程库：直接用网站内容里的课程卡片初始化（课程名与网站一致），
+     * 机构自己加的课（围棋、书法）由 /admin/courses 页面添加。
+     */
+    courses: coursesFromSite(),
     /*
      * 报价配置：用站点内容（data/site/pricing.md）初始化，而不是在种子里
      * 再抄一份价格。抄一份的后果是「宣传页一个价、后台算出来另一个价」，

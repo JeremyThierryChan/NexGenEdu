@@ -67,6 +67,20 @@ export function getClassHoursWindow(): GapWindow | null {
   }
 }
 
+/**
+ * 课程库的「分类」候选：网站课程栏目的名字（小学课内 / 初中课内 / 高中课内 / 外语 …）。
+ *
+ * 只作为输入建议（页面用 datalist），机构完全可以自己写一个新分类（如「兴趣才艺」）——
+ * 围棋、书法这类课本来就不属于现有的六个栏目。
+ */
+export function getCourseCategoryOptions(): string[] {
+  try {
+    return getCourseColumns().map((column) => column.title);
+  } catch {
+    return [];
+  }
+}
+
 /** 班型候选：特色课程里「课内辅导」下的二级课程（一对一定制课 / 晚托管 …）。 */
 export function getFormOptions(): string[] {
   try {
