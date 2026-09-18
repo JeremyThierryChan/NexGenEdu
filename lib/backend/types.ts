@@ -105,3 +105,41 @@ export type TodaySummary = {
   studentCount: number;
   activeTeacherCount: number;
 };
+
+/** 排课入参（新建与编辑共用；编辑时带 id）。 */
+export type LessonInput = {
+  id?: string;
+  subject: string;
+  form: string;
+  teacherId: string;
+  classroomId: string;
+  studentIds: string[];
+  startsAt: string;
+  durationMinutes: number;
+  status: LessonStatus;
+  note: string;
+};
+
+/**
+ * 冲突检查结果。
+ *
+ * 分三类是因为处理方式不同：教师与教室冲突必须调整时间或换人/换教室，
+ * 学生冲突往往是「同一个学生被排了两节课」，需要家长/学生层面确认。
+ * 相邻时间（前一场结束＝后一场开始）**不算冲突**。
+ */
+export type ConflictReport = {
+  teacher: Lesson[];
+  classroom: Lesson[];
+  students: Array<{ studentId: string; lesson: Lesson }>;
+  /** 三类冲突的合计条数，页面用它判断能不能保存。 */
+  total: number;
+};
+
+/** 「标记已上」的结果：课时扣减明细。 */
+export type CompletionResult = {
+  lesson: Lesson | null;
+  /** 本次实际扣减的学生（已上过的课重复标记时为空）。 */
+  deducted: Array<{ studentId: string; remainingLessons: number }>;
+  /** 这节课之前是否已经是「已上」状态。 */
+  alreadyCompleted: boolean;
+};

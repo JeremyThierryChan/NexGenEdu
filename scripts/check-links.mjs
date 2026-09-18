@@ -19,16 +19,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.join(root, "out");
 
 /**
- * 允许暂时不存在的站内路径。
+ * 允许暂时不存在的站内路径（当前为空：后台六个入口都已实现）。
  *
- * 教务后台的课程安排 / 日历还没实现，侧边栏已经有入口，
- * 点进去会显示内部版 404 —— 这是刻意的，
- * 不计入失败；实现之后把它们从这里删掉即可。
+ * 保留这个清单是因为它有用：将来新增「占位入口」时把它加进来，
+ * 就能在不改脚本的前提下继续跑链接体检。
  */
-const ALLOWED_MISSING = [
-  "/admin/lessons/",
-  "/admin/calendar/",
-];
+const ALLOWED_MISSING = [];
 
 if (!existsSync(outDir)) {
   console.error("✗ 未找到 out/ —— 请先构建（npm run build）");

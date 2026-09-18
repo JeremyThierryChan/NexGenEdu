@@ -36,6 +36,7 @@ import { findFeaturedCourse, getAllFeaturedCourses, getFeaturedContent } from "@
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
 import { __useStoreForTesting, api } from "@/lib/backend/api";
 import { createMemoryStore } from "@/lib/backend/storage";
+import { dateKey } from "@/lib/backend/format";
 import {
   __credentialsForTesting,
   __useSessionStoreForTesting,
@@ -664,6 +665,113 @@ ok("按教师查课只返回该教师的课",
 const byClassroom = await api.lessons.listByClassroom(someLesson.classroomId);
 ok("按教室查课只返回该教室的课",
   byClassroom.length > 0 && byClassroom.every((lesson) => lesson.classroomId === someLesson.classroomId));
+
+// ── 排课与冲突检测 ────────────────────────────────────────────────────
+// 冲突检测是排课工具的底线，因此这里把边界情形逐条钉死：
+// 相邻不算冲突、已取消不占时间、编辑自己不算冲突、跨天不算冲突。
+const room = (await api.classrooms.list())[0]!;
+const teacher = (await api.teachers.list())[0]!;
+// 刻意挑一个课时充足的学生：前面「不会扣成负数」的用例已经把第一个学生清零了，
+// 拿零课时的学生来验证扣减会得到 0，看不出是否真的扣了
+const pupil = (await api.students.list()).find((student) => student.remainingLessons > 5)!;
+const base = new Date();
+base.setHours(15, 0, 0, 0);
+
+/** 造一节课，用于冲突测试。 */
+const slot = (hour: number, minute = 0, duration = 60, dayOffset = 0) => {
+  const start = new Date(base);
+  start.setDate(start.getDate() + dayOffset);
+  start.setHours(hour, minute, 0, 0);
+  return { start: start.toISOString(), duration };
+};
+
+const first = slot(15);
+const anchorLesson = await api.lessons.create({
+  subject: "自检课", form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
+  studentIds: [pupil.id], startsAt: first.start, durationMinutes: first.duration,
+  status: "已排", note: "",
+});
+
+const conflictsFor = (start: string, duration = 60) =>
+  api.lessons.findConflicts({
+    subject: "测试", form: "", teacherId: teacher.id, classroomId: room.id,
+    studentIds: [pupil.id], startsAt: start, durationMinutes: duration,
+    status: "已排", note: "",
+  });
+
+// 完全重叠：三类冲突都应该报出来
+const overlap = slot(15, 30);
+const report = await conflictsFor(overlap.start);
+eq("完全重叠时教师冲突 1 处", report.teacher.length, 1);
+eq("完全重叠时教室冲突 1 处", report.classroom.length, 1);
+eq("完全重叠时学生冲突 1 处", report.students.length, 1);
+ok("冲突总数与三类之和一致", report.total === 3);
+
+// 相邻（前一场结束＝后一场开始）不算冲突
+const backToBack = slot(16);
+eq("相邻时段不算冲突", (await conflictsFor(backToBack.start)).total, 0);
+
+// 跨天不算冲突
+const nextDay = slot(15, 0, 60, 1);
+eq("同时间但不同天不算冲突", (await conflictsFor(nextDay.start)).total, 0);
+
+// 编辑自己不算冲突
+const selfReport = await api.lessons.findConflicts({
+  id: anchorLesson.id, subject: "自检课", form: "", teacherId: teacher.id,
+  classroomId: room.id, studentIds: [pupil.id], startsAt: first.start,
+  durationMinutes: first.duration, status: "已排", note: "",
+});
+eq("编辑自己不算冲突", selfReport.total, 0);
+
+// 已取消的课不占用时间
+await api.lessons.update(anchorLesson.id, { status: "已取消" });
+eq("已取消的课不产生冲突", (await conflictsFor(overlap.start)).total, 0);
+
+// 换一个没有课的时段与教师，验证「不误报」
+const otherTeacher = (await api.teachers.list())[1];
+if (otherTeacher !== undefined) {
+  const quiet = slot(7, 0);
+  const quietReport = await api.lessons.findConflicts({
+    subject: "测试", form: "", teacherId: otherTeacher.id, classroomId: room.id,
+    studentIds: [pupil.id], startsAt: quiet.start, durationMinutes: 60,
+    status: "已排", note: "",
+  });
+  eq("空闲时段不误报冲突", quietReport.total, 0);
+}
+
+// ── 标记已上：扣课时且幂等 ────────────────────────────────────────────
+const pupilBefore = (await api.students.get(pupil.id))!.remainingLessons;
+const completed = await api.lessons.markCompleted(anchorLesson.id);
+eq("标记已上后状态为已上", completed.lesson?.status, "已上");
+eq("标记已上扣 1 节课时",
+  (await api.students.get(pupil.id))!.remainingLessons, pupilBefore - 1);
+eq("本次扣减明细含该学生", completed.deducted.map((item) => item.studentId), [pupil.id]);
+
+// 幂等：再点一次不能重复扣课时（最容易出错的地方）
+const again = await api.lessons.markCompleted(anchorLesson.id);
+eq("重复标记被识别为已完成", again.alreadyCompleted, true);
+eq("重复标记不再扣课时",
+  (await api.students.get(pupil.id))!.remainingLessons, pupilBefore - 1);
+eq("重复标记不返回扣减明细", again.deducted.length, 0);
+
+await api.lessons.remove(anchorLesson.id);
+eq("删除排课后查不到", await api.lessons.get(anchorLesson.id), null);
+
+// ── 日历用的区间查询 ──────────────────────────────────────────────────
+const monday = new Date(base);
+monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+const sunday = new Date(monday);
+sunday.setDate(monday.getDate() + 6);
+const inWeek = await api.lessons.listBetween(monday, sunday);
+const mondayKey = dateKey(monday);
+const sundayKey = dateKey(sunday);
+ok("区间查询只返回该周范围内的课",
+  inWeek.every((lesson) => {
+    const key = dateKey(lesson.startsAt);
+    return key >= mondayKey && key <= sundayKey;
+  }));
+ok("区间查询结果按时间升序",
+  inWeek.every((lesson, index) => index === 0 || inWeek[index - 1]!.startsAt <= lesson.startsAt));
 
 await api.reset();
 eq("重置回到示例数据", (await api.students.list()).length, seeded.length);

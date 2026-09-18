@@ -2,7 +2,10 @@ import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createSeedDatabase } from "./seed";
 import type {
   Classroom,
+  CompletionResult,
+  ConflictReport,
   Database,
+  LessonInput,
   Lesson,
   NewClassroom,
   NewLesson,
@@ -192,6 +195,88 @@ export const api = {
 
   lessons: {
     ...collection<Lesson>((db) => db.lessons, "l"),
+
+    /**
+     * 冲突检查：同一教师 / 同一教室 / 同一学生在时间上重叠。
+     *
+     * 刻意做成**独立查询**而不是塞进 create：页面需要在保存前就能提示
+     * 「和哪节课冲突」，而不是提交后才被拒绝。注意真实服务端也必须
+     * 再校验一次 —— 客户端检查只是体验，不是保证。
+     */
+    async findConflicts(input: LessonInput): Promise<ConflictReport> {
+      await delay();
+      const db = load();
+
+      const start = new Date(input.startsAt).getTime();
+      const end = start + input.durationMinutes * 60_000;
+      const overlaps = (lesson: Lesson) => {
+        // 编辑自己时不算冲突；已取消的课不占用时间
+        if (lesson.id === input.id || lesson.status === "已取消") return false;
+        const otherStart = new Date(lesson.startsAt).getTime();
+        const otherEnd = otherStart + lesson.durationMinutes * 60_000;
+        // 相邻不算冲突（结束等于开始）
+        return start < otherEnd && otherStart < end;
+      };
+
+      const clashing = db.lessons.filter(overlaps);
+      const teacher = clashing.filter((lesson) => lesson.teacherId === input.teacherId);
+      const classroom = clashing.filter((lesson) => lesson.classroomId === input.classroomId);
+      const students = clashing.flatMap((lesson) =>
+        lesson.studentIds
+          .filter((id) => input.studentIds.includes(id))
+          .map((studentId) => ({ studentId, lesson })),
+      );
+
+      // 同一节课既撞教师又撞教室时，students 里可能出现重复，这里去重
+      const uniqueStudents = [
+        ...new Map(students.map((item) => [`${item.studentId}-${item.lesson.id}`, item])).values(),
+      ];
+
+      return clone({
+        teacher,
+        classroom,
+        students: uniqueStudents,
+        total: teacher.length + classroom.length + uniqueStudents.length,
+      });
+    },
+
+    /**
+     * 标记为「已上」并按课时扣减。
+     *
+     * 幂等：已经是「已上」的课再点一次不会重复扣课时 —— 这是最容易出错的地方，
+     * 自检里专门有一条断言守住它。
+     */
+    async markCompleted(id: string): Promise<CompletionResult> {
+      await delay();
+      const db = load();
+      const lesson = db.lessons.find((item) => item.id === id);
+      if (lesson === undefined) {
+        return { lesson: null, deducted: [], alreadyCompleted: false };
+      }
+
+      const alreadyCompleted = lesson.status === "已上";
+      if (!alreadyCompleted) {
+        lesson.status = "已上";
+        for (const studentId of lesson.studentIds) {
+          const student = db.students.find((item) => item.id === studentId);
+          if (student !== undefined) {
+            student.remainingLessons = Math.max(0, student.remainingLessons - 1);
+          }
+        }
+        persist(db);
+      }
+
+      const deducted = lesson.studentIds.map((studentId) => ({
+        studentId,
+        remainingLessons: db.students.find((item) => item.id === studentId)?.remainingLessons ?? 0,
+      }));
+
+      return clone({
+        lesson,
+        deducted: alreadyCompleted ? [] : deducted,
+        alreadyCompleted,
+      });
+    },
     /** 某一天的课，按开始时间升序。 */
     async listByDate(date: Date): Promise<Lesson[]> {
       await delay();
@@ -292,7 +377,10 @@ export function __useStoreForTesting(backing: KeyValueStore): void {
 // 重新导出，便于页面只 import 这一处
 export type {
   Classroom,
+  CompletionResult,
+  ConflictReport,
   Database,
+  LessonInput,
   Lesson,
   NewClassroom,
   NewLesson,
