@@ -51,6 +51,7 @@ import type {
   NewLessonRecord,
   Inquiry,
   InquirySlot,
+  InquiryStatus,
   NewInquiry,
   NewPayment,
   OperationLog,
@@ -619,6 +620,7 @@ export function dateKey(value: string | Date): string {
 }
 
 const studentCollection = collection<Student>((db) => db.students, "s", "学生");
+const inquiryCollection = collection<Inquiry>((db) => db.inquiries, "iq", "咨询");
 
 export const api = {
   students: {
@@ -1731,7 +1733,16 @@ export const api = {
    * 判定逻辑在 lib/backend/inquiry.ts（纯函数）。这里只负责凑数据与落库。
    */
   inquiries: {
-    ...collection<Inquiry>((db) => db.inquiries, "iq", "咨询"),
+    ...inquiryCollection,
+
+    /** 登记咨询：创建时间与已排课节由服务生成。 */
+    async create(input: NewInquiry): Promise<Inquiry> {
+      return inquiryCollection.create({
+        ...input,
+        createdAt: nowIso(),
+        scheduledLessonIds: [],
+      });
+    },
 
     /**
      * 判定这条咨询的可行性。
@@ -1930,6 +1941,7 @@ export type BackendApi = typeof api;
 export type {
   Assessment,
   ChurnStats,
+  FeasibilityReport,
   Classroom,
   FollowUpItem,
   RoomUtilization,
@@ -1947,6 +1959,7 @@ export type {
   NewLessonRecord,
   Inquiry,
   InquirySlot,
+  InquiryStatus,
   NewInquiry,
   NewPayment,
   OperationLog,
@@ -1967,6 +1980,7 @@ export type {
 };
 export {
   ATTENDANCE_OPTIONS,
+  INQUIRY_STATUSES,
   PAYMENT_KINDS,
   PAYMENT_METHODS,
   TRANSACTION_KINDS,

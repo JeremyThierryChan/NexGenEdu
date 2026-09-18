@@ -11,6 +11,11 @@ export type AdminNavItem = {
 
 export const ADMIN_NAV: readonly AdminNavItem[] = [
   { href: "/admin", label: "今日概览", description: "今天有哪些课程、教室占用与课时预警" },
+  {
+    href: "/admin/inquiries",
+    label: "咨询",
+    description: "家长咨询登记与排课可行性（这个安排能不能接、不能的话最接近的方案）",
+  },
   { href: "/admin/students", label: "学生", description: "学生档案、剩余课时与下一节课" },
   { href: "/admin/teachers", label: "教师", description: "教师档案与今日本周课程" },
   { href: "/admin/classrooms", label: "教室", description: "教室占用状态与空档" },
