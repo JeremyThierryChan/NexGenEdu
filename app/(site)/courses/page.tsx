@@ -40,9 +40,13 @@ export default function CoursesPage() {
       />
 
       <Container>
-        {/* 学科总览：学段以标签并排显示，同一学科的小学 / 初中 / 高中可直接对比 */}
+        {/*
+          学科总览：学段以标签并排显示，同一学科的小学 / 初中 / 高中可直接对比。
+          用 compact 尺寸并把列数提到 4 列（宽屏），17 个学科能一屏看完，
+          不必滚动就能发现有哪些学科、各有哪些学段。
+        */}
         <Section className="pb-0">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
             {courses.map((course) => (
               <CourseCard
                 key={course.id}
@@ -50,6 +54,7 @@ export default function CoursesPage() {
                 bands={course.bands.map((band) => bandLabel(band.title))}
                 href={`#${encodeURIComponent(course.id)}`}
                 linkLabel="查看学段说明"
+                compact
               />
             ))}
           </div>
