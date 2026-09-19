@@ -514,6 +514,166 @@ const WRITES: Array<{
   },
 ];
 
+/* ── 通用增删改（教师 / 教室 / 课程 / 学生 / 排课）────────────────────── */
+
+type CrudSpec = {
+  path: string;
+  table: string;
+  /** 页面字段（camelCase）→ 数据库列（snake_case）。 */
+  columns: Record<string, string>;
+  /** 这些字段在数据库里是 JSON 文本。 */
+  json: string[];
+  /** 这些字段在数据库里是 0/1。 */
+  bool: string[];
+  to: (row: Row) => unknown;
+  label: string;
+  /** 删除前的护栏（返回 null 表示允许删）。 */
+  guardDelete?: (db: Database.Database, id: string) => string | null;
+};
+
+const CRUD: CrudSpec[] = [
+  {
+    path: "teachers", table: "teachers", label: "教师",
+    columns: { name: "name", role: "role", subjects: "subjects", phone: "phone", active: "active" },
+    json: ["subjects"], bool: ["active"], to: toTeacher,
+  },
+  {
+    path: "classrooms", table: "classrooms", label: "教室",
+    columns: { name: "name", capacity: "capacity", kind: "kind", availability: "availability", note: "note" },
+    json: ["availability"], bool: [], to: toClassroom,
+  },
+  {
+    path: "courses", table: "courses", label: "课程",
+    columns: { name: "name", category: "category", forms: "forms", origin: "origin", status: "status", note: "note", createdAt: "created_at" },
+    json: ["forms"], bool: [], to: toCourse,
+    // 网站来源的课程跟着内容文件走：删了下次同步又会回来，改成「暂未开放」才对
+    guardDelete: (db, id) => {
+      const row = db.prepare("SELECT name, origin FROM courses WHERE id = ?").get(id) as
+        | { name: string; origin: string }
+        | undefined;
+      if (row === undefined) return null;
+      return row.origin === "网站"
+        ? `「${row.name}」是网站上的课程，跟着内容文件走：删了下次同步还会回来，请改成「暂未开放」。`
+        : null;
+    },
+  },
+  {
+    path: "students", table: "students", label: "学生",
+    columns: { name: "name", grade: "grade", guardian: "guardian", status: "status", note: "note", createdAt: "created_at", enrollments: "enrollments", profile: "profile" },
+    json: ["enrollments", "profile"], bool: [], to: toStudent,
+    /*
+     * 护栏：**有账的学生不能直接删**。
+     * 之前就是因为删档案不连带清账，留下了 18 条"没有主人"的收费记录。
+     * 这里宁可拒绝删除并要求先处理账目 —— 账本不该被档案操作牵连。
+     */
+    guardDelete: (db, id) => {
+      const payments = (db.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").get(id) as { n: number }).n;
+      const txs = (db.prepare("SELECT COUNT(*) AS n FROM transactions WHERE student_id = ?").get(id) as { n: number }).n;
+      if (payments === 0 && txs === 0) return null;
+      return `这位学生还有 ${payments} 条收款记录、${txs} 条课时流水，不能直接删除。请先处理他的收款与课时（退课 / 退款会留痕），再删档案。`;
+    },
+  },
+  {
+    path: "lessons", table: "lessons", label: "排课",
+    columns: { subject: "subject", form: "form", teacherId: "teacher_id", classroomId: "classroom_id", studentIds: "student_ids", startsAt: "starts_at", durationMinutes: "duration_minutes", status: "status", note: "note", makeupForLessonId: "makeup_for_lesson_id" },
+    json: ["studentIds"], bool: [], to: toLesson,
+    // 已上过的课课时已经扣了：删掉会让流水指向一节不存在的课，只能先撤销
+    guardDelete: (db, id) => {
+      const used = (db.prepare("SELECT COUNT(*) AS n FROM transactions WHERE lesson_id = ?").get(id) as { n: number }).n;
+      return used === 0 ? null : "这节课已经记过课时流水（扣过课时），不能删除：请先撤销这节课的课时记录。";
+    },
+  },
+];
+
+/** 路径 → CRUD 规格；同时给出 id（列表接口没有 id）。 */
+function matchCrud(pathname: string): { spec: CrudSpec; id: string } | null {
+  const match = /^\/api\/([a-z]+)(?:\/([^/]+))?$/.exec(pathname);
+  if (match === null) return null;
+  const spec = CRUD.find((item) => item.path === match[1]);
+  return spec === undefined ? null : { spec, id: match[2] ?? "" };
+}
+
+function crudRow(db: Database.Database, spec: CrudSpec, id: string): Row | undefined {
+  return db.prepare(`SELECT * FROM ${spec.table} WHERE id = ?`).get(id) as Row | undefined;
+}
+
+/** 从请求体里挑出允许改的字段（只认表里有的列，避免脏字段直接进 SQL）。 */
+function buildColumns(spec: CrudSpec, body: Record<string, unknown>): { columns: string[]; values: unknown[] } {
+  const columns: string[] = [];
+  const values: unknown[] = [];
+  for (const [field, column] of Object.entries(spec.columns)) {
+    if (!(field in body)) continue;
+    const value = body[field];
+    columns.push(column);
+    if (spec.json.includes(field)) values.push(JSON.stringify(value ?? []));
+    else if (spec.bool.includes(field)) values.push(value === true || value === 1 ? 1 : 0);
+    else values.push(value as string | number);
+  }
+  return { columns, values };
+}
+
+function handleCrud(
+  db: Database.Database,
+  method: string,
+  pathname: string,
+  body: Record<string, unknown>,
+): WriteResult | null {
+  const matched = matchCrud(pathname);
+  if (matched === null) return null;
+  const { spec, id } = matched;
+
+  if (method === "POST" && id === "") {
+    // 学生与排课有专用接口（校验更严：姓名必填、时间必须合法），不要被通用新增抢走
+    if (spec.path === "students" || spec.path === "lessons") return null;
+    const { columns, values } = buildColumns(spec, body);
+    if (columns.length === 0) return { status: 400, payload: { error: "没有可写入的字段" } };
+    const newId = nextId(spec.path.slice(0, 2));
+    const all = ["id", ...columns];
+    const run = db.transaction(() => {
+      db.prepare(`INSERT INTO ${spec.table} (${all.join(", ")}) VALUES (${all.map(() => "?").join(", ")})`).run(newId, ...values);
+      writeLog(db, { entity: spec.label, action: "新建", targetId: newId, summary: `新建${spec.label}「${String(body.name ?? "")}」` });
+    });
+    try {
+      run();
+    } catch (cause) {
+      return { status: 400, payload: { error: cause instanceof Error ? cause.message : "写入失败" } };
+    }
+    return { status: 201, payload: spec.to(crudRow(db, spec, newId)!) };
+  }
+
+  if (method === "PATCH" && id !== "") {
+    const row = crudRow(db, spec, id);
+    if (row === undefined) return { status: 404, payload: { error: `没有这条${spec.label}记录` } };
+    const { columns, values } = buildColumns(spec, body);
+    if (columns.length === 0) return { status: 400, payload: { error: "没有可更新的字段" } };
+    const run = db.transaction(() => {
+      db.prepare(`UPDATE ${spec.table} SET ${columns.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`).run(...values, id);
+      writeLog(db, { entity: spec.label, action: "修改", targetId: id, summary: `修改${spec.label}（${columns.join("、")}）` });
+    });
+    try {
+      run();
+    } catch (cause) {
+      return { status: 400, payload: { error: cause instanceof Error ? cause.message : "更新失败" } };
+    }
+    return { status: 200, payload: spec.to(crudRow(db, spec, id)!) };
+  }
+
+  if (method === "DELETE" && id !== "") {
+    const row = crudRow(db, spec, id);
+    if (row === undefined) return { status: 404, payload: { error: `没有这条${spec.label}记录` } };
+    const reason = spec.guardDelete?.(db, id) ?? null;
+    if (reason !== null) return { status: 400, payload: { error: reason } };
+    const run = db.transaction(() => {
+      db.prepare(`DELETE FROM ${spec.table} WHERE id = ?`).run(id);
+      writeLog(db, { entity: spec.label, action: "删除", targetId: id, summary: `删除${spec.label}` });
+    });
+    run();
+    return { status: 200, payload: { deleted: true, id } };
+  }
+
+  return null;
+}
+
 function send(response: ServerResponse, status: number, payload: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(payload, null, 2));
@@ -551,23 +711,30 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
 
   // 写接口：方法 + 路径正则匹配；命中后在事务里执行
   if (request.method === "POST" || request.method === "PATCH" || request.method === "DELETE") {
-    for (const route of WRITES) {
-      const match = route.pattern.exec(url.pathname);
-      if (match !== null && route.method === request.method) {
-        void readBody(request)
-          .then((body) => {
-            const result = route.handle(db, match, body);
-            send(response, result.status, result.payload);
-          })
-          .catch((cause: unknown) => {
-            send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" });
-          });
-        return;
-      }
-    }
-    send(response, 404, { error: `还没有这个写接口：${request.method} ${url.pathname}` });
+    // 先看通用增删改（教师/教室/课程/学生/排课），它带护栏
+    void readBody(request)
+      .then((body) => {
+        const result = handleCrud(db, request.method ?? "POST", url.pathname, body);
+        if (result === null) {
+          for (const route of WRITES) {
+            const match = route.pattern.exec(url.pathname);
+            if (match !== null && route.method === request.method) {
+              const written = route.handle(db, match, body);
+              send(response, written.status, written.payload);
+              return;
+            }
+          }
+          send(response, 404, { error: `还没有这个写接口：${request.method} ${url.pathname}` });
+          return;
+        }
+        send(response, result.status, result.payload);
+      })
+      .catch((cause: unknown) => {
+        send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" });
+      });
     return;
   }
+
 
   /** 退费试算：只读，给出每种口径各退多少（页面在选择前要能看到差异）。 */
   const refundQuote = /^\/api\/students\/([^/]+)\/enrollments\/([^/]+)\/refund-quote$/.exec(url.pathname);
