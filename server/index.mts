@@ -14,6 +14,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type Database from "better-sqlite3";
 import { openDatabase, DB_PATH } from "./db.mts";
+import { createSqliteStore, snapshotSize } from "./kv-store.mts";
+// 伪后端的**同一份实现**：服务端只是换了一个 KeyValueStore，业务口径一行都不用重写
+import { api, __useStoreForTesting } from "../lib/backend/api.ts";
 import { currentVersion, migrate } from "./migrate.mts";
 // 复用伪后端阶段的纯函数：课时记账与剩余课时的口径只能有一份
 import { enrollmentForLesson, remainingTotal } from "../lib/backend/enrollment.ts";
@@ -995,6 +998,32 @@ function send(response: ServerResponse, status: number, payload: unknown): void 
 const db = openDatabase();
 const migration = migrate(db);
 
+/*
+ * 路线 B 的核心一步：把 api.ts 的存储换成 SQLite 支持的实现。
+ * 之后 `api` 上的 106 个方法全部可用，且**与浏览器里跑的是同一套逻辑**。
+ */
+__useStoreForTesting(createSqliteStore(db));
+
+/**
+ * 通用分发：按 `api` 的真实形状逐级查表调用。
+ *
+ * 用「方法名 + 参数数组」而不是逐个写 REST 路由，是为了**不重复描述一遍接口**：
+ * 契约已经在 contract.ts / docs/后台API约定.md 里，这里是机器照做。
+ */
+async function callApi(method: string, args: unknown[]): Promise<unknown> {
+  const parts = method.split(".");
+  let target: unknown = api;
+  for (const part of parts.slice(0, -1)) {
+    if (typeof target !== "object" || target === null) throw new Error(`没有这个方法：${method}`);
+    target = (target as Record<string, unknown>)[part];
+  }
+  if (typeof target !== "object" || target === null) throw new Error(`没有这个方法：${method}`);
+  const name = parts[parts.length - 1] ?? "";
+  const fn = (target as Record<string, unknown>)[name];
+  if (typeof fn !== "function") throw new Error(`没有这个方法：${method}`);
+  return await (fn as (...a: unknown[]) => unknown).apply(target, args);
+}
+
 const server = createServer((request: IncomingMessage, response: ServerResponse) => {
   /*
    * 全局兜底：任何未预期的异常都要变成 500 响应，而不是让进程退出。
@@ -1003,6 +1032,23 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
    */
   try {
   const url = new URL(request.url ?? "/", `http://localhost:${PORT}`);
+
+  /** 通用调用：{ method: "students.list", args: [] }。第 5 步前端就切到这一个入口。 */
+  if (url.pathname === "/api/call" && request.method === "POST") {
+    void readBody(request)
+      .then(async (body) => {
+        const method = String(body.method ?? "");
+        const args = Array.isArray(body.args) ? (body.args as unknown[]) : [];
+        try {
+          const result = await callApi(method, args);
+          send(response, 200, { ok: true, result });
+        } catch (cause) {
+          send(response, 400, { ok: false, error: cause instanceof Error ? cause.message : "调用失败" });
+        }
+      })
+      .catch((cause: unknown) => send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" }));
+    return;
+  }
 
   if (url.pathname === "/health") {
     const counts: Record<string, number> = {};
@@ -1021,6 +1067,8 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
       schemaVersion: currentVersion(db),
       migration: { from: migration.from, to: migration.to, applied: migration.applied },
       routes: Object.keys(ROUTES),
+      storage: "sqlite(kv)：与浏览器共用同一份 api.ts 实现",
+      snapshotBytes: snapshotSize(db, "nexgenedu.admin.db.v1"),
       writes: WRITES.map((route) => `${route.method} ${route.pattern.source.replace(/\\//g, "/")}`),
       counts,
       time: new Date().toISOString(),
