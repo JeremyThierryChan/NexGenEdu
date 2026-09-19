@@ -20,7 +20,7 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 - 数据类型带 `version`（当前 v12），升级链在 `api.ts` 的 `migrate()`，
   **必须按版本升序逐级推进**（历史上写反过一次顺序，导致老数据被重新灌成示例数据）。
 
-## 二、接口分组（共 105 个方法）
+## 二、接口分组（共 106 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -171,8 +171,14 @@ lib/backend/storage.ts    KeyValueStore：浏览器里是 localStorage，Node �
 
 ### 7. 运维与审计
 
-`exportDatabase`、`importDatabase`、`hasBackup`、`restoreBackup`、`reset`、
-`setOperator`、`logs.list`、`logs.clear`。
+`exportDataset`、`exportDatabase`、`importDatabase`、`hasBackup`、`restoreBackup`、
+`reset`、`setOperator`、`logs.list`、`logs.clear`。
+
+其中 `exportDataset` 是**按需导出**（数据集 × 选中的行 × 格式）：服务端照
+`lib/backend/export.ts` 的数据集清单实现即可，注意两点 —— `ids` 为空表示全选；
+返回的 `count` / `total` 要如实区分（「导了 12 条、共 40 条」不能含糊成「已导出」）。
+格式上 CSV 必须带 BOM（Excel 中文不乱码）、ICS 要按 RFC 5545 转义与折行 —— 这些
+在 `lib/backend/backup.ts` 里已有实现，服务端照抄口径，别另写一套。
 
 导入必须保持三道保险：**结构校验**（不合格直接拒收且不动现有数据）、
 **导入前自动备份**、**版本迁移**。`logs` 现在存在本机、可被前端篡改，

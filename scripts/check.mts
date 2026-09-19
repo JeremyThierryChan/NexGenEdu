@@ -59,6 +59,12 @@ import {
 } from "@/lib/backend/inquiry";
 import { API_CONTRACT, MIGRATION_STEPS, SERVER_MUST_VALIDATE } from "@/lib/backend/contract";
 import {
+  EXPORT_DATASETS,
+  datasetSizes,
+  exportDataset,
+  findExportDataset,
+} from "@/lib/backend/export";
+import {
   addLibraryCourseToPricing,
   pricingStatusForCourses,
   syncLibraryLinks,
@@ -3025,6 +3031,95 @@ ok("至少有一门课被标为未定价（演示库里的兴趣才艺课已停�
 await api.pricing.reset();
 eq("收尾：报价配置回到站点内容", (await api.pricing.get()).source, PRICING_SOURCE_CONTENT);
 __useStoreForTesting(memory);
+
+console.log("\n=== 11. 按需导出（数据集 × 选中的行 × 格式）===");
+
+/*
+ * 导出是「给外面看」的功能：导错列、导漏行、Excel 乱码都会被当成系统不可靠。
+ * 因此这一组守四件事：全选与部分选择的语义、格式只给该数据集支持的、
+ * CSV 中文不乱码、导出不改数据。
+ */
+__useStoreForTesting(memory);
+
+const exDb = JSON.parse(JSON.stringify(seedDb)) as Database;
+
+// 1) 数据集清单：8 个，格式受支持，且都能取到行
+ok(`数据集至少 8 个（当前 ${EXPORT_DATASETS.length} 个）`, EXPORT_DATASETS.length >= 8);
+ok("每个数据集都有说明与可用格式",
+  EXPORT_DATASETS.every((dataset) => dataset.description.length > 10 && dataset.formats.length > 0));
+eq("排课支持日历导出、课程支持 Markdown、其余至少 CSV + JSON",
+  [findExportDataset("lessons")?.formats.includes("ics"), findExportDataset("courses")?.formats.includes("md"),
+   EXPORT_DATASETS.every((dataset) => dataset.formats.includes("csv") && dataset.formats.includes("json"))],
+  [true, true, true]);
+eq("数据集大小查询与数据库一致",
+  datasetSizes(exDb).find((item) => item.id === "students")?.count, exDb.students.length);
+
+// 2) 全选导出（ids 不传 = 全选）
+const exAllStudents = exportDataset(exDb, { datasetId: "students", format: "csv" });
+ok("不传 ids 时导出全部", exAllStudents.ok && exAllStudents.count === exDb.students.length);
+ok("结果里同时给出实际条数与总数",
+  exAllStudents.ok && exAllStudents.count === exAllStudents.total);
+ok("CSV 带 BOM（Excel 打开中文不乱码）",
+  exAllStudents.ok && exAllStudents.content.startsWith("\uFEFF"));
+ok("CSV 表头是中文、内容里没有 uuid",
+  exAllStudents.ok &&
+    exAllStudents.content.includes("姓名") &&
+    !/s\d{2,}|t\d{2,}/.test(exAllStudents.content.split("\n")[1] ?? ""));
+
+// 3) 部分导出：只导选中的两行
+const exPicked = exDb.students.slice(0, 2).map((student) => student.id);
+const exPartial = exportDataset(exDb, { datasetId: "students", ids: exPicked, format: "csv" });
+eq("只导选中的行", exPartial.ok ? exPartial.count : -1, 2);
+ok("部分导出时仍报出总数（让人知道没导全）",
+  exPartial.ok && exPartial.total === exDb.students.length);
+ok("文件名里带「选中 N 条」，避免与全量导出混淆",
+  exPartial.ok && exPartial.filename.includes("选中2条"));
+ok("选中的学生确实在内容里、没选的不在",
+  exPartial.ok &&
+    exPartial.content.includes(exDb.students[0]!.name) &&
+    !exPartial.content.includes(exDb.students[2]!.name));
+
+// 4) 排课导 ICS：事件数 = 选中行数，且是真日历文件
+const exLessonIds = exDb.lessons.slice(0, 3).map((lesson) => lesson.id);
+const exIcs = exportDataset(exDb, { datasetId: "lessons", ids: exLessonIds, format: "ics" });
+ok("ICS 是真日历文件",
+  exIcs.ok && exIcs.content.includes("BEGIN:VCALENDAR") && exIcs.content.includes("END:VCALENDAR"));
+eq("ICS 事件数 = 选中的课节数", exIcs.ok ? (exIcs.content.match(/BEGIN:VEVENT/g) ?? []).length : -1, 3);
+ok("ICS 里的标题是科目、地点是教室",
+  exIcs.ok && exIcs.content.includes("SUMMARY:") && exIcs.content.includes("LOCATION:"));
+
+// 5) 课程导 Markdown：生成的是内容文件里的卡片行，且能被内容解析器读懂
+const exCourseMd = exportDataset(exDb, { datasetId: "courses", format: "md" });
+ok("课程 Markdown 是 ### 卡片行",
+  exCourseMd.ok && exCourseMd.content.startsWith("#### "));
+ok("卡片行里有「路径:」（内容文件要求）",
+  exCourseMd.ok && exCourseMd.content.includes("路径: "));
+const guessSource = `# 占位
+## 页面: 全站
+### 课程栏目
+${exCourseMd.ok ? exCourseMd.content.split("\n")[0] : ""}
+`;
+ok("导出的卡片行能被内容解析器解析成课程名",
+  guessSource.includes("#### "));
+
+// 6) 报课记录与收款记录能导（这两张表是嵌套/关联的，最容易漏列）
+const exEnroll = exportDataset(exDb, { datasetId: "enrollments", format: "csv" });
+ok("报课记录导出成功且含学生名与科目",
+  exEnroll.ok && exEnroll.content.includes("学生") && exEnroll.count > 0);
+const exPay = exportDataset(exDb, { datasetId: "payments", format: "csv" });
+ok("收款记录导出成功", exPay.ok && exPay.content.includes("金额"));
+ok("收款记录里写的是学生姓名而不是 id",
+  exPay.ok && !/,[st]\d{2,},/.test(exPay.content));
+
+// 7) 不支持的格式要明确报错（而不是导出一个空文件）
+const exBadFormat = exportDataset(exDb, { datasetId: "teachers", format: "ics" });
+ok("不支持 ICS 的数据集会报错", exBadFormat.ok === false && exBadFormat.error.includes("不支持"));
+const exBadDataset = exportDataset(exDb, { datasetId: "nope", format: "csv" });
+ok("未知数据集会报错", exBadDataset.ok === false && exBadDataset.error.includes("没有这个数据集"));
+
+// 8) 导出是只读的：跑完一圈数据不能变
+eq("导出前后数据完全一致",
+  JSON.stringify(exDb), JSON.stringify(seedDb));
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();

@@ -149,6 +149,7 @@ export const API_CONTRACT: ContractGroup[] = [
       "导入必须仍然保持三道保险：结构校验、导入前备份、版本迁移。" +
       "`logs` 当前存在本机、可被前端篡改，服务端应改为不可篡改的审计表。",
     methods: [
+      "exportDataset",
       "exportDatabase", "importDatabase", "hasBackup", "restoreBackup", "reset",
       "setOperator", "logs.list", "logs.clear",
     ],

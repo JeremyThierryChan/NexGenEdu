@@ -51,6 +51,8 @@ export type {
   TeacherFeeSelection,
 } from "./pricing";
 export type { CourseOption, CourseSummary } from "./courses";
+export type { ExportDataset, ExportFormat, ExportResult } from "./export";
+export { EXPORT_DATASETS, EXPORT_FORMATS, FORMAT_META } from "./export";
 import {
   monthRange,
   outstandingAmount,
@@ -61,6 +63,8 @@ import {
 } from "./finance";
 import type { StudentProfile } from "./student-profile";
 import { getCourseColumns } from "@/lib/data/site";
+import { exportDataset as buildDatasetExport } from "./export";
+import type { ExportRequest, ExportResult } from "./export";
 import {
   canRemoveCourse,
   courseOptions,
@@ -1888,6 +1892,18 @@ export const api = {
    *
    * 返回的是**深拷贝**：调用方改它不会影响存储里的数据。
    */
+  /**
+   * 按需导出：数据集 × 选中的行 × 格式（CSV / JSON / ICS / Markdown）。
+   *
+   * `ids` 为空表示**全选**；返回的 `count` 是实际导出条数、`total` 是该数据集总数 ——
+   * 界面靠这两个数字说清「导了 12 条，共 40 条」，避免让人以为导全了。
+   * 只读：导出不改任何数据。
+   */
+  async exportDataset(request: ExportRequest): Promise<ExportResult> {
+    await delay();
+    return buildDatasetExport(load(), request);
+  },
+
   async exportDatabase(): Promise<Database> {
     await delay();
     return clone(load());

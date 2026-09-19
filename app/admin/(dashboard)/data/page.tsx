@@ -4,7 +4,25 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/admin/AdminFields";
-import { api, type OperationLog } from "@/lib/backend/api";
+import {
+  api,
+  type Classroom,
+  type Course,
+  type Enrollment,
+  type Lesson,
+  type LessonRecord,
+  type OperationLog,
+  type Payment,
+  type Student,
+  type Teacher,
+} from "@/lib/backend/api";
+import {
+  EXPORT_DATASETS,
+  FORMAT_META,
+  type ExportDataset,
+  type ExportFormat,
+} from "@/lib/backend/export";
+import { remainingTotal } from "@/lib/backend/enrollment";
 import {
   createCsv,
   createIcs,
@@ -15,6 +33,7 @@ import {
   type DatabaseStats,
 } from "@/lib/backend/backup";
 import { formatDayLabel } from "@/lib/backend/format";
+import { cn } from "@/lib/utils/cn";
 
 /**
  * 数据与备份。
@@ -222,6 +241,9 @@ export default function AdminDataPage() {
         </p>
       </Panel>
 
+      {/* 按需导出：数据集 × 选中的行 × 格式 */}
+      <OnDemandExport />
+
       {/* 导入 */}
       <Panel
         className="mt-4"
@@ -251,7 +273,7 @@ export default function AdminDataPage() {
           )}
         </div>
         <p className="px-4 pb-4 text-xs leading-relaxed text-ink-500">
-          导入会**整体替换**当前数据（不是合并）。文件结构不对会直接拒绝，现有数据不受影响；
+          导入会整体替换当前数据（不是合并）。文件结构不对会直接拒绝，现有数据不受影响；
           版本较旧的文件会自动升级到当前结构。
         </p>
       </Panel>
@@ -320,5 +342,412 @@ function Stat({ label, value }: { label: string; value: number | undefined }) {
       <dt className="text-xs text-ink-500">{label}</dt>
       <dd className="mt-0.5 text-lg font-medium tabular text-ink-900">{value ?? "…"}</dd>
     </div>
+  );
+}
+
+/* ── 按需导出 ────────────────────────────────────────────────────────── */
+
+/** 一行可导出的数据（界面用；真正的导出行在服务层按 id 取）。 */
+type RowOption = {
+  id: string;
+  /** 主标签：一眼能认出是「哪一条」。 */
+  label: string;
+  /** 次要说明：时间、教室、剩余课时、状态这类补充信息。 */
+  hint: string;
+};
+
+/** `09-19 17:30`：排课与收款这类「具体到时刻」的行用。 */
+function monthDayTime(iso: string): string {
+  const date = new Date(iso);
+  const pad = (value: number) => `${value}`.padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** 把 id 换成名字（导出给人看，界面上也不该出现 uuid）。 */
+function nameById<T extends { id: string; name: string }>(list: T[], id: string): string {
+  return list.find((item) => item.id === id)?.name ?? "";
+}
+
+/**
+ * 取某个数据集的行（**只取当前选中的这一个**）。
+ *
+ * 为什么不把 8 个数据集一起加载：排课、流水、课堂记录加起来几百条，
+ * 每次打开这一页都要等它们全部读完，而用户一次只导一个数据集。
+ * 代价是切换数据集时有一次短暂加载 —— 这个代价小得多。
+ */
+async function loadDatasetRows(datasetId: string): Promise<RowOption[]> {
+  switch (datasetId) {
+    case "students": {
+      const students: Student[] = await api.students.list();
+      return students.map((student) => ({
+        id: student.id,
+        label: `${student.name} · ${student.grade}`,
+        hint: `剩 ${remainingTotal(student.enrollments)} 节 · ${student.status} · ${student.subjects.join("、") || "未报课"}`,
+      }));
+    }
+    case "lessons": {
+      const [lessons, teachers, classrooms] = await Promise.all([
+        api.lessons.list(),
+        api.teachers.list(),
+        api.classrooms.list(),
+      ]);
+      return lessons
+        .slice()
+        .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime())
+        .map((lesson: Lesson) => ({
+          id: lesson.id,
+          label: `${monthDayTime(lesson.startsAt)} ${lesson.subject} · ${nameById(teachers, lesson.teacherId) || "待定"}`,
+          hint: `${nameById(classrooms, lesson.classroomId) || "未定教室"} · ${lesson.durationMinutes} 分钟 · ${lesson.status}`,
+        }));
+    }
+    case "teachers": {
+      const teachers: Teacher[] = await api.teachers.list();
+      return teachers.map((teacher) => ({
+        id: teacher.id,
+        label: `${teacher.name} · ${teacher.role === "" ? "教师" : teacher.role}`,
+        hint: `${teacher.active ? "在职" : "离职"} · 可带 ${teacher.subjects.length} 科`,
+      }));
+    }
+    case "classrooms": {
+      const rooms: Classroom[] = await api.classrooms.list();
+      return rooms.map((room) => ({
+        id: room.id,
+        label: `${room.name} · ${room.kind}`,
+        hint: `容量 ${room.capacity} 人`,
+      }));
+    }
+    case "courses": {
+      const courses: Course[] = await api.courses.list();
+      return courses.map((course) => ({
+        id: course.id,
+        label: `${course.name} · ${course.category}`,
+        hint: `${course.origin} · ${course.status}`,
+      }));
+    }
+    case "enrollments": {
+      // 报课记录没有独立列表接口：挂在学生身上，这里摊平（id 用报课记录自己的 id）
+      const students: Student[] = await api.students.list();
+      return students.flatMap((student) =>
+        student.enrollments.map((enrollment: Enrollment) => ({
+          id: enrollment.id,
+          label: `${student.name} · ${enrollment.subject}`,
+          hint: `剩 ${Math.max(0, enrollment.totalLessons - enrollment.usedLessons)} 节 · ${enrollment.status} · ${enrollment.form || "未填班型"}`,
+        })),
+      );
+    }
+    case "payments": {
+      const [payments, students] = await Promise.all([api.payments.list(), api.students.list()]);
+      return payments
+        .slice()
+        .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+        .map((payment: Payment) => ({
+          id: payment.id,
+          label: `${monthDayTime(payment.at)} ${payment.kind} ¥${payment.amount} · ${nameById(students, payment.studentId) || "未指定学生"}`,
+          hint: payment.method,
+        }));
+    }
+    case "lessonRecords": {
+      const [records, lessons, students] = await Promise.all([
+        api.lessonRecords.list(),
+        api.lessons.list(),
+        api.students.list(),
+      ]);
+      return records.map((record: LessonRecord) => {
+        const lesson = lessons.find((item) => item.id === record.lessonId);
+        return {
+          id: record.id,
+          label: `${lesson === undefined ? "（课节已删除）" : monthDayTime(lesson.startsAt)} ${nameById(students, record.studentId) || "未指定学生"} · ${lesson?.subject ?? ""}`,
+          hint: `${record.attendance} · 专注 ${record.focus} · 评分 ${record.rating}`,
+        };
+      });
+    }
+    default:
+      return [];
+  }
+}
+
+/**
+ * 按需导出面板。
+ *
+ * 与上面三个固定出口的区别：这里是「数据集 × 选中的行 × 格式」——
+ * 典型场景是「把这学期围棋课的排课导成 CSV 发给老师」，原先只能导全量再自己筛。
+ *
+ * 界面上最需要小心的是**空选择的语义**：`ids` 为空数组表示「全部」而不是「什么都不导」。
+ * 因此这里做三件事，避免误解：
+ *   1. 状态行明写「未选择任何行 → 导出全部 N 条」；
+ *   2. 按钮字样跟着选择变（「导出全部 40 条」/「导出选中的 3 条」）；
+ *   3. 导出结果里同时给 `count` 与 `total`（「已导出 3 条（该数据集共 40 条）」）。
+ */
+function OnDemandExport() {
+  const [datasetId, setDatasetId] = useState<string>(EXPORT_DATASETS[0]?.id ?? "students");
+  const [format, setFormat] = useState<ExportFormat>(EXPORT_DATASETS[0]?.formats[0] ?? "csv");
+  const [rows, setRows] = useState<RowOption[] | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [keyword, setKeyword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState("");
+  const [error, setError] = useState("");
+
+  const dataset: ExportDataset | undefined = EXPORT_DATASETS.find(
+    (item) => item.id === datasetId,
+  );
+
+  // 只加载当前数据集的行；切换数据集时清掉上一次的勾选（行都换了，留着勾选会导错）
+  useEffect(() => {
+    let alive = true;
+    setRows(null);
+    setSelected([]);
+    setKeyword("");
+    setResult("");
+    setError("");
+
+    void loadDatasetRows(datasetId)
+      .then((list) => {
+        if (alive) setRows(list);
+      })
+      .catch(() => {
+        // 取数失败不该让整页崩：当成「没有可导出的行」并允许重试
+        if (alive) setRows([]);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [datasetId]);
+
+  /** 切换数据集：格式也要跟着换（ics 只有排课有、md 只有课程有，由 formats 决定）。 */
+  function pickDataset(next: ExportDataset) {
+    setDatasetId(next.id);
+    setFormat(next.formats[0] ?? "csv");
+  }
+
+  const visible = (rows ?? []).filter((row) => {
+    const key = keyword.trim();
+    if (key === "") return true;
+    return row.label.includes(key) || row.hint.includes(key);
+  });
+
+  const total = rows?.length ?? 0;
+  const allSelected = total > 0 && selected.length === total;
+
+  async function runExport() {
+    setBusy(true);
+    setError("");
+    setResult("");
+
+    // ids 传空数组 = 全选（服务层的语义，不是「什么都不导」）
+    const response = await api.exportDataset({ datasetId, ids: selected, format });
+    setBusy(false);
+
+    if (!response.ok) {
+      setError(response.error);
+      return;
+    }
+    downloadTextFile(response.filename, response.content, response.mime);
+    setResult(
+      `已导出 ${response.count} 条（该数据集共 ${response.total} 条）→ ${response.filename}`,
+    );
+  }
+
+  return (
+    <Panel
+      className="mt-4"
+      title="按需导出"
+      description="选数据集、选要哪些行、选格式 —— 导出的是「选中的行」，不选任何行就是全部。"
+    >
+      <div className="space-y-4 px-4 py-4">
+        <p className="text-xs leading-relaxed text-ink-500">
+          选中的行（不选 = 全部）：给 Excel 看用 <strong className="font-medium text-ink-700">CSV</strong>、
+          给别的系统用 <strong className="font-medium text-ink-700">JSON</strong>、
+          排课可以导 <strong className="font-medium text-ink-700">ICS</strong> 进手机日历、
+          课程可以导 <strong className="font-medium text-ink-700">Markdown</strong> 粘回内容文件。
+        </p>
+
+        {/* 1. 选数据集 */}
+        <div>
+          <h3 className="mb-2 text-xs font-medium text-ink-500">第一步：选数据集</h3>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {EXPORT_DATASETS.map((item) => {
+              const active = item.id === datasetId;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => pickDataset(item)}
+                  aria-pressed={active}
+                  className={cn(
+                    "rounded-md border px-3 py-2 text-left transition-colors",
+                    active
+                      ? "border-brand-400 bg-brand-50"
+                      : "border-ink-200 bg-white hover:border-ink-300",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "block text-sm font-medium",
+                      active ? "text-brand-700" : "text-ink-800",
+                    )}
+                  >
+                    {item.label}
+                  </span>
+                  <span className="mt-0.5 block text-[11px] leading-relaxed text-ink-500">
+                    {item.description}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 2. 选行 */}
+        <div>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-medium text-ink-500">
+              第二步：选要哪些行
+              <span className="ml-2 font-normal text-ink-400">
+                共 {rows === null ? "…" : total} 条，已选 {selected.length} 条
+              </span>
+            </h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={visible.length === 0}
+                onClick={() =>
+                  setSelected((prev) => [...new Set([...prev, ...visible.map((row) => row.id)])])
+                }
+              >
+                全选当前结果
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={selected.length === 0}
+                onClick={() => setSelected([])}
+              >
+                全不选
+              </Button>
+            </div>
+          </div>
+
+          <input
+            type="search"
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+            placeholder="按名称 / 科目 / 教室等关键字筛选（只影响显示，不影响已选）"
+            className="mb-2 w-full rounded-md border border-ink-200 px-3 py-2 text-sm outline-none focus:border-brand-400"
+          />
+
+          {/* 空选择的语义必须写出来：最容易被理解成「什么都不导」 */}
+          <p
+            className={cn(
+              "mb-2 rounded-md px-3 py-2 text-xs leading-relaxed",
+              selected.length === 0
+                ? "bg-warning-50 text-warning-600"
+                : "bg-ink-50 text-ink-600",
+            )}
+          >
+            {selected.length === 0
+              ? `未选择任何行 → 将导出全部 ${total} 条`
+              : allSelected
+                ? `已选全部 ${selected.length} 条（等同于全选）`
+                : `已选 ${selected.length} 条 → 只导出这 ${selected.length} 条（该数据集共 ${total} 条）`}
+          </p>
+
+          {rows === null ? (
+            <p className="px-1 py-3 text-xs text-ink-400">加载中…</p>
+          ) : total === 0 ? (
+            <p className="px-1 py-3 text-xs text-ink-500">没有可导出的行。</p>
+          ) : visible.length === 0 ? (
+            <p className="px-1 py-3 text-xs text-ink-500">
+              当前筛选没有匹配的行（共 {total} 条）。
+            </p>
+          ) : (
+            <ul className="max-h-72 divide-y divide-ink-100 overflow-y-auto rounded-md border border-ink-200">
+              {visible.map((row) => {
+                const checked = selected.includes(row.id);
+                return (
+                  <li key={row.id}>
+                    <label className="flex cursor-pointer items-start gap-2.5 px-3 py-2 hover:bg-ink-50">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={checked}
+                        onChange={() =>
+                          setSelected((prev) =>
+                            checked ? prev.filter((id) => id !== row.id) : [...prev, row.id],
+                          )
+                        }
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm text-ink-800">{row.label}</span>
+                        {row.hint !== "" && (
+                          <span className="block truncate text-[11px] text-ink-500">
+                            {row.hint}
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {/* 3. 选格式 + 导出 */}
+        <div>
+          <h3 className="mb-2 text-xs font-medium text-ink-500">第三步：选格式并导出</h3>
+          <div className="flex flex-wrap items-center gap-2">
+            {(dataset?.formats ?? []).map((item) => (
+              <button
+                key={item}
+                type="button"
+                onClick={() => setFormat(item)}
+                aria-pressed={format === item}
+                className={cn(
+                  "rounded-md border px-3 py-1.5 text-xs transition-colors",
+                  format === item
+                    ? "border-brand-400 bg-brand-50 text-brand-700"
+                    : "border-ink-200 bg-white text-ink-600 hover:border-ink-300",
+                )}
+              >
+                {FORMAT_META[item].label}
+              </button>
+            ))}
+            <Button
+              size="sm"
+              disabled={busy || total === 0}
+              onClick={() => void runExport()}
+            >
+              {busy
+                ? "导出中…"
+                : selected.length === 0
+                  ? `导出全部 ${total} 条`
+                  : `导出选中的 ${selected.length} 条`}
+            </Button>
+          </div>
+          <p className="mt-2 text-xs leading-relaxed text-ink-400">
+            {dataset === undefined
+              ? ""
+              : `「${dataset.label}」支持：${dataset.formats.map((item) => FORMAT_META[item].label).join("、")}。`}
+          </p>
+        </div>
+
+        {result !== "" && (
+          <p className="rounded-md border border-success-100 bg-success-50 px-3 py-2 text-xs leading-relaxed text-success-600">
+            {result}
+          </p>
+        )}
+        {error !== "" && (
+          <p
+            role="alert"
+            className="rounded-md border border-danger-100 bg-danger-50 px-3 py-2 text-xs leading-relaxed text-danger-600"
+          >
+            {error}
+          </p>
+        )}
+      </div>
+    </Panel>
   );
 }
