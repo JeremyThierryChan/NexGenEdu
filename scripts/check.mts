@@ -59,6 +59,17 @@ import {
 } from "@/lib/backend/inquiry";
 import { API_CONTRACT, MIGRATION_STEPS, SERVER_MUST_VALIDATE } from "@/lib/backend/contract";
 import {
+  SCRIPT_GROUPS,
+  SCRIPTS,
+  SCRIPT_VARS,
+  fillScript,
+  filterScripts,
+  missingPlaceholders,
+  scriptPlaceholders,
+  scriptsToText,
+  summarizeScripts,
+} from "@/lib/backend/scripts";
+import {
   EXPORT_DATASETS,
   datasetSizes,
   exportDataset,
@@ -3120,6 +3131,119 @@ ok("未知数据集会报错", exBadDataset.ok === false && exBadDataset.error.i
 // 8) 导出是只读的：跑完一圈数据不能变
 eq("导出前后数据完全一致",
   JSON.stringify(exDb), JSON.stringify(seedDb));
+
+console.log("\n=== 12. 话术专区 ===");
+
+/*
+ * 话术是「发出去就收不回」的东西，因此这一组守三件事：
+ *   1. 口径与系统一致（24 小时请假、试课满 10 节、两种退费口径、1 节 +10% 手续费）——
+ *      话术与扣课时/报价的实现分叉，就会变成「系统按新规则算、老师按旧话术承诺」；
+ *   2. **内部信息不进话术**：教师分成、教师课时费、机构留存这些字一条都不能出现
+ *      （它们只在后台内部用，发到家长那里是事故）；
+ *   3. 占位符的替换行为：缺的占位符必须原样保留，不能悄悄变成空白。
+ */
+ok(`话术分组至少 11 组（当前 ${SCRIPT_GROUPS.length} 组）`, SCRIPT_GROUPS.length >= 11);
+ok(`话术至少 30 条（当前 ${SCRIPTS.length} 条）`, SCRIPTS.length >= 30);
+eq("每个分组下都有话术",
+  SCRIPT_GROUPS.filter((group) => !SCRIPTS.some((script) => script.group === group.id)).map((group) => group.id),
+  []);
+eq("话术 id 不重复",
+  SCRIPTS.map((script) => script.id).filter((id, index) => SCRIPTS.findIndex((item) => item.id === id) !== index),
+  []);
+eq("每条话术都挂在存在的分组上",
+  SCRIPTS.filter((script) => !SCRIPT_GROUPS.some((group) => group.id === script.group)).map((script) => script.id),
+  []);
+
+// 每条都要有场景名、什么时候用、成稿、该说与不该说
+eq("话术字段完整（标题 / 场景 / 成稿 / 要点）",
+  SCRIPTS.filter(
+    (script) =>
+      script.title.trim() === "" ||
+      script.when.trim() === "" ||
+      script.script.trim() === "" ||
+      script.tips.say.length === 0 ||
+      script.tips.avoid.length === 0,
+  ).map((script) => script.id),
+  []);
+// 太长家长不看：20–300 字之间（微信一条消息的量级）
+eq("成稿长度在 20–300 字之间",
+  SCRIPTS.filter((script) => script.script.length < 20 || script.script.length > 300)
+    .map((script) => `${script.id}(${script.script.length} 字)`),
+  []);
+
+// 内部信息红线：逐条扫描，失败能指出是哪一条
+const SCRIPT_INTERNAL_WORDS = ["分成", "教师课时费", "机构留存", "40%", "留存", "提成"];
+eq("话术里不出现内部信息（教师分成 / 机构留存等）",
+  SCRIPTS.filter((script) =>
+    SCRIPT_INTERNAL_WORDS.some((word) =>
+      [script.title, script.when, script.script, ...script.tips.say, ...script.tips.avoid]
+        .join("\n")
+        .includes(word),
+    ),
+  ).map((script) => script.id),
+  []);
+
+// 口径一致性：这几条数字必须能在话术里找到（改了规则就要改话术，自检会拦住）
+const groupTextOf = (id: string) =>
+  SCRIPTS.filter((script) => script.group === id)
+    .map((script) => [script.title, script.script, ...script.tips.say, ...script.tips.avoid].join("\n"))
+    .join("\n");
+ok("请假话术讲清了「提前 24 小时不扣课时」", groupTextOf("leave").includes("24 小时"));
+ok("缺课话术讲清了「扣 1 节」与「补课再扣 1 节」",
+  groupTextOf("leave").includes("扣 1 节"));
+ok("试课话术讲清了「报课满 10 节试课免费」", groupTextOf("trial").includes("10 节"));
+ok("退费话术讲了「按实付比例退」这一默认口径",
+  groupTextOf("refund").includes("按实付") || groupTextOf("refund").includes("比例"));
+ok("手续费话术提到「只报 1 节」与「10%」",
+  groupTextOf("quote").includes("1 节") && groupTextOf("quote").includes("10%"));
+ok("接待话术与后台「咨询」页字段对齐（年级 / 科目 / 时间 / 频次 / 指定老师）",
+  ["年级", "科目", "时间", "一周一次", "指定"].every((key) => groupTextOf("first-contact").includes(key)));
+ok("排课话术讲清了接待 9:00–21:00 与上课 8:00–22:00 是两回事",
+  groupTextOf("schedule").includes("9:00–21:00") && groupTextOf("schedule").includes("8:00–22:00"));
+
+// 占位符：替换 / 保留 / 去重
+const twoVarScript = SCRIPTS.find((script) => scriptPlaceholders(script).length >= 2)!;
+const twoVars = scriptPlaceholders(twoVarScript);
+const halfFilled = fillScript(twoVarScript, { [twoVars[0]!]: "小明" });
+ok("fillScript 会替换给到的占位符", !halfFilled.includes(`{${twoVars[0]!}}`));
+ok("fillScript 保留没给到的占位符（不变成空白）", halfFilled.includes(`{${twoVars[1]!}}`));
+eq("scriptPlaceholders 去重且保持出现顺序",
+  scriptPlaceholders({
+    id: "t", group: "leave", title: "t", when: "t",
+    script: "{学生} 与 {学生} 还有 {老师}", tips: { say: [], avoid: [] },
+  }),
+  ["学生", "老师"]);
+eq("missingPlaceholders 只列没填的（填掉一个，剩下的都还在）",
+  missingPlaceholders(twoVarScript, { [twoVars[0]!]: "小明" }), twoVars.slice(1));
+ok("话术里用到的占位符都在 SCRIPT_VARS 清单里",
+  SCRIPTS.every((script) =>
+    scriptPlaceholders(script).every((name) => SCRIPT_VARS.some((item) => item.key === name)),
+  ));
+
+// 筛选：分组 / 关键字 / 组合
+eq("按分组筛选只留该组的", filterScripts({ group: "leave" }).every((script) => script.group === "leave"), true);
+ok("按分组筛选有结果", filterScripts({ group: "leave" }).length >= 2);
+eq("空筛选等于全部", filterScripts({}).length, SCRIPTS.length);
+eq("「全部」等价于不筛选", filterScripts({ group: "全部" }).length, SCRIPTS.length);
+eq("关键字能命中成稿",
+  filterScripts({ keyword: "24 小时" }).length,
+  SCRIPTS.filter((script) =>
+    [script.title, script.script, script.when].join("\n").toLowerCase().includes("24 小时"),
+  ).length);
+ok("分组与关键字同时生效",
+  filterScripts({ group: "quote", keyword: "手续费" }).every((script) => script.group === "quote"));
+ok("关键字命中标题也算（搜「试课」能搜到试课组的话术）",
+  filterScripts({ keyword: "试课" }).length > 0);
+
+// 复制全部：保留分组标题，且每条都在
+const allText = scriptsToText(SCRIPTS);
+ok("复制全部时保留分组标题",
+  SCRIPT_GROUPS.every((group) => allText.includes(`【${group.name}】`)));
+ok("复制全部包含每一条话术",
+  SCRIPTS.every((script) => allText.includes(script.script)));
+eq("话术库规模统计与清单一致",
+  [summarizeScripts().groups, summarizeScripts().scripts],
+  [SCRIPT_GROUPS.length, SCRIPTS.length]);
 
 console.log("\n=== 7. 假登录（纯前端演示）===");
 const sessionMemory = createMemoryStore();

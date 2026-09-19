@@ -42,6 +42,11 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     description: "课时不足、欠费、作业与测评异常的学生，附可直接发送的沟通话术",
   },
   {
+    href: "/admin/scripts",
+    label: "话术",
+    description: "按场景摆好的沟通草稿（接待、报价、试课、请假、续费、欠费、退费…），可套用学生后复制",
+  },
+  {
     href: "/admin/finance",
     label: "收费",
     description: "本月收入、收款流水、欠费清单与退费口径",
