@@ -16,9 +16,13 @@
     "check": "node --experimental-strip-types scripts/check.mjs",
     "check:404": "node scripts/check-404.mjs",
     "check:links": "node scripts/check-links.mjs",
-    "check:all": "npm run check && npm run check:404 && npm run check:links"
+    "check:all": "npm run check && npm run check:404 && npm run check:links",
+    "server": "node --experimental-strip-types server/index.mts",
+    "server:migrate": "node --experimental-strip-types server/migrate.mts",
+    "server:health": "curl -s http://localhost:4000/health"
   },
   "dependencies": {
+    "better-sqlite3": "^13.0.3",
     "next": "15.5.25",
     "react": "19.3.0",
     "react-dom": "19.3.0"

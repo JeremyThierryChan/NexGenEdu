@@ -39,3 +39,7 @@ yarn-error.log*
 
 # 同步时间戳（每次同步都会变，仅用于让打包器重新编译）
 data/site/.sync-stamp.ts
+
+# 后端数据库文件与备份（开发阶段；数据不进 git）
+server/data/
+server/backups/
