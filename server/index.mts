@@ -100,6 +100,87 @@ const toCourse = (row: Row) => ({
   createdAt: str(row.created_at),
 });
 
+
+const toLessonRecord = (row: Row) => ({
+  id: str(row.id), lessonId: str(row.lesson_id), studentId: str(row.student_id),
+  attendance: str(row.attendance), leaveRequestedAt: str(row.leave_requested_at),
+  focus: str(row.focus), interaction: str(row.interaction), rating: num(row.rating),
+  note: str(row.note), recordedAt: str(row.recorded_at),
+});
+
+const toHomework = (row: Row) => ({
+  id: str(row.id), studentId: str(row.student_id), date: str(row.date), subject: str(row.subject),
+  submission: str(row.submission), accuracy: str(row.accuracy), weakPoints: str(row.weak_points),
+  note: str(row.note),
+});
+
+const toAssessment = (row: Row) => ({
+  id: str(row.id), studentId: str(row.student_id), subject: str(row.subject), date: str(row.date),
+  score: row.score === null ? null : num(row.score),
+  previousScore: row.previous_score === null ? null : num(row.previous_score),
+  weakPoints: str(row.weak_points), note: str(row.note),
+});
+
+const toPayment = (row: Row) => ({
+  id: str(row.id), studentId: str(row.student_id), enrollmentId: str(row.enrollment_id),
+  amount: num(row.amount), kind: str(row.kind), method: str(row.method), at: str(row.at),
+  note: str(row.note),
+});
+
+const toTransaction = (row: Row) => ({
+  id: str(row.id), studentId: str(row.student_id), enrollmentId: str(row.enrollment_id),
+  subject: str(row.subject), delta: num(row.delta), kind: str(row.kind),
+  lessonId: str(row.lesson_id), at: str(row.at), note: str(row.note),
+  reversedAt: str(row.reversed_at),
+});
+
+const toLog = (row: Row) => ({
+  id: str(row.id), at: str(row.at), operator: str(row.operator), entity: str(row.entity),
+  action: str(row.action), targetId: str(row.target_id), summary: str(row.summary),
+});
+
+/* ── 小表的按视图取数（界面高频调用，做成查询参数而不是整表拉回前端过滤）── */
+
+type ReadSpec = {
+  path: string;
+  /** 真实表名（**不从路径推导**：`homework` 的表叫 `homework_records`，推导会写错） */
+  table: string;
+  to: (row: Row) => unknown;
+  /** 允许的过滤参数（camelCase）→ 列名。 */
+  filters: Record<string, string>;
+  order: string;
+  limitParam?: string;
+};
+
+const READS: ReadSpec[] = [
+  { path: "payments", table: "payments", to: toPayment, filters: { studentId: "student_id", enrollmentId: "enrollment_id" }, order: "at DESC" },
+  { path: "transactions", table: "transactions", to: toTransaction, filters: { studentId: "student_id", enrollmentId: "enrollment_id", lessonId: "lesson_id" }, order: "at DESC" },
+  { path: "lesson-records", table: "lesson_records", to: toLessonRecord, filters: { lessonId: "lesson_id", studentId: "student_id" }, order: "recorded_at DESC" },
+  { path: "homework", table: "homework_records", to: toHomework, filters: { studentId: "student_id" }, order: "date DESC" },
+  { path: "assessments", table: "assessments", to: toAssessment, filters: { studentId: "student_id" }, order: "date DESC" },
+  { path: "logs", table: "logs", to: toLog, filters: { entity: "entity" }, order: "at DESC", limitParam: "limit" },
+];
+
+/** 按过滤器拼 WHERE（只认白名单里的列，参数一律走占位符）。 */
+function readRows(db: Database.Database, spec: ReadSpec, url: URL): unknown[] {
+  const where: string[] = [];
+  const values: string[] = [];
+  for (const [param, column] of Object.entries(spec.filters)) {
+    const value = url.searchParams.get(param);
+    if (value !== null && value !== "") {
+      where.push(`${column} = ?`);
+      values.push(value);
+    }
+  }
+  const limit = spec.limitParam === undefined ? null : Number(url.searchParams.get(spec.limitParam) ?? 0);
+  const sql =
+    `SELECT * FROM ${spec.table}` +
+    (where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "") +
+    ` ORDER BY ${spec.order}` +
+    (limit !== null && Number.isFinite(limit) && limit > 0 ? ` LIMIT ${Math.floor(limit)}` : "");
+  return (db.prepare(sql).all(...values) as Row[]).map(spec.to);
+}
+
 /* ── 路由 ───────────────────────────────────────────────────────────── */
 
 type Handler = (db: Database.Database, url: URL) => unknown;
@@ -119,14 +200,60 @@ const ROUTES: Record<string, Handler> = {
   "/api/lessons": (db, url) => {
     const from = url.searchParams.get("from");
     const to = url.searchParams.get("to");
-    const rows =
-      from !== null && to !== null
-        ? (db
-            .prepare("SELECT * FROM lessons WHERE starts_at >= ? AND starts_at < ? ORDER BY starts_at")
-            .all(from, to) as Row[])
-        : (db.prepare("SELECT * FROM lessons ORDER BY starts_at").all() as Row[]);
+    const date = url.searchParams.get("date");
+    const studentId = url.searchParams.get("studentId");
+    const teacherId = url.searchParams.get("teacherId");
+    const classroomId = url.searchParams.get("classroomId");
+
+    const where: string[] = [];
+    const values: string[] = [];
+    if (date !== null && date !== "") {
+      // 单日：按本地日历日切，与「今日概览」同一口径
+      const start = new Date(`${date}T00:00:00`);
+      where.push("starts_at >= ? AND starts_at < ?");
+      values.push(start.toISOString(), new Date(start.getTime() + 86_400_000).toISOString());
+    } else if (from !== null && to !== null) {
+      where.push("starts_at >= ? AND starts_at < ?");
+      values.push(from, to);
+    }
+    if (teacherId !== null && teacherId !== "") {
+      where.push("teacher_id = ?");
+      values.push(teacherId);
+    }
+    if (classroomId !== null && classroomId !== "") {
+      where.push("classroom_id = ?");
+      values.push(classroomId);
+    }
+
+    let rows = db
+      .prepare(
+        `SELECT * FROM lessons${where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY starts_at`,
+      )
+      .all(...values) as Row[];
+
+    // 学生筛选走 JSON 列：SQLite 的 json_each 比在 Node 里过滤更省事，也避免全表拉回
+    if (studentId !== null && studentId !== "") {
+      const ids = db
+        .prepare(
+          "SELECT DISTINCT l.id FROM lessons l, json_each(l.student_ids) je WHERE je.value = ?",
+        )
+        .all(studentId) as Array<{ id: string }>;
+      const wanted = new Set(ids.map((item) => item.id));
+      rows = rows.filter((row) => wanted.has(str(row.id)));
+    }
     return rows.map(toLesson);
   },
+
+  /** 单个学生（学生详情页）。 */
+  "/api/students/get": (db, url) => {
+    const id = url.searchParams.get("id") ?? "";
+    const row = db.prepare("SELECT * FROM students WHERE id = ?").get(id) as Row | undefined;
+    return row === undefined ? null : toStudent(row);
+  },
+
+  /** 在职教师（排课下拉用）。 */
+  "/api/teachers/active": (db) =>
+    (db.prepare("SELECT * FROM teachers WHERE active = 1 ORDER BY name").all() as Row[]).map(toTeacher),
 
   /**
    * 今日概览：今天的课 + 每间教室今天几节。
@@ -683,6 +810,12 @@ const db = openDatabase();
 const migration = migrate(db);
 
 const server = createServer((request: IncomingMessage, response: ServerResponse) => {
+  /*
+   * 全局兜底：任何未预期的异常都要变成 500 响应，而不是让进程退出。
+   * 这一条是踩出来的 —— 之前一个 SQL 表名写错，直接把整个服务打挂了（测试时报
+   * ERR_EMPTY_RESPONSE / other side closed），那种故障在真机上就是"后台突然全打不开"。
+   */
+  try {
   const url = new URL(request.url ?? "/", `http://localhost:${PORT}`);
 
   if (url.pathname === "/health") {
@@ -762,6 +895,16 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
     return;
   }
 
+  const readSpec = READS.find((item) => url.pathname === `/api/${item.path}`);
+  if (readSpec !== undefined) {
+    try {
+      send(response, 200, readRows(db, readSpec, url));
+    } catch (cause) {
+      send(response, 500, { error: cause instanceof Error ? cause.message : "查询失败" });
+    }
+    return;
+  }
+
   const handler = ROUTES[url.pathname];
   if (handler === undefined) {
     send(response, 404, { error: `还没有这个接口：${url.pathname}` });
@@ -770,6 +913,9 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
 
   try {
     send(response, 200, handler(db, url));
+  } catch (cause) {
+    send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" });
+  }
   } catch (cause) {
     send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" });
   }
