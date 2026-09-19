@@ -146,6 +146,26 @@ const toTransaction = (row: Row) => ({
   reversedAt: str(row.reversed_at),
 });
 
+const toInquiry = (row: Row) => ({
+  id: str(row.id),
+  studentName: str(row.student_name),
+  grade: str(row.grade),
+  guardian: str(row.guardian),
+  subject: str(row.subject),
+  durationMinutes: num(row.duration_minutes),
+  intervalWeeks: num(row.interval_weeks),
+  plannedLessons: num(row.planned_lessons),
+  startsAt: str(row.starts_at),
+  candidates: parseJson(row.candidates, [] as unknown[]),
+  preferredTeacherId: str(row.preferred_teacher_id),
+  preferredClassroomId: str(row.preferred_classroom_id),
+  skipDates: parseJson(row.skip_dates, [] as string[]),
+  status: str(row.status),
+  note: str(row.note),
+  scheduledLessonIds: parseJson(row.scheduled_lesson_ids, [] as string[]),
+  createdAt: str(row.created_at),
+});
+
 const toLog = (row: Row) => ({
   id: str(row.id), at: str(row.at), operator: str(row.operator), entity: str(row.entity),
   action: str(row.action), targetId: str(row.target_id), summary: str(row.summary),
@@ -262,6 +282,10 @@ const ROUTES: Record<string, Handler> = {
     const row = db.prepare("SELECT * FROM students WHERE id = ?").get(id) as Row | undefined;
     return row === undefined ? null : toStudent(row);
   },
+
+  /** 咨询线索列表（按创建时间倒序，最近的在上）。 */
+  "/api/inquiries": (db) =>
+    (db.prepare("SELECT * FROM inquiries ORDER BY created_at DESC").all() as Row[]).map(toInquiry),
 
   /** 在职教师（排课下拉用）。 */
   "/api/teachers/active": (db) =>
@@ -849,6 +873,18 @@ const CRUD: CrudSpec[] = [
       if (payments === 0 && txs === 0) return null;
       return `这位学生还有 ${payments} 条收款记录、${txs} 条课时流水，不能直接删除。请先处理他的收款与课时（退课 / 退款会留痕），再删档案。`;
     },
+  },
+  {
+    path: "inquiries", table: "inquiries", label: "咨询",
+    columns: {
+      studentName: "student_name", grade: "grade", guardian: "guardian", subject: "subject",
+      durationMinutes: "duration_minutes", intervalWeeks: "interval_weeks",
+      plannedLessons: "planned_lessons", startsAt: "starts_at", candidates: "candidates",
+      preferredTeacherId: "preferred_teacher_id", preferredClassroomId: "preferred_classroom_id",
+      skipDates: "skip_dates", status: "status", note: "note",
+      scheduledLessonIds: "scheduled_lesson_ids", createdAt: "created_at",
+    },
+    json: ["candidates", "skipDates", "scheduledLessonIds"], bool: [], to: toInquiry,
   },
   {
     path: "lessons", table: "lessons", label: "排课",
