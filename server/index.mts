@@ -17,6 +17,9 @@ import { openDatabase, DB_PATH } from "./db.mts";
 import { currentVersion, migrate } from "./migrate.mts";
 // 复用伪后端阶段的纯函数：课时记账与剩余课时的口径只能有一份
 import { enrollmentForLesson, remainingTotal } from "../lib/backend/enrollment.ts";
+// 金额与退费口径、请假扣课时规则：同样只复用伪后端阶段的纯函数
+import { findRefundPolicy, round2 } from "../lib/backend/finance.ts";
+import { decideCharge } from "../lib/backend/attendance.ts";
 
 const PORT = Number(process.env.PORT ?? 4000);
 
@@ -300,16 +303,38 @@ const WRITES: Array<{
     /** 标记已上：按出勤扣课时，**幂等**（重复点不重复扣），课时不足时报错而不是静默截断。 */
     method: "POST",
     pattern: /^\/api\/lessons\/([^/]+)\/complete$/,
-    handle: (db, match) => {
+    handle: (db, match, body) => {
       const row = db.prepare("SELECT * FROM lessons WHERE id = ?").get(match[1] ?? "") as Row | undefined;
       if (row === undefined) return { status: 404, payload: { error: "没有这节课" } };
       const lesson = toLesson(row);
-      if (lesson.status === "已上") return { status: 200, payload: { skipped: true, lesson } };
+      if (lesson.status === "已上") return { status: 200, payload: { skipped: true, lesson, decisions: [] } };
+
+      // 考勤：请求体里可带每名学生的出勤与请假时间，由 decideCharge 决定扣不扣
+      const records = new Map<string, { attendance: string; leaveRequestedAt: string }>();
+      for (const raw of Array.isArray(body.records) ? body.records : []) {
+        const record = raw as Record<string, unknown>;
+        records.set(String(record.studentId ?? ""), {
+          attendance: String(record.attendance ?? "到课"),
+          leaveRequestedAt: String(record.leaveRequestedAt ?? ""),
+        });
+      }
+      const decisions: Array<{ studentId: string; charge: boolean; reason: string }> = [];
 
       const run = db.transaction(() => {
         for (const studentId of lesson.studentIds) {
           const student = loadStudent(db, studentId);
           if (student === null) continue;
+
+          // 复用请假规则：提前 24 小时请假不扣课时，临时缺课扣
+          const record = records.get(studentId);
+          const decision = decideCharge(
+            lesson,
+            record === undefined
+              ? undefined
+              : { attendance: record.attendance, leaveRequestedAt: record.leaveRequestedAt } as never,
+          );
+          decisions.push({ studentId, charge: decision.charge, reason: decision.reason });
+          if (!decision.charge) continue;
           // 复用纯函数：这节课该扣哪一条报课记录（同科目在读、取剩余最多）
           const enrollment = enrollmentForLesson(student.enrollments, lesson.subject);
           if (enrollment === null) continue;
@@ -344,7 +369,147 @@ const WRITES: Array<{
         return { status: 400, payload: { error: cause instanceof Error ? cause.message : "扣课时失败" } };
       }
       const updated = db.prepare("SELECT * FROM lessons WHERE id = ?").get(lesson.id) as Row;
-      return { status: 200, payload: { skipped: false, lesson: toLesson(updated) } };
+      return { status: 200, payload: { skipped: false, lesson: toLesson(updated), decisions } };
+    },
+  },
+  {
+    /** 续费：课时累加到原报课记录 + 课时流水（+ 可选收款），同一事务。 */
+    method: "POST",
+    pattern: /^\/api\/students\/([^/]+)\/enrollments\/([^/]+)\/renew$/,
+    handle: (db, match, body) => {
+      const student = loadStudent(db, match[1] ?? "");
+      if (student === null) return { status: 404, payload: { error: "没有这个学生" } };
+      const target = (student.enrollments as Array<Record<string, unknown>>).find(
+        (item) => item.id === match[2],
+      );
+      if (target === undefined) return { status: 404, payload: { error: "没有这条报课记录" } };
+
+      const added = Number(body.added ?? 0);
+      if (!Number.isFinite(added) || added < 1) return { status: 400, payload: { error: "续费节数至少 1 节" } };
+      const paidNow = Number(body.paidNow ?? 0);
+      const at = new Date().toISOString();
+
+      const run = db.transaction(() => {
+        const enrollments = (student.enrollments as Array<Record<string, unknown>>).map((item) =>
+          item.id === target.id
+            ? {
+                ...item,
+                totalLessons: Number(item.totalLessons ?? 0) + added,
+                agreedAmount: Number(item.agreedAmount ?? 0) + Number(body.agreedAmount ?? 0),
+                paidAmount: Number(item.paidAmount ?? 0) + Math.max(0, paidNow),
+                history: [
+                  ...((item.history as unknown[]) ?? []),
+                  { at, kind: "续费", lessons: added, note: String(body.note ?? "") },
+                ],
+              }
+            : item,
+        );
+        db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(JSON.stringify(enrollments), student.id);
+        db.prepare(
+          "INSERT INTO transactions (id, student_id, enrollment_id, subject, delta, kind, lesson_id, at, note, reversed_at) VALUES (?, ?, ?, ?, ?, '续费', '', ?, ?, '')",
+        ).run(nextId("tx"), student.id, target.id, String(target.subject ?? ""), added, at, String(body.note ?? ""));
+        if (paidNow > 0) {
+          db.prepare(
+            "INSERT INTO payments (id, student_id, enrollment_id, amount, kind, method, at, note) VALUES (?, ?, ?, ?, '收款', ?, ?, ?)",
+          ).run(nextId("p"), student.id, target.id, paidNow, String(body.method ?? "微信"), at, "续费收款");
+        }
+        writeLog(db, { entity: "学生", action: "续费", targetId: student.id, summary: `「${student.name}」续费 ${added} 节（${String(target.subject ?? "")}）` });
+      });
+      run();
+      return { status: 200, payload: loadStudent(db, student.id) };
+    },
+  },
+  {
+    /** 独立收款 / 退款：写一条流水并同步报课记录的实收（退款为负数冲减）。 */
+    method: "POST",
+    pattern: /^\/api\/payments$/,
+    handle: (db, _match, body) => {
+      const studentId = String(body.studentId ?? "");
+      const student = loadStudent(db, studentId);
+      if (student === null) return { status: 404, payload: { error: "没有这个学生" } };
+      const amount = Number(body.amount ?? 0);
+      if (!Number.isFinite(amount) || amount <= 0) return { status: 400, payload: { error: "金额必须大于 0" } };
+      const kind = body.kind === "退款" ? "退款" : "收款";
+      const enrollmentId = String(body.enrollmentId ?? "");
+      const at = new Date().toISOString();
+      const id = nextId("p");
+
+      const run = db.transaction(() => {
+        db.prepare(
+          "INSERT INTO payments (id, student_id, enrollment_id, amount, kind, method, at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(id, studentId, enrollmentId, amount, kind, String(body.method ?? "微信"), at, String(body.note ?? ""));
+        if (enrollmentId !== "") {
+          const enrollments = (student.enrollments as Array<Record<string, unknown>>).map((item) =>
+            item.id === enrollmentId
+              ? {
+                  ...item,
+                  // 实收 = 收款合计 − 退款合计（不变式：账实相符）
+                  paidAmount: round2(Number(item.paidAmount ?? 0) + (kind === "退款" ? -amount : amount)),
+                }
+              : item,
+          );
+          db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(JSON.stringify(enrollments), studentId);
+        }
+        writeLog(db, { entity: "收费", action: kind, targetId: studentId, summary: `「${student.name}」${kind} ${amount} 元` });
+      });
+      run();
+      return { status: 201, payload: { id, kind, amount } };
+    },
+  },
+  {
+    /**
+     * 退课：按选定口径算退费（复用 `finance.ts` 的 REFUND_POLICIES），
+     * 置报课记录为已退课并写退款流水。金额一律由服务端算，不接受前端传来的退款额。
+     */
+    method: "POST",
+    pattern: /^\/api\/students\/([^/]+)\/enrollments\/([^/]+)\/refund$/,
+    handle: (db, match, body) => {
+      const student = loadStudent(db, match[1] ?? "");
+      if (student === null) return { status: 404, payload: { error: "没有这个学生" } };
+      const target = (student.enrollments as Array<Record<string, unknown>>).find(
+        (item) => item.id === match[2],
+      );
+      if (target === undefined) return { status: 404, payload: { error: "没有这条报课记录" } };
+      if (String(target.endedAt ?? "") !== "") return { status: 400, payload: { error: "这条报课记录已经退课了" } };
+
+      const policy = findRefundPolicy(String(body.policy ?? ""));
+      const quote = policy.calculate({
+        totalLessons: Number(target.totalLessons ?? 0),
+        usedLessons: Number(target.usedLessons ?? 0),
+        agreedAmount: Number(target.agreedAmount ?? 0),
+        unitPrice: Number(target.unitPrice ?? 0),
+      });
+      const at = new Date().toISOString();
+
+      const run = db.transaction(() => {
+        const enrollments = (student.enrollments as Array<Record<string, unknown>>).map((item) =>
+          item.id === target.id
+            ? {
+                ...item,
+                endedAt: at,
+                status: "已退课",
+                history: [
+                  ...((item.history as unknown[]) ?? []),
+                  { at, kind: "退课", lessons: 0, note: `${policy.name}：${quote.formula}` },
+                ],
+              }
+            : item,
+        );
+        db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(JSON.stringify(enrollments), student.id);
+        if (quote.refund > 0) {
+          db.prepare(
+            "INSERT INTO payments (id, student_id, enrollment_id, amount, kind, method, at, note) VALUES (?, ?, ?, ?, '退款', ?, ?, ?)",
+          ).run(nextId("p"), student.id, target.id, quote.refund, String(body.method ?? "原路退回"), at, `退课退款（${policy.name}）`);
+        }
+        writeLog(db, {
+          entity: "学生",
+          action: "退课",
+          targetId: student.id,
+          summary: `「${student.name}」退课（${String(target.subject ?? "")}），按「${policy.name}」退 ${quote.refund} 元：${quote.formula}`,
+        });
+      });
+      run();
+      return { status: 200, payload: { refund: quote.refund, formula: quote.formula, policy: policy.id, student: loadStudent(db, student.id) } };
     },
   },
 ];
@@ -401,6 +566,32 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
       }
     }
     send(response, 404, { error: `还没有这个写接口：${request.method} ${url.pathname}` });
+    return;
+  }
+
+  /** 退费试算：只读，给出每种口径各退多少（页面在选择前要能看到差异）。 */
+  const refundQuote = /^\/api\/students\/([^/]+)\/enrollments\/([^/]+)\/refund-quote$/.exec(url.pathname);
+  if (refundQuote !== null) {
+    const student = loadStudent(db, refundQuote[1] ?? "");
+    const target = (student?.enrollments as Array<Record<string, unknown>> | undefined)?.find(
+      (item) => item.id === refundQuote[2],
+    );
+    if (student === null || target === undefined) {
+      send(response, 404, { error: "没有这条报课记录" });
+      return;
+    }
+    const requested = url.searchParams.get("policy");
+    const policies = (requested === null ? ["prorata", "list-clawback"] : [requested]).map((id) => {
+      const policy = findRefundPolicy(id);
+      const quote = policy.calculate({
+        totalLessons: Number(target.totalLessons ?? 0),
+        usedLessons: Number(target.usedLessons ?? 0),
+        agreedAmount: Number(target.agreedAmount ?? 0),
+        unitPrice: Number(target.unitPrice ?? 0),
+      });
+      return { id: policy.id, name: policy.name, refund: quote.refund, formula: quote.formula };
+    });
+    send(response, 200, { enrollmentId: target.id, policies });
     return;
   }
 
