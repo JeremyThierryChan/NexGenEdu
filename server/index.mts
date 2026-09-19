@@ -17,6 +17,7 @@ import { openDatabase, DB_PATH } from "./db.mts";
 import { createSqliteStore, snapshotSize } from "./kv-store.mts";
 // 伪后端的**同一份实现**：服务端只是换了一个 KeyValueStore，业务口径一行都不用重写
 import { api, __useStoreForTesting } from "../lib/backend/api.ts";
+import { createSeedDatabase } from "../lib/backend/seed.ts";
 import { currentVersion, migrate } from "./migrate.mts";
 // 复用伪后端阶段的纯函数：课时记账与剩余课时的口径只能有一份
 import { enrollmentForLesson, remainingTotal } from "../lib/backend/enrollment.ts";
@@ -1002,7 +1003,38 @@ const migration = migrate(db);
  * 路线 B 的核心一步：把 api.ts 的存储换成 SQLite 支持的实现。
  * 之后 `api` 上的 106 个方法全部可用，且**与浏览器里跑的是同一套逻辑**。
  */
-__useStoreForTesting(createSqliteStore(db));
+const SNAPSHOT_KEY = "nexgenedu.admin.db.v1";
+const serverStore = createSqliteStore(db);
+
+/*
+ * **空库起步**。
+ *
+ * 伪后端的 `load()` 在存储为空时会播种示例数据（实测：空存储调用 students.list 直接返回
+ * 8 条示例学生）。机构已经把库清空、也明确要删掉示例数据，所以服务端在首次启动时
+ * 先写一份**空快照**进去：业务表全空，只保留报价配置（机构调过的价格与规则）
+ * 与结构版本 —— 这正是"重新一个一个录"要的起点。
+ *
+ * 需要示例数据做演示时，设 NEXGENEDU_ALLOW_SEED=1 即可（自检与演示用）。
+ */
+if (serverStore.read(SNAPSHOT_KEY) === null && process.env.NEXGENEDU_ALLOW_SEED !== "1") {
+  const empty = createSeedDatabase();
+  empty.students = [];
+  empty.teachers = [];
+  empty.classrooms = [];
+  empty.lessons = [];
+  empty.lessonRecords = [];
+  empty.homeworkRecords = [];
+  empty.assessments = [];
+  empty.transactions = [];
+  empty.payments = [];
+  empty.logs = [];
+  empty.inquiries = [];
+  empty.courses = [];
+  serverStore.write(SNAPSHOT_KEY, JSON.stringify(empty));
+  console.log("已写入空快照（业务表全空、保留报价配置）");
+}
+
+__useStoreForTesting(serverStore);
 
 /**
  * 通用分发：按 `api` 的真实形状逐级查表调用。
