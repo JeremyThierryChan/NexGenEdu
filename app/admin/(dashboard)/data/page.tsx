@@ -168,14 +168,6 @@ export default function AdminDataPage() {
     await load();
   }
 
-  async function reset() {
-    if (!window.confirm("重置为初始示例数据？当前数据会全部丢失（建议先导出备份）。")) return;
-    setBusy(true);
-    await api.reset();
-    setBusy(false);
-    setMessage("已重置为示例数据。");
-    await load();
-  }
 
   return (
     <>
@@ -317,17 +309,6 @@ export default function AdminDataPage() {
       </Panel>
 
       {/* 危险操作 */}
-      <Panel
-        className="mt-4"
-        title="重置"
-        description="演示或改乱之后恢复初始示例数据 —— 会丢掉现有全部数据。"
-      >
-        <div className="px-4 py-4">
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => void reset()}>
-            重置为示例数据
-          </Button>
-        </div>
-      </Panel>
     </>
   );
 }

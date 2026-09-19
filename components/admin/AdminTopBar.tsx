@@ -8,9 +8,9 @@ import { api } from "@/lib/backend/api";
 import { getSession, logout } from "@/lib/auth/session";
 
 /**
- * 后台顶栏：品牌 + 当前账号 + 退出登录 + 重置示例数据。
+ * 后台顶栏：品牌 + 当前账号 + 退出登录。
  *
- * 「重置示例数据」是纯前端版本的必需功能：数据存在浏览器里，
+ * 数据存在浏览器里，
  * 演示时改乱了需要一个一键恢复入口（将来接服务端后删掉即可）。
  */
 export function AdminTopBar() {

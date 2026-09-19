@@ -79,7 +79,7 @@ export default function AdminTodayPage() {
         description="今天有哪些课程、各教室是否空闲、哪些学生课时不足。"
       />
 
-      <DataNotice onReset={load} />
+      <DataNotice onRefresh={load} />
 
       {/* 四个数字，一眼看到规模 */}
       <dl className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

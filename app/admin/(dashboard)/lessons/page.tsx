@@ -115,7 +115,7 @@ export default function AdminLessonsPage() {
         description="按天排课：谁上、在哪上、跟谁上，并在保存前检查时间冲突。"
       />
 
-      <DataNotice onReset={load} />
+      <DataNotice onRefresh={load} />
 
       {/* 日期切换 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">

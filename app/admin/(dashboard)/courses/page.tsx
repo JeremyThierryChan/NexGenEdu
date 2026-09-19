@@ -196,7 +196,7 @@ export default function AdminCoursesPage() {
         description="排课的科目、教师可带科目、报课科目都取自这里。网站上还没有的课（围棋、书法）也可以在这里先建起来。"
       />
       <DataNotice
-        onReset={() => {
+        onRefresh={() => {
           void load();
         }}
       />

@@ -60,7 +60,7 @@ export default function AdminFollowUpsPage() {
         description="需要主动联系家长的学生：课时、欠费、作业、测评、出勤与排课。"
       />
 
-      <DataNotice onReset={load} />
+      <DataNotice onRefresh={load} />
 
       {/* 概览 */}
       <dl className="mt-6 grid gap-3 sm:grid-cols-3 lg:grid-cols-4">

@@ -47,7 +47,7 @@ export default function AdminFinancePage() {
         description="本月收入、收款流水、欠费清单与退费口径。"
       />
 
-      <DataNotice onReset={load} />
+      <DataNotice onRefresh={load} />
 
       {/* 月份切换 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">

@@ -65,7 +65,7 @@ export default function AdminInquiriesPage() {
         description="家长咨询登记与排课可行性：这个安排能不能接，不能的话最接近的方案是什么。"
       />
 
-      <DataNotice onReset={load} />
+      <DataNotice onRefresh={load} />
 
       {creating && (
         <Panel

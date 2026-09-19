@@ -47,7 +47,7 @@ export default function AdminStatsPage() {
         description="教室利用率与空档、教师课时分布、退课与流失。"
       />
 
-      <DataNotice onReset={load} />
+      <DataNotice onRefresh={load} />
 
       {/* 周切换 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">

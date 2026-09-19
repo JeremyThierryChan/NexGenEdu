@@ -90,7 +90,7 @@ export default function AdminStudentsPage() {
         description="学生档案、报读科目、剩余课时与排课情况。"
       />
 
-      <DataNotice onReset={load} />
+      <DataNotice onRefresh={load} />
 
       {/* 新增表单 */}
       {creating && (

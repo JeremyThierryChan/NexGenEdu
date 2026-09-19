@@ -67,7 +67,7 @@ export default function AdminCalendarPage() {
     <>
       <PageHeading title="日历" description="按周查看排课密度与空档，点某天看当天的课。" />
 
-      <DataNotice onReset={load} />
+      <DataNotice onRefresh={load} />
 
       {/* 周切换 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">

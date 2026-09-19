@@ -256,7 +256,7 @@ export default function AdminPricingPage() {
         description="基础价与系数是算钱的依据：改完保存，再用试算器核对一遍，最后导出替换内容文件。"
       />
       <DataNotice
-        onReset={() => {
+        onRefresh={() => {
           void load();
         }}
       />

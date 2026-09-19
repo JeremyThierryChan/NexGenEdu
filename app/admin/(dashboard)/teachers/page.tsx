@@ -76,7 +76,7 @@ export default function AdminTeachersPage() {
         description="教师档案、可带科目、在职状态与排课量。"
       />
 
-      <DataNotice onReset={load} />
+      <DataNotice onRefresh={load} />
 
       {creating && (
         <Panel className="mt-6" title="新增教师" description="科目请与课程名用同一套叫法，便于排课与前台一致。">

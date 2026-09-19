@@ -91,7 +91,7 @@ export default function AdminClassroomsPage() {
         description="上课用教室与自习室：容量、可用时段，以及今天的排课。"
       />
 
-      <DataNotice onReset={load} />
+      <DataNotice onRefresh={load} />
 
       {creating && (
         <Panel

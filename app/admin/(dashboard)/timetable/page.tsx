@@ -133,7 +133,7 @@ export default function AdminTimetablePage() {
         description="按周查看某位教师的课表，或某间教室的占用与空档。"
       />
 
-      <DataNotice onReset={load} />
+      <DataNotice onRefresh={load} />
 
       {/* 周切换 + 页签 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">
