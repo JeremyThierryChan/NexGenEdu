@@ -20,6 +20,18 @@ import { enrollmentForLesson, remainingTotal } from "../lib/backend/enrollment.t
 // 金额与退费口径、请假扣课时规则：同样只复用伪后端阶段的纯函数
 import { findRefundPolicy, round2 } from "../lib/backend/finance.ts";
 import { decideCharge } from "../lib/backend/attendance.ts";
+// 报价与课程库：口径同样只有一份（前台/后台/服务端共用）
+import {
+  pricingConfigFromContent,
+  pricingConfigToMarkdown,
+  quoteSelection,
+  teacherFeeForSelection,
+  validatePricingConfig,
+  PRICING_SOURCE_ADMIN,
+  PRICING_SOURCE_CONTENT,
+  type PricingConfig,
+} from "../lib/backend/pricing.ts";
+import { mergeSiteCourses, summarizeCourses } from "../lib/backend/courses.ts";
 
 const PORT = Number(process.env.PORT ?? 4000);
 
@@ -641,6 +653,144 @@ const WRITES: Array<{
   },
 ];
 
+
+/* ── 报价配置（界面调 6 个方法：读取 / 保存 / 试算 / 教师课时费 / 导出 / 恢复）── */
+
+function loadPricing(db: Database.Database): PricingConfig {
+  const row = db.prepare("SELECT config FROM pricing WHERE id = 1").get() as { config: string } | undefined;
+  return row === undefined
+    ? pricingConfigFromContent()
+    : (JSON.parse(row.config) as PricingConfig);
+}
+
+/** 报价相关：路径 → 处理函数（读与写都在这里，口径全部来自 lib/backend/pricing.ts）。 */
+const PRICING_ROUTES: Record<string, { method: string; handle: (db: Database.Database, body: Record<string, unknown>, url: URL) => WriteResult }> = {
+  "/api/pricing": {
+    method: "GET",
+    handle: (db) => ({ status: 200, payload: loadPricing(db) }),
+  },
+  "/api/pricing/save": {
+    method: "POST",
+    handle: (db, body) => {
+      const config = body as unknown as PricingConfig;
+      // 服务端必须自己复核配置合法性：系数写成 0 会让所有报价变 0
+      const problems = validatePricingConfig(config);
+      if (problems.length > 0) return { status: 400, payload: { error: problems.join("；") } };
+      db.prepare("INSERT OR REPLACE INTO pricing (id, config, source, updated_at) VALUES (1, ?, ?, ?)").run(
+        JSON.stringify({ ...config, source: PRICING_SOURCE_ADMIN, updatedAt: new Date().toISOString() }),
+        PRICING_SOURCE_ADMIN,
+        new Date().toISOString(),
+      );
+      writeLog(db, { entity: "报价", action: "修改配置", targetId: "pricing", summary: "修改了报价配置" });
+      return { status: 200, payload: loadPricing(db) };
+    },
+  },
+  "/api/pricing/reset": {
+    method: "POST",
+    handle: (db) => {
+      const config = pricingConfigFromContent();
+      db.prepare("INSERT OR REPLACE INTO pricing (id, config, source, updated_at) VALUES (1, ?, ?, ?)").run(
+        JSON.stringify(config), PRICING_SOURCE_CONTENT, "",
+      );
+      writeLog(db, { entity: "报价", action: "恢复默认", targetId: "pricing", summary: "报价配置恢复为站点内容" });
+      return { status: 200, payload: loadPricing(db) };
+    },
+  },
+  "/api/pricing/quote": {
+    method: "POST",
+    handle: (db, body) => ({
+      status: 200,
+      payload: quoteSelection(loadPricing(db), body as never),
+    }),
+  },
+  "/api/pricing/teacher-fee": {
+    method: "POST",
+    handle: (db, body) => ({
+      status: 200,
+      payload: teacherFeeForSelection(loadPricing(db), body as never),
+    }),
+  },
+  "/api/pricing/export-markdown": {
+    method: "GET",
+    handle: (db) => ({ status: 200, payload: { markdown: pricingConfigToMarkdown(loadPricing(db)) } }),
+  },
+  "/api/courses/summary": {
+    method: "GET",
+    handle: (db) => ({ status: 200, payload: summarizeCourses(courseRows(db)) }),
+  },
+  "/api/courses/sync-from-site": {
+    method: "POST",
+    handle: (db) => {
+      const stored = courseRows(db);
+      const merged = mergeSiteCourses(stored);
+      /*
+       * 注意：`merged.added` 是**课程名数组**（纯函数的契约就是返回名字，便于页面提示
+       * "同步了哪几门"），不是课程对象 —— 这里要插入的是 `merged.courses` 里新增的那些。
+       * 我第一版把它当对象用，结果插进去的是字符串，报 NOT NULL constraint failed: courses.name。
+       */
+      const storedIds = new Set(stored.map((course) => course.id));
+      const toInsert = merged.courses.filter((course) => !storedIds.has(course.id));
+      if (toInsert.length > 0) {
+        const insert = db.prepare(
+          "INSERT OR REPLACE INTO courses (id, name, category, forms, origin, status, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        );
+        const run = db.transaction(() => {
+          for (const course of toInsert) {
+            insert.run(course.id, course.name, course.category, JSON.stringify(course.forms), course.origin, course.status, course.note, course.createdAt);
+          }
+          writeLog(db, { entity: "课程", action: "同步", targetId: "", summary: `从网站同步了 ${toInsert.length} 门课程：${merged.added.join("、")}` });
+        });
+        run();
+      }
+      return { status: 200, payload: { added: merged.added, total: courseRows(db).length } };
+    },
+  },
+};
+
+/** 数据库里的课程行 → 课程库纯函数要的形状。 */
+function courseRows(db: Database.Database): ReturnType<typeof toCourse>[] {
+  return (db.prepare("SELECT * FROM courses ORDER BY category, name").all() as Row[]).map(toCourse);
+}
+
+
+  /** 作业与阶段测评：只记录，不动课时与钱（课堂记录会动课时，另行处理）。 */
+  const recordRoutes: Record<string, { method: string; handle: (db: Database.Database, body: Record<string, unknown>) => WriteResult }> = {
+    "/api/homework/create": {
+      method: "POST",
+      handle: (db, body) => {
+        const id = nextId("hw");
+        db.prepare(
+          "INSERT INTO homework_records (id, student_id, date, subject, submission, accuracy, weak_points, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(id, String(body.studentId ?? ""), String(body.date ?? ""), String(body.subject ?? ""), String(body.submission ?? ""), String(body.accuracy ?? ""), String(body.weakPoints ?? ""), String(body.note ?? ""));
+        writeLog(db, { entity: "作业", action: "新建", targetId: id, summary: `记录作业：${String(body.subject ?? "")}` });
+        return { status: 201, payload: toHomework(db.prepare("SELECT * FROM homework_records WHERE id = ?").get(id) as Row) };
+      },
+    },
+    "/api/assessments/add": {
+      method: "POST",
+      handle: (db, body) => {
+        const id = nextId("as");
+        db.prepare(
+          "INSERT INTO assessments (id, student_id, subject, date, score, previous_score, weak_points, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(id, String(body.studentId ?? ""), String(body.subject ?? ""), String(body.date ?? ""), body.score === undefined || body.score === null ? null : Number(body.score), body.previousScore === undefined || body.previousScore === null ? null : Number(body.previousScore), String(body.weakPoints ?? ""), String(body.note ?? ""));
+        writeLog(db, { entity: "测评", action: "新建", targetId: id, summary: `阶段测评：${String(body.subject ?? "")}` });
+        return { status: 201, payload: toAssessment(db.prepare("SELECT * FROM assessments WHERE id = ?").get(id) as Row) };
+      },
+    },
+    "/api/logs/clear": {
+      method: "POST",
+      handle: (db) => {
+        const before = (db.prepare("SELECT COUNT(*) AS n FROM logs").get() as { n: number }).n;
+        const run = db.transaction(() => {
+          db.prepare("DELETE FROM logs").run();
+          writeLog(db, { entity: "数据", action: "清空日志", targetId: "", summary: `清空了 ${before} 条操作日志` });
+        });
+        run();
+        return { status: 200, payload: { cleared: before } };
+      },
+    },
+  };
+
 /* ── 通用增删改（教师 / 教室 / 课程 / 学生 / 排课）────────────────────── */
 
 type CrudSpec = {
@@ -843,6 +993,39 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   }
 
   // 写接口：方法 + 路径正则匹配；命中后在事务里执行
+  // 报价与课程库（读 + 写都在这里）
+  const pricingRoute = PRICING_ROUTES[url.pathname];
+  if (pricingRoute !== undefined && request.method === pricingRoute.method) {
+    void readBody(request)
+      .then((body) => {
+        const result = pricingRoute.handle(db, body, url);
+        send(response, result.status, result.payload);
+      })
+      .catch((cause: unknown) => send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" }));
+    return;
+  }
+
+  const deleteMatch = /^\/api\/(homework|assessments)\/([^/]+)$/.exec(url.pathname);
+  if (deleteMatch !== null && request.method === "DELETE") {
+    const table = deleteMatch[1] === "homework" ? "homework_records" : "assessments";
+    const id = deleteMatch[2] ?? "";
+    const info = db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
+    writeLog(db, { entity: deleteMatch[1] === "homework" ? "作业" : "测评", action: "删除", targetId: id, summary: "删除记录" });
+    send(response, info.changes > 0 ? 200 : 404, { deleted: info.changes > 0, id });
+    return;
+  }
+
+  const recordRoute = recordRoutes[url.pathname];
+  if (recordRoute !== undefined && request.method === recordRoute.method) {
+    void readBody(request)
+      .then((body) => {
+        const result = recordRoute.handle(db, body);
+        send(response, result.status, result.payload);
+      })
+      .catch((cause: unknown) => send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" }));
+    return;
+  }
+
   if (request.method === "POST" || request.method === "PATCH" || request.method === "DELETE") {
     // 先看通用增删改（教师/教室/课程/学生/排课），它带护栏
     void readBody(request)
