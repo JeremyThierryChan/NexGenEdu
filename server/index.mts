@@ -15,6 +15,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type Database from "better-sqlite3";
 import { openDatabase, DB_PATH } from "./db.mts";
 import { currentVersion, migrate } from "./migrate.mts";
+// 复用伪后端阶段的纯函数：课时记账与剩余课时的口径只能有一份
+import { enrollmentForLesson, remainingTotal } from "../lib/backend/enrollment.ts";
 
 const PORT = Number(process.env.PORT ?? 4000);
 
@@ -157,6 +159,196 @@ const ROUTES: Record<string, Handler> = {
   },
 };
 
+/** 读请求体（只接受 JSON，超过 1MB 直接拒绝）。 */
+async function readBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = chunk as Buffer;
+    size += buffer.length;
+    if (size > 1_000_000) throw new Error("请求体过大");
+    chunks.push(buffer);
+  }
+  if (size === 0) return {};
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+}
+
+const nextId = (prefix: string): string => `${prefix}${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
+
+function writeLog(
+  db: Database.Database,
+  entry: { entity: string; action: string; targetId: string; summary: string },
+): void {
+  db.prepare(
+    "INSERT INTO logs (id, at, operator, entity, action, target_id, summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(nextId("log"), new Date().toISOString(), "admin", entry.entity, entry.action, entry.targetId, entry.summary);
+}
+
+/** 读一个学生（行 → 页面形状），找不到返回 null。 */
+function loadStudent(db: Database.Database, id: string): ReturnType<typeof toStudent> | null {
+  const row = db.prepare("SELECT * FROM students WHERE id = ?").get(id) as Row | undefined;
+  return row === undefined ? null : toStudent(row);
+}
+
+type WriteResult = { status: number; payload: unknown };
+
+/** 写接口：都要求 `一个请求 = 一个事务`，失败整批回滚。 */
+const WRITES: Array<{
+  method: string;
+  pattern: RegExp;
+  handle: (db: Database.Database, match: RegExpMatchArray, body: Record<string, unknown>) => WriteResult;
+}> = [
+  {
+    method: "POST",
+    pattern: /^\/api\/students$/,
+    handle: (db, _match, body) => {
+      const name = typeof body.name === "string" ? body.name.trim() : "";
+      if (name === "") return { status: 400, payload: { error: "学生姓名必填" } };
+      const id = nextId("s");
+      const run = db.transaction(() => {
+        db.prepare(
+          "INSERT INTO students (id, name, grade, guardian, status, note, created_at, enrollments, profile) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '{}')",
+        ).run(id, name, String(body.grade ?? ""), String(body.guardian ?? ""), String(body.status ?? "在读"), String(body.note ?? ""), new Date().toISOString());
+        writeLog(db, { entity: "学生", action: "新建", targetId: id, summary: `新建学生「${name}」` });
+      });
+      run();
+      return { status: 201, payload: loadStudent(db, id) };
+    },
+  },
+  {
+    /** 报课：报课记录 + 课时流水 + （可选）收款，必须是同一个事务。 */
+    method: "POST",
+    pattern: /^\/api\/students\/([^/]+)\/enroll$/,
+    handle: (db, match, body) => {
+      const student = loadStudent(db, match[1] ?? "");
+      if (student === null) return { status: 404, payload: { error: "没有这个学生" } };
+
+      const subject = typeof body.subject === "string" ? body.subject.trim() : "";
+      const totalLessons = Number(body.totalLessons ?? 0);
+      if (subject === "") return { status: 400, payload: { error: "报课科目必填（取自课程库）" } };
+      if (!Number.isFinite(totalLessons) || totalLessons < 1) {
+        return { status: 400, payload: { error: "报课节数至少 1 节" } };
+      }
+
+      const enrollment = {
+        id: nextId("e"),
+        subject,
+        form: String(body.form ?? ""),
+        teacherId: String(body.teacherId ?? ""),
+        totalLessons,
+        usedLessons: 0,
+        unitPrice: Number(body.unitPrice ?? 0),
+        agreedAmount: Number(body.agreedAmount ?? 0),
+        paidAmount: 0,
+        startedAt: new Date().toISOString(),
+        endedAt: "",
+        status: "在读",
+        note: String(body.note ?? ""),
+        history: [{ at: new Date().toISOString(), kind: "报课", lessons: totalLessons, note: "" }],
+      };
+      const paidNow = Number(body.paidNow ?? 0);
+
+      const run = db.transaction(() => {
+        const enrollments = [...(student.enrollments as typeof enrollment[]), enrollment];
+        db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(JSON.stringify(enrollments), student.id);
+
+        // 课时流水（账本）：正数表示加课时
+        db.prepare(
+          "INSERT INTO transactions (id, student_id, enrollment_id, subject, delta, kind, lesson_id, at, note, reversed_at) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, '')",
+        ).run(nextId("tx"), student.id, enrollment.id, subject, totalLessons, "报课", new Date().toISOString(), "报课");
+
+        if (paidNow > 0) {
+          enrollment.paidAmount = paidNow;
+          db.prepare(
+            "INSERT INTO payments (id, student_id, enrollment_id, amount, kind, method, at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          ).run(nextId("p"), student.id, enrollment.id, paidNow, "收款", String(body.method ?? "微信"), new Date().toISOString(), "报课收款");
+          db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(JSON.stringify(enrollments), student.id);
+        }
+
+        writeLog(db, {
+          entity: "学生",
+          action: "报课",
+          targetId: student.id,
+          summary: `「${student.name}」报课：${subject} ${totalLessons} 节${paidNow > 0 ? `，收款 ${paidNow} 元` : ""}`,
+        });
+      });
+      run();
+
+      const updated = loadStudent(db, student.id)!;
+      return { status: 201, payload: updated };
+    },
+  },
+  {
+    /** 排课：建一节课。冲突检测还没搬过来（见文件顶部说明），先只做基本校验。 */
+    method: "POST",
+    pattern: /^\/api\/lessons$/,
+    handle: (db, _match, body) => {
+      const startsAt = typeof body.startsAt === "string" ? body.startsAt : "";
+      if (startsAt === "" || Number.isNaN(new Date(startsAt).getTime())) {
+        return { status: 400, payload: { error: "上课时间必填且必须是合法时间" } };
+      }
+      const id = nextId("l");
+      db.prepare(
+        "INSERT INTO lessons (id, subject, form, teacher_id, classroom_id, student_ids, starts_at, duration_minutes, status, note, makeup_for_lesson_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '已排', ?, '')",
+      ).run(id, String(body.subject ?? ""), String(body.form ?? ""), String(body.teacherId ?? ""), String(body.classroomId ?? ""), JSON.stringify(body.studentIds ?? []), startsAt, Number(body.durationMinutes ?? 60), String(body.note ?? ""));
+      writeLog(db, { entity: "排课", action: "新建", targetId: id, summary: `排课：${String(body.subject ?? "")}` });
+      const row = db.prepare("SELECT * FROM lessons WHERE id = ?").get(id) as Row;
+      return { status: 201, payload: toLesson(row) };
+    },
+  },
+  {
+    /** 标记已上：按出勤扣课时，**幂等**（重复点不重复扣），课时不足时报错而不是静默截断。 */
+    method: "POST",
+    pattern: /^\/api\/lessons\/([^/]+)\/complete$/,
+    handle: (db, match) => {
+      const row = db.prepare("SELECT * FROM lessons WHERE id = ?").get(match[1] ?? "") as Row | undefined;
+      if (row === undefined) return { status: 404, payload: { error: "没有这节课" } };
+      const lesson = toLesson(row);
+      if (lesson.status === "已上") return { status: 200, payload: { skipped: true, lesson } };
+
+      const run = db.transaction(() => {
+        for (const studentId of lesson.studentIds) {
+          const student = loadStudent(db, studentId);
+          if (student === null) continue;
+          // 复用纯函数：这节课该扣哪一条报课记录（同科目在读、取剩余最多）
+          const enrollment = enrollmentForLesson(student.enrollments, lesson.subject);
+          if (enrollment === null) continue;
+          const remaining = remainingTotal(student.enrollments.filter((item) => item.id === enrollment.id));
+          if (remaining < 1) {
+            throw new Error(`「${student.name}」${lesson.subject} 课时不足（剩 ${remaining} 节），不能标记已上`);
+          }
+          db.prepare(
+            "INSERT INTO transactions (id, student_id, enrollment_id, subject, delta, kind, lesson_id, at, note, reversed_at) VALUES (?, ?, ?, ?, -1, '上课', ?, ?, '', '')",
+          ).run(nextId("tx"), studentId, enrollment.id, lesson.subject, lesson.id, new Date().toISOString());
+
+          /*
+           * 课时流水与报课记录必须一起改：`remainingOf` 读的是 enrollment.usedLessons
+           * （存字段），只写流水不增加 usedLessons 的话，剩余课时永远不减少 ——
+           * 扣课时会变成"记了账但没扣钱"，而且课时不足的拦截永远不会触发。
+           */
+          const nextEnrollments = student.enrollments.map((item) =>
+            item.id === enrollment.id ? { ...item, usedLessons: item.usedLessons + 1 } : item,
+          );
+          db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(
+            JSON.stringify(nextEnrollments),
+            studentId,
+          );
+        }
+        db.prepare("UPDATE lessons SET status = '已上' WHERE id = ?").run(lesson.id);
+        writeLog(db, { entity: "排课", action: "标记已上", targetId: lesson.id, summary: `标记已上：${lesson.subject}` });
+      });
+
+      try {
+        run();
+      } catch (cause) {
+        return { status: 400, payload: { error: cause instanceof Error ? cause.message : "扣课时失败" } };
+      }
+      const updated = db.prepare("SELECT * FROM lessons WHERE id = ?").get(lesson.id) as Row;
+      return { status: 200, payload: { skipped: false, lesson: toLesson(updated) } };
+    },
+  },
+];
+
 function send(response: ServerResponse, status: number, payload: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(payload, null, 2));
@@ -185,9 +377,30 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
       schemaVersion: currentVersion(db),
       migration: { from: migration.from, to: migration.to, applied: migration.applied },
       routes: Object.keys(ROUTES),
+      writes: WRITES.map((route) => `${route.method} ${route.pattern.source.replace(/\\//g, "/")}`),
       counts,
       time: new Date().toISOString(),
     });
+    return;
+  }
+
+  // 写接口：方法 + 路径正则匹配；命中后在事务里执行
+  if (request.method === "POST" || request.method === "PATCH" || request.method === "DELETE") {
+    for (const route of WRITES) {
+      const match = route.pattern.exec(url.pathname);
+      if (match !== null && route.method === request.method) {
+        void readBody(request)
+          .then((body) => {
+            const result = route.handle(db, match, body);
+            send(response, result.status, result.payload);
+          })
+          .catch((cause: unknown) => {
+            send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" });
+          });
+        return;
+      }
+    }
+    send(response, 404, { error: `还没有这个写接口：${request.method} ${url.pathname}` });
     return;
   }
 

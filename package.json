@@ -17,10 +17,10 @@
     "check:404": "node scripts/check-404.mjs",
     "check:links": "node scripts/check-links.mjs",
     "check:all": "npm run check && npm run check:404 && npm run check:links",
-    "server": "node --experimental-strip-types server/index.mts",
-    "server:migrate": "node --experimental-strip-types server/migrate.mts",
+    "server": "node --experimental-strip-types --import ./server/loader.mjs server/index.mts",
+    "server:migrate": "node --experimental-strip-types --import ./server/loader.mjs server/migrate.mts",
     "server:health": "curl -s http://localhost:4000/health",
-    "server:import": "node --experimental-strip-types server/import-data.mts"
+    "server:import": "node --experimental-strip-types --import ./server/loader.mjs server/import-data.mts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
