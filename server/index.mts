@@ -1057,6 +1057,19 @@ __useStoreForTesting(serverStore);
  * 用「方法名 + 参数数组」而不是逐个写 REST 路由，是为了**不重复描述一遍接口**：
  * 契约已经在 contract.ts / docs/后台API约定.md 里，这里是机器照做。
  */
+/** 还原远端代理显式标记的 Date（`{ __date: ISO }`），其余参数原样。 */
+function decodeArg(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(decodeArg);
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    if (typeof record.__date === "string") return new Date(record.__date);
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(record)) out[key] = decodeArg(item);
+    return out;
+  }
+  return value;
+}
+
 async function callApi(method: string, args: unknown[]): Promise<unknown> {
   const parts = method.split(".");
   let target: unknown = api;
@@ -1106,7 +1119,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
         const method = String(body.method ?? "");
         const args = Array.isArray(body.args) ? (body.args as unknown[]) : [];
         try {
-          const result = await callApi(method, args);
+          const result = await callApi(method, args.map(decodeArg));
           send(response, 200, { ok: true, result });
         } catch (cause) {
           send(response, 400, { ok: false, error: cause instanceof Error ? cause.message : "调用失败" });

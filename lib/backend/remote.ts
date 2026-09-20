@@ -27,12 +27,31 @@ export function isRemoteMode(): boolean {
   return remoteBase() !== "";
 }
 
+/**
+ * 参数序列化：`Date` 必须**显式标记**。
+ *
+ * JSON.stringify 会把 Date 变成字符串，服务端收到后调 `getFullYear()` 就炸 ——
+ * 实测就是这样：`finance(new Date())` 报 `anchor.getFullYear is not a function`。
+ * 但也不能"看到像日期的字符串就转回 Date"：很多方法的参数本来就是字符串日期
+ * （`startedAt`、`startsAt`），乱转一样会出错。所以用标记显式区分。
+ */
+function encodeArg(value: unknown): unknown {
+  if (value instanceof Date) return { __date: value.toISOString() };
+  if (Array.isArray(value)) return value.map(encodeArg);
+  if (typeof value === "object" && value !== null) {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) out[key] = encodeArg(item);
+    return out;
+  }
+  return value;
+}
+
 /** 一次 RPC 调用：失败时抛出带服务端原文的错误（不要吞成"未知错误"）。 */
 async function callRemote(base: string, method: string, args: unknown[]): Promise<unknown> {
   const response = await fetch(`${base}/api/call`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ method, args }),
+    body: JSON.stringify({ method, args: encodeArg(args) }),
   });
 
   let payload: { ok?: boolean; result?: unknown; error?: string };
