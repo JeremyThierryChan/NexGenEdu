@@ -143,22 +143,42 @@ try {
     equal("退出后同一个令牌立刻失效（401）", (await call(base, token, "students.list")).status, 401);
     equal("退出后 /api/session 也是 401", (await raw(base, "/api/session", { token })).status, 401);
 
-    console.log("\n[7] 老接口登录后可读（会话同样生效）");
+    console.log("\n[7] 老接口登录后可用，且操作人同样来自会话");
     const fresh = await raw(base, "/api/login", {
       method: "POST", body: { username: info.username, password: info.password },
     });
     const freshToken = String(fresh.body.token ?? "");
-    equal("重新登录后老接口可读", (await raw(base, "/api/students", { token: freshToken })).status, 200);
-    // 老接口同样按会话记操作人：走旧入口也不能把"谁改的"丢掉
+    equal("重新登录后老读接口可读", (await raw(base, "/api/students", { token: freshToken })).status, 200);
+
+    /*
+     * 老接口写的是**它自己那套 SQL 表**（路线 A 的参考实现，不在页面用的数据通路上，
+     * 见 docs/后端开发方案.md §5.2.2），所以它的日志要去 `/api/logs`（读 SQL 的 logs 表）
+     * 里看，而不是 `logs.list`（读 kv 快照里的那份）。
+     *
+     * 这条断言守的是一个真 bug：`writeLog` 原来把操作人**写死成 "admin"**，
+     * 于是不管谁登录，走老接口的写入都记成 admin。
+     */
+    /*
+     * 注意：老接口读写的是**它自己那套 SQL 表**，和 /api/call 走的 kv 快照不是同一份
+     * 存储（见 docs/后端开发方案.md §5.2.2）。所以这里的学生必须也用**老接口**创建 ——
+     * 拿 /api/call 建出来的 id 去喂老接口，只会得到 404（我第一版就是这么写的）。
+     */
+    const oldStudent = await raw(base, "/api/students", {
+      method: "POST",
+      token: freshToken,
+      body: { name: "老接口自检同学", grade: "初二", guardian: "", status: "在读", note: "" },
+    });
+    equal("老接口能建学生", oldStudent.status, 201);
+    const oldStudentId = String((oldStudent.body as { id?: string }).id ?? "");
     await raw(base, "/api/payments", {
       method: "POST",
       token: freshToken,
-      body: { studentId: createdId, amount: 100, kind: "收款", method: "微信", note: "认证自检" },
+      body: { studentId: oldStudentId, amount: 100, kind: "收款", method: "微信", note: "认证自检" },
     });
-    const afterOldRoute = await call(base, freshToken, "logs.list", [20]);
-    const oldRouteLog = ((afterOldRoute.body.result ?? []) as Array<{ action?: string; operator?: string }>)
-      .find((row) => row.action === "收款");
-    equal("走老接口写入的日志也带操作人（不是默认值）", oldRouteLog?.operator, info.username);
+    const sqlLogs = await raw(base, "/api/logs?limit=20", { token: freshToken });
+    const paymentLog = (sqlLogs.body as unknown as Array<{ action?: string; operator?: string }>)
+      .find?.((row) => row.action === "收款");
+    equal("走老接口写入的日志也带会话操作人（不是写死的 admin）", paymentLog?.operator, info.username);
   });
 } catch (cause) {
   failures += 1;

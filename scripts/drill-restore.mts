@@ -57,16 +57,46 @@ function equal(label: string, actual: unknown, expected: unknown): void {
     `实际: ${JSON.stringify(actual)}\n      期望: ${JSON.stringify(expected)}`);
 }
 
-/** 一次 RPC 调用（与页面走的是同一条路：POST /api/call）。 */
+/**
+ * 当前令牌（登录后设置）。
+ *
+ * 第 6 步之后所有 `/api/call` 都要登录，演练也必须先登进来 ——
+ * 这顺带让"登录这条路"每次演练都被走一遍。
+ */
+let token = "";
+
+async function login(base: string, username: string, password: string): Promise<void> {
+  const response = await fetch(`${base}/api/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  const payload = (await response.json()) as { ok?: boolean; token?: string; error?: string };
+  if (payload.ok !== true || typeof payload.token !== "string") {
+    throw new Error(`演练登录失败：${payload.error ?? `HTTP ${response.status}`}`);
+  }
+  token = payload.token;
+}
+
+/** 一次带令牌的请求（与页面走的是同一条路：POST /api/call）。 */
 async function call(base: string, method: string, args: unknown[] = []): Promise<unknown> {
   const response = await fetch(`${base}/api/call`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify({ method, args }),
   });
   const payload = (await response.json()) as { ok?: boolean; result?: unknown; error?: string };
   if (payload.ok !== true) throw new Error(`调用 ${method} 失败：${payload.error ?? "未知错误"}`);
   return payload.result;
+}
+
+/** 读需要登录的状态页（备份状态在里面）。未登录时它会回 401，这也是一条断言。 */
+async function status(base: string): Promise<Record<string, unknown>> {
+  const response = await fetch(`${base}/api/status`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new Error(`读 /api/status 失败：HTTP ${response.status}`);
+  return (await response.json()) as Record<string, unknown>;
 }
 
 /** 删掉数据库文件本身（连同 WAL 文件）：模拟"文件没了"。 */
@@ -173,13 +203,18 @@ try {
     env: { NEXGENEDU_BACKUP_DIR: backupDirPath, NEXGENEDU_BACKUP_KEEP: "5" },
   });
   console.log(`      ${handle.base}`);
-  const health = (await (await fetch(`${handle.base}/health`)).json()) as {
-    backup?: { enabled?: boolean; latest?: string | null };
-  };
-  check("服务端报告自动备份已启用", health.backup?.enabled === true);
+
+  // 未登录时状态页必须是 401（备份目录、表结构这些细节不对门外的人讲）
+  check("未登录读 /api/status 被拒", (await fetch(`${handle.base}/api/status`)).status === 401);
+
+  await login(handle.base, handle.credentials.username, handle.credentials.password);
+  const info = await status(handle.base);
+  const backup = info.backup as { enabled?: boolean; latest?: string | null } | undefined;
+  check("登录后能读到状态", info.ok === true);
+  check("服务端报告自动备份已启用", backup?.enabled === true);
   // 启动那一刻就应该补上"今天的备份"：这正是"昨天关机、今天开机"的场景
-  check("启动时已自动备份今天的份", typeof health.backup?.latest === "string" && health.backup.latest !== "",
-    `latest = ${String(health.backup?.latest)}`);
+  check("启动时已自动备份今天的份", typeof backup?.latest === "string" && backup.latest !== "",
+    `latest = ${String(backup?.latest)}`);
 
   /* 2. 写入可识别的数据 */
   console.log("\n[2/8] 写入演练数据（学生 / 报课 / 收款 / 排课）");
@@ -317,6 +352,15 @@ try {
     dbPath,
     env: { NEXGENEDU_BACKUP_DIR: backupDirPath, NEXGENEDU_BACKUP_KEEP: "5" },
   });
+  /*
+   * 重启后旧令牌必然失效（会话在服务端内存里，见 server/auth.mts 的取舍说明）。
+   * 这一条也顺手证明了"重启即登出"这个行为确实成立。
+   */
+  const staleStatus = await fetch(`${handle.base}/api/status`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  check("重启后旧令牌失效（会话不落盘）", staleStatus.status === 401);
+  await login(handle.base, handle.credentials.username, handle.credentials.password);
   const after = await fingerprint(handle.base);
   console.log(`      ${JSON.stringify(after)}`);
   equal("恢复后所有条数、金额与课时账本完全一致", after, before);

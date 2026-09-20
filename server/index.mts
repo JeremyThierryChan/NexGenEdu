@@ -358,13 +358,26 @@ async function readBody(request: IncomingMessage): Promise<Record<string, unknow
 
 const nextId = (prefix: string): string => `${prefix}${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
 
+/**
+ * 当前请求的操作人（来自会话，见 `requireAuth`）。
+ *
+ * 这里原来是**写死的 "admin"** —— 于是走老 REST 接口的每一次写入，日志里的操作人
+ * 都是"admin"，不管登录的是谁。单用户时看不出问题，等到真有两个账号，
+ * "谁改的"这条线就断了，而且断得毫无提示。
+ *
+ * 用模块级变量是刻意的取舍（与 `api.ts` 的 `operatorName` 一致）：本系统定位是
+ * 单用户本机使用，一个请求一个操作人足够。**多用户并发时要改成随请求一路传下去**
+ * （那时它才会真的出错：A 的写入可能被记成 B 干的）。
+ */
+let currentOperator = "admin";
+
 function writeLog(
   db: Database.Database,
   entry: { entity: string; action: string; targetId: string; summary: string },
 ): void {
   db.prepare(
     "INSERT INTO logs (id, at, operator, entity, action, target_id, summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(nextId("log"), new Date().toISOString(), "admin", entry.entity, entry.action, entry.targetId, entry.summary);
+  ).run(nextId("log"), new Date().toISOString(), currentOperator, entry.entity, entry.action, entry.targetId, entry.summary);
 }
 
 /** 读一个学生（行 → 页面形状），找不到返回 null。 */
@@ -1035,8 +1048,14 @@ function requireAuth(request: IncomingMessage, response: ServerResponse): boolea
     send(response, 401, { ok: false, error: "未登录或登录已过期，请先登录。" });
     return false;
   }
-  // 老接口同样按会话记操作人，日志里的"谁改的"才不会因为走了旧入口而丢失
+  /*
+   * 按会话记操作人，两套日志写入都要用它：
+   *   - `api.setOperator` 影响走 kv 快照的那一套（页面用的）；
+   *   - `currentOperator` 影响服务端自己写 SQL 的那一套（老 REST 接口用的）。
+   * 少设哪一个，都会让"谁改的"在其中一条路上变成默认值。
+   */
   void api.setOperator(session.username);
+  currentOperator = session.username;
   return true;
 }
 
@@ -1197,22 +1216,27 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
     return;
   }
 
+  /*
+   * ── 统一闸门：/api/ 下除上面三个公开入口外，一律要登录 ──────────────────────
+   *
+   * 为什么放在**一处**而不是每个分支里各写一遍：逐个分支加鉴权一定会漏 ——
+   * 这一版第一次跑 `npm run check:auth` 就抓到了：`/api/call` 与写的接口都挡上了，
+   * 而**读接口 `/api/students` 忘了挡**，未登录直接 200 把学生数据交出去。
+   * 那种漏法很隐蔽（"我明明加了鉴权"），所以改成结构性的：
+   * 只要在 /api/ 下，默认就是关门状态，新加接口不需要谁记得加一行。
+   */
+  if (url.pathname.startsWith("/api/") && !requireAuth(request, response)) return;
+
   /** 通用调用：{ method: "students.list", args: [] }。第 5 步前端就切到这一个入口。 */
   if (url.pathname === "/api/call" && request.method === "POST") {
     void readBody(request)
       .then(async (body) => {
-        const session = verifyToken(bearer);
-        if (session === null) {
-          send(response, 401, { ok: false, error: "未登录或登录已过期，请重新登录。" });
-          return;
-        }
         /*
          * 操作人由**会话**决定，不由前端传（第 6 步顺带修掉的一处静默错误）：
          * 早期前端调 `setOperator(name)` 把操作人告诉服务层，而它是同步方法、
          * 经远端代理会静默变成 Promise —— 于是操作日志里的操作人一直是默认值。
-         * 现在每次请求都按令牌所属账号设置，前端说什么都不作数。
+         * 现在每次请求都按令牌所属账号设置（上面的闸门做的），前端说什么都不作数。
          */
-        await api.setOperator(session.username);
         const method = String(body.method ?? "");
         const args = Array.isArray(body.args) ? (body.args as unknown[]) : [];
         try {
@@ -1245,7 +1269,6 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   }
 
   if (url.pathname === "/api/status") {
-    if (!requireAuth(request, response)) return;
     const counts: Record<string, number> = {};
     for (const table of COUNTED_TABLES) {
       try {
@@ -1288,7 +1311,6 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   // 报价与课程库（读 + 写都在这里）
   const pricingRoute = PRICING_ROUTES[url.pathname];
   if (pricingRoute !== undefined && request.method === pricingRoute.method) {
-    if (!requireAuth(request, response)) return;
     void readBody(request)
       .then((body) => {
         const result = pricingRoute.handle(db, body, url);
@@ -1300,7 +1322,6 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
 
   const deleteMatch = /^\/api\/(homework|assessments)\/([^/]+)$/.exec(url.pathname);
   if (deleteMatch !== null && request.method === "DELETE") {
-    if (!requireAuth(request, response)) return;
     const table = deleteMatch[1] === "homework" ? "homework_records" : "assessments";
     const id = deleteMatch[2] ?? "";
     const info = db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
@@ -1311,7 +1332,6 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
 
   const recordRoute = recordRoutes[url.pathname];
   if (recordRoute !== undefined && request.method === recordRoute.method) {
-    if (!requireAuth(request, response)) return;
     void readBody(request)
       .then((body) => {
         const result = recordRoute.handle(db, body);
@@ -1322,7 +1342,6 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   }
 
   if (request.method === "POST" || request.method === "PATCH" || request.method === "DELETE") {
-    if (!requireAuth(request, response)) return;
     // 先看通用增删改（教师/教室/课程/学生/排课），它带护栏
     void readBody(request)
       .then((body) => {
