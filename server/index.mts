@@ -991,10 +991,25 @@ function handleCrud(
   return null;
 }
 
+/**
+ * 允许的来源：本机开发（localhost / 127.0.0.1 的任意端口）。
+ *
+ * 开发期前端跑在 3000、后端跑在 4000，属跨源，浏览器会拦；
+ * 只放开本机来源（而不是 `*`）：将来真放服务器上时再按域名收紧。
+ */
+function allowedOrigin(request: IncomingMessage): string {
+  const origin = request.headers.origin ?? "";
+  return /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ? origin : "";
+}
+
+let currentCors: Record<string, string> = {};
+
 function send(response: ServerResponse, status: number, payload: unknown): void {
-  response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", ...currentCors });
   response.end(JSON.stringify(payload, null, 2));
 }
+
+
 
 const db = openDatabase();
 const migration = migrate(db);
@@ -1062,8 +1077,27 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
    * 这一条是踩出来的 —— 之前一个 SQL 表名写错，直接把整个服务打挂了（测试时报
    * ERR_EMPTY_RESPONSE / other side closed），那种故障在真机上就是"后台突然全打不开"。
    */
+  currentCors = (() => {
+    const origin = allowedOrigin(request);
+    return origin === ""
+      ? {}
+      : {
+          "access-control-allow-origin": origin,
+          "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
+          "access-control-allow-headers": "content-type",
+          "access-control-max-age": "600",
+        };
+  })();
+
   try {
   const url = new URL(request.url ?? "/", `http://localhost:${PORT}`);
+
+  // 预检请求直接回 204（浏览器在跨源 POST + JSON 前会先问一次）
+  if (request.method === "OPTIONS") {
+    response.writeHead(204, currentCors);
+    response.end();
+    return;
+  }
 
   /** 通用调用：{ method: "students.list", args: [] }。第 5 步前端就切到这一个入口。 */
   if (url.pathname === "/api/call" && request.method === "POST") {

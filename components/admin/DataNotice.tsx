@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/Button";
+import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
 
 /**
  * 后台数据提示条。
@@ -16,12 +17,21 @@ import { Button } from "@/components/ui/Button";
 export function DataNotice({ onRefresh }: { onRefresh?: () => void }) {
   return (
     <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-ink-200 bg-white px-3.5 py-2.5">
-      <p className="min-w-0 text-xs leading-relaxed text-ink-500">
-        数据保存在<strong className="font-medium text-ink-700">这台电脑的浏览器</strong>里：
-        换设备、清缓存或用隐私窗口都会看不到。请定期到
-        <strong className="font-medium text-ink-700">「数据与备份」导出 JSON</strong> 作为备份；
-        接上服务端后即为真实数据（多人共用）。
-      </p>
+      {isRemoteMode() ? (
+        <p className="min-w-0 text-xs leading-relaxed text-ink-500">
+          已连接后端（<span className="font-mono text-ink-600">{remoteBase()}</span>）：
+          数据保存在<strong className="font-medium text-ink-700">后端数据库</strong>里，
+          不在浏览器里 —— 换设备、清缓存都不会丢。备份见
+          <strong className="font-medium text-ink-700">「数据与备份」</strong>
+          （导出的 JSON 仍是跨系统搬运与留档的方式）。
+        </p>
+      ) : (
+        <p className="min-w-0 text-xs leading-relaxed text-ink-500">
+          数据保存在<strong className="font-medium text-ink-700">这台电脑的浏览器</strong>里：
+          换设备、清缓存或用隐私窗口都会看不到。请定期到
+          <strong className="font-medium text-ink-700">「数据与备份」导出 JSON</strong> 作为备份。
+        </p>
+      )}
       {onRefresh !== undefined && (
         <Button
           variant="outline"
