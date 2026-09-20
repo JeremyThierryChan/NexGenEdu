@@ -54,9 +54,13 @@ export default function AdminDataPage() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
-    const [db, logList] = await Promise.all([api.exportDatabase(), api.logs.list(100)]);
+    const [db, logList, backupExists] = await Promise.all([
+      api.exportDatabase(),
+      api.logs.list(100),
+      api.hasBackup(),
+    ]);
     setStats(databaseStats(db));
-    setHasBackup(api.hasBackup());
+    setHasBackup(backupExists);
     setLogs(logList);
   }, []);
 

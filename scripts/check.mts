@@ -35,6 +35,7 @@ import { getCasesContent, getFaqContent, getScheduleContent } from "@/lib/data/p
 import { findFeaturedCourse, getAllFeaturedCourses, getFeaturedContent } from "@/lib/data/featured";
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
 import { __useStoreForTesting, api } from "@/lib/backend/api";
+import { isRemoteMode } from "@/lib/backend/remote";
 import { createMemoryStore } from "@/lib/backend/storage";
 import { dateKey } from "@/lib/backend/format";
 import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
@@ -698,21 +699,41 @@ ok("节数为 0 时报错", f.ok === false);
 eq("试课免费门槛", [isTrialFree(9), isTrialFree(10)], [false, true]);
 eq("试课费", [trialFeeFor(9, 300), trialFeeFor(10, 300)], [300, 0]);
 
-console.log("\n=== 6. 教务后台伪后端（localStorage 服务层）===");
+console.log("\n=== 6. 教务后台服务层（同一套断言对两种后端都要通过）===");
 
 /*
- * 这一节用**内存存储**跑完整的增删改查，不需要浏览器：
- * 伪后端刻意把存储抽象成 KeyValueStore（见 lib/backend/storage.ts），
- * 因此在 Node 里也能验证。要守住的是三件事：
- *   1. 首次访问会灌入示例数据；
+ * 这一节跑完整的增删改查，不需要浏览器：服务层刻意把存储抽象成 KeyValueStore
+ * （见 lib/backend/storage.ts），因此同一个 api 可以挂在内存、localStorage 或 SQLite 上。
+ *
+ * ⚠️ **夹具靠接口导入，不靠存储里"本来就有"**。
+ *
+ * 早期这一节直接假设「首次访问会灌入示例数据」，于是断言全挂在那份自动播种上。
+ * 这有两个后果：① 系统改成空库起步后（见 lib/backend/initial.ts）这里会全线失败；
+ * ② 更根本的 —— 同一套断言**没法对服务端再跑一遍**，因为服务端的库是空的。
+ * 而"同一套断言两种后端都通过"正是「换后端没改口径」最硬的证据（docs/后端开发方案.md §5 第 7 步）。
+ *
+ * 所以现在这样：先用 `api.importDatabase(serializeDatabase(seedDb))` 把示例数据
+ * **从接口灌进去**，两种后端（内存 / HTTP）拿到的就是同一份夹具，断言才有可比性。
+ * 顺带白拿一条覆盖：导入这条路径本身（校验、迁移、自动留备份）每次跑自检都会走一遍。
+ *
+ * 要守住的三件事：
+ *   1. **空库起步**：新库不能自己长出示例学生（员工会误以为那是自己录的）；
  *   2. 写入会落盘、且能被新实例读回来（「刷新后还在」的本质）；
  *   3. 汇总统计（今日概览）算得对。
  */
 const memory = createMemoryStore();
 __useStoreForTesting(memory);
 
+const emptyAtStart = await api.students.list();
+eq("空库起步：新库没有学生", emptyAtStart.length, 0);
+ok("空库起步：课程库仍有网站课程", (await api.courses.list()).length > 0);
+
+// 夹具：示例数据经**导入接口**进入当前后端（内存或 SQLite 都一样）
+const fixtureImport = await api.importDatabase(serializeDatabase(seedDb));
+ok("示例数据可以经导入接口灌入", fixtureImport.ok);
+
 const seeded = await api.students.list();
-ok("首次访问灌入示例学生", seeded.length >= 5);
+ok("导入夹具后学生数正确", seeded.length >= 5);
 ok("示例学生都有年级与家长联系方式",
   seeded.every((student) => student.grade !== "" && student.guardian !== ""));
 ok("教师档案来自站点的真实教师（非 AI）",
@@ -732,9 +753,16 @@ ok("搜索能命中", (await api.students.search("自检")).some((s) => s.id ===
 const updated = await api.students.update(created.id, { grade: "初三" });
 ok("更新基础字段生效", updated?.grade === "初三");
 
-// 关键：把服务重新挂到同一个存储上（等价于刷新页面后新建实例），数据仍应在
-__useStoreForTesting(memory);
-ok("写入已落盘（新实例仍能读到）",
+/*
+ * 「刷新后还在」的本质检验：把服务重新挂到**同一个存储**上（等价于页面刷新、
+ * 重新 new 一个实例），数据仍应读得到。
+ *
+ * 内存后端可以直接重挂存储；HTTP 后端重挂的是浏览器那一侧的存储，而数据在服务端，
+ * 重挂没有任何意义（也不该有意义）—— 那里的"数据不会因为刷新而丢"由
+ * 「重启服务后数据仍在」那条来证明，因此这里跳过重挂，断言照跑。
+ */
+if (!isRemoteMode()) __useStoreForTesting(memory);
+ok(`写入已落盘（${isRemoteMode() ? "服务端库" : "新实例"}仍能读到）`,
   (await api.students.get(created.id))?.grade === "初三");
 
 ok("删除生效", (await api.students.remove(created.id)) === true);
@@ -1036,7 +1064,20 @@ const openReport = await api.lessons.findConflicts({
 });
 eq("时段内排课不报教室不开放", openReport.classroomClosed, false);
 
-// ── 老数据迁移：v1 的教室没有用途与时段，打开后台不能出现 undefined ──
+/*
+ * ── 老数据迁移：v1 的教室没有用途与时段，打开后台不能出现 undefined ──
+ *
+ * 这一块**只能对本地存储做**：它的做法是把一份 v1 的原始 JSON 直接写进浏览器存储，
+ * 再看 `load()` 读出来时有没有补齐 —— 检验的是「浏览器里那份老数据打开还能用」。
+ * 走服务端时数据源是 SQLite、浏览器存储不是数据源，往本地存储里写东西毫无意义
+ * （写进去也没人读），因此跳过。
+ *
+ * **迁移逻辑本身不会因此漏测**：下面「老版本文件导入时自动升级」是在服务端跑的
+ * （导入走的是同一个 `migrate()`），两边的覆盖都不缺。
+ */
+if (isRemoteMode()) {
+  console.log("  · 跳过「老数据迁移（浏览器存储）」以外的本地存储用例：当前跑的是服务端后端");
+} else {
 const legacy = createMemoryStore();
 __useStoreForTesting(legacy);
 legacy.write(
@@ -1077,6 +1118,7 @@ const beforeSecondRead = JSON.stringify((await api.students.get("s9"))?.enrollme
 __useStoreForTesting(legacy);
 const afterSecondRead = JSON.stringify((await api.students.get("s9"))?.enrollments);
 eq("重复打开不会再次迁移", afterSecondRead, beforeSecondRead);
+}
 
 // 数据结构版本必须与 seed 写出的一致（曾因 seed 写旧版本导致新数据被误迁移）
 eq("示例数据的版本等于当前版本", seedDb.version, CURRENT_VERSION);
@@ -1084,6 +1126,7 @@ eq("示例数据的版本等于当前版本", seedDb.version, CURRENT_VERSION);
 // ── 信息采集表 ────────────────────────────────────────────────────────
 // 注意：上面的迁移用例把服务切到了另一份存储（legacy），这里必须先切回来，
 // 否则会对着一份没有这些学生的数据做断言（表现为「保存失败」）。
+// 走服务端时那边没有切过存储（迁移用例被跳过），这一句是无副作用的保险。
 __useStoreForTesting(memory);
 // 采集表是键值对 + 字段定义，因此这里守两件事：
 //   1. 定义本身是完整的（键唯一、选择项有候选项、表格有列）；
@@ -1127,8 +1170,22 @@ ok("表格型字段的空表按行定义生成",
 eq("老档案读不到的新字段返回空串", profileText(seeded[1]!.profile, "不存在的字段"), "");
 eq("老档案读不到的新多选字段返回空数组", profileList(seeded[1]!.profile, "不存在的字段"), []);
 
+/*
+ * 清空（`api.reset()`）的语义：**回到空库**，而不是"灌回示例数据"。
+ *
+ * 早期它灌回 8 位示例学生 —— 那在真实使用下是个陷阱：机构点一下就把自己录的数据
+ * 换成了演示数据，而演示数据"看起来有内容"，很容易被当成自己的数据继续用。
+ * 现在它与初始状态一致（`createEmptyDatabase`），并且要守住两件容易写错的事：
+ *   1. 业务表清空；2. **课程库与报价配置保留**（它们不是业务数据，来自网站内容）。
+ * 清空之后再导一遍夹具，后面的断言继续在夹具上跑。
+ */
 await api.reset();
-eq("重置回到示例数据", (await api.students.list()).length, seeded.length);
+eq("清空后业务数据为空", (await api.students.list()).length, 0);
+ok("清空后课程库保留（网站课程不是业务数据）", (await api.courses.list()).length > 0);
+ok("清空后报价配置保留（否则报价页算不出价）", (await api.pricing.get()) !== null);
+const restoredFixtures = await api.importDatabase(serializeDatabase(seedDb));
+ok("清空后能重新导入夹具", restoredFixtures.ok);
+eq("重新导入后学生数回到夹具规模", (await api.students.list()).length, seeded.length);
 
 // ── 课时流水（账本）与撤销 ────────────────────────────────────────────
 // 账本的价值全在「与余额自洽」与「能撤销」两件事上，因此这两条必须钉死。
@@ -1448,19 +1505,24 @@ const emptyButValid = serializeDatabase({
 const imported = await api.importDatabase(emptyButValid);
 eq("合法文件可以导入", imported.ok, true);
 eq("导入后学生被清空（说明确实替换了）", (await api.students.list()).length, 0);
-ok("导入前自动留了备份", api.hasBackup());
+ok("导入前自动留了备份", await api.hasBackup());
 const restored = await api.restoreBackup();
 eq("可以恢复导入前的数据", restored.ok, true);
 eq("恢复后学生数回到导入前", (await api.students.list()).length, studentsBeforeImport);
 
-// 老版本文件导入时自动升级
+// 老版本文件导入时自动升级。
+// 这里刻意用 **v1**（最老的一版）而不是 v2：v1 的教室没有 `kind` / `availability`
+// 两个字段，导入时必须补齐 —— 否则后台教室页会显示 undefined。
+// 这条是「老数据迁移」在**服务端**上的等价覆盖（浏览器存储那一份只能本地跑，见上）。
 const oldFile = JSON.stringify({
-  version: 2,
+  version: 1,
   students: [{
     id: "s_old", name: "旧文件学生", grade: "初二", guardian: "", subjects: ["初中数学"],
     remainingLessons: 5, status: "在读", note: "", createdAt: new Date().toISOString(),
   }],
-  teachers: [], classrooms: [], lessons: [],
+  teachers: [],
+  classrooms: [{ id: "c_old", name: "旧文件教室", capacity: 6, note: "" }],
+  lessons: [],
   updatedAt: new Date().toISOString(),
 });
 const upgraded = await api.importDatabase(oldFile);
@@ -1468,6 +1530,9 @@ eq("旧版本文件导入成功", upgraded.ok, true);
 ok("提示里说明了升级", (upgraded.ok ? upgraded.note : "").includes("升级"));
 const upgradedStudent = (await api.students.get("s_old"))!;
 eq("旧文件的课时被折算成报课记录", remainingTotal(upgradedStudent.enrollments), 5);
+eq("旧文件的教室被补上用途", (await api.classrooms.get("c_old"))?.kind, "上课用教室");
+eq("旧文件的教室被补上空时段", (await api.classrooms.get("c_old"))?.availability, []);
+eq("升级后的库版本等于当前版本", (await api.exportDatabase()).version, CURRENT_VERSION);
 await api.restoreBackup();
 
 // ── ICS 日历文件 ──────────────────────────────────────────────────────
@@ -2219,7 +2284,9 @@ for (let index = 0; index < 5; index += 1) {
 }
 ok("日志按时间倒序（最新在前）",
   (await api.logs.list(1))[0]!.at >= beforeCap.at);
-const allLogs = JSON.parse(memory.read("nexgenedu.admin.db.v1")!).logs as unknown[];
+// 日志上限要在**库本身**上核对，而不是在浏览器存储上：走服务端时数据在 SQLite 里，
+// `memory` 是空的 —— 早期这里直接读 memory，换成 HTTP 后端就会拿到 null。
+const allLogs = (await api.exportDatabase()).logs as unknown[];
 ok("日志条数不超过上限", allLogs.length <= 500);
 
 // 搜索是只读的：不能因为它而多出日志或改动数据

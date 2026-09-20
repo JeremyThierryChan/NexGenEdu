@@ -1,5 +1,5 @@
 import { createKeyValueStore, type KeyValueStore } from "./storage";
-import { createSeedDatabase } from "./seed";
+import { createEmptyDatabase } from "./initial";
 import { isWithinAvailability } from "./availability";
 import { CURRENT_VERSION } from "./version";
 import { createRemoteApi, isRemoteMode, remoteBase } from "./remote";
@@ -175,7 +175,9 @@ function load(): Database {
     }
   }
 
-  cache = createSeedDatabase();
+  // 空库起步，**不是**示例数据：见 lib/backend/initial.ts 的说明。
+  // （这里早期灌的是 createSeedDatabase()，那会让员工一打开就看到 8 位不是自己录的学生。）
+  cache = createEmptyDatabase();
   persist(cache);
   return cache;
 }
@@ -1850,8 +1852,16 @@ const localApi = {
     return { ok: true, stats, note };
   },
 
-  /** 是否存在「导入前的备份」。 */
-  hasBackup(): boolean {
+  /**
+   * 是否存在「导入前的备份」。
+   *
+   * **必须是 async**（哪怕是同步就能算出来的）：远端代理会把每个方法包成
+   * `fetch`，同步方法在这里会**静默**变成一个 Promise —— 调用方写
+   * `if (api.hasBackup())` 永远为真（Promise 对象是 truthy），
+   * 于是"有没有备份"永远答是。这类错误不会报错，只会答错，因此用
+   * `api.ts` 底部的类型级断言把它挡在编译期：**api 上不允许存在同步方法**。
+   */
+  async hasBackup(): Promise<boolean> {
     return store.read(BACKUP_KEY) !== null;
   },
 
@@ -1879,17 +1889,28 @@ const localApi = {
   },
 
   /** 设置操作人（登录后由后台外壳调用一次，用于操作日志）。 */
-  setOperator,
+  async setOperator(name: string): Promise<void> {
+    operatorName = name.trim() === "" ? "admin" : name.trim();
+  },
 
-  /** 清空并重新灌入示例数据（开发与演示用）。 */
+  /**
+   * **清空全部业务数据**，回到空库状态（保留课程库与报价配置）。
+   *
+   * 早期它叫「重置为示例数据」：灌回 8 位示例学生。那在真实使用下是个陷阱 ——
+   * 机构点一下就会把自己录的数据换成演示数据，而演示数据看起来"有内容"，
+   * 很容易被误当成自己的数据继续用。现在它的语义与初始状态一致（`createEmptyDatabase`）。
+   *
+   * 注意它仍然**没有**自动备份：调用方要先自己导出或确认。真正给用户用的"从头来过"
+   * 那条路在「数据与备份 → 导入空库」，那条路会先自动留一份备份。
+   */
   async reset(): Promise<void> {
     await delay();
-    cache = createSeedDatabase();
+    cache = createEmptyDatabase();
     writeLog(cache, {
       entity: "数据",
-      action: "重置",
+      action: "清空",
       targetId: "",
-      summary: "重置为示例数据（原有数据已丢弃）",
+      summary: "清空全部业务数据（原有数据已丢弃，课程库与报价配置保留）",
     });
     persist(cache);
   },
@@ -2232,6 +2253,37 @@ export const api: BackendApi = (isRemoteMode()
   : localApi) as BackendApi;
 
 export type BackendApi = typeof localApi;
+
+/**
+ * 类型级断言：**`api` 上不允许出现同步方法**。
+ *
+ * 远端代理（`lib/backend/remote.ts`）把每个方法包成 `fetch`，因此它的返回值必然是
+ * Promise。同步方法经代理后会**静默**变成 Promise，调用方一点错都收不到，
+ * 只会拿到一个永远为真的对象 —— `if (api.hasBackup())` 从此恒真。
+ * 这类"答错但不报错"的问题最难查，所以把它变成**编译错误**：
+ *
+ *   - 只要 `api` 的某个方法返回的不是 Promise，`NonAsyncApiMethods` 就不再是 `never`，
+ *     于是下面这行的类型要求多出一个属性，而值是 `{}`，编译失败；
+ *   - 报错信息里会直接点名是哪个方法（属性名就是方法路径），
+ *     并且值的类型写着该怎么做。
+ *
+ * 加新方法时若写出同步版本，`npm run typecheck` 会立刻拦住，不需要谁记得这件事。
+ */
+type NonAsyncApiMethods<T = BackendApi, Prefix extends string = ""> = {
+  [K in keyof T]: T[K] extends (...args: never[]) => unknown
+    ? ReturnType<T[K]> extends Promise<unknown>
+      ? never
+      : `${Prefix}${K & string}`
+    : T[K] extends object
+      ? NonAsyncApiMethods<T[K], `${Prefix}${K & string}.`>
+      : never;
+}[keyof T];
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const __apiMustBeFullyAsync: Record<
+  NonAsyncApiMethods<BackendApi> & string,
+  "api 上不允许有同步方法：远端代理会把它静默变成 Promise（恒为真），请改成 async 并返回 Promise"
+> = {};
 
 // 重新导出，便于页面只 import 这一处
 export type {

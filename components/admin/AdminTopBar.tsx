@@ -10,8 +10,9 @@ import { getSession, logout } from "@/lib/auth/session";
 /**
  * 后台顶栏：品牌 + 当前账号 + 退出登录。
  *
- * 数据存在浏览器里，
- * 演示时改乱了需要一个一键恢复入口（将来接服务端后删掉即可）。
+ * 「谁改的」靠这一处：登录后把操作人告诉服务层，之后每个写方法记日志时都会带上它。
+ * 走远端后端时这是一次真实请求（服务端进程记下操作人），因此**必须 await/void 它** ——
+ * 早期它是同步方法，经代理会静默变成 Promise，操作日志里的操作人会一直是默认值。
  */
 export function AdminTopBar() {
   const router = useRouter();
@@ -20,8 +21,7 @@ export function AdminTopBar() {
   useEffect(() => {
     const name = getSession()?.username ?? "";
     setUsername(name);
-    // 操作日志要记「谁改的」：登录后把操作人告诉服务层（纯前端只有 admin 一个账号）
-    if (name !== "") api.setOperator(name);
+    if (name !== "") void api.setOperator(name);
   }, []);
 
   function onLogout() {

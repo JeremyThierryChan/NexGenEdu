@@ -17,6 +17,7 @@ import { openDatabase, DB_PATH } from "./db.mts";
 import { createSqliteStore, snapshotSize } from "./kv-store.mts";
 // 伪后端的**同一份实现**：服务端只是换了一个 KeyValueStore，业务口径一行都不用重写
 import { api, __useStoreForTesting } from "../lib/backend/api.ts";
+import { createEmptyDatabase } from "../lib/backend/initial.ts";
 import { createSeedDatabase } from "../lib/backend/seed.ts";
 import { currentVersion, migrate } from "./migrate.mts";
 // 复用伪后端阶段的纯函数：课时记账与剩余课时的口径只能有一份
@@ -1026,27 +1027,27 @@ const serverStore = createSqliteStore(db);
  *
  * 伪后端的 `load()` 在存储为空时会播种示例数据（实测：空存储调用 students.list 直接返回
  * 8 条示例学生）。机构已经把库清空、也明确要删掉示例数据，所以服务端在首次启动时
- * 先写一份**空快照**进去：业务表全空，只保留报价配置（机构调过的价格与规则）
- * 与结构版本 —— 这正是"重新一个一个录"要的起点。
+ * 写一份**空快照**进去：业务表全空，只保留课程库与报价配置 —— 这正是"重新一个一个录"要的起点。
  *
- * 需要示例数据做演示时，设 NEXGENEDU_ALLOW_SEED=1 即可（自检与演示用）。
+ * 这份定义现在与前端**共用同一个函数**（`createEmptyDatabase`）：早期是在这里手写一遍
+ * 「把示例数据的各张表设成 []」，一旦 `Database` 加了新表，这里就会漏掉一张而
+ * 悄悄把示例内容带进真实库 —— 口径写两遍的代价。
+ *
+ * 需要示例数据做演示时，设 NEXGENEDU_ALLOW_SEED=1 即可（走 `createSeedDatabase`）。
  */
-if (serverStore.read(SNAPSHOT_KEY) === null && process.env.NEXGENEDU_ALLOW_SEED !== "1") {
-  const empty = createSeedDatabase();
-  empty.students = [];
-  empty.teachers = [];
-  empty.classrooms = [];
-  empty.lessons = [];
-  empty.lessonRecords = [];
-  empty.homeworkRecords = [];
-  empty.assessments = [];
-  empty.transactions = [];
-  empty.payments = [];
-  empty.logs = [];
-  empty.inquiries = [];
-  empty.courses = [];
-  serverStore.write(SNAPSHOT_KEY, JSON.stringify(empty));
-  console.log("已写入空快照（业务表全空、保留报价配置）");
+if (serverStore.read(SNAPSHOT_KEY) === null) {
+  // 示例数据只能**显式**要：默认空库。写成"默认灌示例、要空的再设变量"是本末倒置 ——
+  // 忘了设变量的那位，会在真实库里看到 8 位不是自己录的学生。
+  const withDemoData = process.env.NEXGENEDU_ALLOW_SEED === "1";
+  serverStore.write(
+    SNAPSHOT_KEY,
+    JSON.stringify(withDemoData ? createSeedDatabase() : createEmptyDatabase()),
+  );
+  console.log(
+    withDemoData
+      ? "已写入示例数据快照（NEXGENEDU_ALLOW_SEED=1，仅供演示，别在上面录真实数据）"
+      : "已写入空快照（业务表全空，保留课程库与报价配置）",
+  );
 }
 
 __useStoreForTesting(serverStore);
