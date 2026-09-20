@@ -20,6 +20,8 @@ import { api, __useStoreForTesting } from "../lib/backend/api.ts";
 import { createEmptyDatabase } from "../lib/backend/initial.ts";
 import { createSeedDatabase } from "../lib/backend/seed.ts";
 import { currentVersion, migrate } from "./migrate.mts";
+// 备份策略（每天一份 + 保留份数）只在这一处实现，见 server/backup.mts
+import { backupDir, backupIfNotToday, backupsDisabled, latestBackup } from "./backup.mts";
 // 复用伪后端阶段的纯函数：课时记账与剩余课时的口径只能有一份
 import { enrollmentForLesson, remainingTotal } from "../lib/backend/enrollment.ts";
 // 金额与退费口径、请假扣课时规则：同样只复用伪后端阶段的纯函数
@@ -1149,6 +1151,18 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
       routes: Object.keys(ROUTES),
       storage: "sqlite(kv)：与浏览器共用同一份 api.ts 实现",
       snapshotBytes: snapshotSize(db, "nexgenedu.admin.db.v1"),
+      /*
+       * 备份状态放进探活：备份是"出事那天才想起来检查"的东西，所以平时也要看得见。
+       * 只报**最近一份**的时间与份数 —— 判断"备份是不是停了"只要这两样。
+       */
+      backup: backupsDisabled()
+        ? { enabled: false }
+        : {
+            enabled: true,
+            dir: backupDir(),
+            latest: latestBackup()?.name ?? null,
+            latestAt: latestBackup()?.at.toISOString() ?? null,
+          },
       writes: WRITES.map((route) => `${route.method} ${route.pattern.source.replaceAll("\\/", "/")}`),
       counts,
       time: new Date().toISOString(),
@@ -1272,7 +1286,58 @@ server.listen(PORT, () => {
   console.log(`后端已启动：http://localhost:${PORT}/health`);
   console.log(`数据库：${DB_PATH}（结构版本 v${currentVersion(db)}）`);
   console.log(`只读接口：${Object.keys(ROUTES).join("、")}`);
+  scheduleBackups();
 });
+
+/*
+ * ── 自动备份 ────────────────────────────────────────────────────────────────
+ *
+ * 「每天一份」靠两处触发，而不是靠人记得：
+ *   1. 启动时补齐 —— 昨天关机、今天开机第一件事就是把今天的份备上；
+ *   2. 每小时检查一次 —— 长期开着不关的机器（本机构就是）也能跨过零点备上。
+ *
+ * 判定口径只有一份（`backupIfNotToday`）：写在两处的话，早晚分叉成
+ * "启动按 24 小时算、定时器按自然日算"，于是出现一天两份或者隔天漏一份。
+ *
+ * `NEXGENEDU_NO_BACKUP=1` 关闭它 —— 自检与逐页验收用的是**临时库**，
+ * 备份它们既没意义、又会把测试数据混进真实备份目录（那种文件被误恢复就是事故）。
+ */
+const BACKUP_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
+/** 做一次"今天还没备就备一份"，并把结果（含清理了哪些）打印出来。 */
+function backupRound(label: string): void {
+  if (backupsDisabled()) return;
+  try {
+    const outcome = backupIfNotToday(db);
+    if (outcome === null) {
+      const latest = latestBackup();
+      console.log(`[备份] 今天已有备份（${latest?.name ?? "?"}），本次不重复备。`);
+      return;
+    }
+    console.log(
+      `[备份] ${label}已备份：${outcome.file}（${(outcome.bytes / 1024).toFixed(0)} KB，` +
+      `现有 ${outcome.total} 份）`,
+    );
+    // 删掉谁必须说得出来：静默删除备份是不可接受的
+    for (const name of outcome.removed) console.log(`[备份] 按保留份数清理：${name}`);
+  } catch (cause) {
+    // 备份失败不能拖垮服务：库里还有数据，服务继续用，但必须把原因喊出来
+    console.error(
+      `[备份] 失败（服务继续运行，请手工处理）：${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+}
+
+function scheduleBackups(): void {
+  if (backupsDisabled()) {
+    console.log("[备份] 已按 NEXGENEDU_NO_BACKUP=1 关闭自动备份（自检/验收用的临时库）。");
+    return;
+  }
+  console.log(`[备份] 目录：${backupDir()}（每天一份，保留份数见 NEXGENEDU_BACKUP_KEEP）`);
+  backupRound("启动时");
+  // unref：这个定时器不该成为进程退不掉的钉子（演练与测试会反复起停服务）
+  setInterval(() => backupRound("定时检查："), BACKUP_CHECK_INTERVAL_MS).unref();
+}
 
 /** Ctrl+C 时先关服务再关数据库，避免留下 -wal/-shm 的中间状态。 */
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

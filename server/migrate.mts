@@ -12,7 +12,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
-import { backupTo, openDatabase, DB_PATH } from "./db.mts";
+import { backupStamp, backupTo, openDatabase, DB_PATH } from "./db.mts";
+import { backupDir, backupsDisabled, MIGRATION_BACKUP_PREFIX } from "./backup.mts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const MIGRATIONS_DIR = path.join(HERE, "migrations");
@@ -81,8 +82,22 @@ export function migrate(db: Database.Database, options: { backup?: boolean } = {
     return { from, to, applied: [], backup: "", skipped: true };
   }
 
-  // 备份要发生在**事务之外**（VACUUM 不能在事务里跑）
-  const backup = options.backup === false ? "" : backupTo(db);
+  /*
+   * 备份要发生在**事务之外**（VACUUM 不能在事务里跑）。
+   *
+   * 两道闸都不是可有可无的：
+   *   - `backupsDisabled()`（`NEXGENEDU_NO_BACKUP=1`）：自检/验收起的是**临时库**，
+   *     给它们备份毫无意义，而且会写进**真实备份目录**（曾经的 bug：每次起一个临时服务
+   *     都会往 server/backups/ 丢一个空库备份）。后果不只是脏：那些文件会满足
+   *     "今天已备份"的判定，于是**真实库当天可能一份备份都没有** —— 假备份挤掉真备份。
+   *   - `backupDir()`：备份目录必须能被覆盖（演练与测试要隔离到临时目录）。
+   */
+  const backup = options.backup === false || backupsDisabled()
+    ? ""
+    : backupTo(
+        db,
+        path.join(backupDir(), `${MIGRATION_BACKUP_PREFIX}${backupStamp(new Date())}.db`),
+      );
 
   const apply = db.transaction((items: MigrationFile[]) => {
     ensureVersionTable(db);

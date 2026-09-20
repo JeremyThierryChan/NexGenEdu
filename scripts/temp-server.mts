@@ -75,52 +75,59 @@ function removeDbFiles(dbPath: string): void {
   }
 }
 
-/**
- * 起一个临时服务端，把 `http://127.0.0.1:<port>` 交给 `body`，跑完一定收尾。
- *
- * `body` 抛错都不影响收尾；基建层面的问题（起不来、端口被占、清理不掉）
- * 直接抛错，让调用方**响亮地失败**，而不是继续跑出一份可疑的结论。
- */
-export async function withTempServer<T>(
-  // 形参刻意不叫 `use`：eslint 的 react-hooks 规则会把它当成 Hook 调用（误报）
-  body: (base: string, info: { port: number; dbPath: string }) => Promise<T>,
-): Promise<T> {
-  const port = await freePort();
-  const dbPath = `server/data/dual-check-${port}.db`;
-  const base = `http://127.0.0.1:${port}`;
+export type ServerHandle = {
+  base: string;
+  port: number;
+  dbPath: string;
+  /** 服务端自己的输出（排查用；起不来时最先要看的就是它）。 */
+  log: () => string;
+  /**
+   * 停掉服务并等它真的退出，然后确认端口空出来了。
+   * 恢复演练（`scripts/drill-restore.mts`）要停服务再换回备份文件，这一步必须可靠。
+   */
+  stop: () => Promise<void>;
+};
 
-  // 端口被复用时可能残留同名库，先清掉：要的是**空库**这个起点
-  removeDbFiles(dbPath);
+export type StartServerOptions = {
+  /** 数据库文件（相对仓库根；调用方负责它是"临时库"，别指向真实库）。 */
+  dbPath: string;
+  /** 端口；不传就自动挑一个没人用的。 */
+  port?: number;
+  /** 额外的环境变量（例如指定备份目录）。 */
+  env?: Record<string, string>;
+  /** 就绪前等多久（默认 30 秒）。 */
+  timeoutMs?: number;
+};
+
+/**
+ * 起一个服务端进程并**核验它真的就绪**（演练要反复起停，所以单独抽出来）。
+ *
+ * 核验两件事，缺一不可：① `/health` 有应答；② 应答里的库路径就是本次要用的那个。
+ * 第二条是踩出来的 —— 残留进程占着端口时，新进程会 EADDRINUSE 退出，而探活
+ * 照样成功（应答的是旧进程），于是"验证了新代码"变成假话。
+ */
+export async function startServer(options: StartServerOptions): Promise<ServerHandle> {
+  const port = options.port ?? (await freePort());
+  const { dbPath } = options;
+  const base = `http://127.0.0.1:${port}`;
 
   const server = spawn(process.execPath, SERVER_ARGS, {
     cwd: repoRoot,
-    env: { ...process.env, NEXGENEDU_DB: dbPath, PORT: String(port) },
+    env: {
+      ...process.env,
+      NEXGENEDU_DB: dbPath,
+      PORT: String(port),
+      ...(options.env ?? {}),
+    },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true, // 组长：收尾时按进程组杀，杜绝残留
   });
 
-  let serverLog = "";
-  server.stdout.on("data", (chunk) => { serverLog += chunk.toString(); });
-  server.stderr.on("data", (chunk) => { serverLog += chunk.toString(); });
+  let log = "";
+  server.stdout.on("data", (chunk) => { log += chunk.toString(); });
+  server.stderr.on("data", (chunk) => { log += chunk.toString(); });
 
-  try {
-    const health = await waitForHealth(base);
-    if (health === null) {
-      throw new Error(`服务端没起来（${base}/health 无应答）。它自己的输出：\n${serverLog}`);
-    }
-    /*
-     * 核对应答的**就是**本次启动的进程：残留进程占着端口时，新进程会 EADDRINUSE
-     * 退出而探活照样成功 —— 整遍验证会变成"验的旧代码、结论写新代码"。
-     * 库路径写在 /health 里，对得上才算数。
-     */
-    if (!String(health.db ?? "").includes(dbPath)) {
-      throw new Error(
-        `端口 ${port} 上应答的不是本次启动的服务（/health 报的库是 ${health.db}，` +
-        `期望包含 ${dbPath}）。多半有残留进程占着端口，先清掉再跑。\n服务端输出：\n${serverLog}`,
-      );
-    }
-    return await body(base, { port, dbPath });
-  } finally {
+  const stop = async (): Promise<void> => {
     try {
       if (server.pid !== undefined) process.kill(-server.pid, "SIGTERM");
     } catch {
@@ -130,13 +137,58 @@ export async function withTempServer<T>(
       const timer = setTimeout(resolve, 3000);
       server.once("close", () => { clearTimeout(timer); resolve(); });
     });
-
-    // 收尾后确认端口真的空出来了；没空就说明还留着服务，必须报出来
     const stillUp = await fetch(`${base}/health`).then(() => true).catch(() => false);
+    if (stillUp) throw new Error(`服务端（端口 ${port}）没停干净，请检查残留进程。`);
+  };
+
+  const health = await waitForHealth(base, options.timeoutMs ?? 30_000).catch(() => null);
+  if (health === null) {
+    await stop().catch(() => undefined);
     removeDbFiles(dbPath);
-    if (stillUp) {
-      throw new Error(`临时服务（端口 ${port}）没被清理干净，请手动检查残留进程。`);
-    }
+    throw new Error(`服务端没起来（${base}/health 无应答）。它自己的输出：\n${log}`);
+  }
+  if (!String(health.db ?? "").includes(dbPath)) {
+    await stop().catch(() => undefined);
+    removeDbFiles(dbPath);
+    throw new Error(
+      `端口 ${port} 上应答的不是本次启动的服务（/health 报的库是 ${health.db}，` +
+      `期望包含 ${dbPath}）。多半有残留进程占着端口，先清掉再跑。\n服务端输出：\n${log}`,
+    );
+  }
+
+  return { base, port, dbPath, log: () => log, stop };
+}
+
+/**
+ * 起一个**临时**服务端，把地址交给 `body`，跑完一定收尾（停服务、删临时库）。
+ *
+ * 临时库叫 `server/data/dual-check-<port>.db`：带端口就不会和真实库
+ * （`server/data/nexgenedu.db`）撞上，也一眼看得出是测试产物。
+ *
+ * 自动备份对临时库没有意义，还会把测试数据混进真实备份目录
+ * （那种文件被人当成真备份去恢复就是事故），因此默认关掉。
+ */
+export async function withTempServer<T>(
+  // 形参刻意不叫 `use`：eslint 的 react-hooks 规则会把它当成 Hook 调用（误报）
+  body: (base: string, info: { port: number; dbPath: string }) => Promise<T>,
+  options: { env?: Record<string, string> } = {},
+): Promise<T> {
+  const port = await freePort();
+  const dbPath = `server/data/dual-check-${port}.db`;
+
+  // 端口被复用时可能残留同名库，先清掉：要的是**空库**这个起点
+  removeDbFiles(dbPath);
+
+  const handle = await startServer({
+    dbPath,
+    port,
+    env: { NEXGENEDU_NO_BACKUP: "1", ...(options.env ?? {}) },
+  });
+  try {
+    return await body(handle.base, { port, dbPath });
+  } finally {
+    await handle.stop();
+    removeDbFiles(dbPath);
   }
 }
 

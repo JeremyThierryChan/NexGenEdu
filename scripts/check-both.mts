@@ -24,7 +24,9 @@
  * 用法：`npm run check:both`
  */
 
-import { run, withTempServer } from "./temp-server.mts";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
+import { run, repoRoot, withTempServer } from "./temp-server.mts";
 
 /** 自检脚本自身只需要 Node 的类型剥离与 `@/` 别名解析。 */
 const CHECK_ARGS = [
@@ -43,7 +45,18 @@ if (memoryRun.code !== 0) {
 }
 console.log("✓ 内存后端：全部通过");
 
-console.log("\n=== 第二遍：HTTP 后端（真实服务端 + 临时 SQLite 库）===");
+console.log("=== 第二遍：HTTP 后端（真实服务端 + 临时 SQLite 库）===");
+/*
+ * 回归护栏：临时服务**绝不许**往真实备份目录里写东西。
+ *
+ * 这一条是踩出来的：迁移器"执行前自动备份"写死了真实备份目录，于是每起一个临时服务
+ * 都往 server/backups/ 丢一个空库备份。脏只是表面问题，真正的危险是那些文件会满足
+ * "今天已经备份过"的判定 —— **真实库当天一份备份都不会有**，假备份挤掉真备份。
+ * 所以这里在跑之前记下份数，跑完必须一模一样。
+ */
+const realBackupDir = join(repoRoot, "server/backups");
+const backupsBefore = readdirSync(realBackupDir).sort().join("|");
+
 let exitCode = 1;
 try {
   exitCode = await withTempServer(async (base, info) => {
@@ -58,6 +71,17 @@ try {
   console.error(`✗ 起临时服务端失败：${cause instanceof Error ? cause.message : String(cause)}`);
   process.exit(1);
 }
+
+const backupsAfter = readdirSync(realBackupDir).sort().join("|");
+if (backupsAfter !== backupsBefore) {
+  console.error(
+    "\n✗ 临时服务动了真实备份目录（server/backups/）—— 这是必须修的问题：\n" +
+    "  测试库的备份会满足「今天已备份」，让真实库当天没有备份。\n" +
+    "  检查 migrate.mts / backup.mts 是否尊重 NEXGENEDU_NO_BACKUP 与 NEXGENEDU_BACKUP_DIR。",
+  );
+  process.exit(1);
+}
+console.log("✓ 真实备份目录未被临时服务改动");
 
 if (exitCode === 0) {
   console.log("\n✓ HTTP 后端：全部通过");
