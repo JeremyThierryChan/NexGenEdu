@@ -5,14 +5,29 @@
  * 「某个按钮背后调的方法参数不对」这类问题 —— 而这类问题恰恰是**静默**的
  * （上一轮把报课字段猜成 totalLessons，写进去就是 null）。
  *
- * 用法（先起后端，指向一个**临时库**，别动真实数据）：
- *   NEXGENEDU_DB=server/data/accept.db PORT=4199 npm run server
- *   NEXT_PUBLIC_API_BASE=http://localhost:4199 node --experimental-strip-types --import ./server/loader.mjs scripts/accept-check.mts
- *
- * 它按页面分组逐项执行，每项都真实调用（含写操作），打印 ✓/✗ 与失败原因。
+ * **不要直接调用这个文件**：用 `npm run accept`。那一层会自己起临时后端、
+ * 指对地址、跑完收尾（见 `scripts/accept-run.mts`）。下面那道闸是为"有人绕过
+ * 运行器直接跑"准备的 —— 它必须对着服务端跑，否则验的是内存里的伪后端。
  */
 
 import { api } from "../lib/backend/api.ts";
+import { isRemoteMode, remoteBase } from "../lib/backend/remote.ts";
+
+/*
+ * 闸：没指向服务端就直接退出。
+ *
+ * 没有这道闸时，忘了设 `NEXT_PUBLIC_API_BASE` 会静默退化成内存伪后端，
+ * 然后照样打印「43/43 通过」—— 一份假证据比不跑更糟：它让人以为真实后端验过了。
+ */
+if (!isRemoteMode()) {
+  console.error(
+    "✗ 逐页验收必须对着真实服务端跑，但当前没有设置 NEXT_PUBLIC_API_BASE。\n" +
+    "  现在这样跑的是内存里的伪后端，那 43/43 是假通过。请用：\n" +
+    "    npm run accept",
+  );
+  process.exit(2);
+}
+console.log(`后端：${remoteBase()}\n`);
 
 type Result = { page: string; label: string; ok: boolean; note: string };
 const results: Result[] = [];
@@ -101,7 +116,6 @@ await check("收费", "记一笔独立退款", async () => {
   return student.enrollments[0].paidAmount;
 }, (paid: number) => paid === 1100);
 await check("收费", "退费试算（两种口径）", async () => {
-  const id = enrollmentId;
   const student = await api.students.get(studentId);
   const total = student.enrollments[0].totalLessons;
   return { total, remaining: total - student.enrollments[0].usedLessons };

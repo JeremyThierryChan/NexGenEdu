@@ -22,7 +22,7 @@
     "server:migrate": "node --experimental-strip-types --import ./server/loader.mjs server/migrate.mts",
     "server:health": "curl -s http://localhost:4000/health",
     "server:import": "node --experimental-strip-types --import ./server/loader.mjs server/import-data.mts",
-    "accept": "node --experimental-strip-types --import ./server/loader.mjs scripts/accept-check.mts"
+    "accept": "node --experimental-strip-types --import ./server/loader.mjs scripts/accept-run.mts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

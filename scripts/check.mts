@@ -2793,20 +2793,27 @@ eq("恢复后的价格就是宣传页的价格",
 const pbRestoredQuote = await pbQuote("九年级课本", "数学", "一对二", "1.5 小时", 5);
 eq("恢复后报价回到原值", pbRestoredQuote, quote("九年级课本", "数学", "一对二", "1.5 小时", 5));
 
-// 老库升级：pbV9 没有报价配置，升级后要按站点内容补齐（不能是空的，也不能变价）
-const pbLegacyStore = createMemoryStore();
-__useStoreForTesting(pbLegacyStore);
+/*
+ * 老库升级：pbV9 没有报价配置，升级后要按站点内容补齐（不能是空的，也不能变价）。
+ *
+ * 走**导入**这条路，而不是往浏览器存储里塞一份老库再读回来 —— 后者在服务端后端上
+ * 是**假通过**：写进去的本地存储根本没人读，`api.pricing.get()` 读的是服务端库，
+ * 报的是"当前版本、有报价配置"，于是断言全绿却什么都没验。
+ * 导入是真实用户升级数据的路径（走同一个 `migrate()`），两种后端都跑得到。
+ */
 const pbV9 = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown>;
 delete pbV9.pricing;
 pbV9.version = 9;
-pbLegacyStore.write("nexgenedu.admin.db.v1", JSON.stringify(pbV9));
+const pbV9Upgrade = await api.importDatabase(JSON.stringify(pbV9));
+ok("v9 老库能导入并升级", pbV9Upgrade.ok);
 const pbUpgraded = await api.pricing.get();
 eq("pbV9 老库升级后有了报价配置", pbUpgraded.source, PRICING_SOURCE_CONTENT);
 eq("升级补上的价格与站点内容一致",
   pbUpgraded.stages[1]?.courses.map((course) => course.basePrice),
   pricing.stages[1]?.courses.map((course) => course.price));
 eq("升级后的版本号是当前版本",
-  JSON.parse(pbLegacyStore.read("nexgenedu.admin.db.v1") ?? "{}").version, CURRENT_VERSION);
+  (await api.exportDatabase()).version, CURRENT_VERSION);
+await api.restoreBackup();
 
 // ── 教师分成（课内课时费）：公式 → 人话规则 ───────────────────────────
 // 原始口径：小时数 × (课程单价/小时) × (0.4 + (学生人数 − 1) × 0.1)
@@ -2897,19 +2904,20 @@ ok("负的递增比例校验不通过", validatePricingConfig(pbBadStep).length 
 await api.pricing.reset();
 eq("恢复后分成规则回到内容里的口径", (await api.pricing.get()).teacherShare, pricing.teacherShare);
 
-// 老库（v10 没有教师分成字段）升级后要补上默认值，不能是 undefined
-const pbV10Store = createMemoryStore();
-__useStoreForTesting(pbV10Store);
+// 老库（v10 没有教师分成字段）升级后要补上默认值，不能是 undefined。
+// 同样走导入这条路（理由见上面 v9 那段：写本地存储对服务端后端是假通过）。
 const pbV10 = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown>;
 delete (pbV10.pricing as Record<string, unknown>).teacherShare;
 pbV10.version = 10;
-pbV10Store.write("nexgenedu.admin.db.v1", JSON.stringify(pbV10));
+const pbV10Upgrade = await api.importDatabase(JSON.stringify(pbV10));
+ok("v10 老库能导入并升级", pbV10Upgrade.ok);
 const pbV11Config = await api.pricing.get();
 eq("v10 老库升级后补上了教师分成默认值",
   [pbV11Config.teacherShare.basePercent, pbV11Config.teacherShare.stepPercent, pbV11Config.teacherShare.priceBasis],
   [40, 10, "course"]);
 eq("升级后版本号是当前版本",
-  JSON.parse(pbV10Store.read("nexgenedu.admin.db.v1") ?? "{}").version, CURRENT_VERSION);
+  (await api.exportDatabase()).version, CURRENT_VERSION);
+await api.restoreBackup();
 
 // 收尾：切回主存储，并确保报价配置没有留下自检改动的痕迹
 __useStoreForTesting(memory);
@@ -3002,17 +3010,18 @@ const pbTeacher = await api.teachers.create({
 eq("教师可带科目可以写后台新增的课程名", pbTeacher.subjects, ["初中数学", "围棋"]);
 await api.teachers.remove(pbTeacher.id);
 
-// 老库（v11 没有课程表）升级后要按网站内容补齐，否则科目候选会空
-const pbV11Store = createMemoryStore();
-__useStoreForTesting(pbV11Store);
+// 老库（v11 没有课程表）升级后要按网站内容补齐，否则科目候选会空。
+// 同样走导入这条路（理由见上面 v9 那段：写本地存储对服务端后端是假通过）。
 const pbV11 = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown>;
 delete pbV11.courses;
 pbV11.version = 11;
-pbV11Store.write("nexgenedu.admin.db.v1", JSON.stringify(pbV11));
+const pbV11Upgrade = await api.importDatabase(JSON.stringify(pbV11));
+ok("v11 老库能导入并升级", pbV11Upgrade.ok);
 const pbMigratedCourses = await api.courses.list();
 eq("v11 老库升级后课程库按网站内容补齐", pbMigratedCourses.length, pbLibrary.length);
 eq("升级后版本号是当前版本",
-  JSON.parse(pbV11Store.read("nexgenedu.admin.db.v1") ?? "{}").version, CURRENT_VERSION);
+  (await api.exportDatabase()).version, CURRENT_VERSION);
+await api.restoreBackup();
 
 // 收尾：切回主存储
 __useStoreForTesting(memory);
