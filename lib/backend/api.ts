@@ -2,6 +2,7 @@ import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createSeedDatabase } from "./seed";
 import { isWithinAvailability } from "./availability";
 import { CURRENT_VERSION } from "./version";
+import { createRemoteApi, isRemoteMode, remoteBase } from "./remote";
 import { nowIso, reconcileCharge, recordPayment } from "./charges";
 import { enrollmentForLesson, remainingOf, remainingTotal } from "./enrollment";
 import { decideCharge, isAbsent } from "./attendance";
@@ -671,7 +672,7 @@ export function dateKey(value: string | Date): string {
 const studentCollection = collection<Student>((db) => db.students, "s", "学生");
 const inquiryCollection = collection<Inquiry>((db) => db.inquiries, "iq", "咨询");
 
-export const api = {
+const localApi = {
   students: {
     ...studentCollection,
     /** 建档时间由服务生成；新建时不带报课记录（报课走 enroll()）。 */
@@ -2217,7 +2218,20 @@ export function __useStoreForTesting(backing: KeyValueStore): void {
  * 契约分组与「服务端必须复核的校验」见 lib/backend/contract.ts
  * 与 docs/后台API约定.md。
  */
-export type BackendApi = typeof api;
+/**
+ * 对外导出的服务对象。
+ *
+ * **本机使用**（设置了 `NEXT_PUBLIC_API_BASE`）时导出的是**远端代理**：
+ * 每个方法都打到后端的 `/api/call`，数据进 SQLite；
+ * **未设置**（线上构建）时导出本地实现（localStorage），保持线上可用。
+ *
+ * 类型仍然是本地实现的形状，因此页面与类型都不用改 —— 这是"换后端只改一个文件"的落地。
+ */
+export const api: BackendApi = (isRemoteMode()
+  ? createRemoteApi(localApi, remoteBase())
+  : localApi) as BackendApi;
+
+export type BackendApi = typeof localApi;
 
 // 重新导出，便于页面只 import 这一处
 export type {
