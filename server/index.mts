@@ -22,6 +22,16 @@ import { createSeedDatabase } from "../lib/backend/seed.ts";
 import { currentVersion, migrate } from "./migrate.mts";
 // 备份策略（每天一份 + 保留份数）只在这一处实现，见 server/backup.mts
 import { backupDir, backupIfNotToday, backupsDisabled, latestBackup } from "./backup.mts";
+// 会话认证（第 6 步）：口令与令牌都在服务端，见 server/auth.mts
+import {
+  activeSessionCount,
+  credentialFile,
+  login,
+  logout,
+  prepareCredential,
+  tokenFromHeader,
+  verifyToken,
+} from "./auth.mts";
 // 复用伪后端阶段的纯函数：课时记账与剩余课时的口径只能有一份
 import { enrollmentForLesson, remainingTotal } from "../lib/backend/enrollment.ts";
 // 金额与退费口径、请假扣课时规则：同样只复用伪后端阶段的纯函数
@@ -1012,6 +1022,24 @@ function send(response: ServerResponse, status: number, payload: unknown): void 
   response.end(JSON.stringify(payload, null, 2));
 }
 
+/**
+ * 老 REST 接口（/api/students、/api/pricing…）的鉴权闸。
+ *
+ * 这些接口是路线 A 的参考实现，页面并不用它们（页面走 `/api/call`），
+ * 但它们**能读也能写**同一个库，所以一样必须挡在登录之后 —— 只保护新入口、
+ * 忘了旧入口，等于门锁上了而窗户开着。命中未登录就回 401 并返回 false。
+ */
+function requireAuth(request: IncomingMessage, response: ServerResponse): boolean {
+  const session = verifyToken(tokenFromHeader(request.headers.authorization));
+  if (session === null) {
+    send(response, 401, { ok: false, error: "未登录或登录已过期，请先登录。" });
+    return false;
+  }
+  // 老接口同样按会话记操作人，日志里的"谁改的"才不会因为走了旧入口而丢失
+  void api.setOperator(session.username);
+  return true;
+}
+
 
 
 const db = openDatabase();
@@ -1115,10 +1143,76 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
     return;
   }
 
+  /*
+   * ── 认证（第 6 步）────────────────────────────────────────────────────────
+   *
+   * 公开的只有三个：/health（探活）、/api/login（登录）、/api/logout（退出）。
+   * 其余一切（/api/call 与各 REST 接口）都要令牌。
+   *
+   * 为什么口令搬到服务端是必须的：早期登录是纯前端的，口令硬编码在
+   * lib/auth/session.ts 里，而仓库是公开的 —— 那等于没有口令。
+   *
+   * 顺带说清楚一道**不是**防线的防线：CORS 只放开本机来源，但 CORS 是浏览器
+   * 的规矩，`curl` 根本不看它。所以"能写数据的接口"必须靠令牌，不能靠 CORS。
+   */
+  const bearer = tokenFromHeader(request.headers.authorization);
+
+  if (url.pathname === "/api/login" && request.method === "POST") {
+    void readBody(request)
+      .then(async (body) => {
+        const result = login(String(body.username ?? ""), String(body.password ?? ""));
+        if (!result.ok) {
+          /*
+           * 失败时刻意**慢一点**：本机使用时人不该感到延迟，但暴力试探的成本会明显上升。
+           * 这一条不替代强口令，只是把"随手猜几百次"变成不划算。
+           */
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          send(response, 401, { ok: false, error: result.error });
+          return;
+        }
+        send(response, 200, {
+          ok: true,
+          token: result.token,
+          username: result.username,
+          expiresAt: result.expiresAt,
+        });
+      })
+      .catch((cause: unknown) => send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" }));
+    return;
+  }
+
+  if (url.pathname === "/api/logout" && request.method === "POST") {
+    logout(bearer);
+    send(response, 200, { ok: true });
+    return;
+  }
+
+  if (url.pathname === "/api/session" && request.method === "GET") {
+    const session = verifyToken(bearer);
+    if (session === null) {
+      send(response, 401, { ok: false, error: "未登录或登录已过期。" });
+      return;
+    }
+    send(response, 200, { ok: true, username: session.username });
+    return;
+  }
+
   /** 通用调用：{ method: "students.list", args: [] }。第 5 步前端就切到这一个入口。 */
   if (url.pathname === "/api/call" && request.method === "POST") {
     void readBody(request)
       .then(async (body) => {
+        const session = verifyToken(bearer);
+        if (session === null) {
+          send(response, 401, { ok: false, error: "未登录或登录已过期，请重新登录。" });
+          return;
+        }
+        /*
+         * 操作人由**会话**决定，不由前端传（第 6 步顺带修掉的一处静默错误）：
+         * 早期前端调 `setOperator(name)` 把操作人告诉服务层，而它是同步方法、
+         * 经远端代理会静默变成 Promise —— 于是操作日志里的操作人一直是默认值。
+         * 现在每次请求都按令牌所属账号设置，前端说什么都不作数。
+         */
+        await api.setOperator(session.username);
         const method = String(body.method ?? "");
         const args = Array.isArray(body.args) ? (body.args as unknown[]) : [];
         try {
@@ -1132,7 +1226,26 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
     return;
   }
 
+  /*
+   * 探活分成两个：
+   *   - `/health`：**公开**，但只回最少的信息（服务名 + 库文件名）。
+   *     自检与演练脚本靠它确认"起来的确实是本次这个进程"（对库文件名），
+   *     所以它必须公开、必须能对出身份；
+   *   - `/api/status`：**要登录**，回数据库路径、迁移、各表条数、备份状态这些细节。
+   *     这些细节对运维有用，但没道理让同一个局域网里的人随便看。
+   */
   if (url.pathname === "/health") {
+    send(response, 200, {
+      ok: true,
+      service: "nexgenedu-server",
+      db: DB_PATH.split("/").pop() ?? DB_PATH,
+      authRequired: true,
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/status") {
+    if (!requireAuth(request, response)) return;
     const counts: Record<string, number> = {};
     for (const table of COUNTED_TABLES) {
       try {
@@ -1164,6 +1277,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
             latestAt: latestBackup()?.at.toISOString() ?? null,
           },
       writes: WRITES.map((route) => `${route.method} ${route.pattern.source.replaceAll("\\/", "/")}`),
+      auth: { required: true, activeSessions: activeSessionCount() },
       counts,
       time: new Date().toISOString(),
     });
@@ -1174,6 +1288,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   // 报价与课程库（读 + 写都在这里）
   const pricingRoute = PRICING_ROUTES[url.pathname];
   if (pricingRoute !== undefined && request.method === pricingRoute.method) {
+    if (!requireAuth(request, response)) return;
     void readBody(request)
       .then((body) => {
         const result = pricingRoute.handle(db, body, url);
@@ -1185,6 +1300,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
 
   const deleteMatch = /^\/api\/(homework|assessments)\/([^/]+)$/.exec(url.pathname);
   if (deleteMatch !== null && request.method === "DELETE") {
+    if (!requireAuth(request, response)) return;
     const table = deleteMatch[1] === "homework" ? "homework_records" : "assessments";
     const id = deleteMatch[2] ?? "";
     const info = db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
@@ -1195,6 +1311,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
 
   const recordRoute = recordRoutes[url.pathname];
   if (recordRoute !== undefined && request.method === recordRoute.method) {
+    if (!requireAuth(request, response)) return;
     void readBody(request)
       .then((body) => {
         const result = recordRoute.handle(db, body);
@@ -1205,6 +1322,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   }
 
   if (request.method === "POST" || request.method === "PATCH" || request.method === "DELETE") {
+    if (!requireAuth(request, response)) return;
     // 先看通用增删改（教师/教室/课程/学生/排课），它带护栏
     void readBody(request)
       .then((body) => {
@@ -1282,10 +1400,37 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`后端已启动：http://localhost:${PORT}/health`);
+/*
+ * 绑定地址：默认**只绑本机回环**。
+ *
+ * 早期是 `server.listen(PORT)` —— 那会监听**所有网卡**，同一个 WiFi 下的任何设备
+ * 都能连上来。对这个系统的定位（单用户、本机使用）来说，那是不必要的暴露面：
+ * 局域网里的设备不受 CORS 约束（CORS 是浏览器的规矩），于是令牌成了唯一防线。
+ * 真要给别的设备用，显式设 `NEXGENEDU_HOST=0.0.0.0` —— 那是一个有意识的决定。
+ */
+const HOST = process.env.NEXGENEDU_HOST ?? "127.0.0.1";
+
+/** 准备登录凭证（口令从环境变量来，或首次启动时随机生成并落到 server/data/）。 */
+const credential = prepareCredential();
+
+server.listen(PORT, HOST, () => {
+  console.log(`后端已启动：http://${HOST}:${PORT}/health（状态 /api/status 需登录）`);
   console.log(`数据库：${DB_PATH}（结构版本 v${currentVersion(db)}）`);
   console.log(`只读接口：${Object.keys(ROUTES).join("、")}`);
+  /*
+   * 凭证的来历必须说清楚：口令是"新生成"的时候**只打印这一次**。
+   * 同时把文件位置说出来 —— 打印刷过去之后那里还能找回来（否则只能删库重来）。
+   */
+  console.log(`[登录] 账号：${credential.username}（口令来源：${credential.source}）`);
+  if (credential.generatedPassword !== null) {
+    console.log(`[登录] 本次新生成的口令：${credential.generatedPassword}`);
+    console.log(`[登录] 已存到 ${credentialFile()}（权限 0600，重启后继续有效）`);
+    console.log("[登录] 请记下来；也可以自己指定：NEXGENEDU_ADMIN_PASSWORD=... npm run server");
+  } else if (credential.source === "环境变量") {
+    console.log("[登录] 口令取自环境变量 NEXGENEDU_ADMIN_PASSWORD。");
+  } else {
+    console.log(`[登录] 口令在 ${credentialFile()} 里（当初生成时打印过一次）。`);
+  }
   scheduleBackups();
 });
 

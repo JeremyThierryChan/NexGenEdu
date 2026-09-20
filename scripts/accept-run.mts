@@ -29,7 +29,12 @@ try {
   exitCode = await withTempServer(async (base, info) => {
     console.log(`✓ 服务端就绪：${base}（临时库 ${info.dbPath}，不碰真实数据）\n`);
     const result = await run(process.execPath, ACCEPT_ARGS, {
-      env: { NEXT_PUBLIC_API_BASE: base },
+      env: {
+        NEXT_PUBLIC_API_BASE: base,
+        // 第 6 步之后接口要登录：把本次测试账号交给验收脚本
+        NEXGENEDU_ADMIN_USER: info.username,
+        NEXGENEDU_ADMIN_PASSWORD: info.password,
+      },
     });
     process.stdout.write(result.output);
     return result.code;

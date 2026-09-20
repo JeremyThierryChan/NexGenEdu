@@ -1,3 +1,5 @@
+import { clearToken, readToken } from "@/lib/auth/token";
+
 /**
  * 远端代理：把本地 `api` 的每一个方法换成对后端的 `POST /api/call`。
  *
@@ -12,8 +14,13 @@
  *
  * 由 `NEXT_PUBLIC_API_BASE` 决定（见 docs/后端开发方案.md §5.4）：
  *   - 本机用（`.env.local` 里设置）→ 走 `/api/call`，数据进 SQLite —— 真正的使用环境；
- *   - 线上/未设置 → 保持本地 localStorage 行为（线上是给家长看的静态站，
- *     不该因为后台切换而打不开；那条横幅负责说明差别）。
+ *   - 线上/未设置 → 保持本地实现（线上站点不该因为后台切换而打不开）。
+ *
+ * ## 认证（第 6 步）
+ *
+ * 每个请求都带上 `Authorization: Bearer <令牌>`。令牌从 `lib/auth/token.ts` 取 ——
+ * 也就是**口令从不经过这一层**，这一层只搬令牌。未登录/过期时服务端回 401，
+ * 这里把它翻译成一句人话，并**立刻清掉本地令牌**，好让界面下次检查时把人送回登录页。
  */
 
 /** 走远端的判定：环境变量存在且非空。 */
@@ -46,13 +53,69 @@ function encodeArg(value: unknown): unknown {
   return value;
 }
 
-/** 一次 RPC 调用：失败时抛出带服务端原文的错误（不要吞成"未知错误"）。 */
-async function callRemote(base: string, method: string, args: unknown[]): Promise<unknown> {
-  const response = await fetch(`${base}/api/call`, {
+/**
+ * 取本次请求要用的令牌。
+ *
+ * 浏览器里就是 `localStorage` 里那份；**Node 脚本**（自检 / 演练 / 逐页验收）没有登录
+ * 界面，因此额外允许两种来源，省得每个脚本自己写一遍登录：
+ *   - `NEXGENEDU_API_TOKEN`：直接给令牌（最省事）；
+ *   - `NEXGENEDU_ADMIN_USER` + `NEXGENEDU_ADMIN_PASSWORD`：脚本自己登一次并缓存。
+ *
+ * 这两条只在 Node 里生效（浏览器的 `process.env` 里没有这些值，
+ * 何况只认 `NEXT_PUBLIC_` 前缀的才会被打进前端包），所以不会让线上站点变成"免登录"。
+ */
+let scriptToken: string | null = null;
+
+async function resolveToken(base: string): Promise<string | null> {
+  const direct = process.env.NEXGENEDU_API_TOKEN;
+  if (typeof direct === "string" && direct !== "") return direct;
+
+  const stored = readToken();
+  if (stored !== null) return stored;
+
+  const password = process.env.NEXGENEDU_ADMIN_PASSWORD;
+  if (typeof password !== "string" || password === "") return null;
+  if (scriptToken !== null) return scriptToken;
+
+  const response = await fetch(`${base}/api/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      username: process.env.NEXGENEDU_ADMIN_USER ?? "admin",
+      password,
+    }),
+  });
+  const payload = (await response.json()) as { ok?: boolean; token?: string; error?: string };
+  if (payload.ok !== true || typeof payload.token !== "string") {
+    throw new Error(`脚本登录失败：${payload.error ?? `HTTP ${response.status}`}`);
+  }
+  scriptToken = payload.token;
+  return scriptToken;
+}
+
+/** 一次 RPC 调用：失败时抛出带服务端原文的错误（不要吞成"未知错误"）。 */
+async function callRemote(base: string, method: string, args: unknown[]): Promise<unknown> {
+  const token = await resolveToken(base);
+  const response = await fetch(`${base}/api/call`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(token === null ? {} : { authorization: `Bearer ${token}` }),
+    },
     body: JSON.stringify({ method, args: encodeArg(args) }),
   });
+
+  if (response.status === 401) {
+    /*
+     * 登录失效：清掉本地令牌，让人回到登录页。
+     *
+     * 刻意**不**在代理层做跳转（代理不该知道路由）：清掉令牌之后，
+     * `RequireAuth` 下一次检查就会把人送过去。只清不跳，也避免
+     * "在后台某页报错却被踢到登录页、还不知道为什么"。
+     */
+    clearToken();
+    throw new Error("登录已过期，请重新登录。");
+  }
 
   let payload: { ok?: boolean; result?: unknown; error?: string };
   try {

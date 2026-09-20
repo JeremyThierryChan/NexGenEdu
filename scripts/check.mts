@@ -139,13 +139,12 @@ import { createSeedDatabase } from "@/lib/backend/seed";
 
 const seedDb = createSeedDatabase();
 import {
-  __credentialsForTesting,
-  __useSessionStoreForTesting,
   getSession,
   isLoggedIn,
   login,
-  logout,
+  loginUnavailableReason,
 } from "@/lib/auth/session";
+import { __useTokenStoreForTesting, clearToken, readToken, writeToken } from "@/lib/auth/token";
 
 let failures = 0;
 
@@ -3321,17 +3320,67 @@ eq("话术库规模统计与清单一致",
   [summarizeScripts().groups, summarizeScripts().scripts],
   [SCRIPT_GROUPS.length, SCRIPTS.length]);
 
-console.log("\n=== 7. 假登录（纯前端演示）===");
-const sessionMemory = createMemoryStore();
-__useSessionStoreForTesting(sessionMemory);
-eq("初始未登录", isLoggedIn(), false);
-const badLogin = await login("admin", "错的密码");
-eq("错误口令被拒", badLogin.ok, false);
-const okLogin = await login(__credentialsForTesting.username, __credentialsForTesting.password);
-eq("正确口令通过", okLogin.ok, true);
-ok("登录后可读到会话", getSession()?.username === "admin");
-logout();
-eq("退出后未登录", isLoggedIn(), false);
+console.log("\n=== 7. 登录与会话（第 6 步：服务端认证）===");
+
+/*
+ * 这一节守的是**第 6 步的成果**，而不是"假登录还能不能用"：
+ *
+ *   1. **口令不再出现在前端源码里** —— 原来它硬编码在 lib/auth/session.ts，
+ *      而仓库是公开的，等于没有口令。这一条是那个问题的回归护栏：
+ *      任何人把口令写回前端，自检立刻红。
+ *   2. 会话令牌的存取（令牌是前端唯一持有的凭证）。
+ *   3. 没有后端时**明确拒绝登录**，而不是退回"前端假登录"——
+ *      那种"能登进去但数据不知道去哪了"的状态比不能登录更糟。
+ *
+ * 服务端那一侧（401 / 登录 / 令牌 / 退出、操作人由会话决定）由
+ * `npm run check:auth` 对着真实服务端验，见 scripts/check-auth.mts。
+ */
+const PASSWORD_IN_FRONTEND = "689992";
+const frontendFiles = [
+  "lib/auth/session.ts",
+  "lib/auth/token.ts",
+  "lib/backend/remote.ts",
+  "components/admin/LoginForm.tsx",
+  "components/admin/RequireAuth.tsx",
+  "components/admin/DataNotice.tsx",
+  "components/admin/AdminTopBar.tsx",
+  "app/admin/login/page.tsx",
+];
+const leaked = frontendFiles.filter((file) =>
+  readFileSync(new URL(`../${file}`, import.meta.url), "utf8").includes(PASSWORD_IN_FRONTEND));
+eq("前端源码里不再出现口令", leaked, []);
+ok("登录模块不再导出任何口令常量",
+  !readFileSync(new URL("../lib/auth/session.ts", import.meta.url), "utf8").includes("__credentialsForTesting"));
+
+// 令牌存储：写进去、读得回、清得掉（前端唯一的凭证就是它）
+const tokenMemory = createMemoryStore();
+__useTokenStoreForTesting(tokenMemory);
+eq("初始没有令牌", readToken(), null);
+writeToken("t-abc");
+eq("令牌可以写回", readToken(), "t-abc");
+clearToken();
+eq("令牌可以清掉", readToken(), null);
+
+// 没有令牌时就是未登录（会话由服务端说了算，这里连请求都不会发）
+eq("没有令牌时视为未登录", await getSession(), null);
+eq("没有令牌时 isLoggedIn 为 false", await isLoggedIn(), false);
+
+/*
+ * 没有后端时登录必须**明确拒绝**。
+ * 这里临时把后端地址拿掉来模拟"线上静态站"，断言完再放回去 ——
+ * `remoteBase()` 是每次调用时读环境变量，因此可以这样切换。
+ */
+const savedBase = process.env.NEXT_PUBLIC_API_BASE;
+delete process.env.NEXT_PUBLIC_API_BASE;
+try {
+  ok("没有后端时明确说明原因", loginUnavailableReason() !== null);
+  const noBackend = await login("admin", "随便什么口令");
+  eq("没有后端时登录被拒", noBackend.ok, false);
+  ok("拒绝理由指向本机运行后端",
+    !noBackend.ok && (noBackend.error.includes("npm run server") || noBackend.error.includes("后端")));
+} finally {
+  if (savedBase !== undefined) process.env.NEXT_PUBLIC_API_BASE = savedBase;
+}
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
 process.exit(failures === 0 ? 0 : 1);

@@ -61,8 +61,17 @@ let exitCode = 1;
 try {
   exitCode = await withTempServer(async (base, info) => {
     console.log(`✓ 服务端就绪：${base}（临时库 ${info.dbPath}）`);
+    /*
+     * 第 6 步之后 /api/call 要登录：把本次的测试账号口令交给自检进程，
+     * 它自己调 /api/login 换令牌（`lib/backend/remote.ts` 的 Node 分支）。
+     * 于是「登录 → 令牌 → 调用」这条链每次跑 check:both 都被走一遍。
+     */
     const remoteRun = await run(process.execPath, CHECK_ARGS, {
-      env: { NEXT_PUBLIC_API_BASE: base },
+      env: {
+        NEXT_PUBLIC_API_BASE: base,
+        NEXGENEDU_ADMIN_USER: info.username,
+        NEXGENEDU_ADMIN_PASSWORD: info.password,
+      },
     });
     process.stdout.write(remoteRun.output);
     return remoteRun.code;

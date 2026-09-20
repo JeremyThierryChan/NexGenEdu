@@ -79,6 +79,8 @@ export type ServerHandle = {
   base: string;
   port: number;
   dbPath: string;
+  /** 本次测试用的账号口令（脚本靠它登录，见下）。 */
+  credentials: { username: string; password: string };
   /** 服务端自己的输出（排查用；起不来时最先要看的就是它）。 */
   log: () => string;
   /**
@@ -110,6 +112,17 @@ export async function startServer(options: StartServerOptions): Promise<ServerHa
   const port = options.port ?? (await freePort());
   const { dbPath } = options;
   const base = `http://127.0.0.1:${port}`;
+  /*
+   * 认证（第 6 步）之后，测试脚本也得能登录。
+   *
+   * 做法：起服务时**指定一个已知口令**（随机生成，只活到本次进程），
+   * 脚本再用它调 /api/login 换令牌。这样测试既不需要知道真实口令，
+   * 也不会去碰真实凭证文件 —— 而且顺带把"登录这条路"每次运行都走了一遍。
+   */
+  const credentials = {
+    username: "admin",
+    password: `test-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
+  };
 
   const server = spawn(process.execPath, SERVER_ARGS, {
     cwd: repoRoot,
@@ -117,6 +130,8 @@ export async function startServer(options: StartServerOptions): Promise<ServerHa
       ...process.env,
       NEXGENEDU_DB: dbPath,
       PORT: String(port),
+      NEXGENEDU_ADMIN_USER: credentials.username,
+      NEXGENEDU_ADMIN_PASSWORD: credentials.password,
       ...(options.env ?? {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -147,16 +162,22 @@ export async function startServer(options: StartServerOptions): Promise<ServerHa
     removeDbFiles(dbPath);
     throw new Error(`服务端没起来（${base}/health 无应答）。它自己的输出：\n${log}`);
   }
-  if (!String(health.db ?? "").includes(dbPath)) {
+  /*
+   * 比的是**文件名**而不是完整路径：/health 是公开接口，刻意只回库文件名
+   * （不回目录、不回表结构、不回各表条数 —— 那些要登录才给，见 /api/status）。
+   * 靠文件名认身份已经足够：临时库名里带端口，撞不上真实库。
+   */
+  const expectedName = dbPath.split("/").pop() ?? dbPath;
+  if (String(health.db ?? "") !== expectedName) {
     await stop().catch(() => undefined);
     removeDbFiles(dbPath);
     throw new Error(
       `端口 ${port} 上应答的不是本次启动的服务（/health 报的库是 ${health.db}，` +
-      `期望包含 ${dbPath}）。多半有残留进程占着端口，先清掉再跑。\n服务端输出：\n${log}`,
+      `期望 ${expectedName}）。多半有残留进程占着端口，先清掉再跑。\n服务端输出：\n${log}`,
     );
   }
 
-  return { base, port, dbPath, log: () => log, stop };
+  return { base, port, dbPath, credentials, log: () => log, stop };
 }
 
 /**
@@ -170,7 +191,10 @@ export async function startServer(options: StartServerOptions): Promise<ServerHa
  */
 export async function withTempServer<T>(
   // 形参刻意不叫 `use`：eslint 的 react-hooks 规则会把它当成 Hook 调用（误报）
-  body: (base: string, info: { port: number; dbPath: string }) => Promise<T>,
+  body: (
+    base: string,
+    info: { port: number; dbPath: string; username: string; password: string },
+  ) => Promise<T>,
   options: { env?: Record<string, string> } = {},
 ): Promise<T> {
   const port = await freePort();
@@ -185,7 +209,12 @@ export async function withTempServer<T>(
     env: { NEXGENEDU_NO_BACKUP: "1", ...(options.env ?? {}) },
   });
   try {
-    return await body(handle.base, { port, dbPath });
+    return await body(handle.base, {
+      port,
+      dbPath,
+      username: handle.credentials.username,
+      password: handle.credentials.password,
+    });
   } finally {
     await handle.stop();
     removeDbFiles(dbPath);

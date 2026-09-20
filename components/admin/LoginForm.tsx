@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
-import { getSession, login } from "@/lib/auth/session";
+import { getSession, login, loginUnavailableReason } from "@/lib/auth/session";
 import { cn } from "@/lib/utils/cn";
 
 /**
@@ -21,13 +21,20 @@ export function LoginForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  /*
+   * 没有后端时（线上静态站）**先说清楚**，而不是让人对着输入框一遍遍试口令 ——
+   * 那种体验会让人以为"密码不对"，而实际原因是这里根本没有后端可登录。
+   */
+  const unavailable = loginUnavailableReason();
 
   // 挂载后读取来源路径，并处理「已登录则直接进后台」
   useEffect(() => {
     const target = new URLSearchParams(window.location.search).get("next");
     if (target !== null && target.startsWith("/admin")) setNext(target);
 
-    if (getSession() !== null) router.replace(target ?? "/admin");
+    void (async () => {
+      if ((await getSession()) !== null) router.replace(target ?? "/admin");
+    })();
   }, [router]);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -71,6 +78,12 @@ export function LoginForm() {
         />
       </label>
 
+      {unavailable !== null && (
+        <p className="rounded-md border border-ink-200 bg-ink-50 px-3 py-2 text-xs leading-relaxed text-ink-600">
+          {unavailable}
+        </p>
+      )}
+
       {error !== "" && (
         <p
           role="alert"
@@ -80,7 +93,7 @@ export function LoginForm() {
         </p>
       )}
 
-      <Button type="submit" disabled={pending} className="w-full">
+      <Button type="submit" disabled={pending || unavailable !== null} className="w-full">
         {pending ? "登录中…" : "登录"}
       </Button>
     </form>

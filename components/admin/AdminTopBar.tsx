@@ -4,29 +4,28 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { GlobalSearch } from "@/components/admin/GlobalSearch";
-import { api } from "@/lib/backend/api";
 import { getSession, logout } from "@/lib/auth/session";
 
 /**
  * 后台顶栏：品牌 + 当前账号 + 退出登录。
  *
- * 「谁改的」靠这一处：登录后把操作人告诉服务层，之后每个写方法记日志时都会带上它。
- * 走远端后端时这是一次真实请求（服务端进程记下操作人），因此**必须 await/void 它** ——
- * 早期它是同步方法，经代理会静默变成 Promise，操作日志里的操作人会一直是默认值。
+ * 「谁改的」不再由这里告诉服务端了（第 6 步）：操作人由服务端的**会话**决定，
+ * 每次请求按令牌所属账号设置。早期是前端调 `api.setOperator(name)`，而它是同步方法、
+ * 经远端代理会静默变成 Promise —— 操作日志里的操作人一直是默认值，且没人会发现。
+ * 现在前端说什么都不作数，这也是"谁改的"应当由服务端说了算的一个例子。
  */
 export function AdminTopBar() {
   const router = useRouter();
   const [username, setUsername] = useState("");
 
   useEffect(() => {
-    const name = getSession()?.username ?? "";
-    setUsername(name);
-    if (name !== "") void api.setOperator(name);
+    void (async () => {
+      setUsername((await getSession())?.username ?? "");
+    })();
   }, []);
 
   function onLogout() {
-    logout();
-    router.replace("/admin/login");
+    void logout().then(() => router.replace("/admin/login"));
   }
 
   return (
