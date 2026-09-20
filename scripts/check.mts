@@ -2324,8 +2324,22 @@ eq("docs 索引漏掉的核心文档",
   CORE_DOCS.filter((name) => !docsIndex.includes(name)), []);
 eq("README 文档表漏掉的核心文档",
   CORE_DOCS.filter((name) => !readmeRoot.includes(name)), []);
-ok("README 与 docs 索引都说明了伪后端边界（数据只在本机浏览器）",
-  readmeRoot.includes("这台电脑的浏览器") && docsIndex.includes("这台电脑的浏览器"));
+/*
+ * 边界说明必须**与当前事实一致**。
+ *
+ * 原来这里钉的是"数据只在本机浏览器"——那条在接上服务端之后就成了假话。
+ * 现在钉的是当前真正的边界：单用户、没有并发控制、线上后台连不上后端。
+ * 假话比没有更糟：员工会按错误的前提做事（以为换个电脑也能看到数据）。
+ */
+ok("README 与 docs 索引都说明了当前边界（单用户 / 线上后台连不上后端）",
+  readmeRoot.includes("单用户") && docsIndex.includes("单用户"));
+// 已经变成假话的旧说法不能残留（接上服务端后"数据只在浏览器里"不再成立）
+const staleClaims = [
+  ["README.md", readmeRoot, "数据只保存在**这台电脑的浏览器**里"],
+  ["docs/README.md", docsIndex, "数据只在这台电脑的浏览器里"],
+];
+eq("文档里没有残留的过时说法（数据只在浏览器里）",
+  staleClaims.filter(([, text, claim]) => String(text).includes(String(claim))).map(([file]) => file), []);
 
 // ── 接口契约（第八组）─────────────────────────────────────────────────
 // 文档最容易「写完就过期」。这里让契约清单与代码互相校验：
