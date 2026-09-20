@@ -1135,7 +1135,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
       routes: Object.keys(ROUTES),
       storage: "sqlite(kv)：与浏览器共用同一份 api.ts 实现",
       snapshotBytes: snapshotSize(db, "nexgenedu.admin.db.v1"),
-      writes: WRITES.map((route) => `${route.method} ${route.pattern.source.replace(/\\//g, "/")}`),
+      writes: WRITES.map((route) => `${route.method} ${route.pattern.source.replaceAll("\\/", "/")}`),
       counts,
       time: new Date().toISOString(),
     });
