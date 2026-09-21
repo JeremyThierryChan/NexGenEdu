@@ -1147,8 +1147,26 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
       : {
           "access-control-allow-origin": origin,
           "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
-          "access-control-allow-headers": "content-type",
-          "access-control-max-age": "600",
+          /*
+           * 必须显式列出 `authorization`：登录之后**每个**请求都带它，
+           * 而它是一个"非简单头"，浏览器会先发预检来问"你允许这个头吗"。
+           * 漏了它的后果非常隐蔽：登录本身能成功（只用 content-type），
+           * 但登录后所有请求被浏览器拦掉 → `/api/session` 拿不到 → 界面把人**弹回登录页**，
+           * 看起来就像"密码不对、登不进去"。而 Node 里的自检、验收、演练都不走 CORS，
+           * 所以它们**永远查不出**这个问题 —— 只有浏览器会撞上。
+           * （`check:auth` 现在会直接断言这条预检响应。）
+           */
+          "access-control-allow-headers": "content-type, authorization",
+          /*
+           * 预检结果的缓存时间**刻意短**（60 秒）。
+           *
+           * 原先是 600（10 分钟）。教训：我们自己在预检里漏了 `authorization` 时，
+           * 改成正确的**也不会立刻生效** —— 浏览器把旧的"只允许 content-type"缓存住，
+           * 期间每个带令牌的请求照样被拦，症状是"密码明明对、登录后一直被弹回登录页，
+           * 怎么都不好"，而且改代码、重启服务端都看不出变化（因为浏览器压根没再问）。
+           * 短缓存让这类修复一分钟内自己生效；预检本身很便宜，不值得为它省请求。
+           */
+          "access-control-max-age": "60",
         };
   })();
 
@@ -1450,7 +1468,8 @@ server.listen(PORT, HOST, () => {
     console.log(`[登录] 已存到 ${credentialFile()}（权限 0600，含明文，忘了可以直接看里面）`);
     console.log("[登录] 也可以自己指定：NEXGENEDU_ADMIN_PASSWORD=... npm run server");
   } else if (credential.source === "环境变量") {
-    console.log("[登录] 口令取自环境变量 NEXGENEDU_ADMIN_PASSWORD。");
+    console.log("[登录] 口令取自环境变量 NEXGENEDU_ADMIN_PASSWORD（已同步写入凭证文件，");
+    console.log("        所以下次不带这个环境变量启动，用的还是同一份口令）。");
   } else {
     console.log(`[登录] 口令在 ${credentialFile()} 里（文件里有明文，忘了就看它）。`);
   }

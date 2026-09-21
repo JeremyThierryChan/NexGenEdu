@@ -42,8 +42,20 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-/** 凭证文件：与数据库同目录（server/data/，不进 git）。 */
+/**
+ * 凭证文件：**与它保护的那个数据库同目录**（默认 `server/data/`，不进 git）。
+ *
+ * 为什么必须跟着**数据库文件**走，而不是只看 `NEXGENEDU_DB_DIR`：
+ * 自检 / 验收 / 演练起的是**临时库**（`NEXGENEDU_DB=.../dual-check-123.db`），
+ * 那种情况下凭证若仍写到 `server/data/admin-credential.json`，就会**把真实口令覆盖掉** ——
+ * 真发生过：跑完一轮自检，机构那边的登录口令变成了一个随机测试口令。
+ * 现在临时库带来的凭证文件也落在临时目录里（而临时目录跑完就删）。
+ */
 export function credentialFile(): string {
+  const dbFile = process.env.NEXGENEDU_DB;
+  if (typeof dbFile === "string" && dbFile.trim() !== "" && dbFile !== ":memory:") {
+    return path.join(path.dirname(dbFile), "admin-credential.json");
+  }
   const dir = process.env.NEXGENEDU_DB_DIR ?? path.join(HERE, "data");
   return path.join(dir, "admin-credential.json");
 }
@@ -147,7 +159,21 @@ export function prepareCredential(): CredentialSetup {
 
   if (typeof fromEnv === "string" && fromEnv !== "") {
     const salt = randomBytes(16).toString("hex");
-    cached = { username, salt, hash: hashPassword(fromEnv, salt) };
+    cached = { username, password: fromEnv, salt, hash: hashPassword(fromEnv, salt) };
+    /*
+     * 环境变量指定口令时，**也要把它落进凭证文件**（保持"一份真相"）。
+     *
+     * 踩过这个坑：原来只把环境变量记在内存里、不动文件，于是文件里躺着的是**上一份**
+     * 口令。后果很隐蔽 —— 哪天不带环境变量启动（换个终端、忘了、写进脚本却没写全），
+     * 生效的口令会突然变成文件里那份旧的，人只会看到"我明明设过口令，怎么又不对了"。
+     * 现在无论怎么启动，**文件里那份永远是当前生效的那份**。
+     */
+    try {
+      mkdirSync(path.dirname(credentialFile()), { recursive: true });
+      writeFileSync(credentialFile(), `${JSON.stringify(cached, null, 2)}\n`, { mode: 0o600 });
+    } catch {
+      // 写不了文件（只读挂载等）不该让服务起不来：内存里的凭证仍是有效的
+    }
     return { username, generatedPassword: null, source: "环境变量" };
   }
 
