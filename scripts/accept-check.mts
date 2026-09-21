@@ -97,6 +97,33 @@ await check("学生", "建档", async () => {
   studentId = created.id;
   return created;
 }, (s: { name: string }) => s.name === "验收学生");
+/*
+ * 建档时就报课（一个学生多门、每门节数各自独立）。
+ * 「数学 10 节、英语 20 节」是最常见的报名说法，因此这里同时验两件事：
+ * 两门各自的节数不能串（不是并成一条、也不是都记成第一个数），
+ * 以及每门都留下一条「报课」流水（账本不能是空的）。
+ */
+await check("学生", "建档并报多门课（含课时流水）", async () => {
+  const created = await api.students.create({
+    name: "验收多门学生", grade: "初三", guardian: "", status: "在读", note: "", profile: {},
+    enrollments: [
+      { subject: "验收科目A", lessons: 10 },
+      { subject: "验收科目B", lessons: 20 },
+    ],
+  });
+  const ledgers = await Promise.all(
+    created.enrollments.map((item) => api.transactions.listByEnrollment(item.id)),
+  );
+  return {
+    counts: created.enrollments.map((item) => item.totalLessons),
+    kinds: ledgers.map((rows) => rows.map((row) => [row.kind, row.delta])),
+  };
+}, (result: { counts: number[]; kinds: Array<Array<[string, number]>> }) =>
+  result.counts.join(",") === "10,20" &&
+  result.kinds.every(
+    (rows, index) =>
+      rows.length === 1 && rows[0]?.[0] === "报课" && rows[0]?.[1] === (index === 0 ? 10 : 20),
+  ));
 await check("学生", "信息采集表保存", async () => (await api.students.saveProfile(studentId, { school: "验收中学" })).profile.school === "验收中学");
 await check("学生", "报课（真实字段 lessons）", async () => {
   const updated = await api.students.enroll(studentId, {

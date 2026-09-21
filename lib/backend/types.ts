@@ -485,9 +485,42 @@ export type NewHomeworkRecord = Omit<HomeworkRecord, "id">;
 /** 阶段测评入参：上一次分数由服务自动带出。 */
 export type NewAssessment = Omit<Assessment, "id" | "previousScore">;
 
-/** 新建时的入参：id、报课集合与时间戳由服务生成。 */
+/**
+ * 建档时**一并报课**的入参（一个学生可以报多门，每门课时数各自独立）。
+ *
+ * 为什么允许在建档时一起报：家长来报名时说的就是「数学 10 节、英语 20 节」，
+ * 先建档再逐门点「报课」会让人重复劳动，而且中途关掉页面就会留下
+ * 「有档案、没课时」的半成品 —— 那种学生排课时会莫名其妙排不进去。
+ *
+ * 与 `NewEnrollment` 的区别只有一处：**全部字段可省**（有默认值），
+ * 因为建档表单上只想问「科目 + 节数」这两个必答项。
+ */
+export type NewStudentEnrollment = {
+  subject: string;
+  /** 这门课买的节数（必填，> 0）。 */
+  lessons: number;
+  /** 班型；留空表示还没定，之后再改。 */
+  form?: string;
+  teacherId?: string;
+  /** 标价单价（元 / 节）；建档时通常留空，钱到「收款」里再记。 */
+  unitPrice?: number;
+  agreedAmount?: number;
+  paidNow?: number;
+  method?: PaymentMethod;
+  /** 开课日期（ISO）；留空表示就是今天。 */
+  startedAt?: string;
+  note?: string;
+};
+
+/**
+ * 新建时的入参：id、报课集合与时间戳由服务生成。
+ *
+ * `enrollments` 是**建档时一并报课**（见 `NewStudentEnrollment`）：
+ * 传了就顺手把报课记录建好（一次落盘、一条日志），不传就是只建档。
+ */
 export type NewStudent = Omit<Student, "id" | "createdAt" | "enrollments" | "subjects"> & {
   subjects?: string[];
+  enrollments?: NewStudentEnrollment[];
 };
 export type NewTeacher = Omit<Teacher, "id">;
 export type NewClassroom = Omit<Classroom, "id">;

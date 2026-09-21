@@ -18,7 +18,7 @@ import {
 import { isWithinAvailability } from "./availability";
 import { CURRENT_VERSION } from "./version";
 import { createRemoteApi, isRemoteMode, remoteBase } from "./remote";
-import { nowIso, reconcileCharge, recordPayment } from "./charges";
+import { addTransaction, nowIso, reconcileCharge, recordPayment } from "./charges";
 import { enrollmentForLesson, remainingOf, remainingTotal } from "./enrollment";
 import { decideCharge, isAbsent } from "./attendance";
 import { databaseStats, validateImportedDatabase, type ImportOutcome } from "./backup";
@@ -116,6 +116,7 @@ import type {
   Enrollment,
   LessonInput,
   NewEnrollment,
+  NewStudentEnrollment,
   Lesson,
   NewClassroom,
   NewLesson,
@@ -1054,25 +1055,203 @@ function planSeries(db: Database, input: SeriesInput): SeriesPlan {
  */
 const lessonCollection = collection<Lesson>((db) => db.lessons, "l", "排课");
 
+/**
+ * 把「建档时一并报课」的宽松入参补全成一条正式的报课入参。
+ *
+ * 表单上只问「科目 + 节数」，其余字段给默认值 —— **默认值集中在这里一处**，
+ * 而不是散在界面里：界面日后多一个入口（比如批量导入也想报课），
+ * 默认口径不会各写一份然后慢慢分叉。
+ */
+function normalizeNewEnrollment(input: NewStudentEnrollment): NewEnrollment {
+  return {
+    subject: input.subject.trim(),
+    form: (input.form ?? "").trim(),
+    teacherId: input.teacherId ?? "",
+    lessons: Math.trunc(input.lessons),
+    startedAt: input.startedAt ?? "",
+    note: (input.note ?? "").trim(),
+    unitPrice: input.unitPrice ?? 0,
+    agreedAmount: input.agreedAmount ?? 0,
+    paidNow: input.paidNow ?? 0,
+    method: input.method ?? "微信",
+  };
+}
+
+/**
+ * 校验「建档时一并报课」的那几门课，并把它们补全。
+ *
+ * **先全部校验、再动数据**：报课数据有问题时不能留下半个学生 ——
+ * 学生建好了、课时没记上，比干脆没建更麻烦（排课时会莫名其妙排不进去）。
+ *
+ * 同一门科目重复报会被拒（而不是悄悄合成一条）：重复通常是把「数学 10 节」
+ * 填了两遍，合成会让账目对不上；确实是第二次报，应该走「续费」。
+ */
+function normalizeNewEnrollments(items: NewStudentEnrollment[]): NewEnrollment[] {
+  const normalized = items.map(normalizeNewEnrollment);
+  const seen = new Set<string>();
+  for (const item of normalized) {
+    if (item.subject === "") throw new Error("报课科目不能为空。");
+    if (!Number.isFinite(item.lessons) || item.lessons <= 0) {
+      throw new Error(`「${item.subject}」的课时数必须是大于 0 的整数。`);
+    }
+    if (seen.has(item.subject)) {
+      throw new Error(`「${item.subject}」报了两次：同一门科目请合并成一条（第二次报请用「续费」）。`);
+    }
+    seen.add(item.subject);
+  }
+  return normalized;
+}
+
+/**
+ * 记一笔课时流水（**报课 / 续费 / 调整 / 退课的唯一入口**）。
+ *
+ * 为什么必须有这一步：界面上每条报课下面的「课时流水」读的是 `db.transactions`，
+ * 只写 `enrollment.history` 的话，机构看到的是**空账本** ——
+ * 「刚报了 20 节，流水里一笔都没有」，只能怀疑数据没存上。
+ * 示例数据（`seed.ts`）本来就是「history 与流水两边都写」，新录入的应该同规矩。
+ *
+ * `delta` 记的是**实际生效**的节数，不是管理员填的数字：课时不会被调成负数，
+ * 填「减 20 节、实际只剩 15 节」时流水要写 `-15`，否则「流水之和 = 剩余课时」
+ * 这条不变式对不上（自检里有断言守着）。
+ */
+function addLessonTransaction(
+  db: Database,
+  enrollment: Enrollment,
+  input: {
+    studentId: string;
+    delta: number;
+    kind: LessonTransaction["kind"];
+    note: string;
+    lessonId?: string;
+    at?: string;
+  },
+): LessonTransaction {
+  const created = addTransaction(db, {
+    studentId: input.studentId,
+    enrollmentId: enrollment.id,
+    subject: enrollment.subject,
+    delta: input.delta,
+    kind: input.kind,
+    lessonId: input.lessonId ?? "",
+    note: input.note,
+  });
+  // 报课当天到账的流水，时间用开课日期而不是「此刻」（补录历史时更贴近事实）
+  if (input.at !== undefined && input.at !== "") created.at = input.at;
+  return created;
+}
+
+/**
+ * 造一条报课记录（`students.enroll` 与「建档时一并报课」共用）。
+ *
+ * 两处各写一份的话，「建档报的课」与「后来单独报的课」迟早会在某个字段上分叉
+ * （一边记了课时流水、另一边忘了），对账时才发现两批数据不是一个形状。
+ */
+function addEnrollment(db: Database, student: Student, input: NewEnrollment): Enrollment {
+  const lessons = Math.max(0, Math.trunc(input.lessons));
+  const enrollment: Enrollment = {
+    id: nextId("e"),
+    subject: input.subject.trim(),
+    form: input.form.trim(),
+    teacherId: input.teacherId,
+    totalLessons: lessons,
+    usedLessons: 0,
+    unitPrice: round2(Math.max(0, input.unitPrice)),
+    agreedAmount: round2(Math.max(0, input.agreedAmount)),
+    paidAmount: 0,
+    startedAt: input.startedAt !== "" ? input.startedAt : nowIso(),
+    endedAt: "",
+    status: "在读",
+    note: input.note.trim(),
+    // 成交即到账的可以留空；后面用「收款 / 退款」补记
+    history: [{ at: nowIso(), kind: "报课", lessons, note: input.note.trim() }],
+  };
+  student.enrollments.push(enrollment);
+
+  if (lessons > 0) {
+    addLessonTransaction(db, enrollment, {
+      studentId: student.id,
+      delta: lessons,
+      kind: "报课",
+      note: input.note.trim() === "" ? "报课" : `报课 · ${input.note.trim()}`,
+      at: enrollment.startedAt,
+    });
+  }
+
+  /*
+   * 首次实收：金额由收款记录承载，报课记录的 paidAmount 从收款记录累加。
+   * 一次报课可能分期付款，因此这两件事必须分开记 ——
+   * 把金额只存在报课记录上，就没法表达「报课时只付了一半」。
+   */
+  if (input.paidNow > 0) {
+    recordPayment(db, {
+      studentId: student.id,
+      enrollmentId: enrollment.id,
+      amount: round2(input.paidNow),
+      kind: "收款",
+      method: input.method,
+      at: enrollment.startedAt,
+      note: "报课收款",
+    });
+  }
+
+  return enrollment;
+}
+
 const localApi = {
   students: {
     ...studentCollection,
-    /** 建档时间由服务生成；新建时不带报课记录（报课走 enroll()）。 */
+    /**
+     * 建档（**可以同时报课**：一个学生报多门，每门节数各自独立）。
+     *
+     * 建档时间由服务生成；不传 `enrollments` 就是只建档（报课走 `enroll()`）。
+     *
+     * 「建档 + 报课」刻意做成**一次落盘、一条日志**：分两步做的话，
+     * 中途失败会留下「有档案、没课时」的半成品，而那种学生在排课时
+     * 会被"课时不足就不排课"挡下来，看半天不知道为什么。
+     * 报课数据的校验也放在**落库之前**（见 `normalizeNewEnrollments`）。
+     */
     async create(input: NewStudent): Promise<Student> {
-      const { subjects, ...rest } = input;
-      return studentCollection.create({
+      await delay();
+      const db = load();
+      const { subjects, enrollments, ...rest } = input;
+      const wanted = normalizeNewEnrollments(enrollments ?? []);
+
+      const student: Student = {
         ...rest,
+        id: nextId("s"),
         subjects: subjects ?? [],
         profile: input.profile ?? {},
         enrollments: [],
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso(),
+      };
+      db.students.push(student);
+
+      for (const item of wanted) addEnrollment(db, student, item);
+
+      // 报读科目由报课记录推导（`subjects` 不再单独维护一份）
+      syncSubjects(student);
+
+      writeLog(db, {
+        entity: "学生",
+        action: "新建",
+        targetId: student.id,
+        summary:
+          `新建学生「${student.name}」` +
+          (wanted.length === 0
+            ? ""
+            : `（报课：${wanted.map((item) => `${item.subject} ${item.lessons} 节`).join("、")}）`),
       });
+      persist(db);
+      return clone(student);
     },
     /**
      * 报课：新开一条报课记录。
      *
      * 同科目同班型的在读记录不会被合并 —— 合并会掩盖「报了两次」的事实，
      * 续费请用 renewEnrollment()，那条会累加课时并留下流水。
+     *
+     * 与「建档时一并报课」共用同一个 `addEnrollment`：两条入口造的报课记录
+     * 必须是同一个形状，否则对账时才发现两批数据不一样。
      */
     async enroll(studentId: string, input: NewEnrollment): Promise<Student | null> {
       await delay();
@@ -1080,49 +1259,14 @@ const localApi = {
       const student = db.students.find((item) => item.id === studentId);
       if (student === undefined) return null;
 
-      const lessons = Math.max(0, Math.trunc(input.lessons));
-      const enrollment: Enrollment = {
-        id: nextId("e"),
-        subject: input.subject.trim(),
-        form: input.form.trim(),
-        teacherId: input.teacherId,
-        totalLessons: lessons,
-        usedLessons: 0,
-        unitPrice: round2(Math.max(0, input.unitPrice)),
-        agreedAmount: round2(Math.max(0, input.agreedAmount)),
-        paidAmount: 0,
-        startedAt: input.startedAt !== "" ? input.startedAt : nowIso(),
-        endedAt: "",
-        status: "在读",
-        note: input.note.trim(),
-        // 成交即到账的可以留空；后面用「收款 / 退款」补记
-        history: [{ at: nowIso(), kind: "报课", lessons, note: input.note.trim() }],
-      };
-      student.enrollments.push(enrollment);
-
-      /*
-       * 首次实收：金额由收款记录承载，报课记录的 paidAmount 从收款记录累加。
-       * 一次报课可能分期付款，因此这两件事必须分开记 ——
-       * 把金额只存在报课记录上，就没法表达「报课时只付了一半」。
-       */
-      if (input.paidNow > 0) {
-        recordPayment(db, {
-          studentId: student.id,
-          enrollmentId: enrollment.id,
-          amount: round2(input.paidNow),
-          kind: "收款",
-          method: input.method,
-          at: enrollment.startedAt,
-          note: "报课收款",
-        });
-      }
+      const enrollment = addEnrollment(db, student, input);
 
       syncSubjects(student);
       writeLog(db, {
         entity: "报课",
         action: "报课",
         targetId: enrollment.id,
-        summary: `${student.name} 报课「${enrollment.subject}」${lessons} 节`,
+        summary: `${student.name} 报课「${enrollment.subject}」${enrollment.totalLessons} 节`,
       });
       persist(db);
       return clone(student);
@@ -1150,6 +1294,14 @@ const localApi = {
         Math.max(0, enrollment.agreedAmount + (money?.agreedDelta ?? added * enrollment.unitPrice)),
       );
       enrollment.history.push({ at: nowIso(), kind: "续费", lessons: added, note: note.trim() });
+      if (added > 0) {
+        addLessonTransaction(db, enrollment, {
+          studentId: student.id,
+          delta: added,
+          kind: "续费",
+          note: note.trim() === "" ? "续费" : `续费 · ${note.trim()}`,
+        });
+      }
 
       const amount = round2(Math.max(0, money?.amount ?? 0));
       if (amount > 0) {
@@ -1208,6 +1360,17 @@ const localApi = {
             ? `${note.trim()}${note.trim() !== "" ? " · " : ""}按「${refund.policyName}」退款 ${refund.amount} 元`
             : note.trim(),
       });
+      /*
+       * 退课的流水记 **0 节**（与 v4→v5 迁移的折算规则一致）：
+       * 退课只改状态、不减总课时，「剩余 = 总课时 − 已用」这条口径要保持。
+       * 记成负数的话，「流水之和 = 剩余课时」当场就对不上了。
+       */
+      addLessonTransaction(db, enrollment, {
+        studentId: student.id,
+        delta: 0,
+        kind: "退课",
+        note: note.trim() === "" ? "退课" : `退课 · ${note.trim()}`,
+      });
 
       if (refund !== undefined && refund.amount > 0) {
         recordPayment(db, {
@@ -1245,6 +1408,7 @@ const localApi = {
       const enrollment = student?.enrollments.find((item) => item.id === enrollmentId);
       if (student === undefined || enrollment === undefined) return null;
 
+      const before = enrollment.totalLessons;
       enrollment.totalLessons = Math.max(0, enrollment.totalLessons + Math.trunc(delta));
       enrollment.history.push({
         at: nowIso(),
@@ -1252,6 +1416,26 @@ const localApi = {
         lessons: Math.trunc(delta),
         note: note.trim() === "" ? "手工调整" : note.trim(),
       });
+      /*
+       * 流水记的是**实际生效**的节数（`after - before`），不是填进来的那个数：
+       * 课时不会被调成负数，填「减 20 节、实际只剩 15 节」时流水必须是 -15，
+       * 否则「流水之和 = 剩余课时」对不上账（差额就是被夹掉的那 5 节）。
+       * 调整件数按「调整」记，与「续费」区分开 —— 续费是家长交钱买的，
+       * 调整是后台改账，两者混在一起会看不出课时到底从哪来。
+       */
+      const effective = enrollment.totalLessons - before;
+      if (effective !== 0) {
+        addLessonTransaction(db, enrollment, {
+          studentId: student.id,
+          delta: effective,
+          kind: "调整",
+          note:
+            (note.trim() === "" ? "手工调整" : note.trim()) +
+            (effective !== Math.trunc(delta)
+              ? `（申请 ${delta > 0 ? "+" : ""}${Math.trunc(delta)} 节，实际生效 ${effective > 0 ? "+" : ""}${effective} 节：课时不会变成负数）`
+              : ""),
+        });
+      }
 
       syncSubjects(student);
       persist(db);
@@ -2982,6 +3166,7 @@ export type {
   PaymentMethod,
   Enrollment,
   NewEnrollment,
+  NewStudentEnrollment,
   ConflictReport,
   Database,
   LessonInput,

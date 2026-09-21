@@ -262,9 +262,12 @@ try {
   }]);
 
   /*
-   * 标记已上：这是**唯一**会产生课时流水的动作（报课只写报课记录与收款流水，
-   * 详见 docs/后端开发方案.md §5.2.2 —— 我第一版演练就在这里想错了，以为报课会写一条）。
-   * 让它进备份，恢复后要核对的就不只是"数据在不在"，而是"账还对得上吗"。
+   * 标记已上：让**账本上有两笔**（报课 +20、上课 -1），恢复后要核对的就不只是
+   * "数据在不在"，而是"账还对得上吗"。
+   *
+   * 这里原先写的是「报课只写报课记录、不写流水」—— 那是**错的**，也正是它掩盖了
+   * 「账本漏记报课 / 续费 / 调整 / 退课」这个问题（演练只验了上课扣减那一笔）。
+   * 现在报课与上课都进账本：合计 19 节 = 剩余课时（口径见 docs/后台API约定.md §6.3）。
    */
   const lessons = (await call(handle.base, "lessons.list")) as Array<{ id: string }>;
   await call(handle.base, "lessons.markCompleted", [lessons[0]!.id]);
@@ -273,7 +276,8 @@ try {
   console.log(`      ${JSON.stringify(before)}`);
   equal("演练数据写入正确（20 节课、扣 1 节、3600 元）",
     [before.students, before.lessonTotal, before.usedTotal, before.paidTotal], [1, 20, 1, 3600]);
-  equal("课时账本记的是「上课扣减」这一条", [before.ledgerCount, before.ledgerDelta], [1, -1]);
+  equal("课时账本记了「报课 +20」与「上课 -1」，合计 = 剩余课时",
+    [before.ledgerCount, before.ledgerDelta], [2, 19]);
 
   /* 3. 备份 */
   console.log("\n[3/8] 备份（VACUUM INTO）");

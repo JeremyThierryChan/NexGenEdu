@@ -785,6 +785,86 @@ ok(`写入已落盘（${isRemoteMode() ? "服务端库" : "新实例"}仍能读�
 ok("删除生效", (await api.students.remove(created.id)) === true);
 ok("删除后取不到", (await api.students.get(created.id)) === null);
 
+/*
+ * **建档时一并报课**（一个学生报多门，每门节数各自独立）。
+ *
+ * 机构最常见的报名情形就是「数学 10 节、英语 20 节」—— 一条记录装两门课，
+ * 会让课时扣到哪一门说不清；只记第一门，第二门就等于白报。
+ * 因此这里盯着的是：**两门课各自落到自己的报课记录上**，且条数与节数都对得上。
+ */
+const multi = await api.students.create({
+  name: "自检·多门报课", grade: "初三", guardian: "", status: "在读", note: "", profile: {},
+  enrollments: [
+    { subject: "自检·多门A", lessons: 10 },
+    { subject: "自检·多门B", lessons: 20 },
+  ],
+});
+eq("建档一次报两门 → 两条报课记录", multi.enrollments.length, 2);
+eq("每门课的节数各自独立（不是两门并成一条）",
+  multi.enrollments.map((item) => [item.subject, item.totalLessons]).sort(),
+  [["自检·多门A", 10], ["自检·多门B", 20]]);
+eq("报读科目由报课记录推导", [...multi.subjects].sort(), ["自检·多门A", "自检·多门B"]);
+eq("剩余课时 = 各门之和", remainingTotal(multi.enrollments), 30);
+ok("建档报的课与「单独报课」形状一致（已用 0 / 在读 / 一条报课流水）",
+  multi.enrollments.every(
+    (item) =>
+      item.usedLessons === 0 &&
+      item.status === "在读" &&
+      item.startedAt !== "" &&
+      item.history.length === 1 &&
+      item.history[0]?.kind === "报课",
+  ));
+eq("不传实收就不产生收款（钱的入口只在「收款」那一处）",
+  multi.enrollments.map((item) => item.paidAmount), [0, 0]);
+eq("课时流水与课时自洽（每门各自一条 +10 / +20）",
+  (await Promise.all(multi.enrollments.map((item) => api.transactions.listByEnrollment(item.id))))
+    .map((rows) => rows.filter((item) => item.reversedAt === "").reduce((sum, item) => sum + item.delta, 0))
+    .sort((a, b) => a - b),
+  [10, 20]);
+
+/*
+ * 报课数据不对时**不能留下半个学生**：学生建好了、课时没记上，
+ * 之后排课会被"课时不足就不排课"挡下来，看半天不知道为什么。
+ * 因此服务端是**先全部校验、再落库**（见 normalizeNewEnrollments）。
+ */
+const beforeBadCount = (await api.students.list()).length;
+const badCases: Array<[string, Array<{ subject: string; lessons: number }>]> = [
+  ["节数为 0", [{ subject: "自检·坏报课", lessons: 0 }]],
+  ["科目为空", [{ subject: "   ", lessons: 5 }]],
+  ["同一门科目填了两遍", [
+    { subject: "自检·坏报课", lessons: 5 },
+    { subject: "自检·坏报课", lessons: 5 },
+  ]],
+  ["同一门科目只差空格也算重复", [
+    { subject: "自检·坏报课", lessons: 5 },
+    { subject: " 自检·坏报课 ", lessons: 8 },
+  ]],
+];
+for (const [label, enrollments] of badCases) {
+  let message = "";
+  try {
+    await api.students.create({
+      name: "自检·坏报课", grade: "初三", guardian: "", status: "在读", note: "", profile: {},
+      enrollments,
+    });
+  } catch (cause) {
+    message = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok(`建档报课「${label}」被拒并说明原因`, message !== "", message || "（没有被拒绝）");
+}
+eq("被拒时没有留下半个学生", (await api.students.list()).length, beforeBadCount);
+ok("也没有留下同名档案", !(await api.students.search("坏报课")).some((item) => item.name === "自检·坏报课"));
+
+// 不传报课就只是建档（原有行为不能被改坏）
+const plain = await api.students.create({
+  name: "自检·只建档", grade: "初一", guardian: "", status: "在读", note: "", profile: {},
+});
+eq("不传 enrollments 时就是只建档（没有报课记录）", plain.enrollments.length, 0);
+eq("只建档的学生报读科目为空", plain.subjects.length, 0);
+
+ok("删除多门报课的学生", (await api.students.remove(multi.id)) === true);
+ok("删除只建档的学生", (await api.students.remove(plain.id)) === true);
+
 // 今日概览：统计口径
 const todayLessons = await api.lessons.listByDate(new Date());
 const summary = await api.today();
@@ -841,6 +921,25 @@ eq("退课不影响其他科目",
 const adjusted = await api.students.adjustEnrollmentLessons(target.id, added.id, -20, "自检");
 eq("手工调减不会变成负数",
   remainingOf(adjusted!.enrollments.find((item) => item.id === added.id)!), 0);
+
+/*
+ * **账本要记全**：报课 / 续费 / 调整 / 退课都必须在流水里。
+ *
+ * 原先这四种动作只写进了报课记录自带的 `history`，账本里只有「上课」扣减 ——
+ * 机构刚报完 20 节，打开「课时流水」看到的是空的，只能怀疑数据没存上。
+ * 示例数据本来就是两边都写，新录入的没有理由不同规矩。
+ */
+const addedLedger = (await api.transactions.listByEnrollment(added.id))
+  .filter((item) => item.reversedAt === "");
+eq("报课 / 续费 / 调整 / 退课 都进了账本",
+  addedLedger.map((item) => [item.kind, item.delta]).sort(),
+  [["报课", 10], ["调整", -15], ["续费", 5], ["退课", 0]].sort());
+ok("调减被夹到 0 时，账本记的是**实际生效**的节数并说明原因",
+  addedLedger.some((item) => item.kind === "调整" && item.note.includes("实际生效")),
+  addedLedger.find((item) => item.kind === "调整")?.note ?? "（没有调整流水）");
+ok("这条报课的账本与课时自洽",
+  ledgerConsistent(adjusted!.enrollments.find((item) => item.id === added.id)!, 
+    await api.transactions.listByEnrollment(added.id)));
 
 // 按关系查询（学生 / 教师 / 教室详情用）：结果必须真的相关
 const someLesson = (await api.lessons.list())[0]!;
@@ -1328,12 +1427,34 @@ eq("重新导入后学生数回到夹具规模", (await api.students.list()).len
 const ledgerStudent = (await api.students.list()).find((item) => item.enrollments.length > 0)!;
 const ledgerEnrollment = ledgerStudent.enrollments[0]!;
 const ledgerBefore = await api.transactions.listByEnrollment(ledgerEnrollment.id);
-ok("示例数据的流水与课时自洽", (() => {
-  const effective = ledgerBefore.filter((item) => item.reversedAt === "");
-  const positive = effective.filter((item) => item.delta > 0).reduce((sum, item) => sum + item.delta, 0);
-  const negative = effective.filter((item) => item.delta < 0).reduce((sum, item) => sum + item.delta, 0);
-  return positive === ledgerEnrollment.totalLessons && -negative === ledgerEnrollment.usedLessons;
-})());
+/*
+ * 流水与课时是否自洽。
+ *
+ * 两条不变式：
+ *   1. **有效流水之和 = 剩余课时**（总课时 − 已用）；
+ *   2. 「上课」流水之和 = −已用课时。
+ *
+ * 为什么不做成「正流水之和 = 总课时」：那样只有「报课 + 上课」才会通过，
+ * 一旦有手工调整（退课只改状态、调整会改动总课时）就必然误报。
+ * 之前这里写的就是那种拆法，而新报课的流水压根没写进账本 —— 于是它**恰好**
+ * 因为「记录被调成 0 节」而通过，等于空转。改成求和口径后才是真的在守账。
+ */
+function ledgerConsistent(
+  enrollment: { totalLessons: number; usedLessons: number },
+  rows: Array<{ delta: number; kind: string; reversedAt: string }>,
+): boolean {
+  const effective = rows.filter((item) => item.reversedAt === "");
+  const sum = effective.reduce((total, item) => total + item.delta, 0);
+  const usedRows = effective
+    .filter((item) => item.kind === "上课")
+    .reduce((total, item) => total + item.delta, 0);
+  return (
+    sum === enrollment.totalLessons - enrollment.usedLessons &&
+    -usedRows === enrollment.usedLessons
+  );
+}
+
+ok("示例数据的流水与课时自洽", ledgerConsistent(ledgerEnrollment, ledgerBefore));
 // 不变式的通用校验：全部学生的每一条报课都要自洽（不只是抽样那一条）
 ok("所有报课记录的课时都与流水自洽", await (async () => {
   const all = await api.students.list();
@@ -1341,12 +1462,9 @@ ok("所有报课记录的课时都与流水自洽", await (async () => {
     all.flatMap((student) => student.enrollments.map((item) => api.transactions.listByEnrollment(item.id))),
   );
   const enrollments = all.flatMap((student) => student.enrollments);
-  return enrollments.every((enrollment, index) => {
-    const rows = (transactions[index] ?? []).filter((item) => item.reversedAt === "");
-    const positive = rows.filter((item) => item.delta > 0).reduce((sum, item) => sum + item.delta, 0);
-    const negative = rows.filter((item) => item.delta < 0).reduce((sum, item) => sum + item.delta, 0);
-    return positive === enrollment.totalLessons && -negative === enrollment.usedLessons;
-  });
+  return enrollments.every((enrollment, index) =>
+    ledgerConsistent(enrollment, transactions[index] ?? []),
+  );
 })());
 
 // 上课扣课时会记一笔「哪节课扣的」
