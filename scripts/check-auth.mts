@@ -22,7 +22,11 @@
  * 用法：`npm run check:auth`
  */
 
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { withTempServer } from "./temp-server.mts";
+import { login, prepareCredential } from "../server/auth.mts";
 
 let failures = 0;
 
@@ -65,7 +69,72 @@ async function raw(
 const call = (base: string, token: string | null, method: string, args: unknown[] = []) =>
   raw(base, "/api/call", { method: "POST", token, body: { method, args } });
 
+/*
+ * ── 凭证文件必须真的能"找回口令"（代码与文档一致的护栏）────────────────────────
+ *
+ * 登录页与使用手册都写着"忘了口令就去 `server/data/admin-credential.json` 看"。
+ * 而最初那份实现**只存了 salt + hash**：口令打印一次之后就没地方可看了 ——
+ * 文档承诺的恢复路径并不存在，后果是**真锁死**（只能删凭证重来）。
+ * 这一段就是钉住"承诺必须成立"：文件里得有明文、且拿它真的能登进去。
+ */
+function checkCredentialFile(): void {
+  const dir = mkdtempSync(path.join(tmpdir(), "nexgenedu-cred-"));
+  const savedDir = process.env.NEXGENEDU_DB_DIR;
+  const savedPassword = process.env.NEXGENEDU_ADMIN_PASSWORD;
+  // 走"首次启动"这条路：既没有凭证文件，也没有环境变量口令
+  process.env.NEXGENEDU_DB_DIR = dir;
+  delete process.env.NEXGENEDU_ADMIN_PASSWORD;
+
+  try {
+    const setup = prepareCredential();
+    const file = path.join(dir, "admin-credential.json");
+    check("首次启动会生成凭证文件", existsSync(file));
+    const stored = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    check("凭证文件里有明文口令（否则「忘了就去看」是句空话）",
+      typeof stored.password === "string" && stored.password === setup.generatedPassword,
+      `文件里的 password = ${String(stored.password)}，本次生成的是 ${String(setup.generatedPassword)}`);
+    check("凭证文件同时保留 hash（校验用它，不靠明文比对）",
+      typeof stored.hash === "string" && stored.hash !== stored.password);
+
+    // 用文件里那串口令真的登一次（换一个干净进程，避免复用内存里的凭证）
+    const probe = mkdtempSync(path.join(tmpdir(), "nexgenedu-cred2-"));
+    process.env.NEXGENEDU_DB_DIR = probe;
+    writeFileSync(path.join(probe, "admin-credential.json"), JSON.stringify(stored));
+    const again = prepareCredential();
+    check("重启后口令保持不变（不会每次启动都换）",
+      again.generatedPassword === null && again.source === "已有凭证文件");
+    const result = login(setup.username, setup.generatedPassword ?? "");
+    check("用文件里那串口令能登录成功", result.ok === true);
+
+    // 旧格式（没有明文）应当被重新生成，而不是让服务带着"谁也不知道的口令"继续跑
+    const legacy = mkdtempSync(path.join(tmpdir(), "nexgenedu-cred3-"));
+    process.env.NEXGENEDU_DB_DIR = legacy;
+    writeFileSync(
+      path.join(legacy, "admin-credential.json"),
+      JSON.stringify({ username: "admin", salt: "aa", hash: "bb" }),
+    );
+    const healed = prepareCredential();
+    check("旧格式凭证会被重新生成并告知原因",
+      healed.generatedPassword !== null && healed.source === "旧格式已重新生成",
+      `source = ${healed.source}`);
+    const healedStored = JSON.parse(
+      readFileSync(path.join(legacy, "admin-credential.json"), "utf8"),
+    ) as Record<string, unknown>;
+    check("重新生成后文件里带上了明文", healedStored.password === healed.generatedPassword);
+
+    rmSync(probe, { recursive: true, force: true });
+    rmSync(legacy, { recursive: true, force: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    if (savedDir === undefined) delete process.env.NEXGENEDU_DB_DIR;
+    else process.env.NEXGENEDU_DB_DIR = savedDir;
+    if (savedPassword !== undefined) process.env.NEXGENEDU_ADMIN_PASSWORD = savedPassword;
+  }
+}
+
 console.log("=== 服务端认证自检（真实 HTTP，未登录者一律当外人）===");
+console.log("[0] 凭证文件（「忘了口令去哪看」这条承诺是否成立）");
+checkCredentialFile();
 
 try {
   await withTempServer(async (base, info) => {

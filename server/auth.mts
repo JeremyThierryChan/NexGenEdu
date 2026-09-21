@@ -56,6 +56,17 @@ function idleTimeoutMs(): number {
 
 type StoredCredential = {
   username: string;
+  /**
+   * 当前口令的**明文**（连同 hash 一起存，见文件头"为什么明文口令要落一份在文件里"）。
+   *
+   * 这一项不是为了校验（校验用下面的 salt + hash），而是为了**找回**：
+   * 口令只在首次启动时打印一次，终端一滚过去就没地方看了。
+   *
+   * 这一项是补上的 —— 最初只存了 `salt` + `hash`，而登录页与使用手册都写着
+   * "忘了口令就去这个文件里看"：**代码与文档不一致，后果是真锁死**（打印的那次没记下来，
+   * 就再也进不去了，只能删凭证重来）。文档承诺的恢复路径必须真的存在。
+   */
+  password: string;
   /** scrypt 的参数一并存下来：将来调参数时老凭证仍可校验。 */
   salt: string;
   hash: string;
@@ -75,29 +86,53 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 export type CredentialSetup = {
   username: string;
-  /** 仅当本次是**新生成**口令时才有值（调用方负责打印一次）。 */
+  /** 仅当本次是**新生成**（或旧格式重生成）口令时才有值（调用方负责打印一次）。 */
   generatedPassword: string | null;
   /** 口令来源，便于启动日志说清楚"这个口令是哪来的"。 */
-  source: "环境变量" | "已有凭证文件" | "本次新生成";
+  source: "环境变量" | "已有凭证文件" | "本次新生成" | "旧格式已重新生成";
 };
 
 let cached: StoredCredential | null = null;
 
+/**
+ * 读凭证文件。
+ *
+ * 缺少 `password` 的**旧格式**文件按"读不出来"处理（返回 null）→ 调用方会重新生成一份
+ * 并打印新口令。这是刻意的：旧格式意味着那份口令**已经无法找回**，
+ * 与其让服务带着一个谁也说不出的口令继续跑（等于锁死），不如重新生成并把新口令写清楚。
+ */
 function readCredentialFile(file: string): StoredCredential | null {
   if (!existsSync(file)) return null;
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<StoredCredential>;
     if (
       typeof parsed.username === "string" &&
+      typeof parsed.password === "string" &&
       typeof parsed.salt === "string" &&
       typeof parsed.hash === "string"
     ) {
-      return { username: parsed.username, salt: parsed.salt, hash: parsed.hash };
+      return {
+        username: parsed.username,
+        password: parsed.password,
+        salt: parsed.salt,
+        hash: parsed.hash,
+      };
     }
     return null;
   } catch {
     // 文件坏了就当作没有：下面会重新生成，而不是让服务起不来
     return null;
+  }
+}
+
+/** 该路径上是否存在"旧格式"（无明文）凭证文件 —— 只为启动日志能说清原因。 */
+function hasLegacyCredentialFile(file: string): boolean {
+  if (!existsSync(file)) return false;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<StoredCredential>;
+    return typeof parsed.hash === "string" && typeof parsed.password !== "string";
+  } catch {
+    return false;
   }
 }
 
@@ -122,15 +157,20 @@ export function prepareCredential(): CredentialSetup {
     cached = existing;
     return { username: existing.username, generatedPassword: null, source: "已有凭证文件" };
   }
+  const wasLegacy = hasLegacyCredentialFile(file);
 
   // 首次启动：生成一个**强**口令。刻意不用固定的默认口令 ——
   // 固定的默认口令写在公开仓库里，等于没有口令，而这正是本次要修掉的东西。
   const password = randomBytes(12).toString("base64url");
   const salt = randomBytes(16).toString("hex");
-  cached = { username, salt, hash: hashPassword(password, salt) };
+  cached = { username, password, salt, hash: hashPassword(password, salt) };
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, `${JSON.stringify(cached, null, 2)}\n`, { mode: 0o600 });
-  return { username, generatedPassword: password, source: "本次新生成" };
+  return {
+    username,
+    generatedPassword: password,
+    source: wasLegacy ? "旧格式已重新生成" : "本次新生成",
+  };
 }
 
 export type LoginResult =

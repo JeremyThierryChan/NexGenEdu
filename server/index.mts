@@ -1442,13 +1442,17 @@ server.listen(PORT, HOST, () => {
    */
   console.log(`[登录] 账号：${credential.username}（口令来源：${credential.source}）`);
   if (credential.generatedPassword !== null) {
+    if (credential.source === "旧格式已重新生成") {
+      // 说明原因，否则用户会以为"我的口令怎么变了"（旧文件里只有哈希，本来就找不回来）
+      console.log("[登录] 检测到旧格式凭证文件（里面只有哈希、口令无法找回），已重新生成一份。");
+    }
     console.log(`[登录] 本次新生成的口令：${credential.generatedPassword}`);
-    console.log(`[登录] 已存到 ${credentialFile()}（权限 0600，重启后继续有效）`);
-    console.log("[登录] 请记下来；也可以自己指定：NEXGENEDU_ADMIN_PASSWORD=... npm run server");
+    console.log(`[登录] 已存到 ${credentialFile()}（权限 0600，含明文，忘了可以直接看里面）`);
+    console.log("[登录] 也可以自己指定：NEXGENEDU_ADMIN_PASSWORD=... npm run server");
   } else if (credential.source === "环境变量") {
     console.log("[登录] 口令取自环境变量 NEXGENEDU_ADMIN_PASSWORD。");
   } else {
-    console.log(`[登录] 口令在 ${credentialFile()} 里（当初生成时打印过一次）。`);
+    console.log(`[登录] 口令在 ${credentialFile()} 里（文件里有明文，忘了就看它）。`);
   }
   scheduleBackups();
 });
