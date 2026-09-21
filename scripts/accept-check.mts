@@ -247,12 +247,13 @@ await check("数据与备份", "批量导入：覆盖 / 跳过 / 保留两份", 
   return { overwritten: overwritten.overwritten, role, skipped: skipped.skipped.length, duplicated: duplicated.duplicated, hasCopy };
 }, (v: { overwritten: number; role?: string; skipped: number; duplicated: number; hasCopy: boolean }) =>
   v.overwritten === 1 && v.role === "新职务" && v.skipped === 1 && v.duplicated === 1 && v.hasCopy);
-await check("数据与备份", "从网站导入场地（前端内容）", async () => {
-  for (const room of await api.classrooms.list()) await api.classrooms.remove(room.id);
-  const imported = await api.imports.fromSite({ entity: "classrooms", onConflict: "skip" });
-  const names = (await api.classrooms.list()).map((room) => room.name);
-  return { added: imported.added, has301: names.includes("301 教室"), hasStudy: names.includes("自习区") };
-}, (v: { added: number; has301: boolean; hasStudy: boolean }) => v.added === 3 && v.has301 && v.hasStudy);
+await check("数据与备份", "从网站导入教师（前端内容）", async () => {
+  // 网站上总有真实教师（AI 智能体不算），库里教师是空的 → 应当能导进来
+  const imported = await api.imports.fromSite({ entity: "teachers", onConflict: "skip" });
+  const names = (await api.teachers.list()).map((teacher) => teacher.name);
+  return { added: imported.added, names, hasAi: names.some((name) => name.includes("试课诊断")) };
+}, (v: { added: number; names: string[]; hasAi: boolean }) =>
+  v.added >= 1 && v.names.includes("陈老师") && v.hasAi === false);
 await check("数据与备份", "批量导入：缺少必填列时拒绝且不写入", async () => {
   const before = (await api.classrooms.list()).length;
   const outcome = await api.imports.apply({ entity: "classrooms", text: "房间名,容量\r\n漏了表头,6\r\n" });

@@ -255,7 +255,13 @@ export default function HomePage() {
         </Container>
       </div>
 
-        {/* 教室环境 */}
+        {/*
+          教室环境：**有格位内容时才渲染**。
+          没有内容就整节不出现 —— 否则页面上会挂着一个只有标题、下面空空的段落，
+          比不显示更难看。当前 `data/site/content.md` 里的格位是刻意注释掉的
+          （占位内容与机构真实场地名不一致），要恢复就取消注释并填真实场地名与照片。
+        */}
+        {home.classrooms.length > 0 && (
         <Section
           eyebrow={headings.classrooms.eyebrow}
           title={headings.classrooms.title}
@@ -301,6 +307,7 @@ export default function HomePage() {
             ))}
           </div>
         </Section>
+        )}
       </Container>
 
       {/* 底部行动号召 */}
