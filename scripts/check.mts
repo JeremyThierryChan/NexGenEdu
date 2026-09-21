@@ -995,17 +995,69 @@ eq("重复标记不再扣课时",
   remainingTotal((await api.students.get(pupil.id))!.enrollments), pupilBefore - 1);
 eq("重复标记不返回扣减明细", again.deducted.length, 0);
 
-// 没有对应科目的报课记录时：不扣课时，但要如实说明为什么
-const strangerLesson = await api.lessons.create({
-  subject: "自检·无人报课的科目", form: "", teacherId: teacher.id, classroomId: room.id,
+/*
+ * **课时不足就不排课**（机构口径：宁可少排，也不要欠账）。
+ * 这条在服务端拦，因此"没有该科目报课记录"的课**根本建不出来** ——
+ * 顺带把 markCompleted 那条"无报课记录时不扣课时"的容错路径也换了个更真实的造法：
+ * 先建课、再退课，然后标记已上。
+ */
+let blockedMessage = "";
+try {
+  await api.lessons.create({
+    subject: "自检·无人报课的科目", form: "", teacherId: teacher.id, classroomId: room.id,
+    studentIds: [pupil.id], startsAt: slot(9, 0).start, durationMinutes: 60,
+    status: "已排", note: "",
+  });
+} catch (cause) {
+  blockedMessage = cause instanceof Error ? cause.message : String(cause);
+}
+ok("没有该科目课时 → 排课被拒（服务端拦，不欠账）",
+  blockedMessage.includes("课时不足"), blockedMessage);
+ok("拒绝理由里点名了是谁不够、还能排几节",
+  blockedMessage.includes(pupil.name) && blockedMessage.includes("还能排"), blockedMessage);
+
+// 先建一节（此时有课时），再退掉这门课的报课记录 → 标记已上时就没有对应报课记录了
+const orphanLesson = await api.lessons.create({
+  subject: anchorSubject, form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
   studentIds: [pupil.id], startsAt: slot(9, 0).start, durationMinutes: 60,
   status: "已排", note: "",
 });
-const strangerResult = await api.lessons.markCompleted(strangerLesson.id);
-eq("无对应报课记录时不扣课时", strangerResult.deducted.length, 0);
-eq("并且说明原因", strangerResult.skipped.length, 1);
-ok("原因里点名了科目", (strangerResult.skipped[0]?.reason ?? "").includes("无人报课的科目"));
-await api.lessons.remove(strangerLesson.id);
+const orphanEnrollment = (await api.students.get(pupil.id))!.enrollments
+  .find((enrollment) => enrollment.subject === anchorSubject && enrollment.status === "在读")!;
+await api.students.refundEnrollment(pupil.id, orphanEnrollment.id, "自检：造一节无报课记录的课");
+const orphanResult = await api.lessons.markCompleted(orphanLesson.id);
+eq("无对应报课记录时不扣课时", orphanResult.deducted.length, 0);
+eq("并且说明原因", orphanResult.skipped.length, 1);
+ok("原因里点名了科目", (orphanResult.skipped[0]?.reason ?? "").includes(anchorSubject));
+await api.lessons.remove(orphanLesson.id);
+
+/*
+ * 兜底：**超用必须被上报**（而不是静默）。
+ *
+ * 排课时已按"课时够不够"拦了一道，但退课/调减课时/多人课中途退课仍可能造成超用。
+ * 这里故意造出来：先排一节（有课时）→ 把课时手工调到 0 → 标记已上 → 应当出现 overused。
+ */
+const overflowStudent = await api.students.create({
+  name: "自检超用学生", grade: "初二", guardian: "", status: "在读", note: "", profile: {},
+});
+const overflowEnroll = await api.students.enroll(overflowStudent.id, {
+  subject: "自检超用科目", form: "一对一定制课", teacherId: teacher.id, lessons: 5,
+  startedAt: new Date().toISOString(), note: "自检",
+});
+const overflowLesson = await api.lessons.create({
+  subject: "自检超用科目", form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
+  studentIds: [overflowStudent.id], startsAt: slot(11, 0).start, durationMinutes: 60,
+  status: "已排", note: "",
+});
+await api.students.adjustEnrollmentLessons(
+  overflowStudent.id, overflowEnroll!.enrollments[0]!.id, -5, "自检：把课时调到 0",
+);
+const overflowResult = await api.lessons.markCompleted(overflowLesson.id);
+eq("课时已被调到 0 时仍能记录上课（不因为欠费就记不了）", overflowResult.lesson?.status, "已上");
+eq("但要**明确上报超用**（不是静默截断成 0）",
+  overflowResult.overused.map((item) => [item.name, item.subject, item.over]),
+  [["自检超用学生", "自检超用科目", 1]]);
+await api.lessons.remove(overflowLesson.id);
 
 await api.lessons.remove(anchorLesson.id);
 eq("删除排课后查不到", await api.lessons.get(anchorLesson.id), null);
@@ -2435,6 +2487,11 @@ ok("服务端校验清单覆盖关键项（冲突 / 幂等 / 金额 / 鉴权 / �
   return ["冲突", "幂等", "金额", "鉴权", "审计"].every((key) => text.includes(key));
 })());
 ok("每条服务端校验都写了理由", SERVER_MUST_VALIDATE.every((item) => item.why.length > 15));
+// `done` 的含义是「服务端真的会拦」，不是「文档写了」；标了已落地的条目必须在清单里被点名
+ok("服务端校验清单标出已落地项", (() => {
+  const landed = SERVER_MUST_VALIDATE.filter((item) => item.done);
+  return landed.length >= 1 && landed.some((item) => item.rule.includes("课时"));
+})());
 ok("迁移步骤含退出条件", MIGRATION_STEPS.some((item) => item.step.includes("退出条件")));
 
 // 文档必须提到每一个方法（否则「文档漏了接口」没人发现）
@@ -3547,11 +3604,26 @@ ok("预览里的日期是人话（月日 + 星期 + 时间）",
   describeSeriesDate("2026-09-22T09:00:00.000Z").includes("周"),
   describeSeriesDate("2026-09-22T09:00:00.000Z"));
 
-// 走接口：夹具里挑一个学生、一位教师、一间教室
-const seriesStudent = (await api.students.list()).find((student) => student.enrollments.length > 0)!;
-const seriesSubject = seriesStudent.enrollments[0]!.subject;
-const seriesTeacher = (await api.teachers.list())[0]!;
-const seriesRoom = (await api.classrooms.list())[0]!;
+/*
+ * 走接口的部分**自造一套独立数据**（专用科目 / 教师 / 教室 / 学生）：
+ * 夹具里那些学生的课时余额是别的用例在动的，拿它们验证"课时够不够"会被干扰。
+ */
+const seriesSubject = "自检批量排课科目";
+const seriesTeacher = await api.teachers.create({
+  name: "自检批量排课老师", subjects: [seriesSubject], role: "授课教师", phone: "",
+  active: true, years: "", summary: "", bio: "", origin: "后台", kind: "教师",
+});
+const seriesRoom = await api.classrooms.create({
+  name: "自检批量排课教室", kind: "上课用教室", capacity: 8, availability: [], note: "",
+});
+const seriesStudent = await api.students.create({
+  name: "自检批量排课学生", grade: "初二", guardian: "", status: "在读", note: "", profile: {},
+});
+// 报 12 节：够跑"排 6 节 + 重复排一次（冲突跳过）"，又不足以跑满 100 节（用来验封顶）
+await api.students.enroll(seriesStudent.id, {
+  subject: seriesSubject, form: "一对一定制课", teacherId: seriesTeacher.id, lessons: 12,
+  startedAt: new Date().toISOString(), note: "自检",
+});
 // 起排日取**远期的一个周一**：夹具的课都在"现在"附近，这里要测的是机制本身
 const farMonday = (() => {
   const d = new Date(2027, 2, 1);
@@ -3614,10 +3686,25 @@ ok("跳过原因里提到教师、教室或学生",
   /已有课|已被占用|不开放|容量|科目/.test(again2.skipped[0]?.reason ?? ""),
   again2.skipped[0]?.reason ?? "(空)");
 
-// 边界：教师在该时段已被自己占用 → 预检里就该显示冲突（而不是写入时才failed）
+// 边界：教师在该时段已被自己占用 → 预检里就该显示冲突（而不是写入时才 failed）
 const clashPlan = await api.lessons.planSeries({ ...seriesInput, subject: seriesSubject });
-eq("预检能提前看出冲突（同一串时间再排 → 6 节都不可排）",
-  [clashPlan.schedulable, clashPlan.blocked], [0, 6]);
+eq("重复排同一串：生成的 6 节全部撞在已有安排上（能排 0 节）",
+  [clashPlan.items.length, clashPlan.schedulable, clashPlan.blocked], [6, 0, 6]);
+
+/*
+ * **课时不足就不排课**：报 12 节、已排 6 节 → 还能排 6 节。
+ * 要 100 节时应当**封顶到 6 节**，并且把"砍掉了多少、谁不够"说清楚
+ * （不能让"少排了"悄无声息 —— 那是另一种形式的欠账）。
+ */
+// 换一个空闲时段，才能同时看清"封顶"与"这 6 节确实可排"
+// 上午 9 点：与已排的 19:00–20:30 完全不重叠（90 分钟时长很容易撞上邻近时段）
+const capped = await api.lessons.planSeries({ ...seriesInput, count: 100, time: "09:00" });
+eq("课时不足时按剩余课时封顶：只生成 6 节",
+  [capped.items.length, capped.requestedCount, capped.cappedBy], [6, 100, 94]);
+ok("封顶时给出课时不足的说明（点名是谁、还能排几节）",
+  capped.shortageMessage.includes("课时不足") && capped.shortageMessage.includes("还能排"),
+  capped.shortageMessage);
+eq("封顶后的计划里这 6 节都可排（不含冲突）", [capped.schedulable, capped.blocked], [6, 0]);
 
 /* ── 两阶段导入的流程本身（先体检、再写入）──
  *

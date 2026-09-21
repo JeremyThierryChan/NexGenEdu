@@ -166,8 +166,11 @@ export const API_CONTRACT: ContractGroup[] = [
  *
  * 前端已经有这些检查，但它们只是体验：请求可以被绕过、也可以被伪造。
  * 这份清单是「接服务端时必须补上」的验收项，每一项都对应一个已经踩过的坑。
+ *
+ * `done: true` 表示这条已经在 `lib/backend/api.ts` 里真正落地，并有 `scripts/check.mts` 的自检覆盖；
+ * 注意它不是「文档已写」，而是「服务端现在真的会拦」——前端的检查仍然只是体验。
  */
-export type ServerValidation = { rule: string; why: string; done: false };
+export type ServerValidation = { rule: string; why: string; done: boolean };
 
 export const SERVER_MUST_VALIDATE: ServerValidation[] = [
   {
@@ -186,9 +189,9 @@ export const SERVER_MUST_VALIDATE: ServerValidation[] = [
     done: false,
   },
   {
-    rule: "课时不足时的处理：扣课时不得把 usedLessons 变成负数，超扣要明确报错而不是静默截断",
-    why: "静默截断会让「还剩多少节」永远对不上账",
-    done: false,
+    rule: "课时不足时的处理：**课时不够就不排课**（排课前按「剩余课时 − 已排未上」复核，不够就拒绝/封顶并说明是谁不够）；扣课时若仍发生超用，必须**上报**而不是静默截断",
+    why: "机构的经营口径是「宁可少排，也不要欠账」——欠着的课时事后很难收回来；而静默截断会让「还剩多少节」永远对不上账",
+    done: true,
   },
   {
     rule: "金额不变式：报课记录的实收必须等于其收款合计减退款合计",

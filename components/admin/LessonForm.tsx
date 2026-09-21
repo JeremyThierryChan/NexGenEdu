@@ -66,6 +66,8 @@ export function LessonForm({
   const [teacherId, setTeacherId] = useState(lesson?.teacherId ?? "");
   const [classroomId, setClassroomId] = useState(lesson?.classroomId ?? "");
   const [studentIds, setStudentIds] = useState<string[]>(lesson?.studentIds ?? []);
+  // 已经排了但还没上的课（算"还能排几节"时要扣掉它们，才能与服务端口径一致）
+  const [scheduled, setScheduled] = useState<Lesson[]>([]);
   const [status, setStatus] = useState<Lesson["status"]>(lesson?.status ?? "已排");
   const [note, setNote] = useState(lesson?.note ?? "");
 
@@ -74,9 +76,15 @@ export function LessonForm({
   const formOptions = useMemo(() => getFormOptions(), []);
 
   useEffect(() => {
-    void Promise.all([api.students.list(), api.teachers.listActive(), api.classrooms.list()]).then(
-      ([studentList, teacherList, classroomList]) => {
+    void Promise.all([
+      api.students.list(),
+      api.teachers.listActive(),
+      api.classrooms.list(),
+      api.lessons.list(),
+    ]).then(
+      ([studentList, teacherList, classroomList, lessonList]) => {
         setStudents(studentList);
+        setScheduled(lessonList);
         setTeachers(teacherList);
         setClassrooms(classroomList);
         // 新建时给一个合理默认值：第一位在职教师 + 第一个教室
@@ -130,6 +138,35 @@ export function LessonForm({
 
   const hasConflict = (conflicts?.total ?? 0) > 0;
 
+  /**
+   * **课时够不够**（规则：课时不够就不排课）。
+   *
+   * 与服务端 `insufficientLessons` 用同一套口径：该科目**在读**报课的剩余课时，
+   * 减去已排未上的节数（编辑这节课时把自己排除）。
+   * 界面先算一次是为了让人在点保存之前就知道 —— 但真正的保证在服务端（它会再算一次）。
+   */
+  const shortOfLessons = useMemo(() => {
+    const text = subject.trim();
+    if (text === "" || studentIds.length === 0) return [];
+    return studentIds
+      .map((id) => students.find((student) => student.id === id))
+      .filter((student): student is Student => student !== undefined)
+      .map((student) => {
+        const remaining = student.enrollments
+          .filter((enrollment) => enrollment.status === "在读" && enrollment.subject.trim() === text)
+          .reduce((sum, enrollment) => sum + Math.max(0, enrollment.totalLessons - enrollment.usedLessons), 0);
+        const already = scheduled.filter(
+          (item) =>
+            item.id !== lesson?.id &&
+            item.status === "已排" &&
+            item.subject.trim() === text &&
+            item.studentIds.includes(student.id),
+        ).length;
+        return { student, affordable: Math.max(0, remaining - already) };
+      })
+      .filter((item) => item.affordable < 1);
+  }, [students, studentIds, subject, scheduled, lesson?.id]);
+
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -144,6 +181,13 @@ export function LessonForm({
     }
     if (input.studentIds.length === 0) {
       setError("至少要选一位学生。");
+      return;
+    }
+    if (shortOfLessons.length > 0) {
+      setError(
+        `课时不足：${shortOfLessons.map((item) => `${item.student.name}（还能排 0 节）`).join("、")}。` +
+        "请先到学生的「报课与课时」页续费或报课，再来排这一节。",
+      );
       return;
     }
     if (hasConflict) {
@@ -295,6 +339,14 @@ export function LessonForm({
 
       {/* 冲突提示 */}
       {checking && <p className="mt-3 text-xs text-ink-400">正在检查时间冲突…</p>}
+      {shortOfLessons.length > 0 && (
+        <p className="mt-3 rounded-md border border-warning-100 bg-warning-50 px-3 py-2 text-sm leading-relaxed text-warning-600">
+          <strong className="font-medium">课时不足，先不排：</strong>
+          {shortOfLessons.map((item) => item.student.name).join("、")} 在「{subject.trim()}」上已经没有可排的课时了
+          （剩余课时减去已排未上）。请先续费/报课 —— 这条规则是为了**不产生欠账**。
+        </p>
+      )}
+
       {!checking && hasConflict && conflicts !== null && (
         <div className="mt-3 rounded-md border border-warning-100 bg-warning-50 px-3 py-2.5">
           <p className="text-sm font-medium text-warning-600">
@@ -375,7 +427,7 @@ export function LessonForm({
       )}
 
       <div className="mt-4 flex gap-2">
-        <Button type="submit" size="sm" disabled={pending || hasConflict}>
+        <Button type="submit" size="sm" disabled={pending || hasConflict || shortOfLessons.length > 0}>
           {pending ? "保存中…" : editing ? "保存修改" : "排课"}
         </Button>
         <Button type="button" size="sm" variant="outline" onClick={onCancel}>

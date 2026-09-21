@@ -139,10 +139,19 @@ await check("课程安排", "按周批量排课：写入并跳过冲突", async 
     weekdays: [1], time: "16:00", count: 4,
   };
   const first = await api.lessons.createSeries(input);
+  // 再排一遍：课时已被第一遍占用（封顶），因此这次生成的节数可能变少 —— 断言不变量而不是写死数字
+  const secondPlan = await api.lessons.planSeries(input);
   const again = await api.lessons.createSeries(input);
-  return { created: first.created, skippedAgain: again.skipped.length, againCreated: again.created };
-}, (v: { created: number; skippedAgain: number; againCreated: number }) =>
-  v.created === 4 && v.againCreated === 0 && v.skippedAgain === 4);
+  return {
+    created: first.created,
+    againCreated: again.created,
+    skipped: again.skipped.length,
+    planned: secondPlan.items.length,
+    schedulable: secondPlan.schedulable,
+  };
+}, (v: { created: number; againCreated: number; skipped: number; planned: number; schedulable: number }) =>
+  // 第一遍排上 4 节；第二遍一节都不重复建，且预检里生成的每一节都被跳过（都撞已有安排）
+  v.created === 4 && v.againCreated === 0 && v.schedulable === 0 && v.skipped === v.planned);
 
 /* ── 5 课程安排（排课 / 改课 / 标记已上 / 冲突 / 补课）── */
 let lessonId = "";

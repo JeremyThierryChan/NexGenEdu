@@ -570,4 +570,11 @@ export type CompletionResult = {
   skipped: Array<{ studentId: string; reason: string }>;
   /** 这节课之前是否已经是「已上」状态。 */
   alreadyCompleted: boolean;
+  /**
+   * 扣课时后发现"超用"的学生（已用 > 购买）。
+   *
+   * 排课时已经按"课时够不够"先拦了一道，这里留一条兜底上报：**任何超用都必须说出来**。
+   * 否则会出现"剩余课时显示 0"这种看不出欠账的状态 —— 机构就白送了课时。
+   */
+  overused: Array<{ studentId: string; name: string; subject: string; over: number }>;
 };

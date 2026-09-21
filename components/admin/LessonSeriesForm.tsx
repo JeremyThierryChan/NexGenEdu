@@ -268,7 +268,7 @@ export function LessonSeriesForm({
           />
           <NumberInput
             label="排多少节"
-            hint={remaining === null ? "不填建议值也可手填" : `建议按剩余课时填 ${remaining}`}
+            hint={remaining === null ? "课时够不够由服务端复核" : `该科目剩 ${remaining} 节，超了会被砍到能排的节数`}
             min={1}
             max={200}
             value={count}
@@ -318,6 +318,13 @@ export function LessonSeriesForm({
         />
       </div>
 
+      {plan !== null && plan.shortageMessage !== "" && (
+        <p className="mt-3 rounded-md border border-warning-100 bg-warning-50 px-3 py-2 text-sm leading-relaxed text-warning-600">
+          {plan.shortageMessage}
+          （规则：**课时不够就不排课** —— 免得欠账；先续费或报课再加排。）
+        </p>
+      )}
+
       {error !== "" && (
         <p role="alert" className="mt-3 rounded-md border border-danger-100 bg-danger-50 px-3 py-2 text-sm text-danger-600">
           {error}
@@ -353,6 +360,15 @@ export function LessonSeriesForm({
               该科目剩余 {plan.remainingLessons} 节 · 已排未上 {plan.alreadyScheduled} 节 ·
               建议排 {plan.suggestedCount} 节
             </span>
+            {plan.cappedBy > 0 && (
+              /*
+               * 课时不足时必须明说"少排了多少、是谁不够" ——
+               * 静默少排是另一种形式的欠账：人会以为排上了。
+               */
+              <span className="text-danger-600">
+                你填了 {plan.requestedCount} 节，按剩余课时只排 {plan.items.length} 节（少 {plan.cappedBy} 节）
+              </span>
+            )}
           </div>
           <div className="max-h-64 overflow-auto">
             <table className="w-full min-w-[420px] border-collapse text-left text-xs">

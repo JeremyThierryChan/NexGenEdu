@@ -768,6 +768,27 @@ export type SeriesPlan = {
   alreadyScheduled: number;
   /** 建议节数 = 剩余课时 − 已排未上（不小于 0）。 */
   suggestedCount: number;
+  /** 你填的节数（未封顶前）。 */
+  requestedCount: number;
+  /** 因**课时不足**被砍掉的节数（> 0 时界面必须说明，不能让"少排了"悄无声息）。 */
+  cappedBy: number;
+  /** 课时不足的说明（够用时为空串）。 */
+  shortageMessage: string;
+};
+
+/**
+ * 某个学生在这节课上"超用"了课时（已用 > 购买）。
+ *
+ * 排课时已经按"课时够不够"拦了一道，但**仍可能发生**：
+ * 排课时够、后来退课或手工调减课时、多人课里有学生中途退课…
+ * 这时候必须**说出来**：静默超用等于白送课时，而"剩余课时显示 0"看不出欠了几节。
+ */
+export type OverusedLesson = {
+  studentId: string;
+  name: string;
+  subject: string;
+  /** 超用节数（正数）。 */
+  over: number;
 };
 
 export type SeriesOutcome = {
@@ -843,6 +864,63 @@ function conflictsFor(db: Database, input: LessonInput): ConflictReport {
   };
 }
 
+/**
+ * **课时不足的判定**（业务规则：**课时不够就不排课**）。
+ *
+ * 机构的口径是"宁可少排，也不要欠账" —— 欠着的课时事后很难收回来。
+ * 因此排课（单节 / 批量 / 补课）之前一律先算一遍：这几位学生在这门科目上
+ * **还剩几节可用**（剩余课时 − 已排未上），够不上要排的节数就不排。
+ *
+ * 返回 `null` 表示够；否则给出**差额与是谁不够**（界面与错误信息直接用这句话，
+ * 而不是笼统说"课时不足"——要让人一眼知道该找谁续费）。
+ *
+ * 用**同一套科目匹配**（`enrollmentForLesson` 的口径：科目名相同），
+ * 因此"报的是初中数学、排的是初中数学"才会算在一起，不会张冠李戴。
+ */
+function insufficientLessons(
+  db: Database,
+  input: { subject: string; studentIds: string[]; count: number },
+): {
+  message: string;
+  /** 这门科目上"最多还能排几节"（取剩余最少的那位：班课按同一份课表走）。 */
+  affordable: number;
+  short: Array<{ studentId: string; name: string; remaining: number }>;
+} | null {
+  const { subject, studentIds, count } = input;
+  const perStudent = studentIds.map((studentId) => {
+    const student = db.students.find((item) => item.id === studentId);
+    const remaining = student === undefined ? 0 : remainingTotal(
+      student.enrollments.filter((enrollment) => enrollment.subject.trim() === subject.trim()),
+    );
+    // 已经排了但还没上的课：那部分课时已经被"预定"，不能再排一遍
+    const scheduled = db.lessons.filter(
+      (lesson) =>
+        lesson.status === "已排" &&
+        lesson.subject.trim() === subject.trim() &&
+        lesson.studentIds.includes(studentId),
+    ).length;
+    return {
+      studentId,
+      name: student?.name ?? "（学生已删除）",
+      remaining: Math.max(0, remaining - scheduled),
+    };
+  });
+
+  const affordable = perStudent.length === 0 ? 0 : Math.min(...perStudent.map((item) => item.remaining));
+  if (affordable >= count) return null;
+
+  const short = perStudent.filter((item) => item.remaining < count);
+  const names = short.map((item) => `${item.name}（还能排 ${item.remaining} 节）`).join("、");
+  return {
+    affordable,
+    short,
+    message:
+      count <= 1
+        ? `课时不足：${names}。请先续费/报课，再排这一节。`
+        : `课时不足：${names}。${subject}最多还能排 ${affordable} 节，先续费再加排。`,
+  };
+}
+
 /** 冲突报告 → 一句人话（批量排课的预览里逐节显示）。 */
 function describeConflicts(db: Database, report: ConflictReport): string {
   const parts: string[] = [];
@@ -875,11 +953,26 @@ function describeConflicts(db: Database, report: ConflictReport): string {
  * 每节都跑一次 `conflictsFor`，因此预览里说的和写入时判的完全一致。
  */
 function planSeries(db: Database, input: SeriesInput): SeriesPlan {
+  /*
+   * **课时不够就不排**：先算"这门科目最多还能排几节"（剩余课时 − 已排未上，
+   * 多人班课取剩余最少的那位），再把节数**封顶**到这个数。
+   * 封顶而不是整批拒绝：机构想排 20 节、账上只够 8 节时，
+   * 先把能排的 8 节排上更实用；但**必须在预览里说清楚**少排了多少、谁不够。
+   */
+  const availability = insufficientLessons(db, {
+    subject: input.subject,
+    studentIds: input.studentIds,
+    count: input.count,
+  });
+  const affordable = availability === null ? input.count : availability.affordable;
+  const requestedCount = Math.max(0, Math.trunc(input.count));
+  const effectiveCount = Math.min(requestedCount, affordable);
+
   const dates = generateSeriesDates({
     startDate: input.startDate,
     weekdays: input.weekdays,
     time: input.time,
-    count: input.count,
+    count: effectiveCount,
   });
 
   const items: SeriesPlanItem[] = dates.map((startsAt) => {
@@ -933,8 +1026,20 @@ function planSeries(db: Database, input: SeriesInput): SeriesPlan {
     remainingLessons,
     alreadyScheduled,
     suggestedCount: Math.max(0, remainingLessons - alreadyScheduled),
+    requestedCount,
+    // 因课时不足被砍掉的节数（> 0 时界面必须明说）
+    cappedBy: Math.max(0, requestedCount - effectiveCount),
+    shortageMessage: availability === null ? "" : availability.message,
   };
 }
+
+/**
+ * 排课的通用增删改。
+ *
+ * 单独存一份，是为了在 `lessons` 组里**覆盖 create**（排课要过"课时够不够"这一关），
+ * 而覆盖之后仍然能调用通用实现（不像直接展开那样丢掉原方法）。
+ */
+const lessonCollection = collection<Lesson>((db) => db.lessons, "l", "排课");
 
 const localApi = {
   students: {
@@ -1604,7 +1709,33 @@ const localApi = {
   },
 
   lessons: {
-    ...collection<Lesson>((db) => db.lessons, "l", "排课"),
+    /*
+     * 通用增删改（list / get / update / remove / create）先铺开，
+     * 然后**覆盖 create**：排课必须过"课时够不够"这一关。
+     */
+    ...lessonCollection,
+
+    /**
+     * 新建排课（**服务端复核课时**）。
+     *
+     * 机构的规则是「**课时不够就不排课**」—— 宁可少排一节，也不要欠账
+     * （欠着的课时事后很难收回来）。因此在落库前先算一遍：这几位学生在这门科目上
+     * 还剩几节可用（剩余课时 − 已排未上），不够就**明确拒绝并说清是谁不够**。
+     *
+     * 为什么不只在界面上拦：页面拦是体验，服务端拦才是保证 ——
+     * 直接调接口、或将来有第二个入口时，界面那道门形同虚设。
+     */
+    async create(input: NewLesson): Promise<Lesson> {
+      await delay();
+      const db = load();
+      const shortage = insufficientLessons(db, {
+        subject: input.subject,
+        studentIds: input.studentIds,
+        count: 1,
+      });
+      if (shortage !== null) throw new Error(shortage.message);
+      return lessonCollection.create(input);
+    },
 
     /**
      * 更新课节。
@@ -1763,12 +1894,14 @@ const localApi = {
       const db = load();
       const lesson = db.lessons.find((item) => item.id === id);
       if (lesson === undefined) {
-        return { lesson: null, deducted: [], skipped: [], alreadyCompleted: false };
+        return { lesson: null, deducted: [], skipped: [], alreadyCompleted: false, overused: [] };
       }
 
       const alreadyCompleted = lesson.status === "已上";
       const deducted: CompletionResult["deducted"] = [];
       const skipped: CompletionResult["skipped"] = [];
+      // 兜底上报：扣完之后若"已用 > 购买"，必须说出来（排课时已拦一道，这里是第二道）
+      const overused: CompletionResult["overused"] = [];
 
       if (!alreadyCompleted) {
         lesson.status = "已上";
@@ -1805,6 +1938,14 @@ const localApi = {
             subject: enrollment.subject,
             remainingLessons: remainingOf(enrollment),
           });
+          if (enrollment.usedLessons > enrollment.totalLessons) {
+            overused.push({
+              studentId,
+              name: student.name,
+              subject: enrollment.subject,
+              over: enrollment.usedLessons - enrollment.totalLessons,
+            });
+          }
         }
 
         persist(db);
@@ -1820,7 +1961,7 @@ const localApi = {
         persist(db);
       }
 
-      return clone({ lesson, deducted, skipped, alreadyCompleted });
+      return clone({ lesson, deducted, skipped, alreadyCompleted, overused });
     },
     /** 某一天的课，按开始时间升序。 */
     async listByDate(date: Date): Promise<Lesson[]> {
@@ -1853,6 +1994,18 @@ const localApi = {
       const db = load();
       const original = db.lessons.find((item) => item.id === input.originalLessonId);
       if (original === undefined) return null;
+
+      /*
+       * 补课同样占用教师与教室、同样扣 1 节课时 —— 因此也过"课时够不够"这一关：
+       * 课时不足时先续费，再排补课（否则补课本身又变成一笔欠账）。
+       */
+      const makeupStudents = input.studentIds.length > 0 ? input.studentIds : original.studentIds;
+      const shortage = insufficientLessons(db, {
+        subject: original.subject,
+        studentIds: makeupStudents,
+        count: 1,
+      });
+      if (shortage !== null) throw new Error(shortage.message);
 
       const created: Lesson = {
         id: nextId("l"),
