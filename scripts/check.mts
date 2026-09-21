@@ -145,6 +145,7 @@ import {
   parseImport,
   siteImportRecords,
 } from "@/lib/backend/import";
+import { runTwoPhaseImport } from "@/lib/backend/import-flow";
 
 const seedDb = createSeedDatabase();
 import {
@@ -3502,6 +3503,54 @@ const perRowRun = await api.imports.apply({
 });
 eq("逐行策略：第 1 行覆盖、第 2 行跳过", [perRowRun.overwritten, perRowRun.skipped.length], [1, 1]);
 eq("逐行覆盖生效", (await api.teachers.get(existingTeacher.id))?.role, "顾问");
+
+/* ── 两阶段导入的流程本身（先体检、再写入）──
+ *
+ * 这一段守的是一个**真实发生过的 bug**：从网站导入只做了"体检"那一步，
+ * 没有冲突时就直接返回 —— 用户看到"检查完成、都能导入"，但库里什么都没变，
+ * 表现就是"点了没反应"。这段流程原本只写在组件里、自检碰不到，
+ * 所以抽成 `runTwoPhaseImport` 之后在这里钉住它的两条性质。
+ */
+const fakeReport = (over: Record<string, unknown> = {}) => ({
+  ok: true, needsDecision: false, summary: "", added: 0, overwritten: 0, duplicated: 0,
+  skipped: [], problems: [], conflicts: [], headers: [], unknownHeaders: [], ...over,
+});
+
+// 性质一：体检说"需要人决定"时，**绝不能写入**
+{
+  let wrote = false;
+  const result = await runTwoPhaseImport({
+    ask: async () => fakeReport({ needsDecision: true, conflicts: [{ line: 1, key: "k", incoming: { name: "甲" }, existing: { id: "x", name: "甲", summary: "" } }] }) as never,
+    write: async () => { wrote = true; return fakeReport() as never; },
+  });
+  eq("体检要求人工决定时：返回冲突、且一次都没写",
+    [result.status, wrote, result.status === "needs-decision" ? result.conflicts.length : -1],
+    ["needs-decision", false, 1]);
+}
+
+// 性质二：体检说"没有冲突"时，**必须接着写入**（漏了这一步就是"点了没反应"）
+{
+  let writeCount = 0;
+  const result = await runTwoPhaseImport({
+    ask: async () => fakeReport({ summary: "检查完成：4 条都能导入" }) as never,
+    write: async () => { writeCount += 1; return fakeReport({ added: 4, summary: "新增 4 条教师" }) as never; },
+  });
+  eq("体检无冲突时：确实写了，且只写一次", [result.status, writeCount], ["done", 1]);
+  eq("报告用的是写入那一次的结果（不是体检的）",
+    result.status === "done" ? [result.report.added, result.report.summary] : null,
+    [4, "新增 4 条教师"]);
+}
+
+// 性质三：体检自己失败（例如缺必填列）时，不写入、把失败报告交回去
+{
+  let wrote = false;
+  const result = await runTwoPhaseImport({
+    ask: async () => fakeReport({ ok: false, error: "缺少必填列：姓名" }) as never,
+    write: async () => { wrote = true; return fakeReport() as never; },
+  });
+  eq("体检失败时不写入", [result.status, wrote, result.status === "done" ? result.report.ok : null],
+    ["done", false, false]);
+}
 
 /* ── 从网站（前端内容）导入 ── */
 const siteTeachersAsk = await api.imports.fromSite({ entity: "teachers", onConflict: "ask" });
