@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { Panel } from "@/components/admin/AdminFields";
 import { LessonForm } from "@/components/admin/LessonForm";
+import { LessonSeriesForm } from "@/components/admin/LessonSeriesForm";
 import { LessonRecordPanel } from "@/components/admin/LessonRecordPanel";
 import { PendingMakeups } from "@/components/admin/PendingMakeups";
 import { Button } from "@/components/ui/Button";
@@ -36,6 +37,8 @@ export default function AdminLessonsPage() {
   const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  // 按周批量排课面板（与「新增排课」互斥，避免同屏两个大面板）
+  const [series, setSeries] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [recordId, setRecordId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
@@ -140,12 +143,47 @@ export default function AdminLessonsPage() {
           {formatDayLabel(new Date(`${date}T00:00:00`))} · {lessons.length} 节 ·{" "}
           {Math.round((totalMinutes / 60) * 10) / 10} 小时
         </span>
-        <div className="ml-auto">
-          <Button size="sm" onClick={() => setCreating((value) => !value)}>
+        <div className="ml-auto flex items-center gap-2">
+          {/* 按周批量排课：一次排一串（每周二、五 17:00 × N 节），冲突的跳过并说明 */}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setCreating(false);
+              setSeries((value) => !value);
+            }}
+          >
+            {series ? "收起批量排课" : "按周批量排课"}
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => {
+              setSeries(false);
+              setCreating((value) => !value);
+            }}
+          >
             {creating ? "收起表单" : "新增排课"}
           </Button>
         </div>
       </div>
+
+      {series && (
+        <Panel
+          className="mt-4"
+          title="按周批量排课"
+          description="例如「每周二、五 17:00，先排 20 节」：先预览每一节、看清有没有冲突，再写入（冲突的跳过并说明）。调休与临时加课请手动单节处理。"
+        >
+          <LessonSeriesForm
+            teachers={teachers}
+            classrooms={classrooms}
+            students={students}
+            onCancel={() => setSeries(false)}
+            onDone={async () => {
+              await load();
+            }}
+          />
+        </Panel>
+      )}
 
       {notice !== "" && (
         <p className="mt-4 flex items-start justify-between gap-3 rounded-md border border-success-100 bg-success-50 px-3 py-2 text-sm text-success-600">

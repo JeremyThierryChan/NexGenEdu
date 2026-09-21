@@ -146,6 +146,7 @@ import {
   siteImportRecords,
 } from "@/lib/backend/import";
 import { runTwoPhaseImport } from "@/lib/backend/import-flow";
+import { describeSeriesDate, generateSeriesDates } from "@/lib/backend/recurrence";
 
 const seedDb = createSeedDatabase();
 import {
@@ -3503,6 +3504,120 @@ const perRowRun = await api.imports.apply({
 });
 eq("逐行策略：第 1 行覆盖、第 2 行跳过", [perRowRun.overwritten, perRowRun.skipped.length], [1, 1]);
 eq("逐行覆盖生效", (await api.teachers.get(existingTeacher.id))?.role, "顾问");
+
+console.log("\n=== 11.2 按周批量排课（一次排一串，冲突的跳过）===");
+
+/*
+ * 这一节钉两件事：
+ *   1. **日期生成**（纯函数）：起排日当天算不算、星期几怎么数、节数上限、非法输入；
+ *   2. **冲突处理**：能排的排上、撞了的跳过并说明 —— 绝不"硬塞"。
+ */
+const mon = "2026-09-21"; // 周一（2026-09-21 是周一）
+
+// 日期生成：只取命中的星期几，且含起排当天
+eq("每周一只排周一：从起排日当天开始",
+  generateSeriesDates({ startDate: mon, weekdays: [1], time: "17:00", count: 3 }).length, 3);
+eq("生成的三节依次相隔 7 天",
+  generateSeriesDates({ startDate: mon, weekdays: [1], time: "17:00", count: 3 }).map((iso) =>
+    new Date(iso).getDate(),
+  ),
+  [21, 28, 5]);
+ok("时间按本地时区构造（17:00 就是 17:00）",
+  new Date(generateSeriesDates({ startDate: mon, weekdays: [1], time: "17:00", count: 1 })[0] ?? "").getHours() === 17);
+eq("每周二、五：一周两节",
+  generateSeriesDates({ startDate: mon, weekdays: [2, 5], time: "18:30", count: 4 }).map((iso) =>
+    new Date(iso).getDay(),
+  ),
+  [2, 5, 2, 5]);
+eq("起排日是周三、只排周一：第一节是下周一（不含过去日期）",
+  new Date(generateSeriesDates({ startDate: "2026-09-23", weekdays: [1], time: "17:00", count: 1 })[0] ?? "").getDate(),
+  28);
+eq("没选星期几 → 生成 0 节（不是死循环）",
+  generateSeriesDates({ startDate: mon, weekdays: [], time: "17:00", count: 5 }).length, 0);
+eq("节数为 0 → 生成 0 节",
+  generateSeriesDates({ startDate: mon, weekdays: [1], time: "17:00", count: 0 }).length, 0);
+eq("日期写错 → 生成 0 节（不抛错）",
+  generateSeriesDates({ startDate: "2026/09/21", weekdays: [1], time: "17:00", count: 3 }).length, 0);
+eq("时间写错 → 生成 0 节",
+  generateSeriesDates({ startDate: mon, weekdays: [1], time: "25:00", count: 3 }).length, 0);
+eq("手滑填 2000 节会被截到上限 200",
+  generateSeriesDates({ startDate: mon, weekdays: [1], time: "17:00", count: 2000 }).length, 200);
+ok("预览里的日期是人话（月日 + 星期 + 时间）",
+  describeSeriesDate("2026-09-22T09:00:00.000Z").includes("月") &&
+  describeSeriesDate("2026-09-22T09:00:00.000Z").includes("周"),
+  describeSeriesDate("2026-09-22T09:00:00.000Z"));
+
+// 走接口：夹具里挑一个学生、一位教师、一间教室
+const seriesStudent = (await api.students.list()).find((student) => student.enrollments.length > 0)!;
+const seriesSubject = seriesStudent.enrollments[0]!.subject;
+const seriesTeacher = (await api.teachers.list())[0]!;
+const seriesRoom = (await api.classrooms.list())[0]!;
+// 起排日取**远期的一个周一**：夹具的课都在"现在"附近，这里要测的是机制本身
+const farMonday = (() => {
+  const d = new Date(2027, 2, 1);
+  while (d.getDay() !== 1) d.setDate(d.getDate() + 1);
+  const pad = (value: number) => `${value}`.padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+})();
+const seriesInput = {
+  subject: seriesSubject,
+  form: "一对一定制课",
+  teacherId: seriesTeacher.id,
+  classroomId: seriesRoom.id,
+  studentIds: [seriesStudent.id],
+  durationMinutes: 90,
+  status: "已排" as const,
+  note: "批量排课自检",
+  startDate: farMonday,
+  weekdays: [1, 4],
+  time: "19:00",
+  count: 6,
+};
+
+const plan = await api.lessons.planSeries(seriesInput);
+eq("预检：只算不写（计划 6 节，库里没多）",
+  [plan.items.length, (await api.lessons.list()).length], [6, (await api.lessons.list()).length]);
+ok("预检给出建议节数（按该科目剩余课时 − 已排未上）",
+  plan.suggestedCount >= 0 && plan.remainingLessons >= 0,
+  JSON.stringify({ remaining: plan.remainingLessons, scheduled: plan.alreadyScheduled, suggested: plan.suggestedCount }));
+eq("预检里能排 + 冲突 = 总数",
+  plan.schedulable + plan.blocked, plan.items.length);
+
+// 写入：**把预检说能排的都排上**（不假设一定没有冲突 —— 断言"预检与写入一致"才是真性质）
+const beforeSeries = (await api.lessons.list()).length;
+const outcome = await api.lessons.createSeries(seriesInput);
+eq("写入的节数 = 预检说能排的节数（两者共用同一套判定）", outcome.created, plan.schedulable);
+eq("库里的课数 = 之前 + 能排的节数",
+  (await api.lessons.list()).length, beforeSeries + plan.schedulable);
+eq("这次 6 节都排上了（远期时段没有别的课）", [plan.schedulable, plan.blocked], [6, 0]);
+const createdLessons = (await api.lessons.list()).filter((lesson) => lesson.note === "批量排课自检");
+eq("新增的课都带上了备注与科目",
+  [createdLessons.length, createdLessons.every((lesson) => lesson.subject === seriesSubject)],
+  [plan.schedulable, true]);
+eq("新增的课都挂着这位学生",
+  createdLessons.every((lesson) => lesson.studentIds.includes(seriesStudent.id)), true);
+eq("时间落在选定的星期几上",
+  createdLessons.every((lesson) => [1, 4].includes(new Date(lesson.startsAt).getDay())), true);
+eq("一次批量排课只写一条日志",
+  (await api.logs.list(20)).filter((log) => log.action === "批量排课").length, 1);
+
+/*
+ * 再把同一串时间排一遍：应当**全部**被跳过（教师/教室/学生都已有课），
+ * 而且每一节都要给出原因 —— 批量排课最怕的就是"悄悄少排几节"。
+ */
+const again2 = await api.lessons.createSeries(seriesInput);
+eq("重复排同一串：新增 0 节、逐节跳过", [again2.created, again2.skipped.length], [0, 6]);
+ok("每一节跳过都写清了原因（谁撞了）",
+  again2.skipped.every((item) => item.reason !== ""),
+  again2.skipped[0]?.reason ?? "(空)");
+ok("跳过原因里提到教师、教室或学生",
+  /已有课|已被占用|不开放|容量|科目/.test(again2.skipped[0]?.reason ?? ""),
+  again2.skipped[0]?.reason ?? "(空)");
+
+// 边界：教师在该时段已被自己占用 → 预检里就该显示冲突（而不是写入时才failed）
+const clashPlan = await api.lessons.planSeries({ ...seriesInput, subject: seriesSubject });
+eq("预检能提前看出冲突（同一串时间再排 → 6 节都不可排）",
+  [clashPlan.schedulable, clashPlan.blocked], [0, 6]);
 
 /* ── 两阶段导入的流程本身（先体检、再写入）──
  *

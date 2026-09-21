@@ -138,6 +138,9 @@ export const API_CONTRACT: ContractGroup[] = [
       // 因此单独说明：服务端可以保留这个接口给前端做即时提示，
       // 但保存时仍要自己再判一次（前端结果不可信）
       "lessons.findConflicts",
+      // 按周批量排课：预检（只算）与写入（能排的排上、冲突的跳过并说明）。
+      // 两者共用同一套冲突判定，因此"预览说能排、写入说不行"不会发生。
+      "lessons.planSeries", "lessons.createSeries",
       "courses.summary",
     ],
   },

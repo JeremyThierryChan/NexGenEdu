@@ -121,6 +121,29 @@ await check("收费", "退费试算（两种口径）", async () => {
   return { total, remaining: total - student.enrollments[0].usedLessons };
 }, (v: { total: number }) => v.total === 6);
 
+/* ── 4.5 按周批量排课（页面上的「按周批量排课」面板走的就是这两个方法）── */
+await check("课程安排", "按周批量排课：预检只算不写", async () => {
+  const before = (await api.lessons.list()).length;
+  const plan = await api.lessons.planSeries({
+    subject: "围棋", form: "一对一定制课", teacherId, classroomId, studentIds: [studentId],
+    durationMinutes: 60, status: "已排", note: "验收批量排课", startDate: "2027-06-07",
+    weekdays: [1], time: "16:00", count: 4,
+  });
+  return { items: plan.items.length, changed: (await api.lessons.list()).length - before, schedulable: plan.schedulable };
+}, (v: { items: number; changed: number; schedulable: number }) =>
+  v.items === 4 && v.changed === 0 && v.schedulable === 4);
+await check("课程安排", "按周批量排课：写入并跳过冲突", async () => {
+  const input = {
+    subject: "围棋", form: "一对一定制课", teacherId, classroomId, studentIds: [studentId],
+    durationMinutes: 60, status: "已排" as const, note: "验收批量排课", startDate: "2027-06-07",
+    weekdays: [1], time: "16:00", count: 4,
+  };
+  const first = await api.lessons.createSeries(input);
+  const again = await api.lessons.createSeries(input);
+  return { created: first.created, skippedAgain: again.skipped.length, againCreated: again.created };
+}, (v: { created: number; skippedAgain: number; againCreated: number }) =>
+  v.created === 4 && v.againCreated === 0 && v.skippedAgain === 4);
+
 /* ── 5 课程安排（排课 / 改课 / 标记已上 / 冲突 / 补课）── */
 let lessonId = "";
 await check("课程安排", "排课", async () => {

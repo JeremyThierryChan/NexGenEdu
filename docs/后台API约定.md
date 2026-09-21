@@ -206,6 +206,22 @@ lib/backend/api.ts        服务层实现（当前 106 个方法）；数据一�
 
 `courses.summary` 给出课程库的规模（总数 / 开放 / 暂未开放 / 网站 / 后台 / 按分类）。
 
+### 6.1 按周批量排课（`lessons.planSeries` / `lessons.createSeries`）
+
+学生报了 20 节、每周二 17:00 —— 不该点二十次"排课"。这两个方法把它变成一次操作，
+**两者共用同一套冲突判定**（`conflictsFor`），因此预览与写入的结论必然一致：
+
+| 方法 | 行为 |
+| --- | --- |
+| `lessons.planSeries` | **只算不写**：按「起排日期 + 每周几 + 时间 + 节数」生成每一节，逐节给出冲突情况；并给出**建议节数** = 该科目剩余课时 − 已排未上（多人班课取剩余最少的那位） |
+| `lessons.createSeries` | **写入**：无冲突的建课，有冲突的**跳过并逐条说明**；一次落盘、只写一条日志 |
+
+刻意**不提供"强行排"**：把课塞进已被占用的时间，事后要一节节去查 ——
+宁可少排一节并说清原因（要挪课走单节修改或用 `lessons.suggestMoves`）。
+
+边界：**不处理调休、节假日、寒暑假**（就是"按星期几往后数"），
+机构确认这类情况手动处理；节数上限 200 节（防手滑）。
+
 ### 7. 运维与审计
 
 `exportDataset`、`exportDatabase`、`importDatabase`、`imports.apply`、`imports.fromSite`、`hasBackup`、`restoreBackup`、

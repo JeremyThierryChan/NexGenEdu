@@ -1,5 +1,6 @@
 import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createEmptyDatabase } from "./initial";
+import { describeSeriesDate, generateSeriesDates } from "./recurrence";
 import {
   applyImport,
   detectConflicts,
@@ -724,6 +725,216 @@ export function dateKey(value: string | Date): string {
 
 const studentCollection = collection<Student>((db) => db.students, "s", "学生");
 const inquiryCollection = collection<Inquiry>((db) => db.inquiries, "iq", "咨询");
+
+/** 按周批量排课的入参（见 lib/backend/recurrence.ts 与 lessons.planSeries）。 */
+export type SeriesInput = {
+  subject: string;
+  form: string;
+  teacherId: string;
+  classroomId: string;
+  studentIds: string[];
+  durationMinutes: number;
+  status: Lesson["status"];
+  note: string;
+  /** 起排日期（本地日期 `YYYY-MM-DD`）。 */
+  startDate: string;
+  /** 每周几（1 = 周一 … 7 = 周日）。 */
+  weekdays: number[];
+  /** 开始时间 `HH:mm`。 */
+  time: string;
+  /** 排多少节。 */
+  count: number;
+};
+
+/** 计划里的一节：生成的日期时间 + 该节的冲突情况。 */
+export type SeriesPlanItem = {
+  startsAt: string;
+  /** 「9月23日 周二 17:00」这样的人话。 */
+  dayLabel: string;
+  /** 无冲突才能排。 */
+  ok: boolean;
+  /** 冲突摘要（无冲突时为空串）。 */
+  reason: string;
+};
+
+export type SeriesPlan = {
+  items: SeriesPlanItem[];
+  /** 能排的节数 / 被冲突挡掉的节数。 */
+  schedulable: number;
+  blocked: number;
+  /** 该科目剩余课时（多人班课取剩余最少的那位）。 */
+  remainingLessons: number;
+  /** 已经排了但还没上的节数（同科目、且包含选中的学生）。 */
+  alreadyScheduled: number;
+  /** 建议节数 = 剩余课时 − 已排未上（不小于 0）。 */
+  suggestedCount: number;
+};
+
+export type SeriesOutcome = {
+  created: number;
+  skipped: Array<{ startsAt: string; dayLabel: string; reason: string }>;
+  /** 第一/最后一节的时间（给界面回显"排到了哪天"）。 */
+  first: string;
+  last: string;
+  plan: SeriesPlan;
+};
+
+/**
+ * **冲突判定核心**（同步、纯）。
+ *
+ * `lessons.findConflicts`（页面保存前提示）与**按周批量排课**（一次算一整串日期）
+ * 都调它 —— 两处必须用**同一套**判定：各写一遍的话，预览说能排、写入时判成冲突
+ * （或反过来）只是时间问题。判定规则与原来完全一致：
+ * 相邻不算冲突、已取消不占时间、编辑自己不算冲突、没设时段的教室视为不限、
+ * 教师没登记科目时不报科目不符。
+ */
+function conflictsFor(db: Database, input: LessonInput): ConflictReport {
+  const start = new Date(input.startsAt).getTime();
+  const end = start + input.durationMinutes * 60_000;
+  const overlaps = (lesson: Lesson) => {
+    if (lesson.id === input.id || lesson.status === "已取消") return false;
+    const otherStart = new Date(lesson.startsAt).getTime();
+    const otherEnd = otherStart + lesson.durationMinutes * 60_000;
+    return start < otherEnd && otherStart < end;
+  };
+
+  const clashing = db.lessons.filter(overlaps);
+  const teacher = clashing.filter((lesson) => lesson.teacherId === input.teacherId);
+  const classroom = clashing.filter((lesson) => lesson.classroomId === input.classroomId);
+  const students = clashing.flatMap((lesson) =>
+    lesson.studentIds
+      .filter((id) => input.studentIds.includes(id))
+      .map((studentId) => ({ studentId, lesson })),
+  );
+  const uniqueStudents = [
+    ...new Map(students.map((item) => [`${item.studentId}-${item.lesson.id}`, item])).values(),
+  ];
+
+  const room = db.classrooms.find((item) => item.id === input.classroomId);
+  const classroomClosed =
+    room !== undefined &&
+    !isWithinAvailability(room.availability, new Date(input.startsAt), input.durationMinutes);
+
+  const overCapacity =
+    room !== undefined && room.capacity > 0 && input.studentIds.length > room.capacity
+      ? { capacity: room.capacity, students: input.studentIds.length }
+      : null;
+
+  const assigned = db.teachers.find((item) => item.id === input.teacherId);
+  const teacherSubjectMismatch =
+    assigned !== undefined &&
+    assigned.subjects.length > 0 &&
+    !assigned.subjects.some((subject) => input.subject.includes(subject));
+
+  return {
+    teacher,
+    classroom,
+    students: uniqueStudents,
+    classroomClosed,
+    overCapacity,
+    teacherSubjectMismatch,
+    total:
+      teacher.length +
+      classroom.length +
+      uniqueStudents.length +
+      (classroomClosed ? 1 : 0) +
+      (overCapacity !== null ? 1 : 0) +
+      (teacherSubjectMismatch ? 1 : 0),
+  };
+}
+
+/** 冲突报告 → 一句人话（批量排课的预览里逐节显示）。 */
+function describeConflicts(db: Database, report: ConflictReport): string {
+  const parts: string[] = [];
+  if (report.teacher.length > 0) {
+    const name = db.teachers.find((item) => item.id === report.teacher[0]?.teacherId)?.name ?? "该教师";
+    parts.push(`${name} 这个时段已有课`);
+  }
+  if (report.classroom.length > 0) {
+    const name = db.classrooms.find((item) => item.id === report.classroom[0]?.classroomId)?.name ?? "该教室";
+    parts.push(`${name} 这个时段已被占用`);
+  }
+  if (report.students.length > 0) {
+    const names = report.students
+      .map((item) => db.students.find((student) => student.id === item.studentId)?.name ?? "该学生")
+      .filter((value, index, list) => list.indexOf(value) === index);
+    parts.push(`${names.join("、")} 已有课`);
+  }
+  if (report.classroomClosed) parts.push("教室该时段不开放");
+  if (report.overCapacity !== null) {
+    parts.push(`超过教室容量（${report.overCapacity.students} 人 > ${report.overCapacity.capacity}）`);
+  }
+  if (report.teacherSubjectMismatch) parts.push("教师未登记这门科目");
+  return parts.join("；");
+}
+
+/**
+ * **按周批量排课 · 计划**（同步、纯、只算不写）。
+ *
+ * 从 `startDate` 起往后找，凡落在 `weekdays` 里的日期就生成一节，直到凑够 `count` 节。
+ * 每节都跑一次 `conflictsFor`，因此预览里说的和写入时判的完全一致。
+ */
+function planSeries(db: Database, input: SeriesInput): SeriesPlan {
+  const dates = generateSeriesDates({
+    startDate: input.startDate,
+    weekdays: input.weekdays,
+    time: input.time,
+    count: input.count,
+  });
+
+  const items: SeriesPlanItem[] = dates.map((startsAt) => {
+    const report = conflictsFor(db, {
+      id: "",
+      subject: input.subject,
+      form: input.form,
+      teacherId: input.teacherId,
+      classroomId: input.classroomId,
+      studentIds: input.studentIds,
+      startsAt,
+      durationMinutes: input.durationMinutes,
+      status: input.status,
+      note: input.note,
+      makeupForLessonId: "",
+    });
+    const reason = describeConflicts(db, report);
+    return {
+      startsAt,
+      dayLabel: describeSeriesDate(startsAt),
+      ok: report.total === 0,
+      reason,
+    };
+  });
+
+  /*
+   * 建议节数 = **该科目剩余课时 − 已排未上**。
+   * 多人班课取**剩余最少的那位**：班课是按同一份课表走的，
+   * 用最多的那位会把别人上不完的课时也排进去。
+   */
+  const remainingPerStudent = input.studentIds.map((studentId) => {
+    const student = db.students.find((item) => item.id === studentId);
+    if (student === undefined) return 0;
+    return student.enrollments
+      .filter((enrollment) => enrollment.status === "在读" && enrollment.subject === input.subject)
+      .reduce((sum, enrollment) => sum + remainingOf(enrollment), 0);
+  });
+  const remainingLessons = remainingPerStudent.length === 0 ? 0 : Math.min(...remainingPerStudent);
+
+  const alreadyScheduled = db.lessons.filter(
+    (lesson) =>
+      lesson.status === "已排" &&
+      lesson.subject === input.subject &&
+      lesson.studentIds.some((id) => input.studentIds.includes(id)),
+  ).length;
+
+  return {
+    items,
+    schedulable: items.filter((item) => item.ok).length,
+    blocked: items.filter((item) => !item.ok).length,
+    remainingLessons,
+    alreadyScheduled,
+    suggestedCount: Math.max(0, remainingLessons - alreadyScheduled),
+  };
+}
 
 const localApi = {
   students: {
@@ -1462,73 +1673,82 @@ const localApi = {
      */
     async findConflicts(input: LessonInput): Promise<ConflictReport> {
       await delay();
+      return clone(conflictsFor(load(), input));
+    },
+
+    /**
+     * **按周批量排课 · 预检**（只算不写）。
+     *
+     * 返回将要生成的每一节（日期时间 + 该节的冲突情况），以及"建议排几节"的依据：
+     * 建议节数 = 该科目**剩余课时 − 已排未上**（多人班课取剩余最少的那位）。
+     *
+     * 与 `createSeries` 共用同一套冲突判定（`conflictsFor`），因此预览说能排的，
+     * 写的时候就能排 —— 两份判定各写一遍的话，迟早会出现"预览说行、写入说不行"。
+     *
+     * 刻意与写入分成两个方法（而不是一个 `dryRun` 开关）：一个叫 create 的方法
+     * 不该在没说明的情况下不写入 —— 这条教训在批量导入里吃过一次。
+     */
+    async planSeries(input: SeriesInput): Promise<SeriesPlan> {
+      await delay();
+      return clone(planSeries(load(), input));
+    },
+
+    /**
+     * **按周批量排课 · 写入**。
+     *
+     * 逐节建课：**无冲突的才建，有冲突的跳过并逐条说明**。不提供"强行排"——
+     * 把课塞进已被占用的时间，事后要一节节去查；宁可少排一节并说清楚原因。
+     *
+     * 一次落盘、只写一条日志（与批量导入同一纪律：日志上限 500 条，逐节写会冲掉历史）。
+     */
+    async createSeries(input: SeriesInput): Promise<SeriesOutcome> {
+      await delay();
       const db = load();
+      const plan = planSeries(db, input);
 
-      const start = new Date(input.startsAt).getTime();
-      const end = start + input.durationMinutes * 60_000;
-      const overlaps = (lesson: Lesson) => {
-        // 编辑自己时不算冲突；已取消的课不占用时间
-        if (lesson.id === input.id || lesson.status === "已取消") return false;
-        const otherStart = new Date(lesson.startsAt).getTime();
-        const otherEnd = otherStart + lesson.durationMinutes * 60_000;
-        // 相邻不算冲突（结束等于开始）
-        return start < otherEnd && otherStart < end;
-      };
+      const created: Lesson[] = [];
+      const skipped: Array<{ startsAt: string; dayLabel: string; reason: string }> = [];
 
-      const clashing = db.lessons.filter(overlaps);
-      const teacher = clashing.filter((lesson) => lesson.teacherId === input.teacherId);
-      const classroom = clashing.filter((lesson) => lesson.classroomId === input.classroomId);
-      const students = clashing.flatMap((lesson) =>
-        lesson.studentIds
-          .filter((id) => input.studentIds.includes(id))
-          .map((studentId) => ({ studentId, lesson })),
-      );
+      for (const item of plan.items) {
+        if (!item.ok) {
+          skipped.push({ startsAt: item.startsAt, dayLabel: item.dayLabel, reason: item.reason });
+          continue;
+        }
+        const lesson: Lesson = {
+          id: nextId("l"),
+          subject: input.subject,
+          form: input.form,
+          teacherId: input.teacherId,
+          classroomId: input.classroomId,
+          studentIds: [...input.studentIds],
+          startsAt: item.startsAt,
+          durationMinutes: input.durationMinutes,
+          status: input.status,
+          note: input.note,
+          makeupForLessonId: "",
+        };
+        db.lessons.push(lesson);
+        created.push(lesson);
+      }
 
-      // 同一节课既撞教师又撞教室时，students 里可能出现重复，这里去重
-      const uniqueStudents = [
-        ...new Map(students.map((item) => [`${item.studentId}-${item.lesson.id}`, item])).values(),
-      ];
-
-      // 教室在该时段是否开放：没设可用时段的教室视为不限，永远为 false
-      const room = db.classrooms.find((item) => item.id === input.classroomId);
-      const classroomClosed =
-        room !== undefined &&
-        !isWithinAvailability(room.availability, new Date(input.startsAt), input.durationMinutes);
-
-      /*
-       * 容量校验：学生数不能超过教室容量。
-       * 这类问题不会「撞课」，但会把学生塞进坐不下的房间 —— 属于排课时就该拦住的事。
-       */
-      const overCapacity =
-        room !== undefined && room.capacity > 0 && input.studentIds.length > room.capacity
-          ? { capacity: room.capacity, students: input.studentIds.length }
-          : null;
-
-      /*
-       * 教师科目校验：教师的「可带科目」里是否包含这节课的科目。
-       * 匹配规则与前台教师卡片一致（科目名出现在课程名里，如「物理」命中「高中物理」）；
-       * 教师没有登记科目时跳过 —— 没登记不等于不能带。
-       */
-      const assigned = db.teachers.find((item) => item.id === input.teacherId);
-      const teacherSubjectMismatch =
-        assigned !== undefined &&
-        assigned.subjects.length > 0 &&
-        !assigned.subjects.some((subject) => input.subject.includes(subject));
+      if (created.length > 0) {
+        writeLog(db, {
+          entity: "排课",
+          action: "批量排课",
+          targetId: "",
+          summary:
+            `批量排课「${input.subject}」新增 ${created.length} 节` +
+            (skipped.length > 0 ? `（跳过 ${skipped.length} 节：与已有安排冲突）` : ""),
+        });
+        persist(db);
+      }
 
       return clone({
-        teacher,
-        classroom,
-        students: uniqueStudents,
-        classroomClosed,
-        overCapacity,
-        teacherSubjectMismatch,
-        total:
-          teacher.length +
-          classroom.length +
-          uniqueStudents.length +
-          (classroomClosed ? 1 : 0) +
-          (overCapacity !== null ? 1 : 0) +
-          (teacherSubjectMismatch ? 1 : 0),
+        created: created.length,
+        skipped,
+        first: created[0]?.startsAt ?? "",
+        last: created[created.length - 1]?.startsAt ?? "",
+        plan,
       });
     },
 
