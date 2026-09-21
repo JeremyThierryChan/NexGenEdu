@@ -1164,7 +1164,7 @@ function normalizeNewEnrollment(input: NewStudentEnrollment): NewEnrollment {
  * 同一门科目重复报会被拒（而不是悄悄合成一条）：重复通常是把「数学 10 节」
  * 填了两遍，合成会让账目对不上；确实是第二次报，应该走「续费」。
  */
-function normalizeNewEnrollments(items: NewStudentEnrollment[]): NewEnrollment[] {
+function normalizeNewEnrollments(items: NewStudentEnrollment[], db: Database): NewEnrollment[] {
   const normalized = items.map(normalizeNewEnrollment);
   const seen = new Set<string>();
   for (const item of normalized) {
@@ -1176,6 +1176,16 @@ function normalizeNewEnrollments(items: NewStudentEnrollment[]): NewEnrollment[]
       throw new Error(`「${item.subject}」报了两次：同一门科目请合并成一条（第二次报请用「续费」）。`);
     }
     seen.add(item.subject);
+    /*
+     * 指定教师必须是档案里真实存在的人。
+     *
+     * 界面是下拉选的，正常不会错；但接口是可以被直接调的（脚本、将来的导入），
+     * 而一个不存在的教师 id 会静默存下来 —— 之后报课面板上那一栏是空的、
+     * 排课时也找不到人，属于"数据坏了但不报错"的那一类。
+     */
+    if (item.teacherId !== "" && !db.teachers.some((teacher) => teacher.id === item.teacherId)) {
+      throw new Error(`「${item.subject}」指定的教师不存在：请重新选择（或改成「不指定」）。`);
+    }
   }
   return normalized;
 }
@@ -1292,7 +1302,7 @@ const localApi = {
       await delay();
       const db = load();
       const { subjects, enrollments, ...rest } = input;
-      const wanted = normalizeNewEnrollments(enrollments ?? []);
+      const wanted = normalizeNewEnrollments(enrollments ?? [], db);
 
       const student: Student = {
         ...rest,

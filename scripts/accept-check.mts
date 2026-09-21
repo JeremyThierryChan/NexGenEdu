@@ -107,8 +107,8 @@ await check("学生", "建档并报多门课（含课时流水）", async () => 
   const created = await api.students.create({
     name: "验收多门学生", grade: "初三", guardian: "", status: "在读", note: "", profile: {},
     enrollments: [
-      { subject: "验收科目A", lessons: 10 },
-      { subject: "验收科目B", lessons: 20 },
+      { subject: "验收科目A", lessons: 10, form: "一对一定制课", teacherId },
+      { subject: "验收科目B", lessons: 20, form: "一对二 / 一对三小组课" },
     ],
   });
   const ledgers = await Promise.all(
@@ -116,10 +116,20 @@ await check("学生", "建档并报多门课（含课时流水）", async () => 
   );
   return {
     counts: created.enrollments.map((item) => item.totalLessons),
+    forms: created.enrollments.map((item) => item.form),
+    teachers: created.enrollments.map((item) => item.teacherId === teacherId),
     kinds: ledgers.map((rows) => rows.map((row) => [row.kind, row.delta])),
   };
-}, (result: { counts: number[]; kinds: Array<Array<[string, number]>> }) =>
+}, (result: {
+  counts: number[];
+  forms: string[];
+  teachers: boolean[];
+  kinds: Array<Array<[string, number]>>;
+}) =>
   result.counts.join(",") === "10,20" &&
+  // 每门课各自的班型与指定教师都要落对（这是界面上一行一行选出来的）
+  result.forms.join("|") === "一对一定制课|一对二 / 一对三小组课" &&
+  result.teachers.join(",") === "true,false" &&
   result.kinds.every(
     (rows, index) =>
       rows.length === 1 && rows[0]?.[0] === "报课" && rows[0]?.[1] === (index === 0 ? 10 : 20),

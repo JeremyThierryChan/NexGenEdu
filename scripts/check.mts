@@ -813,14 +813,23 @@ ok("删除后取不到", (await api.students.get(created.id)) === null);
  * 会让课时扣到哪一门说不清；只记第一门，第二门就等于白报。
  * 因此这里盯着的是：**两门课各自落到自己的报课记录上**，且条数与节数都对得上。
  */
+// 这一块跑在文件前段，`teacher` 夹具还没定义 —— 就地取一位（谁都可以）
+const multiTeacher = (await api.teachers.list())[0]!;
 const multi = await api.students.create({
   name: "自检·多门报课", grade: "初三", guardian: "", status: "在读", note: "", profile: {},
   enrollments: [
-    { subject: "自检·多门A", lessons: 10 },
-    { subject: "自检·多门B", lessons: 20 },
+    // 每门课各自带上班型与指定教师（界面上就是一行一行选的）
+    { subject: "自检·多门A", lessons: 10, form: "一对一定制课", teacherId: multiTeacher.id },
+    { subject: "自检·多门B", lessons: 20, form: "一对二 / 一对三小组课" },
   ],
 });
 eq("建档一次报两门 → 两条报课记录", multi.enrollments.length, 2);
+eq("每门课的班型各自独立（不是一刀切同一个）",
+  multi.enrollments.map((item) => [item.subject, item.form]).sort(),
+  [["自检·多门A", "一对一定制课"], ["自检·多门B", "一对二 / 一对三小组课"]].sort());
+eq("指定教师也各自独立（一门指定、一门不指定）",
+  multi.enrollments.map((item) => [item.subject, item.teacherId === multiTeacher.id]).sort(),
+  [["自检·多门A", true], ["自检·多门B", false]].sort());
 eq("每门课的节数各自独立（不是两门并成一条）",
   multi.enrollments.map((item) => [item.subject, item.totalLessons]).sort(),
   [["自检·多门A", 10], ["自检·多门B", 20]]);
@@ -861,6 +870,18 @@ const badCases: Array<[string, Array<{ subject: string; lessons: number }>]> = [
     { subject: " 自检·坏报课 ", lessons: 8 },
   ]],
 ];
+// 指定了不存在的教师：下拉选不出来，但接口可以被脚本直接调 —— 不能静默存下来
+let ghostTeacherMessage = "";
+try {
+  await api.students.create({
+    name: "自检·坏报课", grade: "初三", guardian: "", status: "在读", note: "", profile: {},
+    enrollments: [{ subject: "自检·坏报课", lessons: 5, teacherId: "t_不存在的人" }],
+  });
+} catch (cause) {
+  ghostTeacherMessage = cause instanceof Error ? cause.message : String(cause);
+}
+ok("指定了不存在的教师会被拒（不能静默存一个查不到的 id）",
+  ghostTeacherMessage.includes("教师不存在"), ghostTeacherMessage);
 for (const [label, enrollments] of badCases) {
   let message = "";
   try {

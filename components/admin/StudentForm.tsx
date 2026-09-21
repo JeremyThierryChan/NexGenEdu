@@ -48,10 +48,19 @@ export function StudentForm({
   const formOptions = useMemo(() => getFormOptions(), []);
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
+  /*
+   * **每门课各自一份**：节数 / 班型 / 指定教师。
+   *
+   * 为什么不做成"上面选一次、下面共用"：这三件事本来就是按科目定的 ——
+   * 数学是一对一定制课、英语是一对二小组课、晚辅导不指定教师，都是常见组合。
+   * 共用一套只会让人建完档再回头逐门改（而改报课目前还没有入口）。
+   * 默认值仍然统一给（新勾一门课就带上默认班型），因此只有真正不同的那几门要动。
+   */
   const [lessonsBySubject, setLessonsBySubject] = useState<Record<string, string>>({});
+  const [formBySubject, setFormBySubject] = useState<Record<string, string>>({});
+  const [teacherBySubject, setTeacherBySubject] = useState<Record<string, string>>({});
   const [bulkLessons, setBulkLessons] = useState("10");
-  const [form, setForm] = useState(() => getFormOptions()[0] ?? "");
-  const [teacherId, setTeacherId] = useState("");
+  const defaultForm = getFormOptions()[0] ?? "";
 
   useEffect(() => {
     if (editing) return;
@@ -70,6 +79,8 @@ export function StudentForm({
   }, [editing]);
 
   const lessonsOf = (subject: string) => lessonsBySubject[subject] ?? bulkLessons;
+  const formOf = (subject: string) => formBySubject[subject] ?? defaultForm;
+  const teacherOf = (subject: string) => teacherBySubject[subject] ?? "";
   const totalLessons = picked.reduce((sum, subject) => {
     const value = Number(lessonsOf(subject));
     return sum + (Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0);
@@ -94,8 +105,8 @@ export function StudentForm({
     const enrollments = picked.map((subject) => ({
       subject,
       lessons: Math.trunc(Number(lessonsOf(subject))),
-      form,
-      teacherId,
+      form: formOf(subject),
+      teacherId: teacherOf(subject),
     }));
     for (const item of enrollments) {
       if (!Number.isFinite(item.lessons) || item.lessons <= 0) {
@@ -204,9 +215,23 @@ export function StudentForm({
                 </span>
               </div>
 
+              {/*
+                每门课一行：节数 / 班型 / 指定教师，**都在行内各自选**。
+                新勾一门课时会带上默认班型与"不指定"，因此只有真正不同的那几门要动。
+              */}
               <ul className="mt-2 divide-y divide-ink-100 overflow-hidden rounded-md border border-ink-200 bg-white">
+                <li className="hidden bg-ink-50/60 px-3 py-1 text-[11px] text-ink-500 sm:flex sm:items-center sm:gap-2">
+                  <span className="min-w-0 flex-1">科目</span>
+                  <span className="w-16 shrink-0">节数</span>
+                  <span className="w-40 shrink-0">班型</span>
+                  <span className="w-32 shrink-0">指定教师</span>
+                  <span className="w-10 shrink-0" />
+                </li>
                 {picked.map((subject) => (
-                  <li key={subject} className="flex items-center gap-3 px-3 py-1.5">
+                  <li
+                    key={subject}
+                    className="flex flex-wrap items-center gap-2 px-3 py-1.5 sm:flex-nowrap"
+                  >
                     <span className="min-w-0 flex-1 truncate text-sm text-ink-800">{subject}</span>
                     <input
                       type="number"
@@ -214,58 +239,58 @@ export function StudentForm({
                       value={lessonsOf(subject)}
                       aria-label={`${subject} 的课时数`}
                       onChange={(event) =>
-                        setLessonsBySubject((current) => ({
-                          ...current,
-                          [subject]: event.target.value,
-                        }))
+                        setLessonsBySubject((current) => ({ ...current, [subject]: event.target.value }))
                       }
-                      className="w-20 rounded-md border border-ink-300 bg-white px-2 py-1 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+                      className="w-16 shrink-0 rounded-md border border-ink-300 bg-white px-2 py-1 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
                     />
-                    <span className="text-xs text-ink-500">节</span>
+                    <select
+                      value={formOf(subject)}
+                      aria-label={`${subject} 的班型`}
+                      onChange={(event) =>
+                        setFormBySubject((current) => ({ ...current, [subject]: event.target.value }))
+                      }
+                      className="w-40 shrink-0 rounded-md border border-ink-300 bg-white px-2 py-1 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+                    >
+                      {/* 库里没有这个班型也照样显示它，免得把已有的值静默改掉 */}
+                      {(formOf(subject) !== "" && !formOptions.includes(formOf(subject))
+                        ? [formOf(subject), ...formOptions]
+                        : formOptions
+                      ).map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                      <option value="">（还没定）</option>
+                    </select>
+                    <select
+                      value={teacherOf(subject)}
+                      aria-label={`${subject} 的指定教师`}
+                      onChange={(event) =>
+                        setTeacherBySubject((current) => ({ ...current, [subject]: event.target.value }))
+                      }
+                      className="w-32 shrink-0 rounded-md border border-ink-300 bg-white px-2 py-1 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+                    >
+                      <option value="">不指定</option>
+                      {teachers.map((teacher) => (
+                        <option key={teacher.id} value={teacher.id}>
+                          {teacher.name}
+                        </option>
+                      ))}
+                    </select>
                     <button
                       type="button"
                       onClick={() => setPicked((current) => current.filter((item) => item !== subject))}
-                      className="text-xs text-ink-400 transition-colors hover:text-danger-600"
+                      className="w-10 shrink-0 text-xs text-ink-400 transition-colors hover:text-danger-600"
                     >
                       移除
                     </button>
                   </li>
                 ))}
               </ul>
-
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <TextField
-                  label="班型"
-                  value={form}
-                  onChange={(event) => setForm(event.target.value)}
-                  list="student-enroll-form-options"
-                  hint="这几门先按同一个班型录入，建档后可在「报课与课时」里逐门改"
-                  placeholder="例如 一对一定制课"
-                />
-                <label className="block">
-                  <span className="text-xs font-medium text-ink-600">指定教师</span>
-                  <select
-                    value={teacherId}
-                    onChange={(event) => setTeacherId(event.target.value)}
-                    className="mt-1 block w-full rounded-md border border-ink-300 bg-white px-2.5 py-1.5 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
-                  >
-                    <option value="">不指定</option>
-                    {teachers.map((teacher) => (
-                      <option key={teacher.id} value={teacher.id}>
-                        {teacher.name}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="mt-1 block text-[11px] text-ink-400">
-                    多门课先用同一位；要分开带，建档后在「报课与课时」里逐门改
-                  </span>
-                </label>
-              </div>
-              <datalist id="student-enroll-form-options">
-                {formOptions.map((option) => (
-                  <option key={option} value={option} />
-                ))}
-              </datalist>
+              <p className="mt-1.5 text-[11px] text-ink-400">
+                每门课各自选班型与教师（默认是「{defaultForm || "第一个班型"}」与「不指定」）：
+                数学一对一定制课、英语一对二小组课这种组合，在这里一次就录准。
+              </p>
             </>
           )}
         </div>
