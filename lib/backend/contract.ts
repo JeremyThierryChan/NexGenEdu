@@ -142,6 +142,10 @@ export const API_CONTRACT: ContractGroup[] = [
       // 两者共用同一套冲突判定，因此"预览说能排、写入说不行"不会发生。
       "lessons.planSeries", "lessons.createSeries",
       "courses.summary",
+      // 宣传网站构站时读的那一份（教师 / 课程卡片 / 课程正文 / 报价）。
+      // **匿名可用**：服务端把它挂在 `/api/public/site`，位置在登录闸门之前 ——
+      // 字段白名单见 `lib/backend/public-site.ts`，加字段前先看那里的三条规矩。
+      "site.publicContent",
     ],
   },
   {

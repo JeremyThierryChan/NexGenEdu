@@ -1,6 +1,7 @@
 import { getTeachersPage } from "@/lib/data/site";
 import { coursesFromSite } from "./courses";
 import { pricingConfigFromContent } from "./pricing";
+import { siteContentFromContent } from "./site-content";
 import { CURRENT_VERSION } from "./version";
 import type {
   Assessment,
@@ -45,6 +46,9 @@ export function createSeedDatabase(now: Date = new Date()): Database {
       years: teacher.years ?? "",
       summary: teacher.summary ?? "",
       bio: teacher.bio ?? "",
+      // 推荐理由与顺序（v14）：同样取自网站教师页
+      recommendation: teacher.recommendation ?? "",
+      order: index + 1,
       origin: "网站" as const,
       kind: "教师" as const,
     }));
@@ -257,6 +261,11 @@ export function createSeedDatabase(now: Date = new Date()): Database {
      * 而家长会先看到宣传页的价。
      */
     pricing: pricingConfigFromContent(),
+    /*
+     * 网站课程正文（v15）：同样取自站点内容。示例库也必须是「有内容」的状态，
+     * 否则演示时网站会判定「后端没有课程正文」而回落到模版，看起来像功能没生效。
+     */
+    siteContent: siteContentFromContent(),
     updatedAt: now.toISOString(),
   };
 }

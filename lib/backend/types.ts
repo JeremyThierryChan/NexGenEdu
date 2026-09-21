@@ -39,6 +39,150 @@ export type Course = {
   note: string;
   /** 建档时间（ISO）；网站同步进来的课程为空串。 */
   createdAt: string;
+  /*
+   * ── 以下字段是「网站课程页」需要的（v15 起）────────────────────────────
+   *
+   * 加它们的原因：网站要改成"能连上后端就以后端为准"，而课程卡片原先只存在于
+   * 内容文件（`data/site/content.md` 的课程栏目）里 —— 后台看不到、改不了，
+   * 也就没法"以库为准"。现在一张卡片就是课程库里的一行。
+   */
+  /** 卡片页面的路径分段（ASCII，例如 `junior-math`）。空串＝网站上不展示这张卡片。 */
+  path: string;
+  /** 栏目下的子栏目（高中课内分 必考科目 / 外语 / 七选三）；空串＝无子栏目。 */
+  subgroup: string;
+  /** 卡片上的细分标签（学考 / 选考 / A1…），点它跳到对应小节；空数组＝这门课没有细分。 */
+  tags: CourseTag[];
+  /** 卡片本身点进哪个小节（空串＝用课程名）。有标签时通常是第一个标签的目标。 */
+  target: string;
+  /** 在栏目里的显示顺序（越小越靠前）。 */
+  order: number;
+  /** 一句话介绍（选修课卡片用；学科卡片留空时网站用正文首段代替）。 */
+  intro: string;
+  /**
+   * 这门课在**网站课程页**上以什么形态出现。
+   *
+   * 刻意做成显式字段而不是"有没有小节"这种推断：推断规则只在数据里成立，
+   * 一旦有人在后台把某门课的小节删空，卡片就会从一个栏目跳到另一个栏目，
+   * 而且没人知道为什么。
+   */
+  siteKind: CourseSiteKind;
+};
+
+/** 网站卡片上的细分标签（`学考→高中物理学考`）。 */
+export type CourseTag = {
+  /** 显示用文字（例如「学考」「A1」）。 */
+  label: string;
+  /** 跳到哪个小节（锚点名，例如「高中物理学考」）。 */
+  target: string;
+};
+
+/**
+ * 课程在网站课程页上的形态：
+ *   - `学科`：有自己的学段小节（语文 → 小学语文 / 初中语文 / 高中语文），卡片点进小节
+ *   - `选修`：单门课，只有一段介绍（成人英语口语、职场与商务英语）
+ *   - `不展示`：只用于排课/记课时，网站上没有它（机构自建的课默认这个）
+ */
+export const COURSE_SITE_KINDS = ["学科", "选修", "不展示"] as const;
+export type CourseSiteKind = (typeof COURSE_SITE_KINDS)[number];
+
+/**
+ * 网站内容的整体。
+ *
+ * 为什么单独成一块而不是塞进 `courses`：这里的「学科」与「卡片」是**两个粒度**。
+ * 语文是一个学科（正文容器），小学语文 / 初中语文 / 高中语文是三张卡片；
+ * 雅思学科与雅思卡片同名只是巧合，3D建模 & 3D打印 这个名字则两处都不一样。
+ * 硬合成一张表，就要在每行里重复一份导语与小节，改一次要改 N 处。
+ */
+export type SiteContent = {
+  coursePage: SiteCoursePage;
+  /**
+   * 报价页的**短字段**（按钮文字、提示语这类文案）。
+   *
+   * 价格数字不在这里：它们本来就是库里的 `pricing` 配置（能算钱、后台可改）。
+   * 分开存是因为两者的修改频率与责任不同 —— 改价要慎重，改提示语随手就改。
+   */
+  pricingPage: SitePricingPage;
+};
+
+/** 报价页的文案（对应内容文件里「页面: 智能报价」的短字段）。 */
+export type SitePricingPage = {
+  labels: SitePricingLabels;
+};
+
+/** 报价页用到的短字段（键名与网站侧 `PricingData.labels` 一一对应）。 */
+export type SitePricingLabels = {
+  result: string;
+  submit: string;
+  reset: string;
+  unitPriceLabel: string;
+  unit: string;
+  totalLabel: string;
+  formulaNote: string;
+  calculatorTitle: string;
+  calculatorHint: string;
+  otherTitle: string;
+  lessonsLabel: string;
+  lessonsHint: string;
+  durationLabel: string;
+  classSizeLabel: string;
+  classCostLabel: string;
+  classCostHint: string;
+};
+
+/** 网站「课程」页的正文：页面标题 + 学科（含学段小节）+ 选修课父分组名。 */
+export type SiteCoursePage = {
+  /** 页面标题区（eyebrow / title / description）。 */
+  heading: SiteHeading;
+  /** 学科分组，按 `order` 升序显示。 */
+  subjects: SiteSubject[];
+  /**
+   * 选修课的父分组名（内容文件里是「成人课程」）。
+   *
+   * 选修课本身**不在这里**：它们是课程库里的行（`siteKind: "选修"`），
+   * 免得同一门课在库里存两份、改一处忘一处。
+   */
+  electiveTitle: string;
+};
+
+/** 页面上的一个标题区（三个短字段）。 */
+export type SiteHeading = {
+  eyebrow: string;
+  title: string;
+  description: string;
+};
+
+/**
+ * 一个学科分组（语文 / 数学 / … / 3D建模 & 3D打印）。
+ *
+ * 学科是**正文容器**：它的正文由若干「学段小节」组成，
+ * 卡片上的标签（学考 / 选考 / A1）指的就是这些小节的锚点。
+ */
+export type SiteSubject = {
+  id: string;
+  /** 学科名（也是课程页详情区里的分组名）。 */
+  name: string;
+  /** 分组导语（`### 语文` 与第一个小节之间的文字）；多数为空。 */
+  lead: string;
+  /** 整组暂未开放（3D建模 & 3D打印、编程与信息素养）。 */
+  unavailable: boolean;
+  /** 显示顺序（越小越靠前）。 */
+  order: number;
+  /** 学段小节；语言类课程（雅思 / 法语…）也有，按级别分。 */
+  bands: SiteBand[];
+};
+
+/**
+ * 一个学段小节。
+ *
+ * 标题里可以带导语（`初中数学｜建立数学模型`）：竖线之后的文字由网站自己拆出来，
+ * 因此**只存标题全文**，不额外存一份导语 —— 存两份就会出现"标题改了、导语没改"。
+ */
+export type SiteBand = {
+  id: string;
+  /** 小节标题全文；`｜` 之后的部分是导语。 */
+  title: string;
+  /** 正文（Markdown，含「核心能力」列表）。 */
+  body: string;
 };
 
 /** 学生档案。 */
@@ -224,6 +368,21 @@ export type Teacher = {
   summary: string;
   /** 详细介绍（多段文本，来自网站教师页）。 */
   bio: string;
+  /**
+   * 推荐理由（v14 起）：网站上「为什么推荐这位教师」的一句话。
+   *
+   * 与 `summary` 分开是有原因的：`summary` 是**这位教师是谁**（教什么、什么风格），
+   * 推荐理由是**为什么选他**（机构对家长的推荐话术）。合成一个字段，
+   * 网站教师卡片与首页推荐位就没法各说各的。
+   */
+  recommendation: string;
+  /**
+   * 网站教师页的显示顺序（v14 起）：越小越靠前，未填按 999 排在最后。
+   *
+   * 用数字而不是数组下标：数组下标会让「重新排序」变成整表重写，
+   * 而且导出/导入时顺序信息会丢（JSON 数组顺序不可靠）。
+   */
+  order: number;
   origin: TeacherOrigin;
   kind: TeacherKind;
 };
@@ -467,6 +626,13 @@ export type Database = {
   inquiries: Inquiry[];
   /** 课程库：后台的课程台账（网站课程 + 后台新增）。 */
   courses: Course[];
+  /**
+   * **网站内容**（v15 起）：宣传网站上那些不是业务数据、但要能改的正文。
+   *
+   * 目前只有「课程页」一块：学科的导语与各学段小节的正文（语文 → 小学语文…）。
+   * 卡片由 `courses` 提供，报价由 `pricing` 提供 —— 这里只放还没别处可放的正文。
+   */
+  siteContent: SiteContent;
   /**
    * 报价配置（基础价、科目系数、班级系数、计费规则）。
    *

@@ -7,7 +7,14 @@ import { DataNotice } from "@/components/admin/DataNotice";
 import { BulkImport } from "@/components/admin/BulkImport";
 import { MultiSelect } from "@/components/admin/MultiSelect";
 import { Panel, SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
-import { api, COURSE_STATUSES, type Course, type CourseSummary } from "@/lib/backend/api";
+import {
+  api,
+  COURSE_SITE_KINDS,
+  COURSE_STATUSES,
+  type Course,
+  type CourseSiteKind,
+  type CourseSummary,
+} from "@/lib/backend/api";
 import { getCourseCategoryOptions, getFormOptions } from "@/lib/backend/options";
 import { canRemoveCourse } from "@/lib/backend/courses";
 import { pricingStatusForCourses, type LibraryPricingStatus } from "@/lib/backend/pricing";
@@ -48,6 +55,18 @@ export default function AdminCoursesPage() {
   const [forms, setForms] = useState<string[]>([]);
   const [status, setStatus] = useState<string>("开放");
   const [note, setNote] = useState("");
+  /*
+   * 网站卡片字段（v15）。课程库现在同时是**网站课程卡片**的来源：
+   * 能连上后端时，网站上的栏目卡片就是这里的数据（见 docs/技术架构.md §10.1）。
+   * 因此这几项要能在这里改，而不是只能去改内容文件。
+   */
+  const [path, setPath] = useState("");
+  const [subgroup, setSubgroup] = useState("");
+  const [tagsText, setTagsText] = useState("");
+  const [target, setTarget] = useState("");
+  const [order, setOrder] = useState("");
+  const [intro, setIntro] = useState("");
+  const [siteKind, setSiteKind] = useState<CourseSiteKind>("不展示");
   const [pending, setPending] = useState(false);
 
   const categoryOptions = useMemo(() => getCourseCategoryOptions(), []);
@@ -87,6 +106,13 @@ export default function AdminCoursesPage() {
     setForms([]);
     setStatus("开放");
     setNote("");
+    setPath("");
+    setSubgroup("");
+    setTagsText("");
+    setTarget("");
+    setOrder("");
+    setIntro("");
+    setSiteKind("不展示");
   }
 
   function startEdit(course: Course) {
@@ -96,9 +122,29 @@ export default function AdminCoursesPage() {
     setForms(course.forms);
     setStatus(course.status);
     setNote(course.note);
+    setPath(course.path);
+    setSubgroup(course.subgroup);
+    // 标签写成「学考→高中物理学考、选考→高中物理选考」，与内容文件里的写法一致
+    setTagsText(course.tags.map((tag) => `${tag.label}→${tag.target}`).join("、"));
+    setTarget(course.target);
+    setOrder(course.order === 999 ? "" : String(course.order));
+    setIntro(course.intro);
+    setSiteKind(course.siteKind);
     setMessage("");
     setError("");
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  /** 「学考→高中物理学考、选考→高中物理选考」→ 标签数组（箭头可省略，省略时两边同名）。 */
+  function parseTags(text: string): Course["tags"] {
+    return text
+      .split(/[、,，\n]/)
+      .map((raw) => raw.trim())
+      .filter((raw) => raw !== "")
+      .map((raw) => {
+        const [label = "", jump = ""] = raw.split(/→|->/).map((part) => part.trim());
+        return { label, target: jump !== "" ? jump : label };
+      });
   }
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -113,12 +159,24 @@ export default function AdminCoursesPage() {
       forms,
       status: (status === "暂未开放" ? "暂未开放" : "开放") as Course["status"],
       note: note.trim(),
+      path: path.trim(),
+      subgroup: subgroup.trim(),
+      tags: parseTags(tagsText),
+      // 卡片点进哪个小节：没填就按「课程名，其次是第一个标签的目标」推导（网站那侧的口径）
+      target: target.trim(),
+      order: order.trim() === "" || !Number.isFinite(Number(order)) ? 999 : Number(order),
+      intro: intro.trim(),
+      siteKind,
     };
 
     try {
       if (editing === null) {
         await api.courses.create({ ...payload, origin: "后台", createdAt: new Date().toISOString() });
-        setMessage(`已添加课程「${payload.name}」。它现在可以用于排课、报课与教师科目。`);
+        setMessage(
+          siteKind === "不展示"
+            ? `已添加课程「${payload.name}」。它现在可以用于排课、报课与教师科目。`
+            : `已添加课程「${payload.name}」，并会在网站上以「${siteKind}」出现（连上后端构站时才生效）。`,
+        );
       } else {
         await api.courses.update(editing.id, payload);
         setMessage(`已保存「${payload.name}」。`);
@@ -329,6 +387,75 @@ export default function AdminCoursesPage() {
             onChange={(event) => setNote(event.target.value)}
             placeholder="例如：教材用《围棋入门》、需自备棋具"
           />
+
+          {/*
+            网站卡片字段（v15）：课程库同时是**网站课程卡片**的来源。
+            刻意收在一个可折叠说明的区块里：只有"这门课要出现在网站上"时才需要填，
+            日常加一门内部课（围棋、书法）用不上这些。
+          */}
+          <div className="mt-3 rounded-md border border-ink-200 bg-ink-50/50 px-3 py-3">
+            <p className="text-xs font-medium text-ink-700">网站上怎么展示（选填）</p>
+            <p className="mt-1 text-xs text-ink-500">
+              网站能连上后端构站时，课程页的栏目卡片就按这里的数据生成；
+              「不展示」表示这门课只在后台用于排课与记课时。
+            </p>
+
+            <div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <SelectInput
+                label="网站形态"
+                hint="学科＝有自己的学段小节；选修＝只有一段介绍"
+                options={COURSE_SITE_KINDS.map((value) => ({ value, label: value }))}
+                value={siteKind}
+                onChange={(event) => setSiteKind(event.target.value as CourseSiteKind)}
+              />
+              <TextField
+                label="卡片路径"
+                hint="网址里的 ASCII 分段，例如 junior-math（不展示可留空）"
+                value={path}
+                onChange={(event) => setPath(event.target.value)}
+                placeholder="例如 junior-math"
+              />
+              <TextField
+                label="子栏目"
+                hint="栏目再分组时填（高中课内分 必考科目 / 外语 / 七选三）"
+                value={subgroup}
+                onChange={(event) => setSubgroup(event.target.value)}
+                placeholder="例如 七选三"
+              />
+              <TextField
+                label="卡片标签"
+                hint="「标签→小节名」用顿号分隔；不填表示这门课没有细分"
+                value={tagsText}
+                onChange={(event) => setTagsText(event.target.value)}
+                placeholder="例如 学考→高中物理学考、选考→高中物理选考"
+              />
+              <TextField
+                label="卡片点进哪一节"
+                hint="留空则用课程名（有标签时用第一个标签的目标）"
+                value={target}
+                onChange={(event) => setTarget(event.target.value)}
+                placeholder="例如 高中物理学考"
+              />
+              <TextField
+                label="显示顺序"
+                hint="同一栏目内越小越靠前；留空排在最后"
+                type="number"
+                value={order}
+                onChange={(event) => setOrder(event.target.value)}
+                placeholder="例如 1"
+              />
+            </div>
+
+            <div className="mt-3">
+              <TextAreaField
+                label="一句话介绍"
+                hint="选修课卡片会用到；学科卡片留空时网站用正文首段代替"
+                rows={2}
+                value={intro}
+                onChange={(event) => setIntro(event.target.value)}
+              />
+            </div>
+          </div>
 
           <div className="flex items-center gap-3">
             <Button type="submit" disabled={pending}>

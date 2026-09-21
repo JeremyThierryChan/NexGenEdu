@@ -1789,6 +1789,42 @@ eq("旧文件的教室被补上空时段", (await api.classrooms.get("c_old"))?.
 eq("升级后的库版本等于当前版本", (await api.exportDatabase()).version, CURRENT_VERSION);
 await api.restoreBackup();
 
+/*
+ * v13 → v14：教师档案补「推荐理由」与「网站显示顺序」。
+ *
+ * 这两个字段原先只在网站文件里（网站教师页的「推荐理由」「排序」）。网站要改成
+ * 以后端为准，老库就必须能补上它们 —— 且**顺序按原数组次序编号**：
+ * 数组顺序就是机构原来的展示顺序，随机数或全 999 会让网站排序整个乱掉。
+ *
+ * 夹具用「示例数据降级」而不是手写一份 v13：手写要凑齐 v13 的全部表，
+ * 少一张就会在迁移链的下一次写入上崩掉（我第一版就是这么崩的，
+ * 报错还落在 writeLog 上，看起来像日志的锅）。
+ */
+const v13Db = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+  teachers: Array<Record<string, unknown>>;
+  version: number;
+};
+v13Db.version = 13;
+v13Db.teachers = v13Db.teachers.map((teacher) => {
+  const { recommendation: _recommendation, order: _order, ...rest } = teacher;
+  return rest;
+});
+eq("夹具确实是「没有这两个字段的 v13 教师」",
+  v13Db.teachers.every((teacher) => !("recommendation" in teacher) && !("order" in teacher)), true);
+
+const upgradedTeachers = await api.importDatabase(JSON.stringify(v13Db));
+eq("v13 文件可以导入", upgradedTeachers.ok, true);
+const migratedTeachers = await api.teachers.list();
+ok("v13 → v14 补上推荐理由（空值，不猜内容）",
+  migratedTeachers.every((teacher) => teacher.recommendation === ""),
+  migratedTeachers.map((teacher) => teacher.recommendation).join("/"));
+eq("v13 → v14 的顺序按原数组次序编号（原来谁在前面，网站上还是谁在前）",
+  migratedTeachers.map((teacher) => teacher.order),
+  migratedTeachers.map((_teacher, index) => index + 1));
+ok("补字段不影响原有资料",
+  migratedTeachers.every((teacher) => teacher.bio !== "" || teacher.name !== ""));
+await api.restoreBackup();
+
 // ── ICS 日历文件 ──────────────────────────────────────────────────────
 const icsStart = new Date();
 icsStart.setHours(17, 30, 0, 0);
@@ -2661,6 +2697,65 @@ eq("接口契约里没有已不存在的方法（删方法要同步更新 contra
 eq("每个方法只归属一个分组",
   documented.filter((name, index) => documented.indexOf(name) !== index), []);
 ok(`接口方法总数与清单一致（${realMethods.length} 个）`, documented.length === realMethods.length);
+
+/*
+ * ── 宣传网站的公开只读数据（`site.publicContent` / `GET /api/public/site`）──
+ *
+ * 这是**匿名**就能拿到的数据（构站的是 CI 或本机脚本，不会去登录），
+ * 因此"漏了什么都不该漏敏感信息"这件事必须由断言钉死，而不是靠自觉。
+ * 三条一起守：
+ *   1. 该有的都有（教师 / 课程卡片 / 课程正文 / 报价）；
+ *   2. 字段名里不允许出现敏感词（电话、家长、学生、金额、日志…）；
+ *   3. 整份 JSON 文本里不允许出现手机号样式 —— 防止某个字段"顺带"把号码带出去。
+ */
+const publicSite = await api.site.publicContent();
+ok("公开数据包含教师、课程、课程正文与报价",
+  publicSite.teachers.length > 0 &&
+    publicSite.courses.length > 0 &&
+    publicSite.siteContent.coursePage.subjects.length > 0 &&
+    publicSite.pricing.stages.length > 0);
+ok("公开数据里的教师带上了网站要用的资料（教龄 / 简介 / 推荐理由 / 顺序）",
+  publicSite.teachers.some(
+    (teacher) =>
+      teacher.years !== "" && teacher.summary !== "" && teacher.recommendation !== "" && teacher.order > 0,
+  ));
+ok("公开数据里的课程带上了卡片字段（路径 / 栏目 / 班型）",
+  publicSite.courses.some(
+    (course) => course.path !== "" && course.category !== "" && course.forms.length > 0,
+  ));
+
+/** 递归收集 JSON 里出现过的全部键名。 */
+function collectKeys(value: unknown, into: Set<string> = new Set()): Set<string> {
+  if (Array.isArray(value)) {
+    for (const item of value) collectKeys(item, into);
+  } else if (typeof value === "object" && value !== null) {
+    for (const [key, item] of Object.entries(value)) {
+      into.add(key);
+      collectKeys(item, into);
+    }
+  }
+  return into;
+}
+
+const forbiddenKeys = [
+  "phone", "guardian", "password", "token", "student", "payment", "refund",
+  "inquiry", "log", "enrollment", "teachershare", "paidamount", "agreedamount",
+];
+const publicKeys = [...collectKeys(publicSite)].map((key) => key.toLowerCase());
+eq("公开数据里没有任何敏感字段名",
+  publicKeys.filter((key) => forbiddenKeys.some((bad) => key.includes(bad))), []);
+/*
+ * 内部备注（`note`）按**精确名**禁：子串匹配会误伤 `formulaNote`（报价页的提示语，
+ * 本来就该公开）—— 我第一版就是这么误报的。师生两边都有真正的 `note` 字段：
+ * 课程备注、教师备注都是内部信息。
+ */
+eq("公开数据里没有内部备注字段（note）", publicKeys.filter((key) => key === "note"), []);
+ok("公开数据的 JSON 里没有手机号样式的号码",
+  !/1[3-9]\d{9}/.test(JSON.stringify(publicSite)));
+ok("教师课时费分成（内部成本口径）不在公开数据里",
+  !JSON.stringify(publicSite).includes("teacherShare") &&
+    !JSON.stringify(publicSite).includes("系数"));
+
 
 // 分组本身也要有内容与说明
 ok("每个分组都有说明", API_CONTRACT.every((group) => group.note.length > 30));

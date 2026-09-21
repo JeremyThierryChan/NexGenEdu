@@ -1183,7 +1183,8 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   /*
    * ── 认证（第 6 步）────────────────────────────────────────────────────────
    *
-   * 公开的只有三个：/health（探活）、/api/login（登录）、/api/logout（退出）。
+   * 公开的只有四个：/health（探活）、/api/login（登录）、/api/logout（退出）、
+   * /api/public/site（宣传网站构站时要读的公开内容，见下方）。
    * 其余一切（/api/call 与各 REST 接口）都要令牌。
    *
    * 为什么口令搬到服务端是必须的：早期登录是纯前端的，口令硬编码在
@@ -1221,6 +1222,29 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   if (url.pathname === "/api/logout" && request.method === "POST") {
     logout(bearer);
     send(response, 200, { ok: true });
+    return;
+  }
+
+  /*
+   * 公开只读：宣传网站构站时取教师 / 课程 / 正文 / 报价（见 docs/技术架构.md §10.1）。
+   *
+   * 它必须放在**统一闸门之前** —— 构站的是 CI 或本机脚本，没有也不会去登录。
+   * 返回内容由 `lib/backend/public-site.ts` 按字段白名单构造：
+   * 教师电话、学生与家长信息、金额、日志都不在其中（自检有断言盯着）。
+   *
+   * 走的是同一个 `api.site.publicContent()`（与后台调用同一条实现），
+   * 因此"网站上看到的"和"后台预览的"不可能两样。
+   */
+  if (url.pathname === "/api/public/site" && request.method === "GET") {
+    void api.site
+      .publicContent()
+      .then((data) => send(response, 200, { ok: true, data }))
+      .catch((cause: unknown) =>
+        send(response, 500, {
+          ok: false,
+          error: cause instanceof Error ? cause.message : "服务器内部错误",
+        }),
+      );
     return;
   }
 

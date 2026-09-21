@@ -21,8 +21,8 @@
  * 「从网站同步」把它拉进课程库（`mergeSiteCourses`），否则它不会出现在科目候选里。
  */
 
-import { getCourseColumns } from "@/lib/data/site";
-import type { Course, CourseOrigin } from "./types";
+import { getCourseColumns, getCoursesPage } from "@/lib/data/site";
+import type { Course, CourseOrigin, CourseTag } from "./types";
 
 /** 下拉里的一项。 */
 export type CourseOption = {
@@ -42,27 +42,63 @@ export type CourseSummary = {
 };
 
 /**
+ * 网站课程页里属于「选修课」的课程名。
+ *
+ * 选修课与学科课程的区别是**显式的**：学科有自己的学段小节（语文 → 小学/初中/高中语文），
+ * 选修课只有一段介绍（成人英语口语、职场与商务英语）。导入时按这份名单定
+ * `siteKind`，后台也能随时改。
+ */
+function siteElectiveNames(): Set<string> {
+  try {
+    const names = new Set<string>();
+    for (const group of getCoursesPage().electiveGroups) {
+      for (const item of group.items) names.add(item.name);
+    }
+    return names;
+  } catch {
+    return new Set();
+  }
+}
+
+/**
  * 把网站内容里的课程卡片转成课程库记录。
  *
  * id 用卡片的路径（`course-site-<path>`）：**稳定且可重复**，因此
  * 「从网站同步」跑多少次都不会重复添加，也不会因为重新灌种子而变 id。
+ *
+ * v15 起连同**卡片在网站上的全部字段**一起带进来（路径 / 子栏目 / 标签 / 顺序 /
+ * 一句话介绍）：这些字段原先只存在于内容文件里，网站要"以库为准"就得先在库里。
  */
 export function coursesFromSite(): Course[] {
   try {
-    return getCourseColumns().flatMap((column) =>
-      column.subgroups.flatMap((subgroup) =>
-        subgroup.cards.map((card) => ({
-          id: `course-site-${card.path}`,
-          name: card.title,
-          category: column.title,
-          forms: card.forms,
-          origin: "网站" as const,
-          status: card.unavailable ? ("暂未开放" as const) : ("开放" as const),
-          note: "",
-          createdAt: "",
-        })),
-      ),
-    );
+    const electives = siteElectiveNames();
+    const courses: Course[] = [];
+    for (const column of getCourseColumns()) {
+      for (const subgroup of column.subgroups) {
+        subgroup.cards.forEach((card, index) => {
+          const tags: CourseTag[] = card.tags.map((tag) => ({ label: tag.label, target: tag.target }));
+          courses.push({
+            id: `course-site-${card.path}`,
+            name: card.title,
+            category: column.title,
+            forms: card.forms,
+            origin: "网站",
+            status: card.unavailable ? "暂未开放" : "开放",
+            note: "",
+            createdAt: "",
+            path: card.path,
+            subgroup: subgroup.title,
+            tags,
+            target: card.target,
+            // 同一栏目同一子栏目内的相对顺序：数组下标就够，重新排序时改这个数字
+            order: index + 1,
+            intro: "",
+            siteKind: electives.has(card.title) ? "选修" : "学科",
+          });
+        });
+      }
+    }
+    return courses;
   } catch {
     // 内容被改坏时不要让后台打不开：返回空数组，机构仍可手工加课
     return [];
@@ -142,6 +178,33 @@ export function summarizeCourses(courses: Course[]): CourseSummary {
     fromSite: courses.filter((course) => course.origin === "网站").length,
     fromAdmin: courses.filter((course) => course.origin === "后台").length,
     byCategory: [...byCategory.entries()].map(([category, count]) => ({ category, count })),
+  };
+}
+
+/**
+ * 给课程补上 v15 的网站卡片字段的默认值。
+ *
+ * 为什么要在服务端兜：调用方不止一个 —— 后台表单、批量导入、脚本、自检。
+ * 少一个字段（老调用方不会传）就会让网站那侧读到 `undefined`，
+ * 表现是「卡片点不动 / 排序乱掉」这类难查的问题。默认值集中在这一处：
+ *   - `path` 空串 = 网站上不展示这张卡片；
+ *   - `siteKind` 记「不展示」= 只用于排课/记课时；
+ *   - `order` 999 = 排在最后（比 0 更安全：0 会排到最前面，抢掉别人定的顺序）。
+ */
+export function normalizeCourse(input: Omit<Course, "id"> | Course): Course {
+  const course = input as Course;
+  return {
+    ...course,
+    path: typeof course.path === "string" ? course.path.trim() : "",
+    subgroup: typeof course.subgroup === "string" ? course.subgroup.trim() : "",
+    tags: Array.isArray(course.tags)
+      ? course.tags.map((tag) => ({ label: String(tag.label ?? ""), target: String(tag.target ?? "") }))
+      : [],
+    target: typeof course.target === "string" ? course.target.trim() : "",
+    order: Number.isFinite(Number(course.order)) ? Number(course.order) : 999,
+    intro: typeof course.intro === "string" ? course.intro : "",
+    siteKind:
+      course.siteKind === "学科" || course.siteKind === "选修" ? course.siteKind : "不展示",
   };
 }
 

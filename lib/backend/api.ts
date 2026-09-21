@@ -1,5 +1,8 @@
 import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createEmptyDatabase } from "./initial";
+import { emptySiteContent } from "./site-content";
+import { publicSite } from "./public-site";
+import type { PublicSite } from "./public-site";
 import { describeSeriesDate, generateSeriesDates } from "./recurrence";
 import {
   applyImport,
@@ -87,6 +90,7 @@ import {
   courseOptions,
   coursesFromSite,
   mergeSiteCourses,
+  normalizeCourse,
   summarizeCourses,
   validateCourse,
 } from "./courses";
@@ -129,6 +133,7 @@ import type {
   Course,
   CourseOrigin,
   CourseStatus,
+  CourseSiteKind,
 } from "./types";
 
 /**
@@ -466,6 +471,43 @@ function migrate(db: Database): Database | null {
       kind: teacher.kind ?? "教师",
     }));
     db.version = 13;
+  }
+
+  if (db.version === 13) {
+    /*
+     * v13 → v14：教师档案增加**推荐理由**与**网站显示顺序**。
+     *
+     * 这两个字段原先只存在于网站文件（`data/site/content.md` 的教师段），
+     * 后台看不见也改不了；网站要改成"以后端为准"就必须先把它们搬进来。
+     *
+     * 老数据一律补默认值、**不猜内容**：推荐理由留空（页面上不显示这一行），
+     * 顺序按现有数组次序编号 —— 数组顺序就是机构原来的显示顺序，
+     * 编成 1、2、3… 之后在后台调整顺序才是确定性的。
+     */
+    db.teachers = db.teachers.map((teacher, index) => ({
+      ...teacher,
+      recommendation: teacher.recommendation ?? "",
+      order: typeof teacher.order === "number" ? teacher.order : index + 1,
+    }));
+    db.version = 14;
+  }
+
+  if (db.version === 14) {
+    /*
+     * v14 → v15：课程库补上「网站卡片」字段，并新建**网站课程正文**。
+     *
+     * 课程的新字段一律补默认值：老库里那些课程是给排课/报课用的台账，
+     * 它们**不一定在网站上展示**，因此 `path` 留空、`siteKind` 记「不展示」——
+     * 不能默认成"学科"，否则一次升级就会让网站多出一批没有正文的空卡片。
+     *
+     * 网站课程正文取**空结构**而不是拿网站文件来填：迁移是照着数据搬，不是
+     * 借机去读外部的 Markdown —— 真要灌内容，跑 `npm run server:import-site`，
+     * 或者在后台点「从网站导入」。这也让网站那侧的判定（有内容才用后端）能生效。
+     */
+    // 补默认值走 normalizeCourse（与新建/修改同一处默认值，避免两套口径）
+    db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
+    db.courses = db.courses.map((course) => normalizeCourse(course));
+    db.version = 15;
   }
 
   return db.version === CURRENT_VERSION ? db : null;
@@ -1497,10 +1539,11 @@ const localApi = {
     async create(input: Omit<Course, "id">): Promise<Course> {
       await delay();
       const db = load();
-      const problems = validateCourse(input, db.courses);
+      const normalized = normalizeCourse(input);
+      const problems = validateCourse(normalized, db.courses);
       if (problems.length > 0) throw new Error(problems.join("；"));
 
-      const created: Course = { ...input, id: nextId("course") };
+      const created: Course = { ...normalized, id: nextId("course") };
       db.courses.push(created);
       syncPricingWithCourses(db);
       writeLog(db, {
@@ -1513,14 +1556,14 @@ const localApi = {
       return clone(created);
     },
 
-    /** 修改课程：改名同样要防重名；网站来源的课程也能改状态 / 班型 / 分类 / 备注。 */
+    /** 修改课程：改名同样要防重名；网站来源的课程也能改状态 / 班型 / 分类 / 备注 / 网站卡片字段。 */
     async update(id: string, patch: Partial<Omit<Course, "id">>): Promise<Course | null> {
       await delay();
       const db = load();
       const target = db.courses.find((item) => item.id === id);
       if (target === undefined) return null;
 
-      const next = { ...target, ...patch };
+      const next = normalizeCourse({ ...target, ...patch });
       const problems = validateCourse(next, db.courses, id);
       if (problems.length > 0) throw new Error(problems.join("；"));
 
@@ -2685,6 +2728,26 @@ const localApi = {
    * 家长看到的报价页读的是站点内容，因此后台改完价要「导出配置」，
    * 把导出内容替换进 `data/site/pricing.md` 才会真正上线 —— 详见导出的说明。
    */
+  /**
+   * 宣传网站要读的公开数据。
+   *
+   * 单独成一组（而不是塞进 teachers / courses）是因为它**不按"表"取数**，
+   * 而是"构站需要的那一份整体"：教师 + 课程卡片 + 课程正文 + 报价。
+   * 网站那侧一次请求拿全，构站流程里也就不存在"取了一半"的中间状态。
+   */
+  site: {
+    /**
+     * 公开只读内容（**匿名可用**，见 `lib/backend/public-site.ts` 的字段白名单）。
+     *
+     * 服务端把它挂在 `/api/public/site`（登录闸门之前）；后台自己也能调，
+     * 用来预览"网站现在会显示成什么样"。
+     */
+    async publicContent(): Promise<PublicSite> {
+      await delay();
+      return clone(publicSite(load()));
+    },
+  },
+
   pricing: {
     /** 当前报价配置。 */
     async get(): Promise<PricingConfig> {
@@ -3181,6 +3244,8 @@ export type {
   Course,
   CourseOrigin,
   CourseStatus,
+  CourseSiteKind,
+  PublicSite,
 };
 export {
   ATTENDANCE_OPTIONS,
@@ -3196,5 +3261,6 @@ export {
   STUDENT_STATUSES,
   COURSE_ORIGINS,
   COURSE_STATUSES,
+  COURSE_SITE_KINDS,
   SUBMISSION_OPTIONS,
 } from "./types";

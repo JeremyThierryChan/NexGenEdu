@@ -326,6 +326,15 @@ function TeacherForm({
   const [years, setYears] = useState(teacher?.years ?? "");
   const [summary, setSummary] = useState(teacher?.summary ?? "");
   const [bio, setBio] = useState(teacher?.bio ?? "");
+  /*
+   * 推荐理由与网站显示顺序（v14）。
+   *
+   * 网站教师页在"能连上后端"时读的就是这两个字段（见 docs/技术架构.md §10.1）：
+   * 推荐理由是首页/教师卡片上那句「为什么推荐他」，顺序决定谁排前面
+   * （越小越靠前，留空按 999 排在最后）。
+   */
+  const [recommendation, setRecommendation] = useState(teacher?.recommendation ?? "");
+  const [order, setOrder] = useState(String(teacher?.order ?? ""));
   const [kind, setKind] = useState<string>(teacher?.kind ?? "教师");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
@@ -349,6 +358,9 @@ function TeacherForm({
       years: years.trim(),
       summary: summary.trim(),
       bio: bio.trim(),
+      recommendation: recommendation.trim(),
+      // 留空按 999（排在最后）；不是数字就当没填，不让 NaN 进库
+      order: Number.isFinite(Number(order)) && order.trim() !== "" ? Number(order) : 999,
       kind: kind === "AI" ? ("AI" as const) : ("教师" as const),
       // 新建的档案来源是"后台"；网站导入的档案保留"网站"（编辑资料不该改掉它的来历）
       origin: teacher?.origin ?? ("后台" as const),
@@ -414,6 +426,21 @@ function TeacherForm({
           hint="列表里显示（网站教师页的「一句话」）"
           value={summary}
           onChange={(event) => setSummary(event.target.value)}
+        />
+        <TextField
+          label="推荐理由"
+          hint="网站上「为什么推荐这位教师」那一句；留空则网站不显示"
+          value={recommendation}
+          onChange={(event) => setRecommendation(event.target.value)}
+          placeholder="例如 同一教师，不同科目，学生无需适应多个老师"
+        />
+        <TextField
+          label="网站显示顺序"
+          hint="越小越靠前；留空按最后（网站教师页与首页教师卡片按它排）"
+          type="number"
+          value={order}
+          onChange={(event) => setOrder(event.target.value)}
+          placeholder="例如 1"
         />
         <TextAreaField
           label="详细介绍"

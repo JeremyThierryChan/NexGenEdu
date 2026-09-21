@@ -1,5 +1,6 @@
 import { coursesFromSite } from "./courses";
 import { pricingConfigFromContent } from "./pricing";
+import { siteContentFromContent } from "./site-content";
 import { CURRENT_VERSION } from "./version";
 import type { Database } from "./types";
 
@@ -22,6 +23,7 @@ import type { Database } from "./types";
  * | --- | --- | --- |
  * | 学生 / 教师 / 教室 / 排课 / 收款 / 课时流水 / 咨询 / 日志 | **空** | 这些是机构要一条条真实录进去的东西 |
  * | 课程库 | **网站课程**（`coursesFromSite()`） | 网站上的课程是已确定的公开信息，不需要人工重录一遍 |
+ * | 网站课程正文 | **站点内容初始化**（`siteContentFromContent()`） | 同上：网站已经写好的介绍，没必要让机构再录一遍 |
  * | 报价配置 | **站点内容初始化**（`pricingConfigFromContent()`） | 价格是算钱的依据，且公开报价已定；空着会导致报价页算不出价 |
  * | 版本号 | `CURRENT_VERSION` | 必须是当前版本，否则新数据下次读取时会被迁移逻辑改写 |
  *
@@ -44,6 +46,7 @@ export function createEmptyDatabase(now: Date = new Date()): Database {
     // 课程库与报价配置**不是"示例数据"**：它们来自网站内容，是真实的初始值
     courses: coursesFromSite(),
     pricing: pricingConfigFromContent(),
+    siteContent: siteContentFromContent(),
     updatedAt: now.toISOString(),
   };
 }

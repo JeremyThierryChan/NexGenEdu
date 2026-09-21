@@ -128,12 +128,22 @@ export const ENTITY_SPECS: Record<ImportEntity, EntitySpec> = {
     keyFields: ["name"],
     fields: [
       { key: "name", header: "课程名", aliases: ["名称"], required: true, kind: "text", example: "初中数学" },
-      { key: "category", header: "分类", kind: "text", example: "初中课内" },
+      { key: "category", header: "分类", aliases: ["栏目"], kind: "text", example: "初中课内" },
       { key: "forms", header: "班型", kind: "list", example: "一对一定制课|一对二 / 一对三小组课" },
       { key: "status", header: "状态", kind: "enum", options: ["开放", "暂未开放"], example: "开放" },
       { key: "note", header: "备注", kind: "text", example: "" },
+      // v15 的网站卡片字段：填了这张课才会出现在网站上（详见 docs/后台API约定.md）
+      { key: "siteKind", header: "网站形态", aliases: ["展示形态"], kind: "enum", options: ["学科", "选修", "不展示"], example: "学科" },
+      { key: "path", header: "卡片路径", aliases: ["路径"], kind: "text", example: "junior-math" },
+      { key: "subgroup", header: "子栏目", kind: "text", example: "七选三" },
+      { key: "target", header: "点进哪一节", aliases: ["锚点"], kind: "text", example: "高中物理学考" },
+      { key: "order", header: "显示顺序", aliases: ["顺序"], kind: "number", example: "1" },
+      { key: "intro", header: "一句话介绍", aliases: ["简介"], kind: "text", example: "建立数学模型" },
     ],
-    warning: "课程名是排课、报课、教师科目的**引用键**，重名会被拦住（同一门课不要写成两行）。网站来源的课程已经自动在库里，不必再导一遍。",
+    warning:
+      "课程名是排课、报课、教师科目的**引用键**，重名会被拦住（同一门课不要写成两行）。" +
+      "网站来源的课程已经自动在库里，不必再导一遍。" +
+      "「网站形态」填「学科 / 选修」并给出卡片路径，这门课才会出现在网站的课程栏目里（不展示则只在后台用于排课）。",
   },
 };
 
@@ -576,6 +586,9 @@ function finalize(entity: ImportEntity, record: Record<string, unknown>): Record
         years: String(record.years ?? ""),
         summary: String(record.summary ?? ""),
         bio: String(record.bio ?? ""),
+        // v14 的两个字段：批量导入的 CSV/JSON 里可以带上（表头写「推荐理由」「顺序」）
+        recommendation: String(record.recommendation ?? ""),
+        order: Number.isFinite(Number(record.order)) ? Number(record.order) : 999,
         // 类型只有明确的"AI"才算 AI（拼错/留空都当教师，宁可多一个可排课的教师，
         // 也不要因为一个错别字把真人教师从排课下拉里"静默移走"）
         kind: record.kind === "AI" ? "AI" : "教师",
@@ -599,6 +612,16 @@ function finalize(entity: ImportEntity, record: Record<string, unknown>): Record
         status: (record.status as string) ?? "开放",
         note: String(record.note ?? ""),
         createdAt: new Date().toISOString(),
+        // v15 的网站卡片字段：导入的课默认**不上网站**（不展示），
+        // 要上网站就得在表里写明「网站形态」与「卡片路径」—— 默认展示会让
+        // 一次导入把网站上多出一批空卡片。
+        path: String(record.path ?? ""),
+        subgroup: String(record.subgroup ?? ""),
+        tags: [],
+        target: String(record.target ?? ""),
+        order: Number.isFinite(Number(record.order)) ? Number(record.order) : 999,
+        intro: String(record.intro ?? ""),
+        siteKind: record.siteKind === "学科" || record.siteKind === "选修" ? record.siteKind : "不展示",
       };
   }
 }
@@ -779,6 +802,9 @@ export function siteImportRecords(source: SiteImportSource): SiteImportData {
         years: teacher.years ?? "",
         summary: teacher.summary ?? "",
         bio: teacher.bio ?? "",
+        // v14：推荐理由与网站显示顺序也一起带进来（否则导入完还要手工排一遍序）
+        recommendation: teacher.recommendation ?? "",
+        order: teacher.order,
         kind: teacher.kind === "ai" ? "AI" : "教师",
         origin: "网站",
       })),
