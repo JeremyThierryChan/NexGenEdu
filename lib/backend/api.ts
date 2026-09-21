@@ -879,14 +879,26 @@ function conflictsFor(db: Database, input: LessonInput): ConflictReport {
  */
 function insufficientLessons(
   db: Database,
-  input: { subject: string; studentIds: string[]; count: number },
+  input: {
+    subject: string;
+    studentIds: string[];
+    count: number;
+    /**
+     * 复核**已有课节的修改**时把自己排除掉。
+     *
+     * 不排除的话会出现这种事：一节已经排好的课，只想改个备注/时间，
+     * 复核时却把它自己也算成"已排 1 节"，于是「还能排 0 节 < 要排 1 节」被拒 ——
+     * 明明什么都没多排，却被自己的影子挡住。
+     */
+    excludeLessonId?: string;
+  },
 ): {
   message: string;
   /** 这门科目上"最多还能排几节"（取剩余最少的那位：班课按同一份课表走）。 */
   affordable: number;
   short: Array<{ studentId: string; name: string; remaining: number }>;
 } | null {
-  const { subject, studentIds, count } = input;
+  const { subject, studentIds, count, excludeLessonId } = input;
   const perStudent = studentIds.map((studentId) => {
     const student = db.students.find((item) => item.id === studentId);
     const remaining = student === undefined ? 0 : remainingTotal(
@@ -895,6 +907,7 @@ function insufficientLessons(
     // 已经排了但还没上的课：那部分课时已经被"预定"，不能再排一遍
     const scheduled = db.lessons.filter(
       (lesson) =>
+        lesson.id !== excludeLessonId &&
         lesson.status === "已排" &&
         lesson.subject.trim() === subject.trim() &&
         lesson.studentIds.includes(studentId),
@@ -1757,6 +1770,31 @@ const localApi = {
       const wasCompleted = lesson.status === "已上";
       const becomesNotCompleted =
         patch.status !== undefined && patch.status !== "已上";
+
+      /*
+       * **改课也要过课时这一关**（不只是新建）。
+       *
+       * 不然「课时不足就不排课」有个现成的后门：新建被拦，就把旧课改成想排的
+       * 科目/学生/状态 —— 一样是排了一节课，一样是欠账。这里按**改完之后的样子**
+       * 复核（`{ ...lesson, ...patch }`），并把自己排除（见 `excludeLessonId`）。
+       *
+       * 只在改动**碰到课时三要素**（科目 / 学生 / 状态）时才查：纯粹改备注或改时间
+       * 不该被拒 —— 否则历史遗留的欠账课连备注都改不了，那是拿规则为难人。
+       */
+      const touchesCredits =
+        patch.subject !== undefined || patch.studentIds !== undefined || patch.status !== undefined;
+      if (touchesCredits) {
+        const after = { ...lesson, ...patch };
+        if (after.status === "已排") {
+          const shortage = insufficientLessons(db, {
+            subject: after.subject,
+            studentIds: after.studentIds,
+            count: 1,
+            excludeLessonId: id,
+          });
+          if (shortage !== null) throw new Error(shortage.message);
+        }
+      }
 
       Object.assign(lesson, patch);
 

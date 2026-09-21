@@ -1016,6 +1016,73 @@ ok("没有该科目课时 → 排课被拒（服务端拦，不欠账）",
 ok("拒绝理由里点名了是谁不够、还能排几节",
   blockedMessage.includes(pupil.name) && blockedMessage.includes("还能排"), blockedMessage);
 
+/*
+ * 拦的必须是「排课这件事」，而不是 `create` 这一个入口。
+ *
+ * 否则后门是现成的：新建被拦，就把旧课改成想排的科目 / 学生 / 状态 ——
+ * 一样是多了一节课，一样是欠账。所以 `lessons.update` 也要按**改完之后的样子**复核。
+ */
+const editStudent = await api.students.create({
+  name: "自检改课学生", grade: "初二", guardian: "", status: "在读", note: "", profile: {},
+});
+const editEnroll = await api.students.enroll(editStudent.id, {
+  subject: "自检改课科目", form: "一对一定制课", teacherId: teacher.id, lessons: 2,
+  startedAt: new Date().toISOString(), note: "自检",
+});
+const editEnrollmentId = editEnroll!.enrollments[0]!.id;
+const editLesson = await api.lessons.create({
+  subject: "自检改课科目", form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
+  studentIds: [editStudent.id], startsAt: slot(16, 0).start, durationMinutes: 60,
+  status: "已排", note: "",
+});
+const editSecond = await api.lessons.create({
+  subject: "自检改课科目", form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
+  studentIds: [editStudent.id], startsAt: slot(17, 0).start, durationMinutes: 60,
+  status: "已排", note: "",
+});
+
+// 只改备注：不能被自己的影子挡住（复核时会把这节课自己排除掉）
+const noted = await api.lessons.update(editLesson.id, { note: "自检：只改备注" });
+eq("只改备注不受课时规则影响（不因为把自己算成已排而被拒）", noted?.note, "自检：只改备注");
+
+let editMessage = "";
+try {
+  await api.lessons.update(editLesson.id, { subject: "自检·无人报课的科目" });
+} catch (cause) {
+  editMessage = cause instanceof Error ? cause.message : String(cause);
+}
+ok("把已有课改成没有课时的科目 → 被拒（堵住 create 之外的入口）",
+  editMessage.includes("课时不足"), editMessage);
+
+editMessage = "";
+try {
+  await api.lessons.update(editLesson.id, { studentIds: [pupil.id] });
+} catch (cause) {
+  editMessage = cause instanceof Error ? cause.message : String(cause);
+}
+ok("把学生换成没有这门课课时的学生 → 被拒（点名是谁不够）",
+  editMessage.includes("课时不足") && editMessage.includes(pupil.name), editMessage);
+
+// 状态翻回「已排」同样算排课：把课时抽掉之后，取消的课不能再翻回来
+await api.students.adjustEnrollmentLessons(
+  editStudent.id, editEnrollmentId, -2, "自检：把课时抽掉，验证改课复核",
+);
+const cancelled = await api.lessons.update(editLesson.id, { status: "已取消" });
+eq("课时抽掉后仍可把课改成已取消（不挡减法）", cancelled?.status, "已取消");
+editMessage = "";
+try {
+  await api.lessons.update(editLesson.id, { status: "已排" });
+} catch (cause) {
+  editMessage = cause instanceof Error ? cause.message : String(cause);
+}
+ok("课时不够时把「已取消」翻回「已排」→ 被拒", editMessage.includes("课时不足"), editMessage);
+
+// 收尾：把这个学生的课与档案删掉，别影响后面的断言
+await api.lessons.remove(editLesson.id);
+await api.lessons.remove(editSecond.id);
+await api.students.remove(editStudent.id);
+eq("自检改课学生已清理", await api.students.get(editStudent.id), null);
+
 // 先建一节（此时有课时），再退掉这门课的报课记录 → 标记已上时就没有对应报课记录了
 const orphanLesson = await api.lessons.create({
   subject: anchorSubject, form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
