@@ -31,8 +31,20 @@ import {
  * 5. **报课与收款不在这里导入**：那些牵动账本（实收、已用课时），必须走页面流程。
  *    面板上明写这一点，免得有人导完名单以为账也进去了。
  */
-export function BulkImport({ onImported }: { onImported?: () => void }) {
-  const [entity, setEntity] = useState<ImportEntity>("students");
+export function BulkImport({
+  onImported,
+  fixedEntity,
+}: {
+  onImported?: () => void;
+  /**
+   * 锁定导入对象（在"学生/教师/教室/课程"各自的页面上用）。
+   *
+   * 这些页面已经知道你要导什么，因此不必再让人选一次 —— 面板更短、出错更少。
+   * 不传则在面板里显示对象切换（「数据与备份」页那种"批量数据操作"的用法）。
+   */
+  fixedEntity?: ImportEntity;
+}) {
+  const [entity, setEntity] = useState<ImportEntity>(fixedEntity ?? "students");
   const [text, setText] = useState("");
   const [fileName, setFileName] = useState("");
   const [format, setFormat] = useState<ImportFormat | "auto">("auto");
@@ -110,31 +122,33 @@ export function BulkImport({ onImported }: { onImported?: () => void }) {
   return (
     <Panel
       className="mt-6"
-      title="批量导入（CSV / JSON）"
-      description="把 Excel / 表格里的名单一次录进来：学生、教师、教室、课程。只新增，不覆盖已有记录。"
+      title={`批量导入${spec.label}（CSV / JSON）`}
+      description="把 Excel / 表格里的名单一次录进来。只新增，不覆盖已有记录。"
     >
       <div className="space-y-4 px-4 py-4">
-        {/* ① 选对象 */}
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-ink-500">导入对象</span>
-          {IMPORT_ENTITIES.map((key) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => {
-                setEntity(key);
-                setResult(null);
-              }}
-              className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
-                key === entity
-                  ? "border-brand-500 bg-brand-50 text-brand-800"
-                  : "border-ink-200 bg-white text-ink-600 hover:border-brand-300"
-              }`}
-            >
-              {ENTITY_SPECS[key].label}
-            </button>
-          ))}
-        </div>
+        {/* ① 选对象（实体页上由页面锁定，不显示这一行） */}
+        {fixedEntity === undefined && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-ink-500">导入对象</span>
+            {IMPORT_ENTITIES.map((key) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => {
+                  setEntity(key);
+                  setResult(null);
+                }}
+                className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                  key === entity
+                    ? "border-brand-500 bg-brand-50 text-brand-800"
+                    : "border-ink-200 bg-white text-ink-600 hover:border-brand-300"
+                }`}
+              >
+                {ENTITY_SPECS[key].label}
+              </button>
+            ))}
+          </div>
+        )}
 
         <p className="rounded-md border border-warning-100 bg-warning-50 px-3 py-2 text-xs leading-relaxed text-warning-600">
           {spec.warning}

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { Panel, TextField } from "@/components/admin/AdminFields";
+import { BulkImport } from "@/components/admin/BulkImport";
 import { MultiSelect } from "@/components/admin/MultiSelect";
 import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 import { Button } from "@/components/ui/Button";
@@ -24,6 +25,8 @@ export default function AdminTeachersPage() {
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  // 批量导入面板（与「新增」表单互斥，避免同屏两个大面板）
+  const [importing, setImporting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
 
@@ -96,12 +99,33 @@ export default function AdminTeachersPage() {
             ? "加载中…"
             : `${teachers.length} 位教师（在职 ${teachers.filter((t) => t.active).length} 位）`}
         </span>
-        <div className="ml-auto">
-          <Button size="sm" onClick={() => setCreating((value) => !value)}>
+        <div className="ml-auto flex items-center gap-2">
+          {/* 次要样式：导入是低频操作，不该和每天点的「新增」长得一样 */}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setCreating(false);
+              setImporting((value) => !value);
+            }}
+          >
+            {importing ? "收起导入" : "批量导入"}
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => {
+              setImporting(false);
+              setCreating((value) => !value);
+            }}
+          >
             {creating ? "收起表单" : "新增教师"}
           </Button>
         </div>
       </div>
+
+            {importing && (
+        <BulkImport fixedEntity="teachers" onImported={async () => { await load(); }} />
+      )}
 
       <div className="mt-4 overflow-x-auto rounded-lg border border-ink-200 bg-white">
         <table className="w-full min-w-[760px] border-collapse text-sm">

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { NumberInput, Panel, TextField } from "@/components/admin/AdminFields";
+import { BulkImport } from "@/components/admin/BulkImport";
 import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
 import {
@@ -38,6 +39,8 @@ export default function AdminClassroomsPage() {
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  // 批量导入面板（与「新增」表单互斥，避免同屏两个大面板）
+  const [importing, setImporting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [kindFilter, setKindFilter] = useState<"全部" | ClassroomKind>("全部");
@@ -130,12 +133,33 @@ export default function AdminClassroomsPage() {
         <span className="text-xs text-ink-500">
           {loading ? "加载中…" : `${visible.length} 个场地`}
         </span>
-        <div className="ml-auto">
-          <Button size="sm" onClick={() => setCreating((value) => !value)}>
+        <div className="ml-auto flex items-center gap-2">
+          {/* 次要样式：导入是低频操作，不该和每天点的「新增」长得一样 */}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setCreating(false);
+              setImporting((value) => !value);
+            }}
+          >
+            {importing ? "收起导入" : "批量导入"}
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => {
+              setImporting(false);
+              setCreating((value) => !value);
+            }}
+          >
             {creating ? "收起表单" : "新增场地"}
           </Button>
         </div>
       </div>
+
+            {importing && (
+        <BulkImport fixedEntity="classrooms" onImported={async () => { await load(); }} />
+      )}
 
       <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {visible.map((room) => {

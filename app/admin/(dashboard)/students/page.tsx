@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { Panel } from "@/components/admin/AdminFields";
+import { BulkImport } from "@/components/admin/BulkImport";
 import { StudentForm } from "@/components/admin/StudentForm";
 import { StudentDetail } from "@/components/admin/StudentDetail";
 import { Button } from "@/components/ui/Button";
@@ -24,6 +25,8 @@ export default function AdminStudentsPage() {
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  // 批量导入面板（与「新增」表单互斥，避免同屏两个大面板）
+  const [importing, setImporting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
 
@@ -93,6 +96,10 @@ export default function AdminStudentsPage() {
       <DataNotice onRefresh={load} />
 
       {/* 新增表单 */}
+
+      {importing && (
+        <BulkImport fixedEntity="students" onImported={async () => { await load(); }} />
+      )}
       {creating && (
         <Panel
           className="mt-6"
@@ -119,8 +126,25 @@ export default function AdminStudentsPage() {
         <span className="text-xs text-ink-500">
           {loading ? "加载中…" : `${visible.length} / ${students.length} 人`}
         </span>
-        <div className="ml-auto">
-          <Button size="sm" onClick={() => setCreating((value) => !value)}>
+        <div className="ml-auto flex items-center gap-2">
+          {/* 次要样式：导入是低频操作，不该和每天点的「新增」长得一样 */}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setCreating(false);
+              setImporting((value) => !value);
+            }}
+          >
+            {importing ? "收起导入" : "批量导入"}
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => {
+              setImporting(false);
+              setCreating((value) => !value);
+            }}
+          >
             {creating ? "收起表单" : "新增学生"}
           </Button>
         </div>

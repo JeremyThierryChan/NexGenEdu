@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { DataNotice } from "@/components/admin/DataNotice";
+import { BulkImport } from "@/components/admin/BulkImport";
 import { MultiSelect } from "@/components/admin/MultiSelect";
 import { Panel, SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { api, COURSE_STATUSES, type Course, type CourseSummary } from "@/lib/backend/api";
@@ -26,6 +27,8 @@ import { cn } from "@/lib/utils/cn";
  */
 export default function AdminCoursesPage() {
   const [courses, setCourses] = useState<Course[] | null>(null);
+  // 批量导入面板（低频操作：导完就收起来，不占着页面）
+  const [importing, setImporting] = useState(false);
   /** 每门课在报价配置里的定价状态（「打通」的可见部分）。 */
   const [pricingStatus, setPricingStatus] = useState<LibraryPricingStatus[]>([]);
   const [summary, setSummary] = useState<CourseSummary | null>(null);
@@ -217,6 +220,9 @@ export default function AdminCoursesPage() {
         <Button variant="outline" onClick={() => void syncFromSite()} disabled={syncing}>
           {syncing ? "同步中…" : "从网站同步课程"}
         </Button>
+        <Button variant="outline" onClick={() => setImporting((value) => !value)}>
+          {importing ? "收起导入" : "批量导入"}
+        </Button>
         {summary !== null && (
           <span className="text-xs text-ink-500">
             共 {summary.total} 门（网站 {summary.fromSite} · 后台 {summary.fromAdmin}）· 开放{" "}
@@ -225,6 +231,10 @@ export default function AdminCoursesPage() {
           </span>
         )}
       </div>
+
+      {importing && (
+        <BulkImport fixedEntity="courses" onImported={async () => { await load(); }} />
+      )}
 
       {message !== "" && <p className="mt-2 text-xs leading-relaxed text-success-600">{message}</p>}
       {error !== "" && (
