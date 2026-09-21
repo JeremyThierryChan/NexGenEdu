@@ -261,7 +261,7 @@ scripts/                  内容同步（`sync-content.mjs`）、开发包装（
                           `check.mts`、`check-both.mts`、`check-auth.mts`、`accept-run.mts`/`accept-check.mts`、
                           `drill-restore.mts`、`temp-server.mts`（临时服务端夹具）、`check-404.mjs`、`check-links.mjs`
 
-data/site/                Markdown「伪数据库」：网站内容源（唯一手改的地方）
+data/site/                Markdown「伪数据库」：网站内容源（模版兜底 + 一次性导入的来源）
 ```
 
 ## 架构设计
