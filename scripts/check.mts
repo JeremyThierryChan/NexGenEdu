@@ -546,7 +546,8 @@ ok("陈老师有推荐理由", (teachers[0]?.recommendation ?? "").length > 10);
 ok("其余教师未填推荐理由时为空", teachers.slice(1).every((t) => t.recommendation === ""));
 const lin = teachers.find((t) => t.name === "林老师");
 eq("林老师职务", lin?.role, "晚辅导老师");
-eq("林老师科目标签", lin?.subjects, ["晚辅导"]);
+// 林老师除了晚辅导，还带小学语文与小学数学（机构确认并入的 —— 见 data/site/content.md 教师段）
+eq("林老师科目标签", lin?.subjects, ["晚辅导", "小学语文", "小学数学"]);
 eq("林老师教龄", lin?.years, "10 年");
 ok("林老师有详细介绍", (lin?.bio.length ?? 0) > 50);
 ok("排序无重复", new Set(teachers.map((t) => t.order)).size === teachers.length);

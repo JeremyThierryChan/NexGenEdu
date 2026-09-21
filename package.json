@@ -28,7 +28,8 @@
     "drill:restore": "node --experimental-strip-types --import ./server/loader.mjs scripts/drill-restore.mts",
     "bench:capacity": "node --experimental-strip-types --import ./server/loader.mjs scripts/bench-capacity.mts",
     "sync-site-data": "node scripts/sync-site-data.mjs",
-    "site:snapshot": "node scripts/site-snapshot.mjs"
+    "site:snapshot": "node scripts/site-snapshot.mjs",
+    "site:diff": "node --experimental-strip-types --import ./server/loader.mjs scripts/diff-site-content.mts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
