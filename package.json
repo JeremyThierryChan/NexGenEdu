@@ -25,7 +25,8 @@
     "server:import": "node --experimental-strip-types --import ./server/loader.mjs server/import-data.mts",
     "accept": "node --experimental-strip-types --import ./server/loader.mjs scripts/accept-run.mts",
     "server:backup": "node --experimental-strip-types --import ./server/loader.mjs server/backup-cli.mts",
-    "drill:restore": "node --experimental-strip-types --import ./server/loader.mjs scripts/drill-restore.mts"
+    "drill:restore": "node --experimental-strip-types --import ./server/loader.mjs scripts/drill-restore.mts",
+    "bench:capacity": "node --experimental-strip-types --import ./server/loader.mjs scripts/bench-capacity.mts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

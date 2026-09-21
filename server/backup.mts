@@ -22,6 +22,9 @@
  *
  * 本机构的库是 KB 级、每天一份，90 份 = 约三个月的回溯窗口，占用可以忽略。
  * 但**上限必须存在**：无上限的备份目录是那种"半年后发现磁盘满了却不知道谁干的"的问题。
+ * 粗略的磁盘账：备份是整份复制，所以占用 ≈ **快照大小 × 保留份数**
+ * （100 名学生约 1.6MB × 90 ≈ 150MB；800 名学生约 12.6MB × 90 ≈ 1.1GB，
+ * 容量数字见 docs/后端开发方案.md §5.8）；数据大到备份占不下时，先调小这个份数。
  * 清理只删**本模块命名规则**下的文件 —— 你在 `server/backups/` 里放的其他东西
  * （手动导出的 JSON、迁移前快照、临时文件）一根手指都不碰。
  *
@@ -194,6 +197,11 @@ export function takeBackup(db: Database.Database, now: Date = new Date()): Backu
   const dir = backupDir();
   mkdirSync(dir, { recursive: true });
   // 同一秒内重复调用时同名文件已存在，`backupTo` 会直接返回它 —— 不会覆盖，也不会报错
+  /*
+   * 文件名带毫秒（`backupFileName`）**并且**撞名时 `backupTo` 会报错，
+   * 两者一起保证"我刚刚真的生成了一份新备份" —— 只靠"不覆盖"是不够的，
+   * 那会悄悄把一份旧文件当成刚备的（见 server/db.mts 的 `backupTo` 注释）。
+   */
   const file = backupTo(db, path.join(dir, backupFileName(now)));
   const info = statSync(file);
   const pruned = pruneBackups(backupKeep(), dir);

@@ -107,6 +107,11 @@ V1 只围绕五件事：**学生 · 教师 · 教室 · 课程 · 课时**。
 
 ## 快速开始
 
+**设备要求很低**：任何能跑 Node ≥ 22.6 与浏览器的电脑都够 ——
+实测 800 名学生 / 4 万节课时单次写入约 50ms、进程内存约 380MB
+（`npm run bench:capacity`，见 [后端开发方案 §5.8](./docs/后端开发方案.md)）。
+真正需要升级配置的触发条件是"要多人同时用"，那是并发问题不是性能问题。
+
 环境要求：**Node.js ≥ 22.6**（CI 用 22，本机与 Actions 都在 22 上验证）。
 请务必用 22.6 以上：本项目的 npm 脚本（`check`、`server`、`check:both`、`accept`…）都用
 `--experimental-strip-types` 直接跑 `.mts`/`.mjs`，Node 18/20 会报 `unknown option`。

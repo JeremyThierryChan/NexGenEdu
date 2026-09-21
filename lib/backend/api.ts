@@ -140,13 +140,27 @@ const BACKUP_KEY = "nexgenedu.admin.db.backup.v1";
 
 // 版本号与变更记录见 lib/backend/version.ts（seed 与迁移必须用同一个值）
 
-/** 模拟网络延迟，让加载态、按钮禁用等交互在开发时就暴露出来。 */
+/**
+ * 模拟网络延迟，让加载态、按钮禁用等交互在开发时就暴露出来。
+ *
+ * **只在浏览器里生效**（`typeof window !== "undefined"`）—— 它存在的理由是让人看见
+ * 加载态，而 Node 里跑的那些调用（服务端、自检、验收、演练）没有任何加载态要露出来，
+ * 只有纯粹的浪费。实测这一条的成本很硬：服务端每个 `/api/call` 都会白等 120ms，
+ * 而真实计算量在百人规模的库上只有几毫秒——**延迟主要是这个 sleep，不是设备**。
+ * （`npm run check` 也受影响：38 秒里约 37 秒是在 sleep。）
+ */
 const LATENCY_MS = 120;
+
+/** 是否在浏览器里运行（只有那种情况才需要"像有网络一样慢"）。 */
+function inBrowser(): boolean {
+  return typeof window !== "undefined";
+}
 
 let store: KeyValueStore = createKeyValueStore();
 let cache: Database | null = null;
 
 function delay(): Promise<void> {
+  if (!inBrowser()) return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, LATENCY_MS));
 }
 
@@ -456,8 +470,12 @@ function syncSubjects(student: Student): void {
  *
  * 日志本身也占存储：无上限地涨下去，几年后一份 JSON 会大到导不出来。
  * 500 条足够回溯「最近发生了什么」，超出后丢最旧的。
+ *
+ * **导出**是为了让容量测量（`scripts/bench-capacity.mts`）引用这个真实值：
+ * 那类脚本如果自己再写一个 500，"快照能长到多大"的结论就会随某天的改动失真 ——
+ * 而这个项目一贯的做法是：口径只留一份，别靠"记得同步改两边"。
  */
-const LOG_LIMIT = 500;
+export const LOG_LIMIT = 500;
 
 /** 当前操作人（由后台外壳在登录后写入；纯前端只有 admin 一个账号）。 */
 let operatorName = "admin";
