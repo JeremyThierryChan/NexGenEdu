@@ -1,8 +1,9 @@
 import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createEmptyDatabase } from "./initial";
-import { emptySiteContent } from "./site-content";
+import { emptySiteContent, validateSiteContent } from "./site-content";
 import { importSiteContent } from "./site-import";
 import type { SiteContentImportReport } from "./site-import";
+import type { SiteContent } from "./types";
 import { publicSite } from "./public-site";
 import type { PublicSite } from "./public-site";
 import { describeSeriesDate, generateSeriesDates } from "./recurrence";
@@ -2783,6 +2784,51 @@ const localApi = {
     },
 
     /**
+     * **保存网站内容**（课程页正文 / 教师页标题 / 报价页文案）。
+     *
+     * 整份覆盖（与「信息采集表」同一套做法）：调用方传完整对象，服务端校验后整体替换。
+     * 为什么不做成"改一个小节"的细粒度接口：正文是一块一块的文字，页面上就是整块编辑的，
+     * 细粒度接口只会多出十几个方法，而它们做的事都一样。
+     *
+     * 校验不通过**直接拒绝**（见 `validateSiteContent`）：不自动纠正 ——
+     * 系统替人编一个学科名，最后只会在页面上出现"未命名"这种东西。
+     */
+    async saveContent(input: SiteContent): Promise<SiteContent> {
+      await delay();
+      const db = load();
+      const problems = validateSiteContent(input);
+      if (problems.length > 0) throw new Error(problems.join("；"));
+
+      const before = db.siteContent.coursePage;
+      db.siteContent = {
+        coursePage: {
+          heading: { ...input.coursePage.heading },
+          subjects: input.coursePage.subjects.map((subject) => ({
+            ...subject,
+            name: subject.name.trim(),
+            bands: subject.bands.map((band) => ({ ...band, title: band.title.trim() })),
+          })),
+          electiveTitle: input.coursePage.electiveTitle.trim(),
+        },
+        teacherPage: { heading: { ...input.teacherPage.heading } },
+        pricingPage: { labels: { ...input.pricingPage.labels } },
+      };
+
+      const after = db.siteContent.coursePage;
+      const bands = after.subjects.reduce((sum, subject) => sum + subject.bands.length, 0);
+      writeLog(db, {
+        entity: "数据",
+        action: "保存网站内容",
+        targetId: "",
+        summary:
+          `网站内容：课程正文 ${after.subjects.length} 个学科 / ${bands} 个小节` +
+          (after.subjects.length === before.subjects.length ? "（数量未变）" : `（原 ${before.subjects.length} 个学科）`),
+      });
+      persist(db);
+      return clone(db.siteContent);
+    },
+
+    /**
      * **把网站内容搬进库**（教师资料 / 课程卡片字段 / 课程正文 / 报价文案）。
      *
      * `write: false` 是体检：逐条列出"会补什么、会新增什么、跳过了什么"，
@@ -3315,6 +3361,7 @@ export type {
   CourseSiteKind,
   PublicSite,
   SiteContentImportReport,
+  SiteContent,
 };
 export {
   ATTENDANCE_OPTIONS,

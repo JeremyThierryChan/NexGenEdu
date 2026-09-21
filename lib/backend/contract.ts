@@ -148,6 +148,8 @@ export const API_CONTRACT: ContractGroup[] = [
       "site.publicContent",
       // 把网站内容搬进库（体检 / 写入两步；默认只补空、不覆盖）
       "site.importFromContent",
+      // 保存网站正文（整份覆盖：课程页正文 / 教师页标题 / 报价页文案）
+      "site.saveContent",
     ],
   },
   {

@@ -2002,6 +2002,59 @@ ok("覆盖模式下教师简介按网站内容写回（这是它字面上的意�
   (await api.teachers.list()).find((item) => item.id === editedTeacher.id)?.summary !== "机构自己写的简介");
 await api.restoreBackup();
 
+/*
+ * 保存网站正文（`site.saveContent`）：整份覆盖 + 校验拒收。
+ *
+ * 这条路径是"后台能改网站文案"的唯一入口，因此两件事都要钉住：
+ * 保存后读回来一致（不然改完的正文会被下一次保存悄悄改回），
+ * 以及**非法内容必须被拒**（自动纠正会给人一个"看起来存上了、页面上却是别的"的错觉）。
+ */
+{
+  const current = (await api.site.publicContent()).siteContent;
+  const saved = await api.site.saveContent(current);
+  eq("保存网站正文后读回来一致", JSON.stringify(saved), JSON.stringify(current));
+
+  // 改一个字再存，确认真的写进去了
+  const edited: typeof current = JSON.parse(JSON.stringify(current));
+  const firstSubject = edited.coursePage.subjects[0]!;
+  firstSubject.bands[0]!.title = "自检改过的小节标题";
+  const afterEdit = await api.site.saveContent(edited);
+  eq("改动落库了", afterEdit.coursePage.subjects[0]?.bands[0]?.title, "自检改过的小节标题");
+  eq("其它内容没被顺手改掉",
+    afterEdit.coursePage.subjects.length, current.coursePage.subjects.length);
+
+  // 非法内容：空学科名 / 重复锚点 / 没有学科 —— 三种都要被拒
+  const cases: Array<[string, (draft: typeof current) => void]> = [
+    ["没有学科", (draft) => { draft.coursePage.subjects = []; }],
+    ["学科名为空", (draft) => { draft.coursePage.subjects[0]!.name = "  "; }],
+    ["小节锚点重复", (draft) => {
+      const subject = draft.coursePage.subjects[0]!;
+      subject.bands = [subject.bands[0]!, { ...subject.bands[0]! }];
+    }],
+  ];
+  for (const [label, mutate] of cases) {
+    const draft: typeof current = JSON.parse(JSON.stringify(afterEdit));
+    mutate(draft);
+    let message = "";
+    try {
+      await api.site.saveContent(draft);
+    } catch (cause) {
+      message = cause instanceof Error ? cause.message : String(cause);
+    }
+    ok(`保存网站正文「${label}」被拒并说明原因`, message !== "", message || "（没有被拒绝）");
+  }
+
+  // 被拒之后库里仍是上一次保存的内容（不能半途改掉一半）
+  eq("被拒时库里的内容没有被改动",
+    (await api.site.publicContent()).siteContent.coursePage.subjects[0]?.bands[0]?.title,
+    "自检改过的小节标题");
+
+  // 收尾：存回原样（后面的用例还要用这份内容）
+  await api.site.saveContent(current);
+  eq("内容已还原", (await api.site.publicContent()).siteContent.coursePage.subjects[0]?.bands[0]?.title,
+    current.coursePage.subjects[0]?.bands[0]?.title);
+}
+
 // ── ICS 日历文件 ──────────────────────────────────────────────────────
 const icsStart = new Date();
 icsStart.setHours(17, 30, 0, 0);

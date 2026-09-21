@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { BulkImport } from "@/components/admin/BulkImport";
 import { MultiSelect } from "@/components/admin/MultiSelect";
+import { SiteCourseContent } from "@/components/admin/SiteCourseContent";
 import { Panel, SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
 import {
   api,
@@ -562,6 +563,9 @@ export default function AdminCoursesPage() {
           </div>
         </Panel>
       )}
+
+      {/* 网站课程正文：整块编辑、一次保存（服务端整份覆盖） */}
+      <SiteCourseContent />
 
       {/* ── 列表 ── */}
       <Panel className="mt-5 mb-8" title="课程清单" description="按分类分组。网站来源的课程跟着内容文件走，不能删除。">

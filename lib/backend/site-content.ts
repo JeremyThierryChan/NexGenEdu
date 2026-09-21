@@ -149,3 +149,41 @@ export function hasCoursePageContent(content: SiteContent | undefined): boolean 
 export function coursePageAnchors(content: SiteContent): string[] {
   return content.coursePage.subjects.flatMap((subject) => subject.bands.map((band: SiteBand) => band.id));
 }
+
+/**
+ * 校验一份网站内容（后台要保存整份内容时用）。
+ *
+ * 返回问题清单；空数组表示可以用。刻意**不自动纠正**（比如给空名字补个默认名）：
+ * 网站正文是给人看的，系统替人编一个名字，最后只会在页面上出现"未命名"这种东西。
+ */
+export function validateSiteContent(content: SiteContent): string[] {
+  const problems: string[] = [];
+  const page = content.coursePage;
+
+  if (page.subjects.length === 0) {
+    problems.push("课程正文至少要有一个学科（否则网站课程页会没有内容，只能回落模版）。");
+  }
+
+  const subjectNames = new Set<string>();
+  for (const subject of page.subjects) {
+    const name = subject.name.trim();
+    if (name === "") problems.push("学科名不能为空。");
+    if (subjectNames.has(name)) problems.push(`学科「${name}」出现了两次：学科名要唯一（它是锚点与卡片关联的依据）。`);
+    subjectNames.add(name);
+
+    const anchors = new Set<string>();
+    for (const band of subject.bands) {
+      const title = band.title.trim();
+      if (title === "") problems.push(`学科「${name}」有一个小节没有标题。`);
+      if (band.id.trim() === "") {
+        problems.push(`学科「${name}」的小节「${title}」缺少锚点 id。`);
+      }
+      if (anchors.has(band.id)) {
+        problems.push(`学科「${name}」里小节锚点「${band.id}」重复了：卡片标签按锚点跳转，重了会跳到错的地方。`);
+      }
+      anchors.add(band.id);
+    }
+  }
+
+  return problems;
+}
