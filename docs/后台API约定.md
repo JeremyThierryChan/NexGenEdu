@@ -30,7 +30,7 @@ lib/backend/api.ts        服务层实现（当前 106 个方法）；数据一�
 - 对外形状由 `lib/backend/types.ts` 定义，`export type BackendApi = typeof api`
   就是那份唯一的形状 —— 服务端没有另写一份实现，而是**复用同一份**，
   因此「口径只有一份」是结构上的事实，不是纪律上的要求；
-- 数据类型带 `version`（当前 v12），升级链在 `api.ts` 的 `migrate()`，
+- 数据类型带 `version`（当前 v13），升级链在 `api.ts` 的 `migrate()`，
   **必须按版本升序逐级推进**（历史上写反过一次顺序，导致老数据被重新灌成示例数据）；
 - 鉴权已经是服务端的（`server/auth.mts`）：前端只拿令牌，令牌闲置 12 小时过期、
   **后端重启即失效**；操作人由服务端按会话记录，前端传什么都不作数。
@@ -222,7 +222,7 @@ lib/backend/api.ts        服务层实现（当前 106 个方法）；数据一�
 | 后悔药 | 导入前自动备份（`restoreBackup` 可回） | 同样在导入前留一份（同一个键） |
 | 幂等 | 是（同一份文件重复导入结果相同） | 是（重复导入会被判重跳过） |
 
-`imports.apply`（从 CSV/JSON 文本）与 `imports.fromSite`（从网站内容：教师、场地名）
+`imports.apply`（从 CSV/JSON 文本）与 `imports.fromSite`（从网站内容：**教师资料（含 AI 智能体）**、场地名）
 走的是**同一套判定与落库**，只有数据来源不同。冲突处理是这两者共同的能力：
 
 | `onConflict` | 行为 |

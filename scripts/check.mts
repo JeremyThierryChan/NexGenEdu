@@ -3078,6 +3078,27 @@ const pbTeacher = await api.teachers.create({
 eq("教师可带科目可以写后台新增的课程名", pbTeacher.subjects, ["初中数学", "围棋"]);
 await api.teachers.remove(pbTeacher.id);
 
+// 老库（v12 的教师没有资料字段）升级后要补空值与默认值，且不猜内容
+const pbV12 = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown>;
+pbV12.version = 12;
+// 造一条"老结构"的教师：把资料字段删掉，模拟 v12 的数据
+(pbV12.teachers as Array<Record<string, unknown>>).forEach((teacher) => {
+  delete teacher.years;
+  delete teacher.summary;
+  delete teacher.bio;
+  delete teacher.origin;
+  delete teacher.kind;
+});
+const pbV12Upgrade = await api.importDatabase(JSON.stringify(pbV12));
+ok("v12 老库能导入并升级", pbV12Upgrade.ok);
+const migratedTeacher = (await api.teachers.list())[0]!;
+eq("升级后的版本号是当前版本", (await api.exportDatabase()).version, CURRENT_VERSION);
+eq("v12 教师升级后补齐资料字段（不猜内容，一律空串）",
+  [migratedTeacher.years, migratedTeacher.summary, migratedTeacher.bio], ["", "", ""]);
+eq("v12 教师升级后默认来源是「后台」（老数据是机构自己录的）", migratedTeacher.origin, "后台");
+eq("v12 教师升级后默认类型是「教师」", migratedTeacher.kind, "教师");
+await api.restoreBackup();
+
 // 老库（v11 没有课程表）升级后要按网站内容补齐，否则科目候选会空。
 // 同样走导入这条路（理由见上面 v9 那段：写本地存储对服务端后端是假通过）。
 const pbV11 = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown>;
@@ -3490,10 +3511,30 @@ ok("冲突里能看到网站上的老师与库里那条的对应关系",
   JSON.stringify(siteTeachersAsk.conflicts.map((item) => item.incoming.name)));
 const siteTeachers = await api.imports.fromSite({ entity: "teachers", onConflict: "skip" });
 eq("从网站导入教师（跳过同名）", [siteTeachers.ok, siteTeachers.needsDecision], [true, false]);
-ok("AI 智能体不会被当成教师导进来",
-  (await api.teachers.list()).every((teacher) => !teacher.name.includes("试课诊断")),
-  (await api.teachers.list()).map((teacher) => teacher.name).join("、"));
-ok("网站上的真实教师已经进库", (await api.teachers.list()).some((teacher) => teacher.name === "陈老师"));
+/*
+ * AI 智能体**也导进来**（机构要能在后台看到有哪些工具在服务学生），
+ * 但类型标成 AI，并且**不进排课下拉**（那是"人"的地方）。
+ */
+const importedTeachers = await api.teachers.list();
+ok("网站上的真实教师已经进库", importedTeachers.some((teacher) => teacher.name === "陈老师"));
+const importedAi = importedTeachers.filter((teacher) => teacher.kind === "AI");
+ok("AI 智能体也导进来，且类型标成 AI",
+  importedAi.length >= 1 && importedAi.every((teacher) => teacher.name.includes("·")),
+  importedAi.map((teacher) => teacher.name).join("、"));
+ok("AI 不出现在排课下拉里（排课下拉是给「人」用的）",
+  (await api.teachers.listActive()).every((teacher) => teacher.kind !== "AI"));
+ok("真人教师在排课下拉里仍在",
+  (await api.teachers.listActive()).some((teacher) => teacher.name === "陈老师"));
+
+// 教师资料（教龄 / 简介 / 详细介绍）也要跟着进来 —— 这正是"导入资料"的本意
+const chen = importedTeachers.find((teacher) => teacher.name === "陈老师")!;
+ok("教师的教龄导进来了", chen.years !== "", `years="${chen.years}"`);
+ok("教师的一句话简介导进来了", chen.summary !== "", `summary="${chen.summary.slice(0, 30)}…"`);
+ok("教师的详细介绍导进来了（多段文本）", chen.bio.length > 50, `bio 长度 ${chen.bio.length}`);
+eq("从网站导入的教师标记来源为「网站」", chen.origin, "网站");
+ok("AI 的介绍也导进来了",
+  importedAi.every((teacher) => teacher.bio !== ""),
+  importedAi.map((teacher) => `bio=${teacher.bio.length}`).join("、"));
 
 /*
  * 场地名的来源是**网站内容**（首页「教室照片格位」），而内容是可以被编辑的

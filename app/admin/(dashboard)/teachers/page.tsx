@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
-import { Panel, TextField } from "@/components/admin/AdminFields";
+import { Panel, SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { BulkImport } from "@/components/admin/BulkImport";
 import { MultiSelect } from "@/components/admin/MultiSelect";
 import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { api, type Lesson, type Teacher } from "@/lib/backend/api";
+import { TEACHER_KINDS } from "@/lib/backend/types";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
 
 /**
@@ -153,6 +154,25 @@ export default function AdminTeachersPage() {
                       {openId === teacher.id ? "▲" : "▼"}
                     </span>
                   </button>
+                  {/* 类型与资料：导入进来的介绍要看得见，否则"导了也白导" */}
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                    {teacher.kind === "AI" && (
+                      <span className="rounded-sm border border-brand-200 bg-brand-50 px-1.5 py-0.5 text-[10px] text-brand-800">
+                        AI
+                      </span>
+                    )}
+                    {teacher.years !== "" && (
+                      <span className="text-[11px] text-ink-400">教龄 {teacher.years}</span>
+                    )}
+                    {teacher.origin === "网站" && (
+                      <span className="text-[11px] text-ink-300">来自网站</span>
+                    )}
+                  </div>
+                  {teacher.summary !== "" && (
+                    <p className="mt-1 max-w-md text-[11px] leading-relaxed text-ink-500">
+                      {teacher.summary}
+                    </p>
+                  )}
                 </td>
                 <td className="px-4 py-2.5 text-ink-700">{teacher.role !== "" ? teacher.role : "—"}</td>
                 <td className="px-4 py-2.5 text-ink-600">{teacher.subjects.join("、") || "—"}</td>
@@ -302,6 +322,11 @@ function TeacherForm({
    */
   const { options: subjectOptions } = useSubjectOptions();
   const [phone, setPhone] = useState(teacher?.phone ?? "");
+  // 资料字段（v13）：从网站导入时会带着内容进来，也可以在这里手填/修改
+  const [years, setYears] = useState(teacher?.years ?? "");
+  const [summary, setSummary] = useState(teacher?.summary ?? "");
+  const [bio, setBio] = useState(teacher?.bio ?? "");
+  const [kind, setKind] = useState<string>(teacher?.kind ?? "教师");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
 
@@ -321,6 +346,12 @@ function TeacherForm({
       subjects: subjects.map((item) => item.trim()).filter((item) => item !== ""),
       phone: phone.trim(),
       active: teacher?.active ?? true,
+      years: years.trim(),
+      summary: summary.trim(),
+      bio: bio.trim(),
+      kind: kind === "AI" ? ("AI" as const) : ("教师" as const),
+      // 新建的档案来源是"后台"；网站导入的档案保留"网站"（编辑资料不该改掉它的来历）
+      origin: teacher?.origin ?? ("后台" as const),
     };
 
     if (editing) await api.teachers.update(teacher.id, payload);
@@ -361,6 +392,35 @@ function TeacherForm({
           label="联系方式"
           value={phone}
           onChange={(event) => setPhone(event.target.value)}
+        />
+        <TextField
+          label="教龄"
+          hint="例如「5 年」（自由填写）"
+          value={years}
+          onChange={(event) => setYears(event.target.value)}
+        />
+        <SelectInput
+          label="类型"
+          hint="AI 是智能体：留在档案里，但不进排课下拉"
+          options={TEACHER_KINDS.map((value) => ({ value, label: value }))}
+          value={kind}
+          onChange={(event) => setKind(event.target.value)}
+        />
+      </div>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <TextField
+          label="一句话简介"
+          hint="列表里显示（网站教师页的「一句话」）"
+          value={summary}
+          onChange={(event) => setSummary(event.target.value)}
+        />
+        <TextAreaField
+          label="详细介绍"
+          hint="网站教师页的完整介绍会导入到这里；可留空"
+          rows={4}
+          value={bio}
+          onChange={(event) => setBio(event.target.value)}
         />
       </div>
 

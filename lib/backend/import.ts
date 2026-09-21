@@ -97,8 +97,16 @@ export const ENTITY_SPECS: Record<ImportEntity, EntitySpec> = {
       { key: "role", header: "职务", kind: "text", example: "授课教师" },
       { key: "phone", header: "电话", kind: "text", example: "138-0000-0000" },
       { key: "active", header: "在职", kind: "bool", example: "是" },
+      // 资料字段（v13）：可以从网站导入，也可以自己填
+      { key: "years", header: "教龄", kind: "text", example: "5 年" },
+      { key: "summary", header: "一句话简介", aliases: ["简介"], kind: "text", example: "擅长引导学生自己把思路走通。" },
+      { key: "bio", header: "详细介绍", aliases: ["介绍", "bio"], kind: "text", example: "（可留空；网站教师页的完整介绍会填在这里）" },
+      { key: "kind", header: "类型", kind: "enum", options: ["教师", "AI"], example: "教师" },
     ],
-    warning: "可选科目要与**课程库里的课程名**一致，否则排课时会报「教师科目不符」。",
+    warning:
+      "可选科目要与**课程库里的课程名**一致，否则排课时会报「教师科目不符」。" +
+      "类型选 AI 的是智能体（如试课诊断）：它留在档案里，但**不会出现在排课下拉里**。" +
+      "「详细介绍」里如果要换行，写在引号里（CSV 支持多行单元格）。",
   },
   classrooms: {
     key: "classrooms",
@@ -565,6 +573,13 @@ function finalize(entity: ImportEntity, record: Record<string, unknown>): Record
         phone: String(record.phone ?? ""),
         // 未填"在职"时默认在职（导入历史名单时最常见的意图）
         active: record.active === undefined ? true : Boolean(record.active),
+        years: String(record.years ?? ""),
+        summary: String(record.summary ?? ""),
+        bio: String(record.bio ?? ""),
+        // 类型只有明确的"AI"才算 AI（拼错/留空都当教师，宁可多一个可排课的教师，
+        // 也不要因为一个错别字把真人教师从排课下拉里"静默移走"）
+        kind: record.kind === "AI" ? "AI" : "教师",
+        origin: record.origin === "网站" ? "网站" : "后台",
       };
     case "classrooms":
       return {
@@ -740,19 +755,32 @@ export type SiteImportData = {
 export function siteImportRecords(source: SiteImportSource): SiteImportData {
   if (source === "teachers") {
     /*
-     * 只取真实教师：AI 智能体（`kind === "ai"`）在网站上是对家长介绍试课诊断的，
-     * 它们不排课、也不该进后台的教师档案（否则排课下拉里会冒出一个"人"）。
-     * 这条与 seed 的口径一致（seed 当年也是这么过滤的）。
+     * **包含 AI 智能体**（采苓 · 试课诊断、有恒 · 学习跟踪…）：机构要能在后台看到
+     * "有哪些工具在服务学生"，所以它们也进档案，只是 `kind: "AI"`。
+     *
+     * 与"人"的区别落在一处：**排课下拉不列 AI**（见 api.ts 的 teachers.listActive）——
+     * 否则会排出一节"由 AI 上"的课。类型写在档案里，页面上一眼能分辨。
+     *
+     * 资料字段（教龄 / 一句话简介 / 详细介绍）一并带过来 —— 这正是"导入教师资料"的本意：
+     * 网站教师页本来就写着这些，机构不该再抄一遍。
      */
-    const teachers = getTeachersPage().teachers.filter((teacher) => teacher.kind === "teacher");
+    const teachers = getTeachersPage().teachers;
+    const aiCount = teachers.filter((teacher) => teacher.kind === "ai").length;
     return {
-      description: `网站「教师」页的 ${teachers.length} 位真实教师（AI 智能体不算）`,
+      description:
+        `网站「教师」页的 ${teachers.length} 位` +
+        (aiCount > 0 ? `（其中 ${aiCount} 个是 AI 智能体，会标成「AI」且不参与排课）` : ""),
       records: teachers.map((teacher) => ({
         name: teacher.name,
         subjects: teacher.subjects,
         role: teacher.role,
         phone: "",
         active: true,
+        years: teacher.years ?? "",
+        summary: teacher.summary ?? "",
+        bio: teacher.bio ?? "",
+        kind: teacher.kind === "ai" ? "AI" : "教师",
+        origin: "网站",
       })),
     };
   }

@@ -41,6 +41,12 @@ export function createSeedDatabase(now: Date = new Date()): Database {
       role: teacher.role,
       phone: "",
       active: true,
+      // 资料字段（v13）：夹具一样从网站教师页取，因此与"从网站导入"的结果一致
+      years: teacher.years ?? "",
+      summary: teacher.summary ?? "",
+      bio: teacher.bio ?? "",
+      origin: "网站" as const,
+      kind: "教师" as const,
     }));
 
   // 可用时段刻意留了两种形态：工作日晚上 + 周末全天（上课教室），

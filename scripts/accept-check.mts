@@ -247,13 +247,22 @@ await check("数据与备份", "批量导入：覆盖 / 跳过 / 保留两份", 
   return { overwritten: overwritten.overwritten, role, skipped: skipped.skipped.length, duplicated: duplicated.duplicated, hasCopy };
 }, (v: { overwritten: number; role?: string; skipped: number; duplicated: number; hasCopy: boolean }) =>
   v.overwritten === 1 && v.role === "新职务" && v.skipped === 1 && v.duplicated === 1 && v.hasCopy);
-await check("数据与备份", "从网站导入教师（前端内容）", async () => {
-  // 网站上总有真实教师（AI 智能体不算），库里教师是空的 → 应当能导进来
+await check("数据与备份", "从网站导入教师资料（含 AI）", async () => {
+  // 网站上有真人教师与 AI 智能体，且都带资料（教龄 / 简介 / 详细介绍）
   const imported = await api.imports.fromSite({ entity: "teachers", onConflict: "skip" });
-  const names = (await api.teachers.list()).map((teacher) => teacher.name);
-  return { added: imported.added, names, hasAi: names.some((name) => name.includes("试课诊断")) };
-}, (v: { added: number; names: string[]; hasAi: boolean }) =>
-  v.added >= 1 && v.names.includes("陈老师") && v.hasAi === false);
+  const teachers = await api.teachers.list();
+  const schedulable = await api.teachers.listActive();
+  const chen = teachers.find((teacher) => teacher.name === "陈老师");
+  const ai = teachers.filter((teacher) => teacher.kind === "AI");
+  return {
+    added: imported.added,
+    chenHasProfile: chen !== undefined && chen.bio !== "" && chen.years !== "",
+    aiCount: ai.length,
+    aiHasProfile: ai.every((teacher) => teacher.bio !== ""),
+    aiSchedulable: schedulable.some((teacher) => teacher.kind === "AI"),
+  };
+}, (v: { added: number; chenHasProfile: boolean; aiCount: number; aiHasProfile: boolean; aiSchedulable: boolean }) =>
+  v.added >= 1 && v.chenHasProfile && v.aiCount >= 1 && v.aiHasProfile && v.aiSchedulable === false);
 await check("数据与备份", "批量导入：缺少必填列时拒绝且不写入", async () => {
   const before = (await api.classrooms.list()).length;
   const outcome = await api.imports.apply({ entity: "classrooms", text: "房间名,容量\r\n漏了表头,6\r\n" });

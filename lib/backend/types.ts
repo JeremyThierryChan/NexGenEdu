@@ -191,6 +191,18 @@ export const STUDENT_STATUSES = ["在读", "暂停", "结课"] as const;
 export type StudentStatus = (typeof STUDENT_STATUSES)[number];
 
 /** 教师档案。 */
+/** 教师档案的来源：网站同步进来 / 后台自己建的（与课程 origin 同一套口径）。 */
+export type TeacherOrigin = "网站" | "后台";
+
+/**
+ * 教师档案的**类型**。
+ *
+ * `AI` = 网站上的 AI 智能体（如「采苓 · 试课诊断」）：它们是**辅助工具**，
+ * 做试课诊断与学习跟踪，不授课 —— 因此**不出现在排课下拉里**（见 `teachers.listActive`），
+ * 但保留在档案里（机构要能看到"我们有哪些工具在服务学生"）。
+ */
+export type TeacherKind = "教师" | "AI";
+
 export type Teacher = {
   id: string;
   name: string;
@@ -201,7 +213,23 @@ export type Teacher = {
   phone: string;
   /** 是否在职；离职教师保留档案但不在排课里出现。 */
   active: boolean;
+  /**
+   * 以下四项是**教师资料**（v13 起）：从网站教师页导入，或在后台手填。
+   * 加它们的原因：网站的教师页有完整的介绍（教龄、一句话简介、详细 bio），
+   * 而这些信息在后台原本无处存放 —— 只能挂在网站文件里，后台看不见也搜不到。
+   */
+  /** 教龄，例如「5 年」（自由文本：网站上是「5 年」「10 年」这类）。 */
+  years: string;
+  /** 一句话简介（列表里显示）。 */
+  summary: string;
+  /** 详细介绍（多段文本，来自网站教师页）。 */
+  bio: string;
+  origin: TeacherOrigin;
+  kind: TeacherKind;
 };
+
+export const TEACHER_ORIGINS = ["网站", "后台"] as const;
+export const TEACHER_KINDS = ["教师", "AI"] as const;
 
 /** 教室用途。自习室也能被排课（学生来自习），因此两者都在同一个列表里，只是用途不同。 */
 export const CLASSROOM_KINDS = ["上课用教室", "自习室"] as const;

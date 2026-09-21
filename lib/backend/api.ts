@@ -447,6 +447,25 @@ function migrate(db: Database): Database | null {
     db.version = 12;
   }
 
+  if (db.version === 12) {
+    /*
+     * v12 → v13：教师档案增加"资料"字段（教龄 / 简介 / 详细介绍 / 来源 / 类型）。
+     *
+     * 老库没有这些字段 → 一律补空值与默认值，**不猜内容**：
+     * 来源默认「后台」（老数据是机构自己录的），类型默认「教师」
+     * （老库里不可能有 AI 档案，那时还没有这个概念）。
+     */
+    db.teachers = db.teachers.map((teacher) => ({
+      ...teacher,
+      years: teacher.years ?? "",
+      summary: teacher.summary ?? "",
+      bio: teacher.bio ?? "",
+      origin: teacher.origin ?? "后台",
+      kind: teacher.kind ?? "教师",
+    }));
+    db.version = 13;
+  }
+
   return db.version === CURRENT_VERSION ? db : null;
 }
 
@@ -1066,10 +1085,18 @@ const localApi = {
 
   teachers: {
     ...collection<Teacher>((db) => db.teachers, "t", "教师"),
-    /** 在职教师，排课下拉用。 */
+    /**
+     * 在职**教师**，排课下拉用。
+     *
+     * 刻意排除 `kind === "AI"`：AI 智能体（采苓等）是辅助工具，不授课 ——
+     * 混进排课下拉会让人排出一节"由 AI 上"的课，那不是机构的经营方式。
+     * 它们仍然留在教师档案里（机构要能看到这些工具在服务学生）。
+     */
     async listActive(): Promise<Teacher[]> {
       await delay();
-      return clone(load().teachers.filter((teacher) => teacher.active));
+      return clone(
+        load().teachers.filter((teacher) => teacher.active && teacher.kind !== "AI"),
+      );
     },
   },
 

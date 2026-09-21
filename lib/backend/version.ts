@@ -11,7 +11,7 @@
  *   2. 在 api.ts 的 migrate() 里补一段「上一版 → 这一版」的转换；
  *   3. 确认 seed.ts 用的是这个常量（它已经这么做了）。
  */
-export const CURRENT_VERSION = 12;
+export const CURRENT_VERSION = 13;
 
 /** 版本变更记录（给后来的人看，不用翻提交历史）。 */
 export const VERSION_NOTES: Record<number, string> = {
@@ -27,4 +27,5 @@ export const VERSION_NOTES: Record<number, string> = {
   10: "报价搬到后端：基础价 / 科目系数 / 班级系数 / 计费规则成为可配置数据",
   11: "报价配置增加教师分成规则（40% 起、每加一名学生 +10%，课内班型适用）",
   12: "新增课程库：网站课程自动进来，后台可自己加课（围棋课、书法课这类网站还没有的）",
+  13: "教师档案增加资料（教龄 / 一句话简介 / 详细介绍）、来源（网站 / 后台）与类型（教师 / AI）——「从网站导入教师资料」用",
 };
