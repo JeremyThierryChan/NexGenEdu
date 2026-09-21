@@ -51,15 +51,17 @@ V1 只围绕五件事：**学生 · 教师 · 教室 · 课程 · 课时**。
 
 ## 当前状态
 
-**宣传网站与教务后台都已可用**，`lint` / `typecheck` / `check`（600+ 项断言）/ `build` 全部通过，并已部署到 GitHub Pages。
+**宣传网站与教务后台都已可用**：`lint` / `typecheck` / `check`（当前 700+ 项断言，以命令输出为准）/ `build` 全部通过，
+另有 `check:both` / `check:auth` / `accept`（逐页验收）/ `drill:restore`（恢复演练）在本机对**真实后端**跑通。
+**宣传网站**已部署到 GitHub Pages；**教务后台不上公网**，连的是这台电脑上的 Node + SQLite 后端。
 
 ### 对外宣传网站
 
-- 页面：首页、课程（6 栏目 → 32 张卡片 → 卡片详情页）、特色课程、教师、学生案例、常见问题、时间安排、智能报价、关于、联系我们；
+- 页面：首页、课程（当前 6 栏目 → 当前 32 张卡片 → 卡片详情页）、特色课程、教师、学生案例、常见问题、时间安排、智能报价、关于、联系我们；
 - 内容全部在 `data/site/*.md` 里维护，改完跑 `npm run sync-content` 即生效（无需重启 dev server）；
 - 智能报价：学习阶段 / 课程 / 科目 / 班型 / 时长 / 节数，算出课单价、总价与试课费。
 
-### 教务后台（`/admin`，14 个页面）
+### 教务后台（`/admin`，当前 15 个页面）
 
 页面只调 `lib/backend/api.ts`；本机使用时这个对象被换成对后端 `POST /api/call` 的代理，
 **服务端跑的是同一份 `api.ts`** —— 于是业务口径（课时、金额、冲突判定、报价）天然只有一份。
@@ -67,8 +69,9 @@ V1 只围绕五件事：**学生 · 教师 · 教室 · 课程 · 课时**。
 - 今日概览、咨询（排课可行性）、学生档案（含信息采集表）、教师、教室、课程安排、日历、课表与占用、统计、待跟进、收费、报价、课程库、数据与备份；
 - 课时与金额都走账本：报课/续费/退课、收款/退款、请假扣课时、补课、撤销，每次改动留操作日志（操作人由服务端按会话记录）；
 - 报价与教师分成是**可配置数据**，后台可直接给家长试算；
-- 登录已改为**服务端会话**：口令在后端生成（首次启动打印一次），前端只拿令牌，未登录的接口一律 401；
-- **每天自动备份**一份到 `server/backups/`（保留最近 90 份），并用 `npm run drill:restore` 演练过「删库 → 只靠备份文件恢复」。
+- 登录是**服务端会话**：口令来自 `NEXGENEDU_ADMIN_PASSWORD`，没设就首次启动随机生成一份（写在 `server/data/admin-credential.json`，权限 0600）并在启动日志里打印一次 —— **口令不进数据库**，前端只拿令牌；`/api/` 下除 `/api/login`、`/api/logout`、`/api/session` 外一律要登录（一处闸门），后端**重启需要重新登录**；
+- 后端默认**只绑 `127.0.0.1`**（`NEXGENEDU_HOST` 可覆盖），公开的只有 `GET /health`（只回服务名与库文件名，细节在要登录的 `GET /api/status`）；
+- **每天自动备份**一份到 `server/backups/`（保留最近 90 份，`NEXGENEDU_BACKUP_KEEP` 可改），并用 `npm run drill:restore` 演练过「删库 → 只靠备份文件恢复」。
 
 ### 明确还没做（不是遗漏，是范围外）
 
@@ -80,9 +83,11 @@ V1 只围绕五件事：**学生 · 教师 · 教室 · 课程 · 课时**。
   只有一个账号，不做按人分权限；
 - 数据在 `server/data/nexgenedu.db`（不进 git）。备份是自动的（每天一份、保留 90 份），
   但**跨机器搬运**仍要用「数据与备份」页导出的 JSON；
+- 后端**只绑本机 `127.0.0.1`**（局域网也访问不到），且**重启后要重新登录** —— 会话只在服务端内存里，刻意不落盘；
 - 后台改价不会自动出现在宣传页，需要「导出配置 → 替换 `data/site/pricing.md`」才会上线
   （内容文件的真源归属见 [docs/后端开发方案.md](./docs/后端开发方案.md) §10.1）；
-- 线上那份后台连不上后端（静态站），因此**只能在本机使用**：页面会明确提示这一点。
+- 线上那份后台连不上后端（静态站），因此**只能在本机使用**：页面会明确提示这一点；
+- 网站内容进库做只读镜像（`site_content` 表）**还没做**：表已建好，库里 0 行，也还没有同步脚本。
 
 ## 技术栈
 
@@ -102,7 +107,10 @@ V1 只围绕五件事：**学生 · 教师 · 教室 · 课程 · 课时**。
 
 ## 快速开始
 
-环境要求：**Node.js ≥ 18.18**（推荐 20 或更高）。
+环境要求：**Node.js ≥ 22.6**（CI 用 22，本机与 Actions 都在 22 上验证）。
+请务必用 22.6 以上：本项目的 npm 脚本（`check`、`server`、`check:both`、`accept`…）都用
+`--experimental-strip-types` 直接跑 `.mts`/`.mjs`，Node 18/20 会报 `unknown option`。
+（宣传站的 `next build` 本身在更老的 Node 上也能跑，但那样你只有半个项目能用。）
 
 ```bash
 git clone https://github.com/JeremyThierryChan/NexGenEdu.git
@@ -113,6 +121,20 @@ npm run dev
 
 打开 http://localhost:3000 查看宣传网站。
 
+### 用后台（本机后端）
+
+后台的数据不在浏览器里，而在本机的 SQLite 里，所以要同时起**两个**进程：
+
+```bash
+cp .env.example .env.local    # 里面已写好 NEXT_PUBLIC_API_BASE=http://localhost:4000
+npm run server                # 终端 A：后端（默认 4000），启动日志会打印登录口令
+npm run dev                   # 终端 B：前端（3000），打开 http://localhost:3000/admin
+```
+
+- 登录口令来自环境变量 `NEXGENEDU_ADMIN_PASSWORD`；没设就首次启动随机生成一份，写进 `server/data/admin-credential.json`（0600）**并且只在启动日志里打印一次**，请自己存好；
+- **后端重启后需要重新登录**（会话只在服务端内存里）；
+- 数据文件是 `server/data/nexgenedu.db`，每天自动备份到 `server/backups/`；不设 `NEXT_PUBLIC_API_BASE` 时后台连不上后端，页面会提示「后台需要本机后端」。
+
 > 若 `npm install` 报错 `EACCES` / 无法写入 `~/.npm`，改用项目本地缓存目录：
 > `npm install --cache ./.npm-cache`（该目录已在 `.gitignore` 中）。
 
@@ -121,17 +143,27 @@ npm run dev
 | 命令 | 说明 |
 | --- | --- |
 | `npm run dev` | 启动开发服务器（http://localhost:3000） |
-| `npm run build` | 生产构建 |
+| `npm run build` | 生产构建（同步内容 + 静态导出到 `out/`） |
 | `npm start` | 运行生产构建产物 |
 | `npm run lint` | ESLint 检查 |
 | `npm run typecheck` | TypeScript 类型检查（`tsc --noEmit`） |
-| `npm run check` | 自检：内容、报价、服务层、接口契约共 700+ 条断言 |
+| `npm run sync-content` | `data/site/*.md` → `data/site/*.ts` |
+| `npm run check` | 自检：内容、报价、服务层、接口契约（当前 700+ 项断言，以命令输出为准） |
+| `npm run check:404` | 校验 404 产物（分流、样式、文案） |
+| `npm run check:links` | 校验产物里的全部站内链接 |
+| `npm run check:all` | 上面三个 check 连着跑 |
 | `npm run check:both` | **同一套自检对两种后端各跑一遍**（内存 + 真实 HTTP 服务端） |
 | `npm run check:auth` | 服务端认证自检（未登录 401、令牌、退出、操作人来自会话） |
 | `npm run server` | 启动后端（本机 Node + SQLite，默认只绑 127.0.0.1:4000） |
+| `npm run server:migrate` | 跑数据库迁移（迁移前自动备份一份带 `nexgenedu-migrate-` 前缀的快照） |
+| `npm run server:health` | 探活：`curl` 一下公开的 `GET /health` |
+| `npm run server:import` | 把 JSON 导入库里（导错可用备份回滚） |
 | `npm run server:backup` | 手动备份一次（`-- --list` 看清单，`-- --force` 忽略"今天已备份"） |
-| `npm run accept` | 逐页验收：起临时后端，对 14 个页面做真实读写（43 项） |
+| `npm run accept` | 逐页验收：自己起临时后端，对后台各页面做真实读写（当前 43 项，以命令输出为准） |
 | `npm run drill:restore` | 恢复演练：备份 → 删库 → 只靠备份文件恢复 → 核对数据 |
+
+**CI 只跑构站需要的那几条**（`lint` → `sync-content` → `typecheck` → `check` → `build` → `check:404` → `check:links`）；
+`check:both` / `check:auth` / `accept` / `drill:restore` 都要起服务端，所以是**本机门禁**，推送前自己跑一遍。
 
 每个阶段完成后固定执行：`lint` → `typecheck` → `check:both`（或 `check`）→ `build`。
 
@@ -141,7 +173,9 @@ npm run dev
 
 - 工作流：`.github/workflows/deploy-pages.yml`
 - 线上地址：https://jeremythierrychan.github.io/NexGenEdu/
-- 站点为**纯静态导出**产物（`output: "export"` → `out/`），不使用任何服务端运行时
+- **宣传站**是纯静态导出产物（`output: "export"` → `out/`），不使用任何服务端运行时；
+- **后台不部署到公网**：它要连本机的 Node + SQLite 后端（见 [用后台](#用后台本机后端)），
+  线上那份页面会直接提示「后台需要本机后端」，而不是给一个登不上的登录框。原因与触发条件见 [docs/后端开发方案.md](./docs/后端开发方案.md) §7。
 
 ### 子路径是怎么处理的
 
@@ -156,10 +190,14 @@ NEXT_PUBLIC_BASE_PATH=/NexGenEdu npm run build
 
 ### 静态导出带来的约束
 
-静态导出意味着**所有数据必须在构建时可得**：Markdown 数据层（Phase 2）在构建期间读取并
-渲染为 HTML，这与「未来替换为 PostgreSQL」的规划一致 —— 届时改为在构建时或通过
-Server Actions 取数，页面代码不变。它也意味着后台的 `localStorage` 写操作无法跨设备共享，
-属于本阶段的已知限制。
+静态导出意味着**宣传站的数据必须在构建时可得**：内容数据层在构建期间读取 Markdown 并
+渲染为 HTML，因此线上要看到内容改动就得重新构建并部署（本地 dev 下跑一次 `npm run sync-content` 即生效）。
+**后台不受这条约束**：它本来就不在静态产物里 —— 页面通过 `POST /api/call` 调本机后端，
+数据在 `server/data/nexgenedu.db`，与浏览器缓存、清缓存、换设备都无关。
+前端只拿一个会话令牌，而且**后端重启后要重新登录**。
+
+> **历史**：伪后端阶段后台的写操作曾经放在浏览器本地存储里，只作开发期临时方案。
+> 接上本机后端之后这段已经不存在，页面代码也没改 —— 换的只是数据访问层。
 
 ### 首次部署前的一次性设置
 
@@ -173,63 +211,81 @@ Server Actions 取数，页面代码不变。它也意味着后台的 `localStor
 app/
 ├── layout.tsx            根布局：html/body + 全局样式
 ├── globals.css           设计令牌与基础样式（品牌色的唯一来源）
+├── not-found.tsx         404 页面（一份产物、网站版与后台版两种内容，按路径分流）
 ├── (site)/               对外宣传网站路由组（有独立的导航与页脚布局）
 │   ├── page.tsx          首页             /
 │   ├── courses/          课程             /courses
 │   ├── teachers/         教师团队         /teachers
-│   ├── about/            关于我们         /about
-│   └── contact/          联系我们         /contact
-└── admin/                教务后台路由组（Phase 4 起实现）
-    ├── students/         学生管理
-    ├── teachers/         教师管理
-    ├── classrooms/       教室管理
-    ├── lessons/          课程安排与排课
-    └── calendar/         日历（日 / 周视图）
+│   ├── cases/ faq/ schedule/ quote/       学生案例 / 常见问题 / 时间安排 / 智能报价
+│   └── about/ contact/   关于我们 / 联系我们
+└── admin/                教务后台路由组
+    ├── login/            登录页（口令在服务端）    /admin/login
+    └── (dashboard)/      后台页面（整棵子树被 RequireAuth 包住）
+        ├── students/ teachers/ classrooms/          学生 / 教师 / 教室
+        ├── lessons/ calendar/ timetable/            课程安排 / 日历 / 课表与占用
+        └── inquiries/ followups/ finance/ pricing/   咨询 / 待跟进 / 收费 / 报价
+            courses/ stats/ scripts/ data/            课程库 / 统计 / 话术 / 数据与备份
 
 components/
-├── ui/                   基础组件：Button / Card / Badge / Container / Section
-├── layout/               Logo / Header / Footer（后续加 AdminSidebar / AdminHeader）
-├── site/                 宣传网站专用区块组件
-└── students/ teachers/ classrooms/ lessons/ dashboard/    后台业务组件
+├── ui/ layout/           基础组件与页头页脚侧边栏
+├── site/ courses/ teachers/ pricing/    宣传网站区块组件
+└── admin/                后台控件与业务面板（学生档案、排课、报价、登录表单…）
 
 lib/
-├── types/                领域类型定义
-├── data/                 数据访问层：页面获取数据的唯一入口
-├── scheduling/           排课与冲突检测逻辑
-├── site/                 站点配置与导航
-└── utils/                通用工具
+├── data/                 宣传站数据访问层：页面取数的唯一入口（`content.ts` 解析 Markdown）
+├── backend/              **服务层**：`api.ts`（当前 106 个方法）+ 领域纯函数（排课与冲突、课时账本、报价、统计…）
+│   ├── initial.ts        空库起点（正式使用从这里开始；`seed.ts` 只是自检/演示夹具）
+│   └── remote.ts         本机使用时把 `api` 换成对后端 `POST /api/call` 的代理
+├── auth/                 `session.ts`（登录）、`token.ts`（前端唯一持有的凭证：令牌）
+├── site/ pricing/        导航配置、站点侧报价薄适配
+├── types/ utils/ markdown.ts    站点类型、通用工具、Markdown 解析原语
 
-data/                     Markdown「伪数据库」
-├── students/ teachers/ classrooms/ lessons/ site/
+server/                   本机后端（Node + SQLite，不上 Docker）
+├── index.mts             HTTP、`/api/call`、鉴权闸门、每天自动备份调度
+├── auth.mts              口令与会话（口令不进数据库，前端只拿令牌）
+├── backup.mts backup-cli.mts    备份与清理（保留 90 份）、手动备份命令
+├── db.mts migrate.mts kv-store.mts   SQLite 连接、迁移器、`kv` 表上的 KeyValueStore
+└── import-data.mts reset-data.mts clear-payments.mts    运维脚本
+
+scripts/                  内容同步（`sync-content.mjs`）、开发包装（`dev.mjs`），以及自检与验收脚本：
+                          `check.mts`、`check-both.mts`、`check-auth.mts`、`accept-run.mts`/`accept-check.mts`、
+                          `drill-restore.mts`、`temp-server.mts`（临时服务端夹具）、`check-404.mjs`、`check-links.mjs`
+
+data/site/                Markdown「伪数据库」：网站内容源（唯一手改的地方）
 ```
 
 ## 架构设计
 
-核心原则是**数据层与 UI 解耦**。页面只调用 `lib/data` 暴露的函数，不直接读文件、不解析 Markdown：
+核心原则是**数据层与 UI 解耦**。宣传站的页面只调用 `lib/data` 暴露的函数，不直接读文件、不解析 Markdown：
 
 ```ts
-// 页面里只允许出现这样的调用
-const lessons = await getLessonsByDate("2026-09-15");
-const student = await getStudentById("student_001");
+// 宣传站页面里只允许出现这样的调用（内容来自 lib/data）
+const content = getFaqContent();
+const page = getPage("schedule", "课程时间安排");
 ```
 
-数据流向在接入数据库前后保持一致，迁移时改动被限制在数据层内部：
+后台走的是另一条路，但同样只有一层：页面只认 `lib/backend/api.ts` 的那些方法，
+本机使用时这个对象被换成对后端的代理，**服务端跑的是同一份 `api.ts`**：
 
 ```
-现在：  Markdown 文件   →  lib/data（数据访问层）  →  React / Next.js UI
-                  ↓ 只替换这一段
-未来：  PostgreSQL      →  API / Server Actions  →  lib/data（函数签名不变）→ UI 不变
+宣传站：  Markdown 文件  →  lib/data（数据访问层）  →  React / Next.js UI
+
+后台：    页面  →  lib/backend/api.ts  →（本机：remote.ts 代理）→  POST /api/call
+                                                              ↓
+                                        服务端：同一份 api.ts（存储换成 SQLite 的 kv 表）
 ```
 
-因此 UI 不需要知道数据究竟来自 Markdown、`localStorage` 还是 PostgreSQL。
+这么做的好处是业务口径（课时、金额、冲突判定、报价公式）**只实现一份**，
+「宣传页一个价、后台另一个价」这类分叉从结构上就不可能发生；
+换存储也只换掉最下面那一段，页面代码一行都不用改。
 
-> **关于后台的数据变更**：Markdown 在浏览器运行时不可写，所以后台的写操作（排课、课程完成、
-> 课时扣减）会在 Phase 5 通过数据层封装到 `localStorage`，仅作为开发阶段的临时方案，
-> 不承担并发与事务职责。业务校验逻辑在数据层重新执行一次，不只依赖 UI。
+> **历史**：伪后端阶段后台把写操作（排课、课程完成、课时扣减）放在浏览器本地存储里，
+> 只作开发期临时方案，不承担并发与事务职责。接上本机后端之后这段已经不存在：
+> 数据在 `server/data/nexgenedu.db`，业务校验在服务端按会话复核一次，不只依赖界面。
 
 ## 数据模型
 
-五个核心实体，字段设计直接对齐未来的 PostgreSQL Schema，均带稳定 `id` 与 `createdAt` / `updatedAt`：
+五个核心实体，字段设计对齐数据库表结构（真要上 PostgreSQL 时按这些字段建表），均带稳定 `id` 与 `createdAt` / `updatedAt`：
 
 | 实体 | 关键字段 |
 | --- | --- |
@@ -245,6 +301,8 @@ const student = await getStudentById("student_001");
   每笔充值、消耗、取消返还都有记录，便于未来对账。
 - 关系通过 `studentId` / `teacherId` / `classroomId` 外键字段表达，与数据库外键一一对应。
 - 课程状态：`scheduled` / `completed` / `cancelled` / `rescheduled`。
+- 存储形态是**快照式**的：当前 SQLite 里整库一份 JSON 存在 `kv` 表（由 `lib/backend/api.ts` 通过
+  `KeyValueStore` 读写），不是每个实体一张表 —— 实体边界留在代码里，等真有并发/远程需求时再拆表。
 
 ## 路线图
 
@@ -271,12 +329,13 @@ AI 学情分析与批改、CRM、库存采购、合同发票、复杂报表。
 
 ## 开发约定
 
-1. **数据层与 UI 分离**：页面不得出现 `fs.readFile` 或 Markdown 解析逻辑。
-2. **业务逻辑与 UI 分离**：冲突检测等规则放在 `lib/scheduling`，不写死在组件里。
+1. **数据层与 UI 分离**：宣传站页面不得出现 `fs.readFile` 或 Markdown 解析逻辑，一律走 `lib/data`。
+2. **业务逻辑与 UI 分离**：冲突检测、课时与金额不变式等规则放在服务层 `lib/backend/`（`api.ts` 的 `lessons.findConflicts`、`availability.ts`、`timetable.ts`…），不写死在组件里。
 3. **类型优先**：使用明确的 TypeScript 类型，不使用 `any`。
 4. **组件保持小型化**：不要把整个页面写进一个巨大文件。
 5. **不提前设计**：不为未确定的功能建立复杂架构。
 6. **不编造数据**：数据未接入时展示空状态，而不是假数据。
+7. **服务端不信任前端**：鉴权、冲突、容量、幂等、金额这些判定，服务端都要自己复核一遍（清单见 [docs/后台API约定.md](./docs/后台API约定.md)）；界面上的提示只是体验，不是边界。
 
 ## 文档
 
@@ -286,9 +345,9 @@ AI 学情分析与批改、CRM、库存采购、合同发票、复杂报表。
 | [docs/使用手册.md](./docs/使用手册.md) | 机构员工 | 后台怎么用：排课、报课收费、咨询、报价、请假补课、备份 |
 | [docs/内容维护手册.md](./docs/内容维护手册.md) | 运营 / 负责人 | 怎么改课程、价格、FAQ、教师等内容并发布上线 |
 | [docs/技术架构.md](./docs/技术架构.md) | 开发者 / 接手的人 | 架构全景、目录职责、数据模型、领域模块、自检体系 |
-| [docs/部署与发布.md](./docs/部署与发布.md) | 开发者 | 本地命令、构建、CI、上线核对与常见故障 |
-| [docs/后台API约定.md](./docs/后台API约定.md) | 接后端的人 | 106 个接口的分组、服务端必须复核的校验、迁移步骤 |
-| [docs/后端开发方案.md](./docs/后端开发方案.md) | 要写后端的人 | 开发阶段用本机 Node + SQLite 单文件（不上 Docker）的落地顺序与纪律 |
+| [docs/部署与发布.md](./docs/部署与发布.md) | 开发者 | 本机环境与命令、起后端与登录、构建、CI、上线核对与常见故障、回滚 |
+| [docs/后台API约定.md](./docs/后台API约定.md) | 接后端的人 | 当前 106 个接口的分组、服务端必须复核的校验、迁移步骤 |
+| [docs/后端开发方案.md](./docs/后端开发方案.md) | 要写 / 维护后端的人 | 本机 Node + SQLite 单文件（不上 Docker）的落地顺序与纪律：会话认证、两种后端跑同一套自检、每天自动备份与恢复演练 |
 | [PROJECT.md](./PROJECT.md) | 开发者 | 分主题的设计决策记录（「当时为什么这么定」） |
 | [docs/README.md](./docs/README.md) | 所有人 | docs 目录索引 |
 

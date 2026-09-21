@@ -2333,6 +2333,45 @@ eq("README 文档表漏掉的核心文档",
  */
 ok("README 与 docs 索引都说明了当前边界（单用户 / 线上后台连不上后端）",
   readmeRoot.includes("单用户") && docsIndex.includes("单用户"));
+/*
+ * 文档里的**锚点链接**（`[第 8 节](#8-转真后端时改什么)`）必须真的指得到标题。
+ *
+ * 为什么要有这条：改文档时最容易被忽略的破坏就是**改了小标题**——
+ * 正文读起来完全正常，但所有指向它的锚点都悄悄失效了（GitHub 上点了没反应）。
+ * 这次就真的发生过一次：把「转真后端时改什么」加上"（已做过）"之后，
+ * 别处的 `#8-转真后端时改什么` 立刻变成了死链接，而当时没有任何检查会发现。
+ *
+ * 只校验**同一份文档内**的锚点；跨文档引用（`docs/xxx.md#…`）先不查 ——
+ * 那需要按目标文档解析，容易写成"看起来在查、其实没查"的样子。
+ * slug 规则按 GitHub 的近似实现：转小写、去标点、空格转连字符
+ * （中日韩字符保留）。这条检查宁可漏报也不要误报：误报会让人去改正确的标题。
+ */
+function headingSlug(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/<[^>]*>/g, "")
+    .replace(/[^\p{Letter}\p{Number}\s_-]/gu, "")
+    .trim()
+    .replace(/\s+/g, "-");
+}
+
+const docFiles = [
+  "README.md",
+  "PROJECT.md",
+  ...["使用手册", "内容维护手册", "技术架构", "部署与发布", "后台API约定", "后端开发方案"]
+    .map((name) => `docs/${name}.md`),
+];
+const brokenAnchors: string[] = [];
+for (const file of docFiles) {
+  const text = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  const headings = [...text.matchAll(/^#{1,6}\s+(.+)$/gm)].map((match) => headingSlug(match[1] ?? ""));
+  for (const match of text.matchAll(/\]\(#([^)]+)\)/g)) {
+    const target = decodeURIComponent(match[1] ?? "");
+    if (!headings.includes(headingSlug(target))) brokenAnchors.push(`${file} → #${target}`);
+  }
+}
+eq("文档内的锚点链接都指得到标题", brokenAnchors, []);
+
 // 已经变成假话的旧说法不能残留（接上服务端后"数据只在浏览器里"不再成立）
 const staleClaims = [
   ["README.md", readmeRoot, "数据只保存在**这台电脑的浏览器**里"],
