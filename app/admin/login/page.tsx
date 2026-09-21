@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { LoginForm } from "@/components/admin/LoginForm";
+import { AdminBackendHint } from "@/components/admin/AdminBackendHint";
 
 export const metadata: Metadata = {
   title: "登录",
@@ -45,6 +46,11 @@ export default function AdminLoginPage() {
           <p className="mt-2 text-sm leading-relaxed text-ink-500">
             登录后才能查看学生、排课与课时数据。
           </p>
+
+          <div className="mt-4">
+            {/* 登录页也必须能看/改后端地址：连不上后端时，人正是卡在这一页 */}
+            <AdminBackendHint />
+          </div>
 
           <div className="mt-7">
             <LoginForm />

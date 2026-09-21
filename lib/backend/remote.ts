@@ -1,4 +1,5 @@
 import { clearToken, readToken } from "@/lib/auth/token";
+import { backendBase } from "@/lib/backend/connection";
 
 /**
  * 远端代理：把本地 `api` 的每一个方法换成对后端的 `POST /api/call`。
@@ -23,13 +24,19 @@ import { clearToken, readToken } from "@/lib/auth/token";
  * 这里把它翻译成一句人话，并**立刻清掉本地令牌**，好让界面下次检查时把人送回登录页。
  */
 
-/** 走远端的判定：环境变量存在且非空。 */
+/**
+ * 当前生效的后端地址（"" = 没有可用后端）。
+ *
+ * 判定逻辑集中在 `lib/backend/connection.ts`（优先级：**界面手动指定的地址** →
+ * 构建期环境变量 → 没有）。早先这里直接读环境变量，于是有两件事说不通：
+ * 界面上改不了地址；而后端没跑时界面照样宣称"已连接后端"。现在地址与连接状态
+ * 都只有一个真源。
+ */
 export function remoteBase(): string {
-  const base = process.env.NEXT_PUBLIC_API_BASE;
-  return typeof base === "string" ? base.trim().replace(/\/+$/, "") : "";
+  return backendBase();
 }
 
-/** 当前是否使用远端后端（页面用它决定是否显示"本机服务"提示）。 */
+/** 当前是否配置了后端（页面用它决定走远端还是本地实现）。 */
 export function isRemoteMode(): boolean {
   return remoteBase() !== "";
 }

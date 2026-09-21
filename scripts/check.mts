@@ -136,6 +136,14 @@ import {
   profileText,
 } from "@/lib/backend/student-profile";
 import { createSeedDatabase } from "@/lib/backend/seed";
+import {
+  ENTITY_SPECS,
+  IMPORT_ENTITIES,
+  csvTemplate,
+  detectFormat,
+  jsonTemplate,
+  parseImport,
+} from "@/lib/backend/import";
 
 const seedDb = createSeedDatabase();
 import {
@@ -3259,6 +3267,148 @@ ok("未知数据集会报错", exBadDataset.ok === false && exBadDataset.error.i
 // 8) 导出是只读的：跑完一圈数据不能变
 eq("导出前后数据完全一致",
   JSON.stringify(exDb), JSON.stringify(seedDb));
+
+console.log("\n=== 11.1 批量导入（CSV / JSON）===");
+
+/*
+ * 批量导入是**一次写入几百条**的操作，出错代价最高，所以这里钉得细一点：
+ * 解析要能吃下 Excel 导出的各种写法、校验要能指出"第几行错在哪"、
+ * 落库要**只新增不覆盖**且**重复导入不重复加**。
+ */
+const importMemory = createMemoryStore();
+__useStoreForTesting(importMemory);
+await api.importDatabase(serializeDatabase(seedDb));
+
+const teacherCsv = [
+  "姓名,可带科目,职务,电话,在职",
+  '张老师,"初中数学|初中物理",授课教师,138-0000-0001,是',
+  "李老师,初中英语,晚辅导老师,138-0000-0002,否",
+  "王老师,,全科教师,,在职",
+].join("\r\n");
+
+const parsedTeachers = parseImport("teachers", teacherCsv);
+eq("CSV 表头按中文列名识别", parsedTeachers.headers, ["姓名", "可带科目", "职务", "电话", "在职"]);
+eq("CSV 全部行都通过校验", parsedTeachers.problems, []);
+eq("解析出 3 位教师", parsedTeachers.records.length, 3);
+eq("用 | 分隔的科目拆成数组", parsedTeachers.records[0]?.subjects, ["初中数学", "初中物理"]);
+eq("是/否 转成布尔", [parsedTeachers.records[0]?.active, parsedTeachers.records[1]?.active], [true, false]);
+eq("「在职」也算真值（Excel 里常见的写法）", parsedTeachers.records[2]?.active, true);
+
+// 引号内的逗号与换行、双写引号、BOM、CRLF：Excel 导出真的会出现
+const trickyCsv = "\uFEFF姓名,年级,家长联系方式,备注\r\n" +
+  '"李四,小",初二,138-0000-0003,"第一行\n第二行"\r\n' +
+  '"王五",,,"他说""你好"""\r\n';
+const tricky = parseImport("students", trickyCsv);
+eq("带引号的逗号不会被当分隔符", tricky.records[0]?.name, "李四,小");
+eq("引号内的换行保留在单元格里", tricky.records[0]?.note, "第一行\n第二行");
+eq("双写引号还原成一个引号", tricky.records[1]?.note, '他说"你好"');
+eq("BOM 不影响第一列识别", tricky.records[0]?.name, "李四,小");
+
+// 校验要指出具体行与原因
+const badCsv = "姓名,年级,状态\n张三,初二,在读\n,初一,在读\n李四,初二,已毕业\n";
+const bad = parseImport("students", badCsv);
+eq("不是候选值的枚举被拦下并说明原因",
+  bad.problems.map((item) => item.line), [3, 4]);
+ok("错误信息里说清了是哪一列：空必填列报姓名、错枚举报状态",
+  (bad.problems[0]?.reason ?? "").includes("姓名") &&
+  (bad.problems[1]?.reason ?? "").includes("状态") &&
+  (bad.problems[1]?.reason ?? "").includes("已毕业"));
+eq("能导入的仍只有通过校验的那一条", bad.records.length, 1);
+
+// 必填列缺失：整份不导（通常是选错了实体或列名写错）
+const wrongEntity = parseImport("students", "教师姓名,科目\n张老师,数学\n");
+eq("缺少必填列时列出缺哪一列", wrongEntity.missingRequiredHeaders, ["姓名"]);
+eq("缺少必填列时不产出任何记录", wrongEntity.records.length, 0);
+
+// 不认识的列会被忽略但不是错误（表格里常有额外列）
+const extraCsv = "姓名,年级,微信昵称\n张三,初二,aka\n";
+const extra = parseImport("students", extraCsv);
+eq("多余列被记入未识别列表", extra.unknownHeaders, ["微信昵称"]);
+eq("多余列不影响导入", extra.records.length, 1);
+
+// JSON：数组与 { students: [...] } 两种形状都接受
+const jsonArray = parseImport("classrooms", JSON.stringify([
+  { name: "301 教室", kind: "上课用教室", capacity: 8 },
+]));
+eq("JSON 数组可以直接导", jsonArray.records.length, 1);
+eq("JSON 里的数字列保持数字", jsonArray.records[0]?.capacity, 8);
+const jsonWrapped = parseImport("classrooms", JSON.stringify({ classrooms: [{ 名称: "302 教室", 用途: "上课用教室" }] }));
+eq("JSON 对象按实体键取数组", jsonWrapped.records.length, 1);
+eq("JSON 里用中文列名也认", jsonWrapped.records[0]?.name, "302 教室");
+eq("空 JSON 对象会说明缺什么",
+  parseImport("students", JSON.stringify({ teachers: [] })).problems.length, 1);
+
+// 模板与解析器同源：模板必须能被自己解析
+for (const entity of IMPORT_ENTITIES) {
+  const fromTemplate = parseImport(entity, csvTemplate(entity));
+  eq(`CSV 模板能被自己解析（${ENTITY_SPECS[entity].label}）`,
+    [fromTemplate.missingRequiredHeaders, fromTemplate.records.length], [[], 1]);
+  const jsonFromTemplate = parseImport(entity, jsonTemplate(entity));
+  eq(`JSON 模板能被自己解析（${ENTITY_SPECS[entity].label}）`,
+    [jsonFromTemplate.missingRequiredHeaders, jsonFromTemplate.records.length], [[], 1]);
+}
+eq("格式自动识别：JSON 看首个非空字符", [detectFormat('  [{"a":1}]'), detectFormat("姓名,年级")], ["json", "csv"]);
+
+// 走接口真导一次（同一份实现在服务端也跑）
+const beforeTeachers = (await api.teachers.list()).length;
+const applied = await api.imports.apply({ entity: "teachers", text: teacherCsv, fileName: "教师名单.csv" });
+eq("导入成功", applied.ok, true);
+eq("新增 3 位教师", applied.added, 3);
+eq("数据库里确实多了 3 位", (await api.teachers.list()).length, beforeTeachers + 3);
+eq("导入的教师带上了科目与在职状态",
+  (await api.teachers.list()).find((teacher) => teacher.name === "李老师")?.active, false);
+
+// 幂等：同一份文件重复导入不会重复加
+const reimported = await api.imports.apply({ entity: "teachers", text: teacherCsv });
+eq("重复导入新增 0 条", reimported.added, 0);
+eq("重复导入把 3 条都记成跳过", reimported.skipped.length, 3);
+eq("重复导入后总数没变", (await api.teachers.list()).length, beforeTeachers + 3);
+
+// 一次导入只写一条日志（日志上限 500，逐行写会把历史冲掉）
+const importLogs = (await api.logs.list(20)).filter((log) => log.action === "批量导入");
+// 到这里一共导入了两次（首次 + 重复导入），因此应当**恰好两条**：
+// 每条对应"一次导入"，而不是"一行记录一条"
+eq("每次导入只留一条日志（两次导入 = 两条日志）", importLogs.length, 2);
+ok("日志里写清了导入对象与条数（不是逐行记录）",
+  importLogs.every((log) => (log.summary ?? "").includes("教师")) &&
+  importLogs.some((log) => (log.summary ?? "").includes("3 条")));
+
+// 必填列缺失时整份拒绝，且**不动现有数据**
+const rejected = await api.imports.apply({ entity: "students", text: "教师姓名,科目\n张老师,数学\n" });
+eq("必填列缺失时导入被拒", rejected.ok, false);
+ok("拒绝时给出了缺哪一列", (rejected.error ?? "").includes("姓名"));
+eq("被拒时没有写入任何记录", (await api.students.list()).length, seeded.length);
+
+// 学生：按「姓名 + 家长联系方式」判重
+const studentCsv = "姓名,年级,家长联系方式\n导入同学甲,初二,139-0000-0001\n导入同学甲,初二,139-0000-0009\n";
+const studentsImported = await api.imports.apply({ entity: "students", text: studentCsv });
+eq("同姓名但家长联系方式不同 → 算两个人", studentsImported.added, 2);
+eq("导入的学生默认是在读状态",
+  (await api.students.list()).filter((student) => student.name === "导入同学甲").every((s) => s.status === "在读"), true);
+eq("导入的学生没有报课记录（报课要走页面流程）",
+  (await api.students.list()).find((student) => student.name === "导入同学甲")?.enrollments.length, 0);
+
+// 课程：重名会被拦（课程名是引用键）
+const courseCsv = "课程名,分类,班型\n导入课程甲,初中课内,一对一定制课\n导入课程甲,初中课内,一对一定制课\n";
+const coursesImported = await api.imports.apply({ entity: "courses", text: courseCsv });
+eq("同名课程只进第一条", coursesImported.added, 1);
+eq("第二条被记成跳过", coursesImported.skipped.length, 1);
+
+/*
+ * 后悔药：`imports.apply` 在写入前把当前库存进 BACKUP_KEY（只留最近一次），
+ * 所以 `restoreBackup()` 回退的是**最后一次导入之前**的状态 ——
+ * 也就是"课程那次导入"没发生、但更早导入的学生还在。
+ * （断言写准这一点，免得以后有人以为它能把所有导入都撤掉。）
+ */
+await api.restoreBackup();
+eq("恢复后最后一次导入的课程消失（回退到导入前）",
+  (await api.courses.list()).some((course) => course.name === "导入课程甲"), false);
+ok("更早导入的学生仍在（后悔药只回退最近一次导入）",
+  (await api.students.list()).some((student) => student.name === "导入同学甲"));
+
+// 收尾：把库恢复成夹具原样，避免影响后面的断言（后面几节都在同一份内存存储上）
+await api.importDatabase(serializeDatabase(seedDb));
+eq("收尾：库回到夹具规模", (await api.students.list()).length, seeded.length);
 
 console.log("\n=== 12. 话术专区 ===");
 

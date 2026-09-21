@@ -208,8 +208,24 @@ lib/backend/api.ts        服务层实现（当前 106 个方法）；数据一�
 
 ### 7. 运维与审计
 
-`exportDataset`、`exportDatabase`、`importDatabase`、`hasBackup`、`restoreBackup`、
+`exportDataset`、`exportDatabase`、`importDatabase`、`imports.apply`、`hasBackup`、`restoreBackup`、
 `reset`、`setOperator`、`logs.list`、`logs.clear`。
+
+**两种"导入"别混**：
+
+| | `importDatabase`（整库导入） | `imports.apply`（批量导入） |
+| --- | --- | --- |
+| 语义 | **整体替换**整个数据库 | **只新增**记录（同名跳过） |
+| 用途 | 换机器、换数据库、搬回一份备份 | 把 Excel / 表格里的名单一次录进来 |
+| 对象 | 全部数据 | 学生 / 教师 / 教室 / 课程，一次一种 |
+| 输入 | 本系统导出的 JSON 全文 | CSV 或 JSON 文本 + 实体名 |
+| 后悔药 | 导入前自动备份（`restoreBackup` 可回） | 同样在导入前留一份（同一个键） |
+| 幂等 | 是（同一份文件重复导入结果相同） | 是（重复导入会被判重跳过） |
+
+`imports.apply` 的要点：**判定与落库都在服务端**（`lib/backend/import.ts` 是同一份实现，
+页面用它做预览），成功时返回 `{ added, skipped, problems, headers, unknownHeaders }`，
+逐行给出"第几行为什么跳过/没通过"。它**一次落盘、只写一条日志**（日志上限 500 条，
+逐行写会把历史冲掉），并且**不导入报课/收款/课时** —— 那些牵动账本，必须走页面流程。
 
 其中 `exportDataset` 是**按需导出**（数据集 × 选中的行 × 格式）：按
 `lib/backend/export.ts` 的数据集清单实现（服务端跑的就是它），注意两点 —— `ids` 为空表示全选；

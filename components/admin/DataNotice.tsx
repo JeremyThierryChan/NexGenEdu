@@ -1,7 +1,9 @@
 "use client";
 
+import { useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/Button";
-import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
+import { BackendStatus } from "@/components/admin/BackendStatus";
+import { backendBase, getConnectionState, subscribeConnection } from "@/lib/backend/connection";
 
 /**
  * 后台数据提示条。
@@ -22,35 +24,44 @@ import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
  * 「数据与备份 → 导入空库」就够了，而且那条路会先自动备份。
  */
 export function DataNotice({ onRefresh }: { onRefresh?: () => void }) {
-  const remote = isRemoteMode();
+  /*
+   * 这段话必须**依据真实探活结果**来说，不能只看"配没配地址"。
+   * 以前它只判断环境变量，于是后端没在跑时照样宣称"已连接后端…数据不会丢" ——
+   * 那是句假话，而且正好是出事时最不该说的一句（让人以为数据平安）。
+   */
+  const state = useSyncExternalStore(subscribeConnection, getConnectionState, getConnectionState);
 
   return (
     <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-ink-200 bg-white px-3.5 py-2.5">
-      {remote ? (
+      {state.status === "ok" || state.status === "ready" ? (
         <p className="min-w-0 text-xs leading-relaxed text-ink-500">
-          已连接后端（<span className="font-mono text-ink-600">{remoteBase()}</span>）：
+          已连接后端（<span className="font-mono text-ink-600">{backendBase()}</span>）：
           数据保存在<strong className="font-medium text-ink-700">服务端数据库</strong>里，
           不在浏览器里 —— 换设备、清缓存都不会丢；后端每天会自动备份一份
           （「数据与备份」页可导出 JSON 留档）。
         </p>
+      ) : state.status === "down" ? (
+        <p className="min-w-0 text-xs leading-relaxed text-ink-500">
+          <strong className="font-medium text-danger-600">连不上后端</strong>
+          （<span className="font-mono text-ink-600">{state.base === "" ? "地址未配置" : state.base}</span>）：
+          {state.reason}
+          <strong className="font-medium text-ink-700">这不代表数据丢了</strong> ——
+          数据在服务端的库文件里；后端起来后刷新即可。点右边看详情或手动指定地址。
+        </p>
       ) : (
         <p className="min-w-0 text-xs leading-relaxed text-ink-500">
-          这是<strong className="font-medium text-ink-700">线上静态站点</strong>：
-          没有后端可连，后台不保存任何数据（因此也无法登录）。
-          正式使用请在本机运行 <span className="font-mono">npm run server</span> 与{" "}
-          <span className="font-mono">npm run dev</span>。
+          正在检查后端连接状态…
+          {backendBase() === "" && "（当前没有配置后端地址）"}
         </p>
       )}
-      {onRefresh !== undefined && (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onRefresh}
-          className="shrink-0"
-        >
-          刷新
-        </Button>
-      )}
+      <div className="flex shrink-0 items-center gap-2">
+        <BackendStatus />
+        {onRefresh !== undefined && (
+          <Button variant="outline" size="sm" onClick={onRefresh}>
+            刷新
+          </Button>
+        )}
+      </div>
     </div>
   );
 }

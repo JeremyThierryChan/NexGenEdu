@@ -22,11 +22,22 @@
  * 用法：`npm run check:auth`
  */
 
+import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { withTempServer } from "./temp-server.mts";
 import { login, prepareCredential } from "../server/auth.mts";
+import { createMemoryStore } from "../lib/backend/storage.ts";
+import {
+  __useConnectionStoreForTesting,
+  backendBase,
+  isLocalBase,
+  autoDetectBackend,
+  looksLikeBase,
+  probeBackend,
+  setBackendOverride,
+} from "../lib/backend/connection.ts";
 
 let failures = 0;
 
@@ -122,6 +133,31 @@ function checkCredentialFile(): void {
     ) as Record<string, unknown>;
     check("重新生成后文件里带上了明文", healedStored.password === healed.generatedPassword);
 
+    /*
+     * 环境变量指定的口令也必须落进文件：否则"文件里那份"与"实际生效那份"会不一致，
+     * 哪天不带环境变量启动就会突然换口令（真发生过，用户当场被挡在门外）。
+     */
+    const envDir = mkdtempSync(path.join(tmpdir(), "nexgenedu-cred4-"));
+    process.env.NEXGENEDU_DB_DIR = envDir;
+    process.env.NEXGENEDU_ADMIN_PASSWORD = "由环境变量指定的口令-abc123";
+    const fromEnv = prepareCredential();
+    check("用环境变量启动时来源标记正确",
+      fromEnv.source === "环境变量" && fromEnv.generatedPassword === null);
+    const envFile = path.join(envDir, "admin-credential.json");
+    check("环境变量指定的口令被同步写进凭证文件（一份真相）", existsSync(envFile));
+    const envStored = JSON.parse(readFileSync(envFile, "utf8")) as Record<string, unknown>;
+    check("文件里的口令就是环境变量那个",
+      envStored.password === "由环境变量指定的口令-abc123",
+      `文件里是 ${String(envStored.password)}`);
+    check("用环境变量那个口令能登录", login("admin", "由环境变量指定的口令-abc123").ok === true);
+    // 再模拟"下次不带环境变量启动"：应当仍然用同一份口令，而不是回退成别的
+    delete process.env.NEXGENEDU_ADMIN_PASSWORD;
+    const restart = prepareCredential();
+    check("下次不带环境变量启动，口令不变",
+      restart.source === "已有凭证文件" && login("admin", "由环境变量指定的口令-abc123").ok === true,
+      `source = ${restart.source}`);
+    rmSync(envDir, { recursive: true, force: true });
+
     rmSync(probe, { recursive: true, force: true });
     rmSync(legacy, { recursive: true, force: true });
   } finally {
@@ -132,7 +168,47 @@ function checkCredentialFile(): void {
   }
 }
 
+/*
+ * ── 连接模块（后端地址从哪来、以及"到底连上没有"）────────────────────────────
+ *
+ * 这一段守两件事，都是这一天真实踩过的坑：
+ *   1. **地址优先级**：界面手动指定 > 构建期环境变量 > 没有；
+ *   2. **只认自报家门的服务**：端口上跑着别的程序时，不能判成"后端连上了"。
+ *      （真事：3000 上是另一个 Next 项目，人却在那个页面上反复试口令。）
+ */
+async function checkConnectionModule(): Promise<void> {
+  const memory = createMemoryStore();
+  __useConnectionStoreForTesting(memory);
+  const savedEnv = process.env.NEXT_PUBLIC_API_BASE;
+
+  try {
+    delete process.env.NEXT_PUBLIC_API_BASE;
+    equal("没配任何地址时 backendBase 为空", backendBase(), "");
+    setBackendOverride("http://localhost:4999/");
+    equal("手动指定优先（并去掉末尾斜杠）", backendBase(), "http://localhost:4999");
+    process.env.NEXT_PUBLIC_API_BASE = "http://localhost:4000";
+    equal("手动指定压过构建期地址", backendBase(), "http://localhost:4000".replace("4000", "4999"));
+    setBackendOverride(null);
+    equal("清除手动指定后回到构建期地址", backendBase(), "http://localhost:4000");
+
+    check("本机地址识别正确", isLocalBase("http://localhost:4000") && isLocalBase("http://127.0.0.1:4000"));
+    check("非本机地址识别为非本机", !isLocalBase("http://192.168.1.9:4000"));
+    check("地址格式校验", looksLikeBase("http://localhost:4000") && !looksLikeBase("localhost:4000"));
+
+    // 探一个"不是本系统"的地址：必须明确说不是，而不是算成功
+    const stranger = await probeBackend("http://127.0.0.1:9");
+    check("探测无响应的地址 → 失败并给出原因",
+      stranger.ok === false && stranger.reason.length > 0, JSON.stringify(stranger));
+  } finally {
+    setBackendOverride(null);
+    if (savedEnv === undefined) delete process.env.NEXT_PUBLIC_API_BASE;
+    else process.env.NEXT_PUBLIC_API_BASE = savedEnv;
+  }
+}
+
 console.log("=== 服务端认证自检（真实 HTTP，未登录者一律当外人）===");
+console.log("\n[0.5] 后端地址与连接判定");
+await checkConnectionModule();
 console.log("[0] 凭证文件（「忘了口令去哪看」这条承诺是否成立）");
 checkCredentialFile();
 
@@ -151,6 +227,70 @@ try {
     equal("未登录调老写接口 /api/payments 也 401",
       (await raw(base, "/api/payments", { method: "POST", body: {} })).status, 401);
     equal("未登录看 /api/status 也 401", (await raw(base, "/api/status")).status, 401);
+
+    /*
+     * ── 跨源预检（CORS）──
+     *
+     * 这一段守的是一个**只有浏览器才会撞上**的坑：登录之后每个请求都带
+     * `Authorization`，而浏览器会为它先发 OPTIONS 预检；服务端若没在
+     * `access-control-allow-headers` 里列出 `authorization`，浏览器就拦掉请求。
+     * 症状是"密码明明对、登录后却被弹回登录页"，而 Node 里的测试全都不走 CORS，
+     * 一条断言都不会红。所以这里直接断言响应头。
+     */
+    console.log("\n[1.5] 跨源预检（浏览器进后台要靠它）");
+    const preflight = await fetch(`${base}/api/session`, {
+      method: "OPTIONS",
+      headers: {
+        origin: "http://localhost:3000",
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "authorization",
+      },
+    });
+    const allowHeaders = (preflight.headers.get("access-control-allow-headers") ?? "").toLowerCase();
+    check("预检放行 localhost 来源", preflight.status === 204,
+      `HTTP ${preflight.status}`);
+    check("预检允许 authorization 头（漏了它，登录后会被弹回登录页）",
+      allowHeaders.includes("authorization"),
+      `access-control-allow-headers = ${allowHeaders}`);
+    check("预检仍允许 content-type", allowHeaders.includes("content-type"));
+    const evil = await fetch(`${base}/api/session`, {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://evil.example.com",
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "authorization",
+      },
+    });
+    check("非本机来源拿不到 CORS 放行头（浏览器即拦截）",
+      evil.headers.get("access-control-allow-origin") === null,
+      `allow-origin = ${String(evil.headers.get("access-control-allow-origin"))}`);
+
+    /*
+     * 自动探测必须**跳过别人的服务**：先造一个"冒充后端"的服务（端口上跑着别的程序，
+     * 这一天真的发生过），再让探测在它和我们真实后端之间选 —— 必须选对的那个。
+     */
+    console.log("\n[1.6] 自动探测只认本系统的后端");
+    const stranger = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true, service: "some-other-app", db: "whatever.db" }));
+    });
+    const strangerPort: number = await new Promise((resolve) => {
+      stranger.listen(0, "127.0.0.1", () => {
+        const address = stranger.address();
+        resolve(typeof address === "object" && address !== null ? address.port : 0);
+      });
+    });
+    try {
+      const strangerBase = `http://127.0.0.1:${strangerPort}`;
+      const strangerProbe = await probeBackend(strangerBase);
+      check("探测到别的服务时不算连上",
+        strangerProbe.ok === false && strangerProbe.reason.includes("别的服务"),
+        JSON.stringify(strangerProbe));
+      const found = await autoDetectBackend([strangerBase, base]);
+      equal("自动探测跳过别的服务、选中本系统后端", found?.base ?? null, base);
+    } finally {
+      stranger.close();
+    }
 
     console.log("\n[2] 探活是公开的，但只说最少的话");
     const health = await raw(base, "/health");

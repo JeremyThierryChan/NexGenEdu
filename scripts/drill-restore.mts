@@ -28,8 +28,9 @@
  * 用法：`npm run drill:restore`
  */
 
-import { copyFileSync, existsSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { startServer, repoRoot } from "./temp-server.mts";
 import { openDatabase } from "../server/db.mts";
 import {
@@ -99,11 +100,16 @@ async function status(base: string): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
 
+/** 把可能的相对路径解析成绝对路径（临时库现在放在系统临时目录里）。 */
+function resolveDbPath(dbPath: string): string {
+  return isAbsolute(dbPath) ? dbPath : join(repoRoot, dbPath);
+}
+
 /** 删掉数据库文件本身（连同 WAL 文件）：模拟"文件没了"。 */
 function destroyDatabase(dbPath: string): string[] {
   const removed: string[] = [];
   for (const suffix of ["", "-wal", "-shm"]) {
-    const file = join(repoRoot, `${dbPath}${suffix}`);
+    const file = `${resolveDbPath(dbPath)}${suffix}`;
     if (existsSync(file)) {
       rmSync(file);
       removed.push(`${dbPath}${suffix}`);
@@ -181,7 +187,15 @@ function fingerprintOfSnapshot(snapshot: {
 /* ── 演练 ────────────────────────────────────────────────────────────── */
 
 const stamp = `${Date.now()}`;
-const dbPath = `server/data/drill-${stamp}.db`;
+/*
+ * 演练的库与凭证都放进**一次性临时目录**。
+ *
+ * 原先放在 `server/data/drill-*.db`：凭证文件是"与数据库同目录"的，于是演练会把
+ * **机构真实的口令覆盖成测试口令**（真发生过：跑完演练，机构登不进去了）。
+ * 临时目录跑完整个删掉，从根上避免。
+ */
+const drillDir = mkdtempSync(join(tmpdir(), "nexgenedu-drill-"));
+const dbPath = join(drillDir, "drill.sqlite");
 const backupDirPath = join(repoRoot, `server/data/drill-backups-${stamp}`);
 
 // 让本进程的备份模块也指向临时目录：策略检查（保留份数、每天一份）要在隔离环境里做，
@@ -337,12 +351,12 @@ try {
   await handle.stop();
   handle = null;
   const removedFiles = destroyDatabase(dbPath);
-  check("数据库文件确实被删掉了", removedFiles.length > 0 && !existsSync(join(repoRoot, dbPath)),
+  check("数据库文件确实被删掉了", removedFiles.length > 0 && !existsSync(resolveDbPath(dbPath)),
     `删除了 ${removedFiles.join("、")}`);
 
   /* 6. 恢复：只靠备份文件 */
   console.log("\n[6/8] 用备份文件恢复");
-  const restoredPath = join(repoRoot, dbPath);
+  const restoredPath = resolveDbPath(dbPath);
   copyFileSync(backupFile.path, restoredPath);
   check("备份文件已复制回数据库路径", statSync(restoredPath).size > 0);
 
@@ -381,8 +395,10 @@ try {
   if (handle !== null) await handle.stop().catch(() => undefined);
   destroyDatabase(dbPath);
   if (existsSync(backupDirPath)) rmSync(backupDirPath, { recursive: true, force: true });
+  rmSync(drillDir, { recursive: true, force: true });
   const leftovers = readdirSync(join(repoRoot, "server/data")).filter((name) => name.startsWith("drill-"));
-  check("临时文件已清理干净", leftovers.length === 0, `还剩：${leftovers.join("、")}`);
+  check("临时文件已清理干净（含临时库与临时凭证目录）",
+    leftovers.length === 0 && !existsSync(drillDir), `还剩：${leftovers.join("、")}`);
 }
 
 console.log(

@@ -19,9 +19,12 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+// path 用到了 mkdtempSync 的结果拼接（下面 withTempServer）
+import path from "node:path";
 import { createServer } from "node:net";
 
 export const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -198,10 +201,18 @@ export async function withTempServer<T>(
   options: { env?: Record<string, string> } = {},
 ): Promise<T> {
   const port = await freePort();
-  const dbPath = `server/data/dual-check-${port}.db`;
-
-  // 端口被复用时可能残留同名库，先清掉：要的是**空库**这个起点
-  removeDbFiles(dbPath);
+  /*
+   * 数据库与**凭证**都放进一次性临时目录。
+   *
+   * 为什么不是放在 `server/data/` 下（哪怕名字带端口）：
+   * 凭证文件是"与数据库同目录"的（见 server/auth.mts 的 credentialFile），
+   * 临时库若落在真实目录里，就会**把机构真实的口令覆盖成测试口令** ——
+   * 真发生过一次：跑完自检之后机构登不进去了。临时目录跑完整个删掉，从根上避免。
+   *
+   * 库文件名仍带端口：`/health` 只回文件名，自检靠它确认"应答的是本次这个进程"。
+   */
+  const dir = mkdtempSync(path.join(tmpdir(), "nexgenedu-check-"));
+  const dbPath = path.join(dir, `db-${port}.sqlite`);
 
   const handle = await startServer({
     dbPath,
@@ -217,7 +228,7 @@ export async function withTempServer<T>(
     });
   } finally {
     await handle.stop();
-    removeDbFiles(dbPath);
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 

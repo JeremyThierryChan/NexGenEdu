@@ -93,6 +93,17 @@ export function LoginForm() {
         </p>
       )}
 
+      {error !== "" && (
+        /* 口令只在后端启动时打印一次（也存成文件），所以失败时直接说清去哪儿找 ——
+           这句话不泄露口令本身，只省掉"我明明见过它"的来回试。 */
+        <p className="rounded-md border border-ink-200 bg-ink-50 px-3 py-2 text-xs leading-relaxed text-ink-600">
+          口令在后端启动时打印过一次，也存在{" "}
+          <span className="font-mono">server/data/admin-credential.json</span> 里（明文，直接打开就能看）。
+          若找不到该文件，说明后端是用 <span className="font-mono">NEXGENEDU_ADMIN_PASSWORD</span>{" "}
+          启动的。
+        </p>
+      )}
+
       <Button type="submit" disabled={pending || unavailable !== null} className="w-full">
         {pending ? "登录中…" : "登录"}
       </Button>

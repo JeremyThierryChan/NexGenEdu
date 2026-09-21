@@ -1,6 +1,7 @@
 "use client";
 
-import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
+import { isRemoteMode } from "@/lib/backend/remote";
+import { backendBase } from "@/lib/backend/connection";
 import { clearToken, readToken, writeToken } from "@/lib/auth/token";
 
 /**
@@ -49,31 +50,77 @@ export function loginUnavailableReason(): string | null {
   );
 }
 
-/** 读取当前会话：把令牌交给服务端验一次，验不过就当未登录。 */
-export async function getSession(): Promise<Session | null> {
-  const base = remoteBase();
-  if (base === "") return null;
+/**
+ * 会话检查的结果。
+ *
+ * **为什么要区分原因**：以前这里失败一律返回 `null`，界面就只能把"未登录"一个结论
+ * 呈现出来 —— 于是"后端没开""浏览器把请求拦了（CORS 预检）""令牌过期"三种完全不同的
+ * 情况，表现都是**无声地弹回登录页**。用户看到的是"密码明明对，怎么都进不去"，
+ * 而没有一条线索能指向真正的原因（这一轮就为此绕了很久）。
+ * 现在把原因带出来，界面才能说人话。
+ */
+export type SessionCheck = {
+  session: Session | null;
+  reason: "ok" | "no-backend" | "no-token" | "expired" | "unreachable";
+  /** 排错用的细节（只在控制台与"连不上"提示里显示，不含敏感信息）。 */
+  detail?: string;
+};
+
+/**
+ * 向服务端确认会话（唯一可信来源）。
+ *
+ * `expired` 会顺手清掉本地令牌；`unreachable` **不清** —— 那多半是后端没开或请求被拦，
+ * 把令牌留着，等后端恢复就不用重新登录。
+ */
+export async function checkSession(): Promise<SessionCheck> {
+  const base = backendBase();
+  if (base === "") return { session: null, reason: "no-backend" };
 
   const token = readToken();
-  if (token === null) return null;
+  if (token === null) return { session: null, reason: "no-token" };
 
+  let response: Response;
   try {
-    const response = await fetch(`${base}/api/session`, {
+    response = await fetch(`${base}/api/session`, {
       headers: { authorization: `Bearer ${token}` },
+      /*
+       * **必须有超时**：没有它的话，请求卡住（后端没响应、被拦截、连接排队）
+       * 会让界面永远停在"正在检查登录状态…"—— 用户看不到任何原因、也等不到结果。
+       * 这一条是踩出来的：另一种"无声失败"。
+       */
+      signal: AbortSignal.timeout(8000),
     });
-    if (response.status === 401) {
-      // 服务端重启或闲置过期都会走到这里：清掉本地令牌，别留一个"看起来还在"的状态
-      clearToken();
-      return null;
-    }
-    if (!response.ok) return null;
-    const payload = (await response.json()) as { ok?: boolean; username?: string };
-    if (payload.ok !== true || typeof payload.username !== "string") return null;
-    return { username: payload.username, loginAt: "" };
-  } catch {
-    // 后端没开：当作未登录（界面会明确提示连不上，而不是假装登录着）
-    return null;
+  } catch (cause) {
+    // fetch 抛错 = 根本没拿到响应：后端没开、地址不对，或**请求被浏览器拦掉**（CORS）
+    const detail = `${base}/api/session 请求失败：${cause instanceof Error ? cause.message : String(cause)}`;
+    console.warn(
+      `[登录] ${detail}\n` +
+      "  常见原因：① npm run server 没在跑；② 该请求带的 Authorization 头没被服务端放行" +
+      "（预检响应里的 access-control-allow-headers 必须包含 authorization）；" +
+      "③ 浏览器把旧的预检结果缓存住了（重启浏览器即可清掉，服务端现在只缓存 60 秒）。",
+    );
+    return { session: null, reason: "unreachable", detail };
   }
+
+  if (response.status === 401) {
+    // 服务端重启或闲置过期都会走到这里：清掉令牌，别留一个"看起来还在"的状态
+    clearToken();
+    return { session: null, reason: "expired", detail: "服务端说该令牌无效或已过期。" };
+  }
+  if (!response.ok) {
+    return { session: null, reason: "unreachable", detail: `HTTP ${response.status}（${base}/api/session）` };
+  }
+
+  const payload = (await response.json().catch(() => ({}))) as { ok?: boolean; username?: string };
+  if (payload.ok !== true || typeof payload.username !== "string") {
+    return { session: null, reason: "unreachable", detail: "服务端返回的会话格式不认识。" };
+  }
+  return { session: { username: payload.username, loginAt: "" }, reason: "ok" };
+}
+
+/** 读取当前会话（只关心"有没有"时用它）。 */
+export async function getSession(): Promise<Session | null> {
+  return (await checkSession()).session;
 }
 
 export async function isLoggedIn(): Promise<boolean> {
@@ -85,7 +132,7 @@ export async function login(
   username: string,
   password: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const base = remoteBase();
+  const base = backendBase();
   const unavailable = loginUnavailableReason();
   if (unavailable !== null || base === "") {
     return { ok: false, error: unavailable ?? "没有配置后端地址。" };
@@ -101,9 +148,14 @@ export async function login(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ username: username.trim(), password }),
+      // 同上：登录也不能无限等（否则按钮永远停在"登录中…"）
+      signal: AbortSignal.timeout(10_000),
     });
   } catch {
-    return { ok: false, error: `连不上后端（${base}）：请确认 npm run server 正在运行。` };
+    return {
+      ok: false,
+      error: `连不上后端（${base}）：请确认 npm run server 正在运行，且后端地址与端口正确。`,
+    };
   }
 
   const payload = (await response.json().catch(() => ({}))) as {
@@ -121,7 +173,7 @@ export async function login(
 
 /** 退出登录：先让服务端作废令牌，再清本地。 */
 export async function logout(): Promise<void> {
-  const base = remoteBase();
+  const base = backendBase();
   const token = readToken();
   clearToken();
   if (base === "" || token === null) return;

@@ -209,6 +209,32 @@ await check("报价", "导出 Markdown", async () => (await api.pricing.exportMa
 
 /* ── 10 数据与备份 / 搜索 / 日志 ── */
 await check("数据与备份", "导出全部数据", async () => (await api.exportDatabase()).students.length > 0);
+// 批量导入（页面上的「批量导入」面板走的就是这个方法）
+await check("数据与备份", "批量导入：CSV 导入教室", async () => {
+  const csv = [
+    "名称,用途,容量,备注",
+    "验收教室A,上课用教室,6,批量导入自检",
+    "验收教室B,自习室,4,",
+  ].join("\r\n");
+  const outcome = await api.imports.apply({ entity: "classrooms", text: csv, fileName: "验收.csv" });
+  return { ok: outcome.ok, added: outcome.added };
+}, (v: { ok: boolean; added: number }) => v.ok && v.added === 2);
+await check("数据与备份", "批量导入：重复导入不重复加", async () => {
+  const csv = "名称,用途,容量,备注\r\n验收教室A,上课用教室,6,批量导入自检\r\n";
+  const outcome = await api.imports.apply({ entity: "classrooms", text: csv });
+  return { added: outcome.added, skipped: outcome.skipped.length };
+}, (v: { added: number; skipped: number }) => v.added === 0 && v.skipped === 1);
+await check("数据与备份", "批量导入：JSON 导入教师", async () => {
+  const json = JSON.stringify([{ name: "验收老师甲", subjects: ["初中数学"], role: "授课教师", active: true }]);
+  const outcome = await api.imports.apply({ entity: "teachers", text: json });
+  const created = (await api.teachers.list()).find((teacher) => teacher.name === "验收老师甲");
+  return { added: outcome.added, subjects: created?.subjects ?? [] };
+}, (v: { added: number; subjects: string[] }) => v.added === 1 && v.subjects.length === 1);
+await check("数据与备份", "批量导入：缺少必填列时拒绝且不写入", async () => {
+  const before = (await api.classrooms.list()).length;
+  const outcome = await api.imports.apply({ entity: "classrooms", text: "房间名,容量\r\n漏了表头,6\r\n" });
+  return { ok: outcome.ok, changed: (await api.classrooms.list()).length - before };
+}, (v: { ok: boolean; changed: number }) => v.ok === false && v.changed === 0);
 await check("搜索", "全局搜索命中学生", async () => (await api.search("验收")).length > 0);
 await check("日志", "操作日志有记录", async () => (await api.logs.list(50)).length > 0);
 

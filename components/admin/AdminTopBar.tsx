@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { GlobalSearch } from "@/components/admin/GlobalSearch";
+import { BackendStatus } from "@/components/admin/BackendStatus";
 import { getSession, logout } from "@/lib/auth/session";
 
 /**
@@ -41,6 +42,8 @@ export function AdminTopBar() {
         <GlobalSearch />
 
         <div className="flex items-center gap-3">
+          {/* 后端/数据库的真实连接状态：后端没跑、地址填错时，这里会直接变色并可手动改地址 */}
+          <BackendStatus compact />
           {username !== "" && (
             <span className="text-sm text-ink-500 max-sm:hidden">
               已登录：{username}

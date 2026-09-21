@@ -1,5 +1,6 @@
 import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createEmptyDatabase } from "./initial";
+import { applyImport, parseImport, summarizeImport, ENTITY_SPECS, type ImportEntity, type ImportFormat, type ParsedImport } from "./import";
 import { isWithinAvailability } from "./availability";
 import { CURRENT_VERSION } from "./version";
 import { createRemoteApi, isRemoteMode, remoteBase } from "./remote";
@@ -1912,6 +1913,90 @@ const localApi = {
   },
 
   /**
+   * **批量导入**（CSV / JSON）：学生 / 教师 / 教室 / 课程。
+   *
+   * 为什么做成一个方法而不是"界面循环调 create"：
+   *   - **一次落盘**：整库是一份 JSON 快照，循环 1000 次新建就是 1000 次整库重写，
+   *     又慢又会在中途失败时留下半截数据；这里改完统一 persist；
+   *   - **一次日志**：日志上限 500 条，逐行写日志会把历史冲掉；
+   *   - **口径一处**：判重、默认值、校验都在 `lib/backend/import.ts`，
+   *     界面与服务端调的是同一份（页面也能用同一个纯函数做预览）。
+   *
+   * 只**新增**不覆盖：同名记录跳过并在 `skipped` 里逐条说明。
+   * 报课/收款/课时**不在这里导入**（见 import.ts 顶部说明）。
+   */
+  imports: {
+    async apply(input: {
+      entity: ImportEntity;
+      text: string;
+      format?: ImportFormat;
+      /** 文件名，只用于日志里说明"从哪来的"。 */
+      fileName?: string;
+    }): Promise<{
+      /** 整体是否可用（必填列缺失时为 false，一份都不导）。 */
+      ok: boolean;
+      error?: string;
+      summary: string;
+      added: number;
+      skipped: { line: number; reason: string }[];
+      problems: { line: number; reason: string }[];
+      /** 解析阶段的信息，便于界面显示"列对上了没有"。 */
+      headers: string[];
+      unknownHeaders: string[];
+    }> {
+      await delay();
+      const db = load();
+      const entity = input.entity;
+      if (!(entity in ENTITY_SPECS)) {
+        return {
+          ok: false, error: `不认识的导入对象：${String(entity)}`, summary: "",
+          added: 0, skipped: [], problems: [], headers: [], unknownHeaders: [],
+        };
+      }
+
+      const parsed: ParsedImport = parseImport(entity, input.text, input.format);
+      if (parsed.missingRequiredHeaders.length > 0) {
+        return {
+          ok: false,
+          error: `缺少必填列：${parsed.missingRequiredHeaders.join("、")}（请对照模板的表头）`,
+          summary: "",
+          added: 0,
+          skipped: [],
+          problems: parsed.problems,
+          headers: parsed.headers,
+          unknownHeaders: parsed.unknownHeaders,
+        };
+      }
+
+      // 导入前留一颗后悔药（与整库导入同一套：只留最近一次）
+      store.write(BACKUP_KEY, JSON.stringify(db));
+
+      const outcome = applyImport(db, parsed);
+      const label = ENTITY_SPECS[entity].label;
+      writeLog(db, {
+        entity: label,
+        action: "批量导入",
+        targetId: "",
+        summary:
+          `批量导入${label} ${outcome.added} 条` +
+          (outcome.skipped.length > 0 ? `（跳过 ${outcome.skipped.length} 条已存在）` : "") +
+          (input.fileName === undefined || input.fileName === "" ? "" : `，来源 ${input.fileName}`),
+      });
+      persist(db);
+
+      return {
+        ok: true,
+        summary: summarizeImport(outcome),
+        added: outcome.added,
+        skipped: outcome.skipped,
+        problems: outcome.problems,
+        headers: parsed.headers,
+        unknownHeaders: parsed.unknownHeaders,
+      };
+    },
+  },
+
+  /**
    * **清空全部业务数据**，回到空库状态（保留课程库与报价配置）。
    *
    * 早期它叫「重置为示例数据」：灌回 8 位示例学生。那在真实使用下是个陷阱 ——
@@ -2265,6 +2350,12 @@ export function __useStoreForTesting(backing: KeyValueStore): void {
  * **未设置**（线上构建）时导出本地实现（localStorage），保持线上可用。
  *
  * 类型仍然是本地实现的形状，因此页面与类型都不用改 —— 这是"换后端只改一个文件"的落地。
+ */
+/*
+ * 这里在**模块加载时**决定导出哪一份实现，因此"界面里改了后端地址"需要**刷新页面**才生效。
+ * 这是刻意的取舍：`api` 的形状必须在页面代码里保持同步（106 个方法），
+ * 做成"随时可换"会引入一层不必要的间接。
+ * 连接状态指示器会明确提示"改完地址请刷新"。
  */
 export const api: BackendApi = (isRemoteMode()
   ? createRemoteApi(localApi, remoteBase())

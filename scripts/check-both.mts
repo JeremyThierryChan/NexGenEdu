@@ -24,7 +24,7 @@
  * 用法：`npm run check:both`
  */
 
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { run, repoRoot, withTempServer } from "./temp-server.mts";
 
@@ -56,6 +56,15 @@ console.log("=== 第二遍：HTTP 后端（真实服务端 + 临时 SQLite 库�
  */
 const realBackupDir = join(repoRoot, "server/backups");
 const backupsBefore = readdirSync(realBackupDir).sort().join("|");
+/*
+ * 凭证文件同样不许被测试改动 —— 这条是**真事故**换来的：
+ * 临时服务曾把机构真实的口令覆盖成随机测试口令（跑完自检人就登不进去了）。
+ * 真实凭证在 `server/data/admin-credential.json`；跑完必须一字不差。
+ */
+const realCredentialFile = join(repoRoot, "server/data/admin-credential.json");
+const credentialBefore = existsSync(realCredentialFile)
+  ? readFileSync(realCredentialFile, "utf8")
+  : null;
 
 let exitCode = 1;
 try {
@@ -82,6 +91,19 @@ try {
 }
 
 const backupsAfter = readdirSync(realBackupDir).sort().join("|");
+const credentialAfter = existsSync(realCredentialFile)
+  ? readFileSync(realCredentialFile, "utf8")
+  : null;
+if (credentialAfter !== credentialBefore) {
+  console.error(
+    "\n✗ 临时服务改动了真实凭证文件（server/data/admin-credential.json）—— 必须修：\n" +
+    "  那意味着跑一次自检就会把机构的登录口令换成测试口令。\n" +
+    "  检查 credentialFile() 是否跟着**数据库文件所在目录**走，以及临时服务是否用了临时目录。",
+  );
+  process.exit(1);
+}
+console.log("✓ 真实凭证文件未被测试改动");
+
 if (backupsAfter !== backupsBefore) {
   console.error(
     "\n✗ 临时服务动了真实备份目录（server/backups/）—— 这是必须修的问题：\n" +

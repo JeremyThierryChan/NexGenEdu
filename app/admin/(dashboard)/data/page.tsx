@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/admin/AdminFields";
+import { BulkImport } from "@/components/admin/BulkImport";
 import {
   api,
   type Classroom,
@@ -201,6 +202,9 @@ export default function AdminDataPage() {
           </div>
         </dl>
       </Panel>
+
+      {/* 批量导入：把表格里的名单一次录进来（只新增，不覆盖） */}
+      <BulkImport onImported={() => void load()} />
 
       {message !== "" && (
         <p className="mt-4 rounded-md border border-success-100 bg-success-50 px-3 py-2 text-sm text-success-600">

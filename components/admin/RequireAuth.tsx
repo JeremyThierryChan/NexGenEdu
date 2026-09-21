@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { getSession } from "@/lib/auth/session";
-import { isRemoteMode } from "@/lib/backend/remote";
+import { checkSession } from "@/lib/auth/session";
+import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
+import { BackendStatus } from "@/components/admin/BackendStatus";
 
 /**
  * 后台登录守卫。
@@ -18,26 +19,54 @@ import { isRemoteMode } from "@/lib/backend/remote";
  * 这个区别值得记住：守卫漏了只是体验差，服务端漏了才是数据被看走。
  */
 export function RequireAuth({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<"checking" | "authed" | "anonymous" | "offline">("checking");
+  const [state, setState] = useState<"checking" | "authed" | "anonymous" | "offline" | "blocked">("checking");
+  const [detail, setDetail] = useState("");
   const router = useRouter();
   const pathname = usePathname();
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const session = await getSession();
+      /*
+       * 整段包 try/catch：**检查本身出错也必须给结论**。
+       * 以前这里一旦抛异常（例如浏览器里还是半新半旧的模块、`checkSession` 根本不存在），
+       * effect 就静悄悄死掉，界面永远停在"正在检查登录状态…"—— 没有任何提示，
+       * 也没法自救。现在任何异常都会落到"出错"这一屏，把原因摆出来。
+       */
+      let check;
+      try {
+        check = await checkSession();
+      } catch (cause) {
+        if (cancelled) return;
+        setDetail(
+          `检查登录状态时出错：${cause instanceof Error ? cause.message : String(cause)}` +
+          "（若刚刚改过代码，请用 Cmd+Shift+R 强制刷新一次，清掉浏览器里缓存的旧模块）",
+        );
+        setState("blocked");
+        return;
+      }
       if (cancelled) return;
 
-      if (session !== null) {
+      if (check.session !== null) {
         setState("authed");
         return;
       }
+
       /*
-       * 没连后端时**不往登录页踢**：那种环境下登录页也做不了什么，
-       * 来回跳只会让人以为是"口令输错了"。停在一句明确的说明上更有用。
+       * 这里**不再把三种情况混成一种**。
+       *
+       * 以前失败一律当"未登录"→ 弹回登录页。于是"后端没开""浏览器把请求拦了"
+       * "令牌过期"表现完全一样：用户在登录页反复试口令，怎么都不进去，
+       * 而真正的原因一个字都没露出来（这一轮就为此绕了很久）。
+       * 现在：只有"确实没令牌/令牌过期"才回登录页；"请求根本发不出去"停在这里说清楚。
        */
       if (!isRemoteMode()) {
         setState("offline");
+        return;
+      }
+      if (check.reason === "unreachable") {
+        setDetail(check.detail ?? "");
+        setState("blocked");
         return;
       }
       setState("anonymous");
@@ -53,7 +82,37 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-dvh items-center justify-center bg-ink-50 px-6">
-      {state === "offline" ? (
+      {state === "blocked" ? (
+        <div className="max-w-lg">
+          <p className="text-base font-semibold text-ink-800">没能确认登录状态</p>
+          <p className="mt-2 text-sm leading-relaxed text-ink-500">
+            浏览器没拿到会话响应，所以没有进后台。<strong className="font-medium text-ink-700">这通常不是口令问题</strong>
+            —— 是随后的请求发不出去（或出错了）。常见原因：
+          </p>
+          <ol className="mt-3 list-decimal space-y-1.5 pl-5 text-sm leading-relaxed text-ink-600">
+            <li>后端没在跑：<span className="font-mono text-xs">npm run server</span>（端口 4000）；</li>
+            <li>浏览器缓存了旧的跨源预检结果 —— <strong className="font-medium text-ink-700">重启浏览器</strong>即可清掉；</li>
+            <li>服务端没放行 <span className="font-mono text-xs">Authorization</span> 头（应包含在
+              <span className="font-mono text-xs"> access-control-allow-headers</span> 里）；</li>
+            <li>浏览器里还是**半新半旧的模块**（刚改过代码时会出现）——
+              <strong className="font-medium text-ink-700">Cmd+Shift+R 强制刷新</strong>即可。</li>
+          </ol>
+          <p className="mt-3 text-xs leading-relaxed text-ink-400">
+            后端地址：<span className="font-mono">{remoteBase()}</span>
+            {detail === "" ? null : <><br />技术细节（也可在浏览器控制台看到）：<span className="font-mono">{detail}</span></>}
+          </p>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <BackendStatus />
+            <button
+              type="button"
+              className="rounded-md border border-ink-300 bg-white px-3 py-1.5 text-sm text-ink-800 transition-colors hover:border-brand-400 hover:text-brand-700"
+              onClick={() => window.location.reload()}
+            >
+              刷新页面重试
+            </button>
+          </div>
+        </div>
+      ) : state === "offline" ? (
         <div className="max-w-md text-center">
           <p className="text-base font-semibold text-ink-800">后台需要本机后端</p>
           <p className="mt-2 text-sm leading-relaxed text-ink-500">
