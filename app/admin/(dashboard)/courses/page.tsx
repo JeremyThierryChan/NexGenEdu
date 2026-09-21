@@ -33,6 +33,8 @@ export default function AdminCoursesPage() {
   const [pricingStatus, setPricingStatus] = useState<LibraryPricingStatus[]>([]);
   const [summary, setSummary] = useState<CourseSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  /** 刷新中（页面上已有数据，因此不清空列表 —— 见 load 的说明）。 */
+  const [refreshing, setRefreshing] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [originFilter, setOriginFilter] = useState("全部");
   const [message, setMessage] = useState("");
@@ -51,8 +53,17 @@ export default function AdminCoursesPage() {
   const categoryOptions = useMemo(() => getCourseCategoryOptions(), []);
   const formOptions = useMemo(() => getFormOptions(), []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据。
+   *
+   * `quiet: true` = **安静刷新**：页面上已经有数据时，不把列表换掉、只在旁边显示"刷新中…"。
+   * 这一点是必须的：如果刷新时把整块列表换成一行"加载中…"，页面高度会从很高塌成一行，
+   * 浏览器随即把滚动位置夹回顶部 —— 于是"点一下『设为暂未开放』就跳回页面顶部、
+   * 还得再往下滑"（真实反馈）。首屏加载用 `loading`（那时本来就没内容可保）。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet === true) setRefreshing(true);
+    else setLoading(true);
     const [list, stats, config] = await Promise.all([
       api.courses.list(),
       api.courses.summary(),
@@ -62,6 +73,7 @@ export default function AdminCoursesPage() {
     setSummary(stats);
     setPricingStatus(pricingStatusForCourses(config, list));
     setLoading(false);
+    setRefreshing(false);
   }, []);
 
   useEffect(() => {
@@ -112,7 +124,7 @@ export default function AdminCoursesPage() {
         setMessage(`已保存「${payload.name}」。`);
       }
       resetForm();
-      await load();
+      await load({ quiet: true });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "保存失败。");
     } finally {
@@ -120,12 +132,21 @@ export default function AdminCoursesPage() {
     }
   }
 
+  /**
+   * 切换「开放 / 暂未开放」。
+   *
+   * 刻意**就地更新这一条**（而不是整页重载）：一是不会因为列表被换掉而跳回顶部，
+   * 二是少两次请求（只补一次 summary，用来更新上面的计数）。
+   * 价格关联不受状态影响，因此不需要重算 pricingStatus。
+   */
   async function toggleStatus(course: Course) {
     setError("");
-    await api.courses.update(course.id, {
-      status: course.status === "开放" ? "暂未开放" : "开放",
-    });
-    await load();
+    const next: Course["status"] = course.status === "开放" ? "暂未开放" : "开放";
+    const updated = await api.courses.update(course.id, { status: next });
+    if (updated !== null) {
+      setCourses((prev) => (prev ?? []).map((item) => (item.id === course.id ? updated : item)));
+    }
+    setSummary(await api.courses.summary());
   }
 
   async function remove(course: Course) {
@@ -140,7 +161,7 @@ export default function AdminCoursesPage() {
     try {
       await api.courses.remove(course.id);
       setMessage(`已删除「${course.name}」。`);
-      await load();
+      await load({ quiet: true });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "删除失败。");
     }
@@ -157,7 +178,7 @@ export default function AdminCoursesPage() {
         ? `网站上的课程都已在课程库里（共 ${result.total} 门）。`
         : `从网站同步了 ${result.added.length} 门课程：${result.added.join("、")}（现共 ${result.total} 门）。`,
     );
-    await load();
+    await load({ quiet: true });
   }
 
   const visible = useMemo(
@@ -200,7 +221,8 @@ export default function AdminCoursesPage() {
       />
       <DataNotice
         onRefresh={() => {
-          void load();
+          // 同样用安静刷新：手动刷新也不该把列表清空、把页面高度塌掉
+          void load({ quiet: true });
         }}
       />
 
@@ -233,7 +255,7 @@ export default function AdminCoursesPage() {
       </div>
 
       {importing && (
-        <BulkImport fixedEntity="courses" onImported={async () => { await load(); }} />
+        <BulkImport fixedEntity="courses" onImported={async () => { await load({ quiet: true }); }} />
       )}
 
       {message !== "" && <p className="mt-2 text-xs leading-relaxed text-success-600">{message}</p>}
@@ -348,7 +370,9 @@ export default function AdminCoursesPage() {
               </button>
             ))}
           </div>
-          <span className="text-xs text-ink-400">{visible.length} 门</span>
+          <span className="text-xs text-ink-400">
+            {visible.length} 门{refreshing ? "（刷新中…）" : ""}
+          </span>
         </div>
 
         {loading ? (
