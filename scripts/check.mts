@@ -41,6 +41,7 @@ import { dateKey } from "@/lib/backend/format";
 import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
+import { hasCoursePageContent } from "@/lib/backend/site-content";
 import { weekDays } from "@/lib/backend/format";
 import {
   buildDayTimeline,
@@ -1823,6 +1824,101 @@ eq("v13 → v14 的顺序按原数组次序编号（原来谁在前面，网站�
   migratedTeachers.map((_teacher, index) => index + 1));
 ok("补字段不影响原有资料",
   migratedTeachers.every((teacher) => teacher.bio !== "" || teacher.name !== ""));
+await api.restoreBackup();
+
+/*
+ * ── 把网站内容搬进库（`site.importFromContent`）─────────────────────────────
+ *
+ * 老库升级上来时：教师没有推荐理由与顺序、课程行没有卡片字段、课程正文是空的。
+ * 网站那侧据此判定"后端没有内容"而回落到模版 —— 因此这条导入路径必须有，
+ * 而且必须**两件事都成立**：
+ *   1. 体检（`write: false`）一个字都不写；
+ *   2. 默认**只补空、不覆盖**（机构在后台改过的内容不能被一次导入冲掉）。
+ * 用一份"降级成 v14"的库来造这个场景：这是真实会遇到的形态（升级前就是这个样子）。
+ */
+const v14Db = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+  teachers: Array<Record<string, unknown>>;
+  courses: Array<Record<string, unknown>>;
+  version: number;
+  siteContent?: unknown;
+};
+v14Db.version = 14;
+v14Db.teachers = v14Db.teachers.map((teacher) => {
+  const copy = { ...teacher };
+  delete copy.recommendation;
+  delete copy.order;
+  return copy;
+});
+v14Db.courses = v14Db.courses.map((course) => {
+  const copy = { ...course };
+  for (const key of ["path", "subgroup", "tags", "target", "order", "intro", "siteKind"]) delete copy[key];
+  return copy;
+});
+delete v14Db.siteContent;
+eq("降级夹具：课程没有卡片字段（v14 的样子）",
+  v14Db.courses.every((course) => !("path" in course) && !("siteKind" in course)), true);
+
+// 升级进库（v14 → v15 迁移会补默认值），此时网站内容仍是空的
+eq("v14 文件可以升级导入", (await api.importDatabase(JSON.stringify(v14Db))).ok, true);
+const afterUpgrade = await api.exportDatabase();
+ok("老库升级后课程正文是空的（迁移不读外部文件，只补结构）",
+  !hasCoursePageContent(afterUpgrade.siteContent));
+ok("老库升级后课程行有了卡片字段的默认值",
+  afterUpgrade.courses.every((course) => course.siteKind === "不展示" && course.path === ""));
+
+// ① 体检：必须一个字都不写
+const beforeDryRun = JSON.stringify(await api.exportDatabase());
+const dry = await api.site.importFromContent({ write: false });
+ok("体检报告列出了会补什么（不是空话）", dry.changes.length > 0, dry.changes.slice(0, 2).join("；"));
+eq("体检没有写库", JSON.stringify(await api.exportDatabase()), beforeDryRun);
+eq("体检报告标了「没写」", dry.written, false);
+
+// ② 写入：教师资料、课程卡片字段、课程正文都补上
+const written = await api.site.importFromContent({ write: true });
+eq("写入报告标了「已写」", written.written, true);
+ok("补上了教师资料（教龄 / 简介 / 推荐理由 / 顺序）",
+  written.counts.teachersFilled > 0 &&
+    (await api.teachers.list()).some(
+      (teacher) => teacher.recommendation !== "" && teacher.order !== 999 && teacher.years !== "",
+    ),
+  JSON.stringify({
+    counts: written.counts,
+    teachers: (await api.teachers.list()).map((t) => [t.name, t.years, t.summary.length, t.recommendation.length, t.order]),
+  }));
+ok("补上了课程卡片字段（路径 / 网站形态）",
+  written.counts.coursesFilled > 0 &&
+    (await api.courses.list()).some((course) => course.path !== "" && course.siteKind !== "不展示"));
+ok("写入了课程正文（学科与小节）",
+  written.counts.subjectsWritten > 0 && written.counts.bandsWritten > 0);
+const afterImport = await api.exportDatabase();
+ok("写完之后网站那侧能看到内容", hasCoursePageContent(afterImport.siteContent));
+eq("小节数与网站的锚点数量一致",
+  afterImport.siteContent.coursePage.subjects.reduce((sum, item) => sum + item.bands.length, 0),
+  written.counts.bandsWritten);
+
+// ③ 再导一次（不覆盖）：课程正文必须原样保留，并说明"未覆盖"
+const secondImport = await api.site.importFromContent({ write: true });
+eq("再导一次不再改写课程正文", secondImport.counts.subjectsWritten, 0);
+ok("并明确说明为什么没覆盖",
+  secondImport.changes.some((item) => item.includes("已有课程正文") && item.includes("未覆盖")),
+  secondImport.changes.find((item) => item.includes("未覆盖")) ?? "（没有说明）");
+
+// ④ 覆盖模式：确实替换（这是"改了内容文件要推上去"的那条路）
+const replaced = await api.site.importFromContent({ write: true, overwrite: true });
+ok("勾选覆盖时课程正文被替换", replaced.counts.subjectsWritten > 0,
+  `subjectsWritten=${replaced.counts.subjectsWritten}`);
+
+// ⑤ 「只补空」的意义：机构在后台改过的内容，默认不会被一次导入冲掉
+const editedTeacher = (await api.teachers.list())[0]!;
+await api.teachers.update(editedTeacher.id, { summary: "机构自己写的简介" });
+await api.site.importFromContent({ write: true });
+eq("默认导入不动机构改过的教师简介",
+  (await api.teachers.list()).find((item) => item.id === editedTeacher.id)?.summary,
+  "机构自己写的简介");
+// 而 `overwrite` 是**明确动作**：它会把网站内容按原文写回去（体检里会列出来）
+await api.site.importFromContent({ write: true, overwrite: true });
+ok("覆盖模式下教师简介按网站内容写回（这是它字面上的意思）",
+  (await api.teachers.list()).find((item) => item.id === editedTeacher.id)?.summary !== "机构自己写的简介");
 await api.restoreBackup();
 
 // ── ICS 日历文件 ──────────────────────────────────────────────────────

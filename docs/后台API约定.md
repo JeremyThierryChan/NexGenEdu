@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 111 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 112 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -40,7 +40,7 @@ lib/backend/api.ts        服务层实现（当前 111 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 111 个方法）
+## 二、接口分组（当前 112 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -231,6 +231,19 @@ lib/backend/api.ts        服务层实现（当前 111 个方法）；数据一�
 "挑着删"的写法会**默认漏出去**，"白名单"的写法默认不外泄 —— 失败方向必须是安全的那一个。
 `scripts/check.mts` 有两组断言盯着这条边界：字段名里出现敏感词要报错，
 返回的 JSON 文本里出现手机号样式也要报错。
+
+**反方向：`site.importFromContent`**（把网站内容搬进库）。
+
+| | |
+| --- | --- |
+| 方法 | `site.importFromContent({ write?, overwrite? })` |
+| `write: false` | **体检**：逐条列出会补什么、会新增什么、跳过了什么；在一个深拷贝上算，**一个字都不写** |
+| 默认语义 | **只补空、不覆盖**：机构在后台改过的教师资料与课程字段不会被一次导入冲掉 |
+| `overwrite: true` | 用内容文件整体替换（课程正文那一段尤其要先看清体检结果） |
+| 覆盖范围 | 教师（补教龄 / 简介 / 详细介绍 / 推荐理由 / 顺序）、课程卡片字段（路径 / 子栏目 / 标签 / 点进哪一节 / 顺序 / 网站形态）、课程正文、报价页文案 |
+
+它与 `imports.fromSite` 的分工：后者是**逐行**导入（名字清单，走 CSV 那套判重与冲突策略），
+后者处理不了"课程正文"这种一块一块的结构，也补不了**已有行**上缺的字段。
 
 ### 6.1 按周批量排课（`lessons.planSeries` / `lessons.createSeries`）
 

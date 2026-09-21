@@ -146,6 +146,8 @@ export const API_CONTRACT: ContractGroup[] = [
       // **匿名可用**：服务端把它挂在 `/api/public/site`，位置在登录闸门之前 ——
       // 字段白名单见 `lib/backend/public-site.ts`，加字段前先看那里的三条规矩。
       "site.publicContent",
+      // 把网站内容搬进库（体检 / 写入两步；默认只补空、不覆盖）
+      "site.importFromContent",
     ],
   },
   {

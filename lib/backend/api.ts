@@ -1,6 +1,8 @@
 import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createEmptyDatabase } from "./initial";
 import { emptySiteContent } from "./site-content";
+import { importSiteContent } from "./site-import";
+import type { SiteContentImportReport } from "./site-import";
 import { publicSite } from "./public-site";
 import type { PublicSite } from "./public-site";
 import { describeSeriesDate, generateSeriesDates } from "./recurrence";
@@ -507,6 +509,19 @@ function migrate(db: Database): Database | null {
     // 补默认值走 normalizeCourse（与新建/修改同一处默认值，避免两套口径）
     db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
     db.courses = db.courses.map((course) => normalizeCourse(course));
+    /*
+     * 顺手把 v14 的教师字段也再兜一遍。
+     *
+     * 这不是多余的：**一份声称自己是 v14 的文件，未必真有那两个字段** ——
+     * 手改过的导出文件、以及"迁移脚本只跑了一半"的库都长这样，
+     * 而缺字段的后果是网站在排序时读到 `undefined`（表现是"教师顺序乱掉"，
+     * 而不是报错）。我自己的自检夹具就是这么造出来的，当场撞上了。
+     */
+    db.teachers = db.teachers.map((teacher, index) => ({
+      ...teacher,
+      recommendation: teacher.recommendation ?? "",
+      order: typeof teacher.order === "number" ? teacher.order : index + 1,
+    }));
     db.version = 15;
   }
 
@@ -2746,6 +2761,39 @@ const localApi = {
       await delay();
       return clone(publicSite(load()));
     },
+
+    /**
+     * **把网站内容搬进库**（教师资料 / 课程卡片字段 / 课程正文 / 报价文案）。
+     *
+     * `write: false` 是体检：逐条列出"会补什么、会新增什么、跳过了什么"，
+     * **一个字都不写**（在深拷贝上算，见 `lib/backend/site-import.ts`）。
+     * 界面上先给人看这份清单，再用 `write: true` 落库。
+     *
+     * 默认**只补空、不覆盖**：机构在后台改过的内容不能被一次导入冲掉；
+     * 确实要用内容文件整体替换时传 `overwrite: true`（课程正文那一段尤其要看清楚）。
+     */
+    async importFromContent(
+      options: { write?: boolean; overwrite?: boolean } = {},
+    ): Promise<SiteContentImportReport> {
+      await delay();
+      const db = load();
+      const report = importSiteContent(db, {
+        write: options.write === true,
+        overwrite: options.overwrite === true,
+      });
+      if (report.written) {
+        writeLog(db, {
+          entity: "数据",
+          action: "导入网站内容",
+          targetId: "",
+          summary: `从网站内容导入：${report.changes.slice(0, 3).join("；")}${
+            report.changes.length > 3 ? ` 等 ${report.changes.length} 项` : ""
+          }`,
+        });
+        persist(db);
+      }
+      return clone(report);
+    },
   },
 
   pricing: {
@@ -3246,6 +3294,7 @@ export type {
   CourseStatus,
   CourseSiteKind,
   PublicSite,
+  SiteContentImportReport,
 };
 export {
   ATTENDANCE_OPTIONS,
