@@ -208,7 +208,7 @@ lib/backend/api.ts        服务层实现（当前 106 个方法）；数据一�
 
 ### 7. 运维与审计
 
-`exportDataset`、`exportDatabase`、`importDatabase`、`imports.apply`、`hasBackup`、`restoreBackup`、
+`exportDataset`、`exportDatabase`、`importDatabase`、`imports.apply`、`imports.fromSite`、`hasBackup`、`restoreBackup`、
 `reset`、`setOperator`、`logs.list`、`logs.clear`。
 
 **两种"导入"别混**：
@@ -221,6 +221,20 @@ lib/backend/api.ts        服务层实现（当前 106 个方法）；数据一�
 | 输入 | 本系统导出的 JSON 全文 | CSV 或 JSON 文本 + 实体名 |
 | 后悔药 | 导入前自动备份（`restoreBackup` 可回） | 同样在导入前留一份（同一个键） |
 | 幂等 | 是（同一份文件重复导入结果相同） | 是（重复导入会被判重跳过） |
+
+`imports.apply`（从 CSV/JSON 文本）与 `imports.fromSite`（从网站内容：教师、场地名）
+走的是**同一套判定与落库**，只有数据来源不同。冲突处理是这两者共同的能力：
+
+| `onConflict` | 行为 |
+| --- | --- |
+| `skip`（**默认**） | 同名跳过（在 `skipped` 里逐条说明原因） |
+| `overwrite` | 用文件里的值**更新**库里那条（只改导入行真的带值的字段，且不动报课记录/采集表/可用时段等结构性字段） |
+| `duplicate` | **两条都留**：第二条加序号后缀（王老师 → 王老师（2）），学生不加后缀（同名同家长可能是兄弟姐妹） |
+| `ask` | **纯体检、从不写入**（哪怕没有冲突也不写）：返回 `conflicts`（含"库里那条长什么样"），由人决定后再调一次 |
+
+`perRow`（键为行号）可逐行覆盖全局策略，支持"大部分跳过、个别覆盖"这种真实需求。
+`ask` 模式**从不写入**（有冲突时 `needsDecision: true`）—— 这是"手动处理冲突"能成立的前提：
+先看清会动到哪些记录，再决定。
 
 `imports.apply` 的要点：**判定与落库都在服务端**（`lib/backend/import.ts` 是同一份实现，
 页面用它做预览），成功时返回 `{ added, skipped, problems, headers, unknownHeaders }`，

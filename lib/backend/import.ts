@@ -1,3 +1,4 @@
+import { getHomeContent, getTeachersPage } from "@/lib/data/site";
 import type {
   Classroom,
   Course,
@@ -417,13 +418,121 @@ export function parseImport(entity: ImportEntity, text: string, format?: ImportF
 
 // ── 落库 ────────────────────────────────────────────────────────────────────
 
+/**
+ * 冲突处理策略 —— 对应"把文件复制进目标文件夹时同名了怎么办"那三个选择。
+ *
+ * | 策略 | 含义 | 什么时候用 |
+ * | --- | --- | --- |
+ * | `skip` | 保留库里那条，忽略文件里这条 | 库里已经录好、只是文件里有重复 |
+ * | `overwrite` | 用文件里的值**更新**库里的那条 | 文件是更新过的版本，要以文件为准 |
+ * | `duplicate` | 两条都留（第二条加序号后缀，避免看起来一模一样） | 确实是两个人/两间房，或想留档对比 |
+ *
+ * 默认 `skip`：批量改数据不可逆，而"少做一步"永远是更安全的默认值。
+ */
+export type ConflictStrategy = "skip" | "overwrite" | "duplicate";
+
+export type Conflict = {
+  /** 行号（CSV 的物理行 / JSON 的序号），界面用它定位到具体哪一行。 */
+  line: number;
+  /** 判重键（内部用，不展示）。 */
+  key: string;
+  /** 文件里这条的字段值（用于和库里对比展示）。 */
+  incoming: Record<string, unknown>;
+  /** 库里已有的那条：只带 id、名称与一句摘要，避免把整条记录塞进响应。 */
+  existing: { id: string; name: string; summary: string };
+};
+
 export type ApplyOutcome = {
   entity: ImportEntity;
   added: number;
+  /** 被覆盖（更新）的条数。 */
+  overwritten: number;
+  /** 以"保留两份"方式新增的条数。 */
+  duplicated: number;
   /** 因为已存在或文件内重复而跳过的行（带行号与原因）。 */
   skipped: RowProblem[];
   problems: RowProblem[];
+  /** 与库里冲突的行（`onConflict: "ask"` 时返回，供人逐个决定）。 */
+  conflicts: Conflict[];
 };
+
+/** 覆盖时**不能动**的字段：结构性或派生的数据，改了就破坏不变式。 */
+const STRUCTURAL_FIELDS: Record<ImportEntity, string[]> = {
+  // 报课记录、采集表、科目（由报课推导）都不属于"档案基础字段"
+  students: ["id", "enrollments", "profile", "subjects", "createdAt"],
+  teachers: ["id"],
+  // 可用时段是单独在页面上设的，导入不该把它清掉
+  classrooms: ["id", "availability"],
+  courses: ["id", "createdAt", "origin"],
+};
+
+/** 给"保留两份"的第二条生成一个不重名的名字：王老师 → 王老师（2）。 */
+function uniqueName(taken: Set<string>, name: string): string {
+  if (!taken.has(name.toLowerCase())) return name;
+  for (let index = 2; index < 999; index += 1) {
+    const candidate = `${name}（${index}）`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${name}（副本）`;
+}
+
+/** 库里那条记录的一句话摘要（冲突列表里给用户看，便于判断"是不是同一个人"）。 */
+function describeExisting(entity: ImportEntity, record: Record<string, unknown>): string {
+  switch (entity) {
+    case "students":
+      return [record.grade, record.guardian].filter((value) => String(value ?? "") !== "").join(" · ");
+    case "teachers":
+      return [record.role, (record.subjects as string[] | undefined)?.join("、")]
+        .filter((value) => String(value ?? "") !== "")
+        .join(" · ");
+    case "classrooms":
+      return [record.kind, record.capacity === undefined ? "" : `${String(record.capacity)} 人`]
+        .filter((value) => String(value ?? "") !== "")
+        .join(" · ");
+    case "courses":
+      return [record.category, record.status].filter((value) => String(value ?? "") !== "").join(" · ");
+  }
+}
+
+/** 找出文件里与库中（或文件内）重复的行。 */
+export function detectConflicts(db: Database, parsed: ParsedImport): Conflict[] {
+  const spec = ENTITY_SPECS[parsed.entity];
+  const list = targetList(db, parsed.entity);
+  const seen = new Map<string, Record<string, unknown>>();
+  for (const item of list) {
+    const record = item as Record<string, unknown>;
+    seen.set(keyOf(spec, record, record), record);
+  }
+
+  const conflicts: Conflict[] = [];
+  const insideFile = new Set<string>();
+  parsed.records.forEach((record, index) => {
+    const key = keyOf(spec, record, record);
+    const existing = seen.get(key);
+    if (existing !== undefined) {
+      conflicts.push({
+        line: index + 1,
+        key,
+        incoming: record,
+        existing: {
+          id: String(existing.id ?? ""),
+          name: String(existing.name ?? ""),
+          summary: describeExisting(parsed.entity, existing),
+        },
+      });
+    } else if (insideFile.has(key)) {
+      // 文件内部自己重复：按"库里没有"处理，但也提示出来
+      conflicts.push({
+        line: index + 1,
+        key,
+        incoming: record,
+        existing: { id: "", name: String(record.name ?? ""), summary: "文件里前面已经出现过同名的一条" },
+      });
+    }
+    insideFile.add(key);
+  });
+  return conflicts;
+}
 
 function keyOf(spec: EntitySpec, record: Record<string, unknown>, existing: Record<string, unknown>): string {
   const parts = spec.keyFields
@@ -489,32 +598,96 @@ function targetList(db: Database, entity: ImportEntity): unknown[] {
  * 返回逐项结果，调用方负责落盘与写日志 —— 这样"改了什么"和"什么时候落盘"分开，
  * 自检可以只测前半段而不落盘。
  */
-export function applyImport(db: Database, parsed: ParsedImport): ApplyOutcome {
+export function applyImport(
+  db: Database,
+  parsed: ParsedImport,
+  options: {
+    /** 冲突时的处理方式；默认 `skip`（保守）。 */
+    strategy?: ConflictStrategy;
+    /** 逐行覆盖全局策略：键是行号（字符串）。 */
+    perRow?: Record<string, ConflictStrategy>;
+  } = {},
+): ApplyOutcome {
   const spec = ENTITY_SPECS[parsed.entity];
   const list = targetList(db, parsed.entity);
-  const seen = new Set<string>();
-  for (const item of list) seen.add(keyOf(spec, item as Record<string, unknown>, item as Record<string, unknown>));
+  const byKey = new Map<string, Record<string, unknown>>();
+  const takenNames = new Set<string>();
+  for (const item of list) {
+    const record = item as Record<string, unknown>;
+    byKey.set(keyOf(spec, record, record), record);
+    takenNames.add(String(record.name ?? "").toLowerCase());
+  }
 
   const skipped: RowProblem[] = [];
+  const conflicts: Conflict[] = [];
   let added = 0;
+  let overwritten = 0;
+  let duplicated = 0;
 
   parsed.records.forEach((record, index) => {
     const line = index + 1;
+    const choice = options.perRow?.[String(line)] ?? options.strategy ?? "skip";
     const key = keyOf(spec, record, record);
     if (key === "") {
       skipped.push({ line, reason: "没有可用于判重的名称" });
       return;
     }
-    if (seen.has(key)) {
-      skipped.push({ line, reason: `已存在同名记录（按 ${spec.keyFields.join(" + ")} 判重），跳过` });
+
+    const existing = byKey.get(key);
+    if (existing !== undefined) {
+      conflicts.push({
+        line,
+        key,
+        incoming: record,
+        existing: {
+          id: String(existing.id ?? ""),
+          name: String(existing.name ?? ""),
+          summary: describeExisting(parsed.entity, existing),
+        },
+      });
+
+      if (choice === "skip") {
+        skipped.push({ line, reason: `已存在同名记录（按 ${spec.keyFields.join(" + ")} 判重），保留库里那条` });
+        return;
+      }
+      if (choice === "overwrite") {
+        /*
+         * 覆盖只改**导入行里真的带了值的字段**，并跳过结构性字段
+         * （报课记录、采集表、可用时段、来源…）：那些不是"档案基础信息"，
+         * 用一份表格把它们清掉是事故，不是更新。
+         */
+        const structural = STRUCTURAL_FIELDS[parsed.entity];
+        const patch = finalize(parsed.entity, record);
+        for (const [field, value] of Object.entries(patch)) {
+          if (structural.includes(field)) continue;
+          // 导入行没提这个字段（空值）时不覆盖，避免"空表格清空已有内容"
+          const provided = record[field];
+          if (provided === undefined) continue;
+          if (typeof provided === "string" && provided.trim() === "" && field !== "note") continue;
+          existing[field] = value;
+        }
+        overwritten += 1;
+        return;
+      }
+      // duplicate：两条都留。名称若会被当作身份（教师/教室/课程）就加序号，避免看起来一模一样
+      const renamed = parsed.entity === "students" ? false : true;
+      const name = String(record.name ?? "");
+      const finalName = renamed ? uniqueName(takenNames, name) : name;
+      takenNames.add(finalName.toLowerCase());
+      list.push({ ...finalize(parsed.entity, { ...record, name: finalName }), id: makeId(spec.idPrefix) });
+      byKey.set(keyOf(spec, { ...record, name: finalName }, record), list[list.length - 1] as Record<string, unknown>);
+      duplicated += 1;
+      added += 1;
       return;
     }
-    seen.add(key);
+
+    byKey.set(key, record);
+    takenNames.add(String(record.name ?? "").toLowerCase());
     list.push({ ...finalize(parsed.entity, record), id: makeId(spec.idPrefix) });
     added += 1;
   });
 
-  return { entity: parsed.entity, added, skipped, problems: parsed.problems };
+  return { entity: parsed.entity, added, overwritten, duplicated, skipped, problems: parsed.problems, conflicts };
 }
 
 /**
@@ -531,9 +704,80 @@ function makeId(prefix: string): string {
 export function summarizeImport(outcome: ApplyOutcome): string {
   const label = ENTITY_SPECS[outcome.entity].label;
   const parts = [`新增 ${outcome.added} 条${label}`];
-  if (outcome.skipped.length > 0) parts.push(`跳过 ${outcome.skipped.length} 条（已存在）`);
+  if (outcome.overwritten > 0) parts.push(`更新（覆盖）${outcome.overwritten} 条`);
+  if (outcome.duplicated > 0) parts.push(`保留两份 ${outcome.duplicated} 条`);
+  if (outcome.skipped.length > 0) parts.push(`跳过 ${outcome.skipped.length} 条`);
   if (outcome.problems.length > 0) parts.push(`${outcome.problems.length} 行没通过校验`);
   return parts.join("，");
 }
 
 export type { Classroom, Course, Student, Teacher };
+
+// ── 从"前端"（网站内容）导入 ────────────────────────────────────────────────
+//
+// 网站上有两份现成的、**真实**的名单：教师团队（`data/site/content.md` 的教师段）
+// 与场地照片格里写的场地名（301 教室、302 教室…）。机构刚起步时不必手录一遍 ——
+// 这就是"从前端导入"的用途。
+//
+// 刻意**只做教师与教室**：
+//   - 课程已有「从网站同步课程」（同一件事，不重复造）；
+//   - 学生网站上没有（那是机构自己的数据，没有来源可导）。
+
+export type SiteImportSource = "teachers" | "classrooms";
+
+export type SiteImportData = {
+  /** 表单里给用户看的来源说明。 */
+  description: string;
+  records: Array<Record<string, unknown>>;
+};
+
+/**
+ * 读网站内容，产出**与 CSV/JSON 导入同一种形状**的记录。
+ *
+ * 这一点很重要：产出走同一套 `applyImport`（判重、冲突策略、日志、落盘），
+ * 因此"从网站导入"与"从文件导入"在行为上完全一致，只有数据来源不同。
+ */
+export function siteImportRecords(source: SiteImportSource): SiteImportData {
+  if (source === "teachers") {
+    /*
+     * 只取真实教师：AI 智能体（`kind === "ai"`）在网站上是对家长介绍试课诊断的，
+     * 它们不排课、也不该进后台的教师档案（否则排课下拉里会冒出一个"人"）。
+     * 这条与 seed 的口径一致（seed 当年也是这么过滤的）。
+     */
+    const teachers = getTeachersPage().teachers.filter((teacher) => teacher.kind === "teacher");
+    return {
+      description: `网站「教师」页的 ${teachers.length} 位真实教师（AI 智能体不算）`,
+      records: teachers.map((teacher) => ({
+        name: teacher.name,
+        subjects: teacher.subjects,
+        role: teacher.role,
+        phone: "",
+        active: true,
+      })),
+    };
+  }
+
+  /*
+   * 场地名来自首页的「教室照片格位」小节（`getHomeContent().classrooms`）。
+   * 条目形如 `301 教室 | classroom-301.jpg`：竖线后面是图片文件名，不是场地名的一部分，
+   * 所以取竖线前的那一段；照片格位留空的行会被跳过（那是还没填的位子）。
+   *
+   * 「是不是自习室」按名字猜（名字里带"自习"就是自习室）：这一条是**猜**，
+   * 所以只在名字明确时生效，其余一律按"上课用教室"导入并在界面上让人改 ——
+   * 宁可让人改一次，也不要静默把自习室当成上课教室。
+   */
+  const rooms: string[] = [];
+  for (const item of getHomeContent().classrooms) {
+    const name = (item.title ?? "").split("|")[0]?.trim() ?? "";
+    if (name !== "" && !rooms.includes(name)) rooms.push(name);
+  }
+  return {
+    description: `网站首页「教室照片格位」里的 ${rooms.length} 个场地名（可用时段要导入后在「教室」页单独设）`,
+    records: rooms.map((name) => ({
+      name,
+      kind: name.includes("自习") ? "自习室" : "上课用教室",
+      capacity: 0,
+      note: "从网站导入，容量与时段请按实际填写",
+    })),
+  };
+}

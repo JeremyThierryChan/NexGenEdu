@@ -3406,6 +3406,105 @@ eq("恢复后最后一次导入的课程消失（回退到导入前）",
 ok("更早导入的学生仍在（后悔药只回退最近一次导入）",
   (await api.students.list()).some((student) => student.name === "导入同学甲"));
 
+/* ── 冲突处理：覆盖 / 跳过 / 保留两份（对应「复制文件遇到同名」那三个选择）── */
+
+// 先体检（ask）：只报告冲突，**不写任何东西**
+const existingTeacher = (await api.teachers.list()).find((teacher) => teacher.name === "张老师")!;
+const clashCsv = "姓名,可带科目,职务,电话,在职\r\n张老师,初中数学,首席教师,138-0000-9999,是\r\n";
+const beforeAsk = (await api.teachers.list()).length;
+const asked = await api.imports.apply({ entity: "teachers", text: clashCsv, onConflict: "ask" });
+eq("ask 模式下不写入", (await api.teachers.list()).length, beforeAsk);
+eq("ask 模式要求人来决定", asked.needsDecision, true);
+eq("ask 模式列出冲突行", asked.conflicts.length, 1);
+eq("冲突里带上库里那条的 id 与摘要，便于判断是不是同一个人",
+  [asked.conflicts[0]?.existing.id === existingTeacher.id, (asked.conflicts[0]?.existing.summary.length ?? 0) > 0],
+  [true, true]);
+
+// ask 在没有冲突时也**不写入**（体检就只是体检）
+const cleanCsv = "姓名,职务\r\n体检专用老师,顾问\r\n";
+const beforeCleanAsk = (await api.teachers.list()).length;
+const cleanAsk = await api.imports.apply({ entity: "teachers", text: cleanCsv, onConflict: "ask" });
+eq("ask 无冲突时也不写入（体检不代劳）",
+  [(await api.teachers.list()).length, cleanAsk.needsDecision, cleanAsk.added],
+  [beforeCleanAsk, false, 0]);
+const afterCleanApply = await api.imports.apply({ entity: "teachers", text: cleanCsv });
+eq("随后 apply 才真正写入", [afterCleanApply.added, afterCleanApply.skipped.length], [1, 0]);
+
+// skip（默认）：保留库里那条
+const skippedRun = await api.imports.apply({ entity: "teachers", text: clashCsv });
+eq("默认策略是 skip：不新增、不改动", [skippedRun.added, skippedRun.overwritten, skippedRun.skipped.length], [0, 0, 1]);
+eq("skip 之后那条的职务没被改", (await api.teachers.get(existingTeacher.id))?.role, existingTeacher.role);
+
+// overwrite：用文件里的值更新
+const beforeOverwrite = (await api.teachers.list()).length;
+const overwrittenRun = await api.imports.apply({ entity: "teachers", text: clashCsv, onConflict: "overwrite" });
+eq("overwrite：不新增、记一条覆盖", [overwrittenRun.added, overwrittenRun.overwritten], [0, 1]);
+const afterOverwrite = (await api.teachers.get(existingTeacher.id))!;
+eq("overwrite 之后职务被更新", afterOverwrite.role, "首席教师");
+eq("overwrite 之后电话被更新", afterOverwrite.phone, "138-0000-9999");
+eq("overwrite 之后 id 不变（是更新不是新建）", afterOverwrite.id, existingTeacher.id);
+eq("overwrite 不新增记录", (await api.teachers.list()).length, beforeOverwrite);
+
+// overwrite 的边界：文件里空着的字段不能被清空
+const partialCsv = "姓名,备注\r\n张老师,\r\n";
+await api.imports.apply({ entity: "teachers", text: partialCsv, onConflict: "overwrite" });
+eq("空单元格不会把已有内容清掉（覆盖只改真的带值的字段）",
+  (await api.teachers.get(existingTeacher.id))?.role, "首席教师");
+
+// duplicate：两条都留，第二条加序号后缀（名称同时是身份，不能看起来一模一样）
+const dupRun = await api.imports.apply({ entity: "teachers", text: clashCsv, onConflict: "duplicate" });
+eq("duplicate：记一条「保留两份」", [dupRun.duplicated, dupRun.added], [1, 1]);
+const teacherNames = (await api.teachers.list()).map((teacher) => teacher.name);
+ok("保留两份时第二条带序号后缀", teacherNames.includes("张老师（2）"), teacherNames.join("、"));
+
+// 学生的「保留两份」**不加**后缀：同名同家长可能是兄弟姐妹（那是真实数据，不能改）
+const siblingCsv = "姓名,年级,家长联系方式\r\n共享家长同学,初一,139-1111-1111\r\n共享家长同学,初三,139-1111-1111\r\n";
+await api.imports.apply({ entity: "students", text: siblingCsv, onConflict: "duplicate" });
+eq("学生保留两份：姓名都保持原样（不改真实数据）",
+  (await api.students.list()).filter((student) => student.name === "共享家长同学").length, 2);
+
+// perRow：大部分跳过、个别覆盖
+const mixedCsv = "姓名,职务\r\n张老师,顾问\r\n李老师,教研组长\r\n";
+const perRowRun = await api.imports.apply({
+  entity: "teachers",
+  text: mixedCsv,
+  onConflict: "skip",
+  perRow: { "1": "overwrite" },
+});
+eq("逐行策略：第 1 行覆盖、第 2 行跳过", [perRowRun.overwritten, perRowRun.skipped.length], [1, 1]);
+eq("逐行覆盖生效", (await api.teachers.get(existingTeacher.id))?.role, "顾问");
+
+/* ── 从网站（前端内容）导入 ── */
+const siteTeachersAsk = await api.imports.fromSite({ entity: "teachers", onConflict: "ask" });
+eq("从网站导入教师：因为库里已有同名，先要求决定", siteTeachersAsk.needsDecision, true);
+ok("冲突里能看到网站上的老师与库里那条的对应关系",
+  siteTeachersAsk.conflicts.some((item) => String(item.incoming.name) === "陈老师" && item.existing.id !== ""),
+  JSON.stringify(siteTeachersAsk.conflicts.map((item) => item.incoming.name)));
+const siteTeachers = await api.imports.fromSite({ entity: "teachers", onConflict: "skip" });
+eq("从网站导入教师（跳过同名）", [siteTeachers.ok, siteTeachers.needsDecision], [true, false]);
+ok("AI 智能体不会被当成教师导进来",
+  (await api.teachers.list()).every((teacher) => !teacher.name.includes("试课诊断")),
+  (await api.teachers.list()).map((teacher) => teacher.name).join("、"));
+ok("网站上的真实教师已经进库", (await api.teachers.list()).some((teacher) => teacher.name === "陈老师"));
+
+// 夹具里的场地本来就来自网站，所以先要求决定（三条冲突）
+const siteRoomsAsk = await api.imports.fromSite({ entity: "classrooms", onConflict: "ask" });
+eq("从网站导入场地：库里已有同名场地 → 先要求决定",
+  [siteRoomsAsk.needsDecision, siteRoomsAsk.conflicts.length], [true, 3]);
+const siteRoomsSkip = await api.imports.fromSite({ entity: "classrooms", onConflict: "skip" });
+eq("跳过策略下不新增（三个场地都已存在）",
+  [siteRoomsSkip.added, siteRoomsSkip.skipped.length], [0, 3]);
+
+// 把场地清空，验证**真的能导进来**（不是"因为已存在所以看起来没事"）
+for (const room of await api.classrooms.list()) await api.classrooms.remove(room.id);
+eq("清空后没有场地", (await api.classrooms.list()).length, 0);
+const siteRooms = await api.imports.fromSite({ entity: "classrooms", onConflict: "skip" });
+eq("从网站导入场地名：新增 3 个", [siteRooms.ok, siteRooms.added], [true, 3]);
+const roomNames = (await api.classrooms.list()).map((room) => room.name);
+ok("场地名来自网站的教室照片格位", roomNames.includes("301 教室") && roomNames.includes("302 教室"), roomNames.join("、"));
+eq("名字里带「自习」的按自习室导入",
+  (await api.classrooms.list()).find((room) => room.name === "自习区")?.kind, "自习室");
+
 // 收尾：把库恢复成夹具原样，避免影响后面的断言（后面几节都在同一份内存存储上）
 await api.importDatabase(serializeDatabase(seedDb));
 eq("收尾：库回到夹具规模", (await api.students.list()).length, seeded.length);

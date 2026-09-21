@@ -12,6 +12,8 @@ import {
   IMPORT_ENTITIES,
   jsonTemplate,
   parseImport,
+  type Conflict,
+  type ConflictStrategy,
   type ImportEntity,
   type ImportFormat,
 } from "@/lib/backend/import";
@@ -49,6 +51,15 @@ export function BulkImport({
   const [fileName, setFileName] = useState("");
   const [format, setFormat] = useState<ImportFormat | "auto">("auto");
   const [busy, setBusy] = useState(false);
+  /*
+   * 冲突处理（对应「复制文件遇到同名」那三个选择）：
+   *   - `conflicts`：服务端体检回来的冲突行（含库里那条长什么样）；
+   *   - `choices`：逐行选择，键是行号；`globalChoice` 是"一键应用"的默认值。
+   * 体检（onConflict: "ask"）阶段**什么都没写**，所以人可以放心比较、改主意。
+   */
+  const [conflicts, setConflicts] = useState<Conflict[]>([]);
+  const [globalChoice, setGlobalChoice] = useState<ConflictStrategy>("skip");
+  const [choices, setChoices] = useState<Record<string, ConflictStrategy>>({});
   const [result, setResult] = useState<{
     ok: boolean;
     message: string;
@@ -77,39 +88,127 @@ export function BulkImport({
     setFormat(/\.json$/i.test(file.name) ? "json" : /\.csv$/i.test(file.name) ? "csv" : "auto");
   }, []);
 
+  /** 把服务端返回的报告转成面板上的结果提示。 */
+  const showReport = useCallback((outcome: {
+    ok: boolean; error?: string; summary: string; added: number;
+    overwritten: number; duplicated: number;
+    skipped: { line: number; reason: string }[];
+    problems: { line: number; reason: string }[];
+    unknownHeaders: string[];
+  }) => {
+    setResult({
+      ok: outcome.ok,
+      message: outcome.ok ? outcome.summary : (outcome.error ?? "导入失败。"),
+      added: outcome.added,
+      skipped: outcome.skipped,
+      problems: outcome.problems,
+      unknownHeaders: outcome.unknownHeaders,
+    });
+  }, []);
+
+  /**
+   * 第一步：**体检**（onConflict: "ask"）。
+   *
+   * 有冲突就展示出来让人选（覆盖 / 跳过 / 保留两份），**此时一个字节都没写**；
+   * 没冲突就直接按 skip 写入。
+   */
   const onImport = useCallback(async () => {
     if (text.trim() === "") return;
     setBusy(true);
     setResult(null);
+    setConflicts([]);
     try {
       const outcome = await api.imports.apply({
         entity,
         text,
         format: format === "auto" ? undefined : format,
         fileName,
+        onConflict: "ask",
       });
+      if (outcome.needsDecision) {
+        setConflicts(outcome.conflicts);
+        setChoices({});
+        setGlobalChoice("skip");
+        return;
+      }
+      // 没有冲突（或没有要处理的）：直接按默认策略写入
+      const applied = await api.imports.apply({
+        entity,
+        text,
+        format: format === "auto" ? undefined : format,
+        fileName,
+        onConflict: "skip",
+      });
+      showReport(applied);
+      if (applied.ok) onImported?.();
+    } catch (cause) {
       setResult({
-        ok: outcome.ok,
-        message: outcome.ok ? outcome.summary : (outcome.error ?? "导入失败。"),
-        added: outcome.added,
-        skipped: outcome.skipped,
-        problems: outcome.problems,
-        unknownHeaders: outcome.unknownHeaders,
+        ok: false,
+        message: cause instanceof Error ? cause.message : String(cause),
+        added: 0, skipped: [], problems: [], unknownHeaders: [],
       });
+    } finally {
+      setBusy(false);
+    }
+  }, [text, entity, format, fileName, onImported, showReport]);
+
+  /** 第二步：按人选的策略真正写入（逐行选择优先于全局）。 */
+  const onConfirm = useCallback(async () => {
+    setBusy(true);
+    try {
+      const perRow: Record<string, ConflictStrategy> = {};
+      for (const conflict of conflicts) {
+        perRow[String(conflict.line)] = choices[String(conflict.line)] ?? globalChoice;
+      }
+      const outcome = await api.imports.apply({
+        entity,
+        text,
+        format: format === "auto" ? undefined : format,
+        fileName,
+        onConflict: globalChoice,
+        perRow,
+      });
+      setConflicts([]);
+      showReport(outcome);
       if (outcome.ok) onImported?.();
     } catch (cause) {
       setResult({
         ok: false,
         message: cause instanceof Error ? cause.message : String(cause),
-        added: 0,
-        skipped: [],
-        problems: [],
-        unknownHeaders: [],
+        added: 0, skipped: [], problems: [], unknownHeaders: [],
       });
     } finally {
       setBusy(false);
     }
-  }, [text, entity, format, fileName, onImported]);
+  }, [conflicts, choices, globalChoice, entity, text, format, fileName, onImported, showReport]);
+
+  /** 从**网站内容**导入（教师 / 场地名）：同样先体检、再按选择写入。 */
+  const onFromSite = useCallback(async (strategy: ConflictStrategy | "ask") => {
+    if (fixedEntity !== "teachers" && fixedEntity !== "classrooms") return;
+    setBusy(true);
+    setResult(null);
+    setConflicts([]);
+    try {
+      const outcome = await api.imports.fromSite({ entity: fixedEntity, onConflict: strategy });
+      if (outcome.needsDecision) {
+        setConflicts(outcome.conflicts);
+        setChoices({});
+        setGlobalChoice("skip");
+        return;
+      }
+      showReport(outcome);
+      if (outcome.ok) onImported?.();
+    } catch (cause) {
+      setResult({
+        ok: false,
+        message: cause instanceof Error ? cause.message : String(cause),
+        added: 0, skipped: [], problems: [], unknownHeaders: [],
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [fixedEntity, onImported, showReport]);
+
 
   const reset = useCallback(() => {
     setText("");
@@ -154,7 +253,21 @@ export function BulkImport({
           {spec.warning}
         </p>
 
-        {/* ② 模板 + 文件 */}
+        {/* ② 从网站（前端内容）导入：网站上有现成的教师名单与场地名 */}
+        {(entity === "teachers" || entity === "classrooms") && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-ink-200 bg-ink-50 px-3 py-2">
+            <span className="text-xs leading-relaxed text-ink-600">
+              网站内容里已有这份名单（
+              {entity === "teachers" ? "教师页的真实教师，AI 智能体不算" : "首页「教室照片格位」里的场地名"}
+              ），可以一键拉进来：
+            </span>
+            <Button size="sm" variant="outline" onClick={() => void onFromSite("ask")} disabled={busy}>
+              {busy ? "处理中…" : "从网站导入"}
+            </Button>
+          </div>
+        )}
+
+        {/* ③ 模板 + 文件 */}
         <div className="flex flex-wrap items-center gap-2">
           <Button
             size="sm"
@@ -275,12 +388,122 @@ export function BulkImport({
             onClick={() => void onImport()}
             disabled={busy || text.trim() === "" || (preview?.missingRequiredHeaders.length ?? 0) > 0}
           >
-            {busy ? "导入中…" : `导入${spec.label}`}
+            {busy ? "处理中…" : `检查并导入${spec.label}`}
           </Button>
           <span className="text-xs text-ink-400">
-            导入前会自动留一份快照；同名记录跳过，不会覆盖已有数据。
+            先**体检**：有重名会列出来让你选（覆盖 / 跳过 / 保留两份），选之前不会写入。
+            导入前会自动留一份快照。
           </span>
         </div>
+
+        {/* ⑥ 冲突处理：先看清会动到哪些记录，再决定 */}
+        {conflicts.length > 0 && (
+          <div className="rounded-md border border-warning-100 bg-warning-50 px-3 py-3 text-xs leading-relaxed">
+            <p className="font-medium text-ink-800">
+              有 {conflicts.length} 条与现有记录同名
+              <span className="ml-1 font-normal text-ink-500">
+                （还没写入任何东西 —— 先选好怎么处理，再点下面的按钮）
+              </span>
+            </p>
+
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="text-ink-600">全部这样处理：</span>
+              {(
+                [
+                  ["skip", "跳过（保留库里那条）"],
+                  ["overwrite", "覆盖（用文件里的值更新）"],
+                  ["duplicate", "保留两份（第二条加序号）"],
+                ] as Array<[ConflictStrategy, string]>
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setGlobalChoice(value)}
+                  className={`rounded-md border px-2.5 py-1 transition-colors ${
+                    globalChoice === value
+                      ? "border-brand-500 bg-white font-medium text-brand-800"
+                      : "border-ink-200 bg-white text-ink-600 hover:border-brand-300"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-3 max-h-64 overflow-auto rounded border border-ink-200 bg-white">
+              <table className="w-full min-w-[520px] border-collapse text-left">
+                <thead>
+                  <tr className="border-b border-ink-100 text-ink-500">
+                    <th className="px-2 py-1.5 font-medium">行</th>
+                    <th className="px-2 py-1.5 font-medium">文件里</th>
+                    <th className="px-2 py-1.5 font-medium">库里已有</th>
+                    <th className="px-2 py-1.5 font-medium">这条怎么处理</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {conflicts.slice(0, 100).map((conflict) => {
+                    const current = choices[String(conflict.line)] ?? globalChoice;
+                    return (
+                      <tr key={`${conflict.line}-${conflict.key}`} className="border-b border-ink-50 last:border-0">
+                        <td className="px-2 py-1.5 text-ink-500">{conflict.line}</td>
+                        <td className="px-2 py-1.5">
+                          <span className="font-medium text-ink-800">{String(conflict.incoming.name ?? "")}</span>
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <span className="text-ink-700">{conflict.existing.name}</span>
+                          {conflict.existing.summary !== "" && (
+                            <span className="ml-1 text-ink-400">（{conflict.existing.summary}）</span>
+                          )}
+                        </td>
+                        <td className="px-2 py-1.5">
+                          <div className="flex flex-wrap gap-1">
+                            {(
+                              [
+                                ["skip", "跳过"],
+                                ["overwrite", "覆盖"],
+                                ["duplicate", "两份"],
+                              ] as Array<[ConflictStrategy, string]>
+                            ).map(([value, label]) => (
+                              <button
+                                key={value}
+                                type="button"
+                                onClick={() =>
+                                  setChoices((prev) => ({ ...prev, [String(conflict.line)]: value }))
+                                }
+                                className={`rounded border px-1.5 py-0.5 transition-colors ${
+                                  current === value
+                                    ? "border-brand-500 bg-brand-50 font-medium text-brand-800"
+                                    : "border-ink-200 text-ink-500 hover:border-brand-300"
+                                }`}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {conflicts.length > 100 && (
+                <p className="px-2 py-1.5 text-ink-400">
+                  只列出前 100 条；其余按上面的「全部这样处理」执行。
+                </p>
+              )}
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <Button size="sm" onClick={() => void onConfirm()} disabled={busy}>
+                {busy ? "导入中…" : "按以上选择导入"}
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setConflicts([])} disabled={busy}>
+                取消
+              </Button>
+              <span className="text-ink-400">「保留两份」对教师/教室/课程会加序号后缀，学生按原样两条都留。</span>
+            </div>
+          </div>
+        )}
 
         {result !== null && (
           <div

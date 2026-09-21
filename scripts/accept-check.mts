@@ -230,6 +230,29 @@ await check("数据与备份", "批量导入：JSON 导入教师", async () => {
   const created = (await api.teachers.list()).find((teacher) => teacher.name === "验收老师甲");
   return { added: outcome.added, subjects: created?.subjects ?? [] };
 }, (v: { added: number; subjects: string[] }) => v.added === 1 && v.subjects.length === 1);
+await check("数据与备份", "批量导入：冲突先体检、不写入", async () => {
+  const before = (await api.teachers.list()).length;
+  const csv = "姓名,职务\r\n验收老师甲,改过的职务\r\n";
+  const asked = await api.imports.apply({ entity: "teachers", text: csv, onConflict: "ask" });
+  return { needsDecision: asked.needsDecision, changed: (await api.teachers.list()).length - before, conflicts: asked.conflicts.length };
+}, (v: { needsDecision: boolean; changed: number; conflicts: number }) =>
+  v.needsDecision === true && v.changed === 0 && v.conflicts === 1);
+await check("数据与备份", "批量导入：覆盖 / 跳过 / 保留两份", async () => {
+  const csv = "姓名,职务\r\n验收老师甲,新职务\r\n";
+  const overwritten = await api.imports.apply({ entity: "teachers", text: csv, onConflict: "overwrite" });
+  const role = (await api.teachers.list()).find((t) => t.name === "验收老师甲")?.role;
+  const skipped = await api.imports.apply({ entity: "teachers", text: csv });
+  const duplicated = await api.imports.apply({ entity: "teachers", text: csv, onConflict: "duplicate" });
+  const hasCopy = (await api.teachers.list()).some((t) => t.name === "验收老师甲（2）");
+  return { overwritten: overwritten.overwritten, role, skipped: skipped.skipped.length, duplicated: duplicated.duplicated, hasCopy };
+}, (v: { overwritten: number; role?: string; skipped: number; duplicated: number; hasCopy: boolean }) =>
+  v.overwritten === 1 && v.role === "新职务" && v.skipped === 1 && v.duplicated === 1 && v.hasCopy);
+await check("数据与备份", "从网站导入场地（前端内容）", async () => {
+  for (const room of await api.classrooms.list()) await api.classrooms.remove(room.id);
+  const imported = await api.imports.fromSite({ entity: "classrooms", onConflict: "skip" });
+  const names = (await api.classrooms.list()).map((room) => room.name);
+  return { added: imported.added, has301: names.includes("301 教室"), hasStudy: names.includes("自习区") };
+}, (v: { added: number; has301: boolean; hasStudy: boolean }) => v.added === 3 && v.has301 && v.hasStudy);
 await check("数据与备份", "批量导入：缺少必填列时拒绝且不写入", async () => {
   const before = (await api.classrooms.list()).length;
   const outcome = await api.imports.apply({ entity: "classrooms", text: "房间名,容量\r\n漏了表头,6\r\n" });

@@ -1,6 +1,19 @@
 import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createEmptyDatabase } from "./initial";
-import { applyImport, parseImport, summarizeImport, ENTITY_SPECS, type ImportEntity, type ImportFormat, type ParsedImport } from "./import";
+import {
+  applyImport,
+  detectConflicts,
+  ENTITY_SPECS,
+  parseImport,
+  siteImportRecords,
+  summarizeImport,
+  type Conflict,
+  type ConflictStrategy,
+  type ImportEntity,
+  type ImportFormat,
+  type ParsedImport,
+  type SiteImportSource,
+} from "./import";
 import { isWithinAvailability } from "./availability";
 import { CURRENT_VERSION } from "./version";
 import { createRemoteApi, isRemoteMode, remoteBase } from "./remote";
@@ -1926,73 +1939,69 @@ const localApi = {
    * 报课/收款/课时**不在这里导入**（见 import.ts 顶部说明）。
    */
   imports: {
+    /**
+     * 批量导入（**从文件/文本**）。
+     *
+     * `onConflict`：
+     *   - `"skip"`（**默认**）：同名跳过。默认值刻意选它 —— 一个叫 apply 的方法
+     *     不该在没说明的情况下"只体检不写入"，那会让人以为导进去了；
+     *   - `"overwrite"` / `"duplicate"`：覆盖 / 两条都留；
+     *   - `"ask"`：**纯体检、从不写入**（没有冲突也不写），把冲突行连同"库里那条长什么样"
+     *     一起返回，让人决定怎么处理（界面就是这么用的：先 ask，再按选择 apply）。
+     * `perRow` 逐行覆盖全局策略（键是行号），让"大部分跳过、个别覆盖"这种真实需求可行。
+     */
     async apply(input: {
       entity: ImportEntity;
       text: string;
       format?: ImportFormat;
       /** 文件名，只用于日志里说明"从哪来的"。 */
       fileName?: string;
-    }): Promise<{
-      /** 整体是否可用（必填列缺失时为 false，一份都不导）。 */
-      ok: boolean;
-      error?: string;
-      summary: string;
-      added: number;
-      skipped: { line: number; reason: string }[];
-      problems: { line: number; reason: string }[];
-      /** 解析阶段的信息，便于界面显示"列对上了没有"。 */
-      headers: string[];
-      unknownHeaders: string[];
-    }> {
+      onConflict?: ConflictStrategy | "ask";
+      perRow?: Record<string, ConflictStrategy>;
+    }): Promise<ImportReport> {
       await delay();
-      const db = load();
       const entity = input.entity;
-      if (!(entity in ENTITY_SPECS)) {
-        return {
-          ok: false, error: `不认识的导入对象：${String(entity)}`, summary: "",
-          added: 0, skipped: [], problems: [], headers: [], unknownHeaders: [],
-        };
-      }
-
-      const parsed: ParsedImport = parseImport(entity, input.text, input.format);
-      if (parsed.missingRequiredHeaders.length > 0) {
-        return {
-          ok: false,
-          error: `缺少必填列：${parsed.missingRequiredHeaders.join("、")}（请对照模板的表头）`,
-          summary: "",
-          added: 0,
-          skipped: [],
-          problems: parsed.problems,
-          headers: parsed.headers,
-          unknownHeaders: parsed.unknownHeaders,
-        };
-      }
-
-      // 导入前留一颗后悔药（与整库导入同一套：只留最近一次）
-      store.write(BACKUP_KEY, JSON.stringify(db));
-
-      const outcome = applyImport(db, parsed);
-      const label = ENTITY_SPECS[entity].label;
-      writeLog(db, {
-        entity: label,
-        action: "批量导入",
-        targetId: "",
-        summary:
-          `批量导入${label} ${outcome.added} 条` +
-          (outcome.skipped.length > 0 ? `（跳过 ${outcome.skipped.length} 条已存在）` : "") +
-          (input.fileName === undefined || input.fileName === "" ? "" : `，来源 ${input.fileName}`),
-      });
-      persist(db);
-
-      return {
-        ok: true,
-        summary: summarizeImport(outcome),
-        added: outcome.added,
-        skipped: outcome.skipped,
-        problems: outcome.problems,
+      const parsed = parseImport(entity, input.text, input.format);
+      return runImport(load(), parsed, {
+        strategy: input.onConflict ?? "skip",
+        perRow: input.perRow,
+        source: input.fileName ?? "",
         headers: parsed.headers,
         unknownHeaders: parsed.unknownHeaders,
+        missingRequiredHeaders: parsed.missingRequiredHeaders,
+      });
+    },
+
+    /**
+     * 批量导入（**从网站内容**）。
+     *
+     * 网站上现成有两份真实名单：教师团队与场地名。机构刚起步时不必手录一遍。
+     * 走的是**同一套**判定与落库（`applyImport`），因此冲突处理、判重、日志与文件导入一致。
+     * 只支持 `teachers` 与 `classrooms`：课程已有「从网站同步课程」，学生网站上没有。
+     */
+    async fromSite(input: {
+      entity: SiteImportSource;
+      onConflict?: ConflictStrategy | "ask";
+      perRow?: Record<string, ConflictStrategy>;
+    }): Promise<ImportReport> {
+      await delay();
+      const data = siteImportRecords(input.entity);
+      const parsed: ParsedImport = {
+        entity: input.entity,
+        records: data.records,
+        problems: [],
+        headers: Object.keys(data.records[0] ?? {}),
+        unknownHeaders: [],
+        missingRequiredHeaders: [],
       };
+      return runImport(load(), parsed, {
+        strategy: input.onConflict ?? "skip",
+        perRow: input.perRow,
+        source: `网站内容（${data.description}）`,
+        headers: parsed.headers,
+        unknownHeaders: [],
+        missingRequiredHeaders: [],
+      });
     },
   },
 
@@ -2324,6 +2333,118 @@ const localApi = {
     );
   },
 };
+
+/** 批量导入的返回结构（文件导入与"从网站导入"共用）。 */
+export type ImportReport = {
+  /** 整体是否可用（必填列缺失时为 false，一份都不导）。 */
+  ok: boolean;
+  error?: string;
+  /** 需要人工决定冲突（`onConflict: "ask"` 且确实有冲突时为 true，此时**什么都没写**）。 */
+  needsDecision: boolean;
+  summary: string;
+  added: number;
+  overwritten: number;
+  duplicated: number;
+  skipped: { line: number; reason: string }[];
+  problems: { line: number; reason: string }[];
+  conflicts: Conflict[];
+  headers: string[];
+  unknownHeaders: string[];
+};
+
+/**
+ * 一次导入的公共后半段：**判定 → （必要时只报告）→ 落盘 → 写日志 → 返回报告**。
+ *
+ * 抽出来是为了让"从文件导入"与"从网站导入"**只有数据来源不同**：
+ * 判重、冲突策略、后悔药、日志、落盘全在这一个函数里，两处不可能分叉。
+ */
+function runImport(
+  db: Database,
+  parsed: ParsedImport,
+  options: {
+    strategy: ConflictStrategy | "ask";
+    perRow?: Record<string, ConflictStrategy>;
+    source: string;
+    headers: string[];
+    unknownHeaders: string[];
+    missingRequiredHeaders: string[];
+  },
+): ImportReport {
+  const label = ENTITY_SPECS[parsed.entity].label;
+  const base = {
+    added: 0, overwritten: 0, duplicated: 0,
+    skipped: [] as { line: number; reason: string }[],
+    problems: parsed.problems,
+    conflicts: [] as Conflict[],
+    headers: options.headers,
+    unknownHeaders: options.unknownHeaders,
+  };
+
+  if (options.missingRequiredHeaders.length > 0) {
+    return {
+      ...base,
+      ok: false,
+      needsDecision: false,
+      error: `缺少必填列：${options.missingRequiredHeaders.join("、")}（请对照模板的表头）`,
+      summary: "",
+    };
+  }
+
+  /*
+   * `ask` = **纯体检，从不写入**（哪怕一条冲突都没有）。
+   *
+   * 这一条踩过：最初写成"有冲突才返回、没冲突就顺手导进去"，于是界面的流程
+   * （ask → 没冲突 → 再 apply）变成了"第一次已经写进去了，第二次全部同名跳过"，
+   * 用户看到"跳过 N 条"而实际上那些数据刚被导进来 —— 报告与事实不符。
+   * 体检就该只是体检：调用方拿到结论后再决定写不写。
+   */
+  if (options.strategy === "ask") {
+    const conflicts = detectConflicts(db, parsed);
+    return {
+      ...base,
+      ok: true,
+      needsDecision: conflicts.length > 0,
+      summary: conflicts.length > 0
+        ? `${conflicts.length} 条与现有记录冲突，需要你决定怎么处理`
+        : `检查完成：${parsed.records.length} 条都能导入（没有同名冲突）`,
+      conflicts,
+    };
+  }
+
+  // 留一颗后悔药（与整库导入同一套：只留最近一次）
+  store.write(BACKUP_KEY, JSON.stringify(db));
+
+  const outcome = applyImport(db, parsed, {
+    strategy: options.strategy,
+    perRow: options.perRow,
+  });
+
+  const conflictNote =
+    outcome.overwritten > 0 || outcome.duplicated > 0 || outcome.skipped.length > 0
+      ? `（覆盖 ${outcome.overwritten} · 保留两份 ${outcome.duplicated} · 跳过 ${outcome.skipped.length}）`
+      : "";
+  writeLog(db, {
+    entity: label,
+    action: "批量导入",
+    targetId: "",
+    summary:
+      `批量导入${label} ${outcome.added} 条${conflictNote}` +
+      (options.source === "" ? "" : `，来源 ${options.source}`),
+  });
+  persist(db);
+
+  return {
+    ...base,
+    ok: true,
+    needsDecision: false,
+    summary: summarizeImport(outcome),
+    added: outcome.added,
+    overwritten: outcome.overwritten,
+    duplicated: outcome.duplicated,
+    skipped: outcome.skipped,
+    conflicts: outcome.conflicts,
+  };
+}
 
 /**
  * 仅供自检使用：把服务切到指定的存储实现（Node 里用内存存储）。

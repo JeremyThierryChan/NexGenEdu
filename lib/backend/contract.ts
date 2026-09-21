@@ -146,12 +146,13 @@ export const API_CONTRACT: ContractGroup[] = [
     title: "七、运维与审计",
     note:
       "导入导出有两个层次，别混：**整库导入**（`importDatabase`，整体替换，用于换机器/换数据库）" +
-      "与**批量导入**（`imports.apply`，只新增，用于把 Excel/表格里的名单一次录进来）。" +
+      "与**批量导入**（`imports.apply` 从文件/文本、`imports.fromSite` 从网站内容；默认只新增，" +
+      "冲突可逐条选择覆盖 / 跳过 / 保留两份）。" +
       "两者都要在动手前留备份（前者是结构校验 + 导入前备份 + 版本迁移三道保险）。" +
       "`logs` 存在库里、能被导入导出整体替换，因此还不是不可篡改的审计记录。",
     methods: [
       "exportDataset",
-      "exportDatabase", "importDatabase", "imports.apply", "hasBackup", "restoreBackup", "reset",
+      "exportDatabase", "importDatabase", "imports.apply", "imports.fromSite", "hasBackup", "restoreBackup", "reset",
       "setOperator", "logs.list", "logs.clear",
     ],
   },
