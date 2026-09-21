@@ -1,4 +1,4 @@
-import { getTeachersPage } from "@/lib/data/site";
+import { getTeachersPageFromTemplate } from "@/lib/data/site";
 import { coursesFromSite } from "./courses";
 import { pricingConfigFromContent } from "./pricing";
 import { siteContentFromContent } from "./site-content";
@@ -33,7 +33,7 @@ import type {
  *      万一它出现在真实库里，一眼就能认出来。
  */
 export function createSeedDatabase(now: Date = new Date()): Database {
-  const teachers: Teacher[] = getTeachersPage()
+  const teachers: Teacher[] = getTeachersPageFromTemplate()
     .teachers.filter((teacher) => teacher.kind === "teacher")
     .map((teacher, index) => ({
       id: `t${index + 1}`,
@@ -46,9 +46,11 @@ export function createSeedDatabase(now: Date = new Date()): Database {
       years: teacher.years ?? "",
       summary: teacher.summary ?? "",
       bio: teacher.bio ?? "",
-      // 推荐理由与顺序（v14）：同样取自网站教师页
+      // 推荐理由与顺序（v14）：同样取自网站教师页（顺序用它自己的「排序」值，不用下标）
       recommendation: teacher.recommendation ?? "",
-      order: index + 1,
+      order: teacher.order,
+      // 夹具里的教师本来就来自网站，因此默认展示（v16）
+      siteVisible: true,
       origin: "网站" as const,
       kind: "教师" as const,
     }));

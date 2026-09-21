@@ -26,7 +26,25 @@ function sync() {
   return new Promise((resolve) => result.on("exit", (code) => resolve(code === 0)));
 }
 
+/** 取一次后端数据（失败不拦开发：回落模版，脚本自己会说明原因）。 */
+function syncSiteData() {
+  const result = spawn(process.execPath, [path.join(root, "scripts", "sync-site-data.mjs")], {
+    cwd: root,
+    stdio: "inherit",
+  });
+  return new Promise((resolve) => result.on("exit", () => resolve(true)));
+}
+
 await sync();
+
+/*
+ * 取一次后端数据（决定网站内容用后端还是模版）。
+ *
+ * 只在启动时取一次：改了后端里的教师 / 课程 / 正文后，重启 dev（或单独跑
+ * `npm run sync-site-data`）才会刷新 —— 这与正式构建的行为一致（构建时取一次），
+ * 因此不会出现"开发时能热更新、上线却不更新"这种错觉。
+ */
+await syncSiteData();
 
 // 启动 next dev，继承标准输入输出
 const nextBin = path.join(root, "node_modules", ".bin", "next");

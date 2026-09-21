@@ -84,7 +84,7 @@ import {
   type PaymentSummary,
 } from "./finance";
 import type { StudentProfile } from "./student-profile";
-import { getCourseColumns } from "@/lib/data/site";
+import { getCourseColumnsFromTemplate } from "@/lib/data/site";
 import { exportDataset as buildDatasetExport } from "./export";
 import type { ExportRequest, ExportResult } from "./export";
 import {
@@ -523,6 +523,26 @@ function migrate(db: Database): Database | null {
       order: typeof teacher.order === "number" ? teacher.order : index + 1,
     }));
     db.version = 15;
+  }
+
+  if (db.version === 15) {
+    /*
+     * v15 → v16：教师增加「是否在宣传网站展示」。
+     *
+     * 老数据**一律默认不展示**（包括 `origin: "网站"` 的那些）。
+     *
+     * 为什么连"网站来源"也不默认展示：`origin` 记的是"这条档案当初从哪来"，
+     * 它不等于"现在该不该出现在宣传页上" —— 我第一版就是按来源默认的，
+     * 结果真实库里有两位早已不在网站内容里的教师（历史上从网站导入过、后来内容改了名字）
+     * 被标成"展示"，网站会多出两个人来。**迁移猜不出来机构想让谁上台**，
+     * 因此默认全部关掉（网站这次构站仍显示原来的那几位，因为紧接着的
+     * 「从网站导入内容」会把内容里那几位标上）；机构要放谁上去，在教师表单里勾一下。
+     */
+    db.teachers = db.teachers.map((teacher) => ({
+      ...teacher,
+      siteVisible: teacher.siteVisible ?? false,
+    }));
+    db.version = 16;
   }
 
   return db.version === CURRENT_VERSION ? db : null;
@@ -3054,7 +3074,7 @@ const localApi = {
         teachers: db.teachers,
         classrooms: db.classrooms,
         lessons: db.lessons,
-        courses: getCourseColumns().flatMap((column) =>
+        courses: getCourseColumnsFromTemplate().flatMap((column) =>
           column.subgroups.flatMap((subgroup) =>
             subgroup.cards.map((card) => ({
               title: card.title,

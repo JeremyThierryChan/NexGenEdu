@@ -1,4 +1,4 @@
-import { getHomeContent, getTeachersPage } from "@/lib/data/site";
+import { getHomeContent, getTeachersPageFromTemplate } from "@/lib/data/site";
 import type {
   Classroom,
   Course,
@@ -102,6 +102,7 @@ export const ENTITY_SPECS: Record<ImportEntity, EntitySpec> = {
       { key: "summary", header: "一句话简介", aliases: ["简介"], kind: "text", example: "擅长引导学生自己把思路走通。" },
       { key: "bio", header: "详细介绍", aliases: ["介绍", "bio"], kind: "text", example: "（可留空；网站教师页的完整介绍会填在这里）" },
       { key: "kind", header: "类型", kind: "enum", options: ["教师", "AI"], example: "教师" },
+      { key: "siteVisible", header: "网站展示", aliases: ["在网站展示"], kind: "bool", example: "否" },
     ],
     warning:
       "可选科目要与**课程库里的课程名**一致，否则排课时会报「教师科目不符」。" +
@@ -593,6 +594,11 @@ function finalize(entity: ImportEntity, record: Record<string, unknown>): Record
         // 也不要因为一个错别字把真人教师从排课下拉里"静默移走"）
         kind: record.kind === "AI" ? "AI" : "教师",
         origin: record.origin === "网站" ? "网站" : "后台",
+        // 表里没写"网站展示"时按来源默认：网站导进来的展示，其余不展示
+        siteVisible:
+          record.siteVisible === undefined
+            ? record.origin === "网站"
+            : record.siteVisible === true || record.siteVisible === "是" || record.siteVisible === "true",
       };
     case "classrooms":
       return {
@@ -787,7 +793,7 @@ export function siteImportRecords(source: SiteImportSource): SiteImportData {
      * 资料字段（教龄 / 一句话简介 / 详细介绍）一并带过来 —— 这正是"导入教师资料"的本意：
      * 网站教师页本来就写着这些，机构不该再抄一遍。
      */
-    const teachers = getTeachersPage().teachers;
+    const teachers = getTeachersPageFromTemplate().teachers;
     const aiCount = teachers.filter((teacher) => teacher.kind === "ai").length;
     return {
       description:
@@ -806,6 +812,8 @@ export function siteImportRecords(source: SiteImportSource): SiteImportData {
         recommendation: teacher.recommendation ?? "",
         order: teacher.order,
         kind: teacher.kind === "ai" ? "AI" : "教师",
+        // 网站内容里的教师 → 默认在网站上展示
+        siteVisible: true,
         origin: "网站",
       })),
     };

@@ -21,7 +21,7 @@
  * 「从网站同步」把它拉进课程库（`mergeSiteCourses`），否则它不会出现在科目候选里。
  */
 
-import { getCourseColumns, getCoursesPage } from "@/lib/data/site";
+import { getCourseColumnsFromTemplate, getCoursesPageFromTemplate } from "@/lib/data/site";
 import type { Course, CourseOrigin, CourseTag } from "./types";
 
 /** 下拉里的一项。 */
@@ -48,15 +48,16 @@ export type CourseSummary = {
  * 选修课只有一段介绍（成人英语口语、职场与商务英语）。导入时按这份名单定
  * `siteKind`，后台也能随时改。
  */
-function siteElectiveNames(): Set<string> {
+function siteElectives(): Map<string, string> {
   try {
-    const names = new Set<string>();
-    for (const group of getCoursesPage().electiveGroups) {
-      for (const item of group.items) names.add(item.name);
+    const items = new Map<string, string>();
+    for (const group of getCoursesPageFromTemplate().electiveGroups) {
+      // 值是该选修课的一段介绍（正文首段口径由网站那侧决定，这里原样存）
+      for (const item of group.items) items.set(item.name, item.description);
     }
-    return names;
+    return items;
   } catch {
-    return new Set();
+    return new Map();
   }
 }
 
@@ -71,9 +72,9 @@ function siteElectiveNames(): Set<string> {
  */
 export function coursesFromSite(): Course[] {
   try {
-    const electives = siteElectiveNames();
+    const electives = siteElectives();
     const courses: Course[] = [];
-    for (const column of getCourseColumns()) {
+    for (const column of getCourseColumnsFromTemplate()) {
       for (const subgroup of column.subgroups) {
         subgroup.cards.forEach((card, index) => {
           const tags: CourseTag[] = card.tags.map((tag) => ({ label: tag.label, target: tag.target }));
@@ -92,7 +93,12 @@ export function coursesFromSite(): Course[] {
             target: card.target,
             // 同一栏目同一子栏目内的相对顺序：数组下标就够，重新排序时改这个数字
             order: index + 1,
-            intro: "",
+            /*
+             * 选修课的一段介绍写在这里（学科卡片留空 —— 它们的介绍是学科正文）。
+             * 这段文字在内容文件里属于课程页的选修分组的正文，而不是卡片行；
+             * 但它的归属就是"这门选修课"，因此存到课程行上最省事、也只需要改一处。
+             */
+            intro: electives.get(card.title) ?? "",
             siteKind: electives.has(card.title) ? "选修" : "学科",
           });
         });

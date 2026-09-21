@@ -1,6 +1,6 @@
 import { getFeaturedContent } from "@/lib/data/featured";
 import { getScheduleContent } from "@/lib/data/pages";
-import { getSiteBrand, getCourseColumns } from "@/lib/data/site";
+import { getSiteBrand, getCourseColumnsFromTemplate } from "@/lib/data/site";
 import { parseGapWindow, type GapWindow } from "./timetable";
 
 /**
@@ -17,7 +17,7 @@ import { parseGapWindow, type GapWindow } from "./timetable";
 /** 科目候选：课程总览里全部卡片名（小学语文 / 初中数学 / 高中物理 / 雅思 …）。 */
 export function getSubjectOptions(): string[] {
   try {
-    return getCourseColumns().flatMap((column) =>
+    return getCourseColumnsFromTemplate().flatMap((column) =>
       column.subgroups.flatMap((subgroup) => subgroup.cards.map((card) => card.title)),
     );
   } catch {
@@ -75,7 +75,7 @@ export function getClassHoursWindow(): GapWindow | null {
  */
 export function getCourseCategoryOptions(): string[] {
   try {
-    return getCourseColumns().map((column) => column.title);
+    return getCourseColumnsFromTemplate().map((column) => column.title);
   } catch {
     return [];
   }

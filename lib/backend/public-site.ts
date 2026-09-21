@@ -41,6 +41,8 @@ export type PublicTeacher = {
   order: number;
   kind: Teacher["kind"];
   active: boolean;
+  /** 是否在宣传网站上展示（网站据此过滤，见 `Teacher.siteVisible`）。 */
+  siteVisible: boolean;
 };
 
 /** 公开的课程（网站卡片所需的全部字段）。 */
@@ -100,6 +102,7 @@ function publicTeacher(teacher: Teacher): PublicTeacher {
     order: teacher.order,
     kind: teacher.kind,
     active: teacher.active,
+    siteVisible: teacher.siteVisible,
   };
 }
 
@@ -131,6 +134,7 @@ export function publicSite(db: Database): PublicSite {
     courses: db.courses.map(publicCourse),
     siteContent: {
       coursePage: db.siteContent.coursePage,
+      teacherPage: db.siteContent.teacherPage,
       pricingPage: db.siteContent.pricingPage,
     },
     pricing: {

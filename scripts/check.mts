@@ -42,6 +42,10 @@ import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
 import { hasCoursePageContent } from "@/lib/backend/site-content";
+import { publicSite as buildPublicSite } from "@/lib/backend/public-site";
+import { __useBackendSnapshotForTesting, backendSnapshot } from "@/lib/site/backend-source";
+import { siteTeachers as siteTeachersFromContent } from "@/lib/backend/site-import";
+import { coursesFromSite } from "@/lib/backend/courses";
 import { weekDays } from "@/lib/backend/format";
 import {
   buildDayTimeline,
@@ -149,6 +153,14 @@ import {
 import { runTwoPhaseImport } from "@/lib/backend/import-flow";
 import { describeSeriesDate, generateSeriesDates } from "@/lib/backend/recurrence";
 
+/*
+ * **先把后端快照关掉**：这份自检里的内容断言（卡片 / 学科 / 小节 / 教师 / 报价）
+ * 测的是**模版那条路**，必须与"上次构站有没有连上后端"无关 ——
+ * 否则本机开着后端跑 check 会红、CI 上跑会绿（或反过来），而且看起来像内容坏了。
+ * 后端那条路由最后一段"两条来源产出同一份页面数据"用注入的快照单独验。
+ */
+__useBackendSnapshotForTesting(null);
+
 const seedDb = createSeedDatabase();
 import {
   getSession,
@@ -171,11 +183,18 @@ function eq(label: string, actual: unknown, expected: unknown): void {
   }
 }
 
-/** 断言为真。 */
-function ok(label: string, condition: boolean): void {
+/**
+ * 断言为真。
+ *
+ * `detail` 是失败时要显示的那句话（例如服务端返回的拒绝理由）。
+ * 之前这个参数**没有被接住**：文件里十几处 `ok(label, cond, "…")` 的第三个参数
+ * 一直被静默丢掉，于是失败时只剩一句"没通过"，看不到原因 ——
+ * 排查时多花的时间比这个参数值钱得多。
+ */
+function ok(label: string, condition: boolean, detail = ""): void {
   if (!condition) {
     failures += 1;
-    console.error(`  ✗ ${label}`);
+    console.error(`  ✗ ${label}${detail === "" ? "" : `\n      ${detail}`}`);
   } else {
     console.log(`  ✓ ${label}`);
   }
@@ -1807,8 +1826,10 @@ const v13Db = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> &
 };
 v13Db.version = 13;
 v13Db.teachers = v13Db.teachers.map((teacher) => {
-  const { recommendation: _recommendation, order: _order, ...rest } = teacher;
-  return rest;
+  const copy = { ...teacher };
+  delete copy.recommendation;
+  delete copy.order;
+  return copy;
 });
 eq("夹具确实是「没有这两个字段的 v13 教师」",
   v13Db.teachers.every((teacher) => !("recommendation" in teacher) && !("order" in teacher)), true);
@@ -1890,6 +1911,8 @@ ok("补上了课程卡片字段（路径 / 网站形态）",
     (await api.courses.list()).some((course) => course.path !== "" && course.siteKind !== "不展示"));
 ok("写入了课程正文（学科与小节）",
   written.counts.subjectsWritten > 0 && written.counts.bandsWritten > 0);
+ok("写入了教师页标题（否则教师页会没有标题）",
+  (await api.exportDatabase()).siteContent.teacherPage.heading.title !== "");
 const afterImport = await api.exportDatabase();
 ok("写完之后网站那侧能看到内容", hasCoursePageContent(afterImport.siteContent));
 eq("小节数与网站的锚点数量一致",
@@ -1907,6 +1930,64 @@ ok("并明确说明为什么没覆盖",
 const replaced = await api.site.importFromContent({ write: true, overwrite: true });
 ok("勾选覆盖时课程正文被替换", replaced.counts.subjectsWritten > 0,
   `subjectsWritten=${replaced.counts.subjectsWritten}`);
+
+/*
+ * v15 → v16：教师补「是否在宣传网站展示」。
+ *
+ * 这条不变量很要紧：网站刚切到"以库为准"时，如果默认把**所有**教师都展示，
+ * 机构内部老师的档案（真名、没有简介）会直接出现在宣传页上 —— 那是真实会发生的意外。
+ * 因此默认口径按来源定：网站导进来的展示，机构手建的不展示。
+ */
+const v15Db = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+  teachers: Array<Record<string, unknown>>;
+  version: number;
+};
+v15Db.version = 15;
+v15Db.teachers = v15Db.teachers.map((teacher, index) => {
+  const copy = { ...teacher };
+  delete copy.siteVisible;
+  // 一半造"网站来源"、一半造"后台手建"，好验证两种默认口径
+  copy.origin = index === 0 ? "后台" : "网站";
+  return copy;
+});
+eq("v15 文件可以升级导入", (await api.importDatabase(JSON.stringify(v15Db))).ok, true);
+const migratedVisible = await api.teachers.list();
+eq("老库迁移后一律默认**不**展示（迁移猜不出机构想让谁上台）",
+  migratedVisible.every((teacher) => !teacher.siteVisible), true);
+// 紧接着的「从网站导入内容」会把内容文件里那几位标成展示，其余保持不展示
+await api.site.importFromContent({ write: true });
+const afterSiteImport = await api.teachers.list();
+const contentNames = new Set(siteTeachersFromContent().map((teacher) => teacher.name));
+ok("导入后：内容文件里有的教师标成展示、没有的仍不展示",
+  afterSiteImport.every((teacher) => teacher.siteVisible === contentNames.has(teacher.name)),
+  JSON.stringify(afterSiteImport.map((teacher) => [teacher.name, teacher.siteVisible, contentNames.has(teacher.name)])));
+
+/*
+ * 而"机构明确关掉展示"的那一位，导入**不能**把它翻回来。
+ *
+ * 这条是踩出来的：导入侧当时读的是**快照**（而不是模版），于是它看到的"网站内容"
+ * 其实是库自己 —— 连机构手动关掉展示的教师都被它按"内容里有他"重新标成展示。
+ * 症状很隐蔽：日志上写着"按网站内容更新 网站上展示"，但内容文件里根本没有这个人。
+ */
+const hiddenTeacher = afterSiteImport.find((teacher) => !teacher.siteVisible);
+if (hiddenTeacher !== undefined) {
+  await api.site.importFromContent({ write: true, overwrite: true });
+  eq("导入不会把机构关掉展示的教师翻回来（内容文件里没有他）",
+    (await api.teachers.list()).find((item) => item.id === hiddenTeacher.id)?.siteVisible,
+    false);
+} else {
+  // 夹具里没有"手建且已关掉展示"的教师：这一条改成自己造一位（放到最后，避免影响上面的断言）
+  const handmade = await api.teachers.create({
+    name: "自检·内部老师", subjects: [], role: "内部", phone: "", active: true,
+    years: "", summary: "", bio: "", recommendation: "", order: 999,
+    siteVisible: false, origin: "后台", kind: "教师",
+  });
+  await api.site.importFromContent({ write: true, overwrite: true });
+  eq("导入不会把机构关掉展示的教师翻回来（内容文件里没有他）",
+    (await api.teachers.get(handmade.id))?.siteVisible, false);
+  await api.teachers.remove(handmade.id);
+}
+await api.restoreBackup();
 
 // ⑤ 「只补空」的意义：机构在后台改过的内容，默认不会被一次导入冲掉
 const editedTeacher = (await api.teachers.list())[0]!;
@@ -4368,6 +4449,126 @@ try {
     !noBackend.ok && (noBackend.error.includes("npm run server") || noBackend.error.includes("后端")));
 } finally {
   if (savedBase !== undefined) process.env.NEXT_PUBLIC_API_BASE = savedBase;
+}
+
+/*
+ * ── 两条数据来源必须产出**同一份页面数据**（等价性）────────────────────────
+ *
+ * 网站内容有两条来源：库（后端模式）与 Markdown 模版（模版模式）。页面组件只认
+ * 结构，因此"同一个机构、同一份内容"在两条路径下必须生成**逐字节相同**的数据 ——
+ * 否则就会出现"本地开发看到的网站与 GitHub Pages 上的不一样"这种最难查的差异。
+ *
+ * 做法：把示例库（它的课程库 / 课程正文 / 报价 / 教师都取自站点内容）转成一份
+ * 公开数据快照注入进去，先取一遍模版路径的结果、再取一遍后端路径的结果，逐项比对。
+ * 这是这套功能里**唯一**能把"两条路径等价"钉住的断言，因此不比计数、比全文。
+ */
+{
+  const fixture = {
+    ...seedDb,
+    // 教师要用**内容文件里的全部教师**（含 AI）：模版路径会列出它们，
+    // 而示例库刻意只放真人教师（AI 不参与排课），两边对不上就比不平
+    teachers: siteTeachersFromContent().map((teacher, index) => ({
+      id: `t_fixture_${index}`,
+      name: teacher.name,
+      subjects: teacher.subjects,
+      role: teacher.role,
+      phone: "",
+      active: true,
+      years: teacher.years,
+      summary: teacher.summary,
+      bio: teacher.bio,
+      recommendation: teacher.recommendation,
+      order: teacher.order,
+      siteVisible: true,
+      origin: "网站" as const,
+      kind: teacher.kind,
+    })),
+  };
+  const snapshot = buildPublicSite(fixture);
+  ok("夹具里带了教师页标题（不然那条等价性是空转的）",
+    snapshot.siteContent.teacherPage.heading.title !== "");
+
+  __useBackendSnapshotForTesting(null);
+  const templateSide = {
+    teachers: getTeachersPage(),
+    columns: getCourseColumns(),
+    courses: getCoursesPage(),
+    pricing: getPricingData(),
+  };
+
+  __useBackendSnapshotForTesting(snapshot);
+  // 注入之后必须**真的**在后端这条路上（不是"撤掉快照后回落"那种恒真的断言）
+  ok("注入快照后确实走的是后端那条路", backendSnapshot() !== null);
+  const backendSide = {
+    teachers: getTeachersPage(),
+    columns: getCourseColumns(),
+    courses: getCoursesPage(),
+    pricing: getPricingData(),
+  };
+  __useBackendSnapshotForTesting(null);
+
+  /*
+   * 比较用的是**规范化后的 JSON**（对象键排序），不是原始 JSON 字符串。
+   * 理由：键的先后顺序不是数据，为了"映射时的书写顺序"去改代码是本末倒置；
+   * 而数组顺序会被保留 —— 那才是页面上的真实顺序（教师排序、卡片、小节都要一致）。
+   */
+  const canonical = (value: unknown): string =>
+    JSON.stringify(value, (_key, item: unknown) => {
+      if (item === null || typeof item !== "object" || Array.isArray(item)) return item;
+      const record = item as Record<string, unknown>;
+      return Object.fromEntries(Object.keys(record).sort().map((key) => [key, record[key]]));
+    });
+
+  const same = (label: string, a: unknown, b: unknown) => {
+    const left = canonical(a);
+    const right = canonical(b);
+    ok(`两条来源产出同一份${label}`, left === right,
+      left === right
+        ? ""
+        : `长度 模版 ${left.length} / 后端 ${right.length}；首处差异：` +
+          (() => {
+            for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+              if (left[i] !== right[i]) return `${left.slice(Math.max(0, i - 60), i + 60)}  ≠  ${right.slice(Math.max(0, i - 60), i + 60)}`;
+            }
+            return "";
+          })());
+  };
+
+  same("教师页", templateSide.teachers, backendSide.teachers);
+  same("课程栏目", templateSide.columns, backendSide.columns);
+  same("课程页", templateSide.courses, backendSide.courses);
+  same("报价页数据", templateSide.pricing, backendSide.pricing);
+
+  /*
+   * "内容 → 库"那个方向必须**永远读模版**，哪怕磁盘上就躺着一份快照。
+   *
+   * 这不是洁癖：导入侧（课程库同步、从网站导入教师与正文）如果读了快照，
+   * 就会绕成一个圈 —— 库的数据生成快照，快照又被当成"网站内容"导回库里。
+   * 我第一版就是这样，症状是"选修课的一句话介绍永远导不进去"。
+   *
+   * 验法：造一份**模版里没有的**课程快照注入进去。
+   * 页面（`getCourseColumns`）应当跟着快照多出这门课 —— 这证明注入真的生效了；
+   * 而导入侧（`coursesFromSite`）必须看不见它 —— 这证明它读的是模版。
+   */
+  const firstCourse = snapshot.courses[0]!;
+  __useBackendSnapshotForTesting({
+    ...snapshot,
+    courses: [
+      ...snapshot.courses,
+      { ...firstCourse, name: "模版里没有的课程", path: "not-in-template" },
+    ],
+  });
+  ok("页面会跟着快照走（注入确实生效）",
+    getCourseColumns().some((column) =>
+      column.subgroups.some((subgroup) => subgroup.cards.some((card) => card.title === "模版里没有的课程")),
+    ));
+  eq("导入侧读的仍是模版，不是快照",
+    coursesFromSite().some((course) => course.name === "模版里没有的课程"), false);
+  __useBackendSnapshotForTesting(null);
+
+  ok("课程卡片张数与模版一致",
+    backendSide.columns.flatMap((c) => c.subgroups.flatMap((s) => s.cards)).length ===
+      templateSide.columns.flatMap((c) => c.subgroups.flatMap((s) => s.cards)).length);
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

@@ -96,6 +96,15 @@ export type CourseSiteKind = (typeof COURSE_SITE_KINDS)[number];
 export type SiteContent = {
   coursePage: SiteCoursePage;
   /**
+   * 教师页的标题区。
+   *
+   * 只存标题（eyebrow / title / description）—— 教师**本人**的资料在 `teachers` 表里。
+   * 之所以连标题也搬进来：网站"以后端为准"时，课程页与教师页的标题如果还留在模版里，
+   * 那两页就会变成"标题来自文件、内容来自库"的半截状态，改一次要跑两个地方。
+   * （首页 / 关于 / 联系我们 这些页的标题仍来自模版 —— 它们不在这次的范围里。）
+   */
+  teacherPage: SiteTeacherPage;
+  /**
    * 报价页的**短字段**（按钮文字、提示语这类文案）。
    *
    * 价格数字不在这里：它们本来就是库里的 `pricing` 配置（能算钱、后台可改）。
@@ -142,6 +151,11 @@ export type SiteCoursePage = {
    * 免得同一门课在库里存两份、改一处忘一处。
    */
   electiveTitle: string;
+};
+
+/** 网站「教师」页的标题区。 */
+export type SiteTeacherPage = {
+  heading: SiteHeading;
 };
 
 /** 页面上的一个标题区（三个短字段）。 */
@@ -376,6 +390,18 @@ export type Teacher = {
    * 网站教师卡片与首页推荐位就没法各说各的。
    */
   recommendation: string;
+  /**
+   * **是否在宣传网站上展示**（v16 起）。
+   *
+   * 为什么需要它：后台的教师档案里有两类人 —— 一类是"网站上已经公开的那几位"，
+   * 另一类是机构自己录的内部老师（排课要用、但没打算放到宣传页上）。
+   * 网站改成"以后端为准"之后，如果不加这个开关，**一次构站就会把内部老师的档案
+   * （真名、没有简介）直接放到宣传页上** —— 这是真实会发生的意外，不是假想。
+   *
+   * 默认口径：网站内容导入进来的（`origin: "网站"`）默认展示，后台手建的默认不展示。
+   * 想放上去就在教师表单里勾一下。
+   */
+  siteVisible: boolean;
   /**
    * 网站教师页的显示顺序（v14 起）：越小越靠前，未填按 999 排在最后。
    *

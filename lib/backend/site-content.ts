@@ -19,7 +19,7 @@
  * 导语与小节就要在每行里重复一份。
  */
 
-import { getCoursesPage } from "@/lib/data/site";
+import { getCoursesPageFromTemplate, getTeachersPageFromTemplate } from "@/lib/data/site";
 import { getPricingData } from "@/lib/data/pricing";
 import type {
   SiteBand,
@@ -47,6 +47,7 @@ export function siteContentFromContent(): SiteContent {
     electiveTitle: "",
   };
   let labels: SitePricingLabels = emptyPricingLabels();
+  let teacherHeading = { eyebrow: "", title: "", description: "" };
   try {
     labels = getPricingData().labels;
   } catch {
@@ -54,7 +55,7 @@ export function siteContentFromContent(): SiteContent {
   }
 
   try {
-    const page = getCoursesPage();
+    const page = getCoursesPageFromTemplate();
     const subjects: SiteSubject[] = page.courses.map((course, index) => ({
       // id 用学科名：与网站侧的 `Course.id`（= 分组名）同一口径，重新导入也不会漂
       id: course.nameZh,
@@ -83,7 +84,18 @@ export function siteContentFromContent(): SiteContent {
     // 内容坏了就用空结构：后台照常能开，网站会回落到模版
   }
 
-  return { coursePage, pricingPage: { labels } };
+  try {
+    const teachers = getTeachersPageFromTemplate().heading;
+    teacherHeading = {
+      eyebrow: teachers.eyebrow,
+      title: teachers.title,
+      description: teachers.description,
+    };
+  } catch {
+    // 同上：内容坏了就留空，页面标题会回落到模版
+  }
+
+  return { coursePage, teacherPage: { heading: teacherHeading }, pricingPage: { labels } };
 }
 
 /** 报价页文案的空值（键必须齐全：页面上少一个键就是一个空按钮）。 */
@@ -116,6 +128,7 @@ export function emptySiteContent(): SiteContent {
       subjects: [],
       electiveTitle: "",
     },
+    teacherPage: { heading: { eyebrow: "", title: "", description: "" } },
     pricingPage: { labels: emptyPricingLabels() },
   };
 }

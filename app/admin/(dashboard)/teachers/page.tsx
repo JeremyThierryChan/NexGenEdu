@@ -334,6 +334,11 @@ function TeacherForm({
    * （越小越靠前，留空按 999 排在最后）。
    */
   const [recommendation, setRecommendation] = useState(teacher?.recommendation ?? "");
+  /*
+   * 「在宣传网站展示」（v16）。默认：网站导进来的勾上，机构自己建的**不勾** ——
+   * 网站以库为准之后，内部老师的档案不该自己跑到宣传页上去。
+   */
+  const [siteVisible, setSiteVisible] = useState(teacher?.siteVisible ?? false);
   const [order, setOrder] = useState(String(teacher?.order ?? ""));
   const [kind, setKind] = useState<string>(teacher?.kind ?? "教师");
   const [error, setError] = useState("");
@@ -359,6 +364,7 @@ function TeacherForm({
       summary: summary.trim(),
       bio: bio.trim(),
       recommendation: recommendation.trim(),
+      siteVisible,
       // 留空按 999（排在最后）；不是数字就当没填，不让 NaN 进库
       order: Number.isFinite(Number(order)) && order.trim() !== "" ? Number(order) : 999,
       kind: kind === "AI" ? ("AI" as const) : ("教师" as const),
@@ -449,6 +455,21 @@ function TeacherForm({
           value={bio}
           onChange={(event) => setBio(event.target.value)}
         />
+        <label className="flex items-start gap-2 rounded-md border border-ink-200 bg-ink-50/50 px-3 py-2 text-xs text-ink-600">
+          <input
+            type="checkbox"
+            checked={siteVisible}
+            onChange={(event) => setSiteVisible(event.target.checked)}
+            className="mt-0.5"
+          />
+          <span>
+            在宣传网站上展示这位教师
+            <span className="mt-0.5 block text-[11px] text-ink-400">
+              勾上才会出现在网站教师页与首页教师卡片（网站能连上后端构站时以这里为准）；
+              内部老师不必勾。
+            </span>
+          </span>
+        </label>
       </div>
 
       {error !== "" && (

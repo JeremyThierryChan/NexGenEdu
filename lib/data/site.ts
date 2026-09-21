@@ -8,6 +8,11 @@ import {
   type Section,
 } from "@/lib/data/content";
 import { COURSES_HREF } from "@/lib/site/featured-routes";
+import {
+  backendCourseColumns,
+  backendCoursesPage,
+  backendTeachersPage,
+} from "@/lib/site/backend-source";
 import type {
   AboutContent,
   ElectiveCourse,
@@ -152,6 +157,29 @@ function courseSectionNames(): Set<string> {
  *   - `子栏目` 只在栏目需要再分组时写（目前只有高中课内的 必考科目 / 外语 / 七选三）。
  */
 export function getCourseColumns(): CourseColumn[] {
+  /*
+   * **两条来源，先问后端**（见 docs/技术架构.md §5.1）。
+   *
+   * 构站时如果连得上后端，`data/site/.backend-snapshot.ts` 里就有库里的课程卡片，
+   * 这里直接把它映射成同一套 `CourseColumn` 结构；取不到（GitHub Pages 那种
+   * 没有后端的环境）就照原样解析 Markdown。**返回结构完全一样**，
+   * 因此页面组件一行都不用改，全站的下游（栏目页、卡片页、班型页）自动跟着切。
+   */
+  return backendCourseColumns() ?? getCourseColumnsFromTemplate();
+}
+
+/**
+ * 课程栏目（**只读模版**，不看后端快照）。
+ *
+ * 为什么要单独留一个"只读模版"的出口：`lib/backend/*` 里有一批代码属于
+ * **「内容文件 → 数据库」这个方向**（课程库从网站同步、从网站导入教师与正文、
+ * 示例数据夹具）。它们必须读模版，否则会绕成一个圈：库里的数据 → 构站快照 → 再点一次
+ * "从网站同步"读到的却是快照（也就是库自己）。
+ *
+ * 这个圈不是理论问题：我第一版就是这样，结果**选修课的一句话介绍永远导不进去**
+ * —— 因为导入时读到的那份"网站内容"，正是它自己要填的那份数据。
+ */
+export function getCourseColumnsFromTemplate(): CourseColumn[] {
   const page = getPageBlock("全站");
   const sections = courseSectionNames();
   const columns: CourseColumn[] = [];
@@ -299,6 +327,22 @@ export function getHomeSectionHeadings(): {
  *   - 选修课程：`### 成人课程与课外兴趣` → `#### 课程名` + 「状态」字段
  */
 export function getCoursesPage(): {
+  heading: SectionHeading;
+  /** 学科课程（学科 → 学段小节），用于课程详情区。 */
+  courses: Course[];
+  /** 课程总览的栏目结构，与首页同源。 */
+  columns: CourseColumn[];
+  /** 选修类课程的父分组名称。 */
+  electiveTitle: string;
+  /** 选修课按栏目（外语 / 课外兴趣 / 成人课程）分组。 */
+  electiveGroups: Array<{ title: string; items: ElectiveCourse[] }>;
+} {
+  // 同上：后端可用就用库里的学科正文与选修课，否则解析 Markdown
+  return backendCoursesPage() ?? getCoursesPageFromTemplate();
+}
+
+/** 课程页内容（**只读模版**，不看后端快照）—— 理由同 `getCourseColumnsFromTemplate`。 */
+export function getCoursesPageFromTemplate(): {
   heading: SectionHeading;
   /** 学科课程（学科 → 学段小节），用于课程详情区。 */
   courses: Course[];
@@ -695,6 +739,15 @@ function toTeacher(section: Section): Teacher {
 
 
 export function getTeachersPage(): {
+  heading: SectionHeading;
+  teachers: Teacher[];
+} {
+  // 同上：后端可用就用库里的教师档案（含"是否在网站展示"的过滤）
+  return backendTeachersPage() ?? getTeachersPageFromTemplate();
+}
+
+/** 教师页（**只读模版**，不看后端快照）—— 理由同 `getCourseColumnsFromTemplate`。 */
+export function getTeachersPageFromTemplate(): {
   heading: SectionHeading;
   teachers: Teacher[];
 } {

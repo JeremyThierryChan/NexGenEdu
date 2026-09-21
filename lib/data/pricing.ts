@@ -1,4 +1,5 @@
 import { pricingSource } from "@/data/site/pricing";
+import { backendPricingData } from "@/lib/site/backend-source";
 import { parseDocument, type PageBlock, type Section } from "@/lib/data/content";
 
 /**
@@ -393,11 +394,27 @@ export function parsePricingSource(source: string): PricingData {
 }
 
 /**
- * 报价页数据（站点内容）。
+ * 报价页数据。
  *
  * 页面与后台公式都从这里取，**只有一份**取值逻辑：
  * 后台改价用的是 lib/backend/pricing.ts 里的配置（首次由这份内容初始化）。
+ *
+ * 两条来源（见 docs/技术架构.md §5.1）：构站时连得上后端就用库里的报价配置 +
+ * 库里的页面文案，连不上就解析 `data/site/pricing.md`。返回结构完全一样，
+ * 页面与报价公式都不用知道数据是从哪来的。
+ *
+ * `parsePricingSource` 仍然导出给自检用：等价性断言要能单独跑模版这一条路。
  */
 export function getPricingData(): PricingData {
+  return backendPricingData() ?? getPricingDataFromTemplate();
+}
+
+/**
+ * 报价页数据（**只读模版**，不看后端快照）。
+ *
+ * 理由与 `getCourseColumnsFromTemplate` 同一件事：`lib/backend/pricing.ts`
+ * 那条"内容 → 库"的方向必须读模版，否则就是把库里的报价再导一遍。
+ */
+export function getPricingDataFromTemplate(): PricingData {
   return parsePricingSource(pricingSource);
 }

@@ -24,7 +24,7 @@
  */
 
 import { coursesFromSite } from "./courses";
-import { getTeachersPage } from "@/lib/data/site";
+import { getTeachersPageFromTemplate } from "@/lib/data/site";
 import { siteContentFromContent } from "./site-content";
 import type { Course, CourseTag, Database, SiteBand, SiteSubject, Teacher } from "./types";
 
@@ -39,10 +39,12 @@ export function siteTeachers(): Array<{
   recommendation: string;
   order: number;
   kind: Teacher["kind"];
+  /** 来自网站内容的人 → 默认在网站上展示（`siteVisible`，v16）。 */
+  siteVisible: boolean;
 }> {
   try {
-    return getTeachersPage()
-      .teachers.map((teacher, index) => ({
+    return getTeachersPageFromTemplate()
+      .teachers.map((teacher) => ({
         name: teacher.name,
         role: teacher.role,
         subjects: teacher.subjects,
@@ -50,8 +52,16 @@ export function siteTeachers(): Array<{
         summary: teacher.summary ?? "",
         bio: teacher.bio ?? "",
         recommendation: teacher.recommendation ?? "",
-        order: index + 1,
+        /*
+         * 用教师自己的「排序」值，**不要**用数组下标。
+         * `getTeachersPage()` 已经按「排序」排好序了，所以下标看起来"也对"——
+         * 但只要有人给某位教师填了 10（例如两位 AI 智能体排在真人之后），
+         * 下标法会把它变成 3，网站上的教师顺序就跟内容文件不一致了。
+         * 我第一版就是这么写的，等价性断言当场抓到了。
+         */
+        order: teacher.order,
         kind: teacher.kind === "ai" ? ("AI" as const) : ("教师" as const),
+        siteVisible: true,
       }));
   } catch {
     return [];
@@ -129,6 +139,8 @@ export function importSiteContent(
         bio: site.bio,
         recommendation: site.recommendation,
         order: site.order,
+        // 来自网站内容 → 默认在网站上展示（`siteVisible`，v16）
+        siteVisible: true,
         origin: "网站",
         kind: site.kind,
       });
@@ -169,6 +181,17 @@ export function importSiteContent(
       existing.order = site.order;
       filled.push("顺序");
     }
+    /*
+     * 这条数据出自网站内容 → 标成"在网站上展示"。
+     *
+     * 只往"展示"这一个方向补、不反向关掉：机构如果明确取消了某位教师的网站展示，
+     * 那是机构的选择，不该被一次导入翻回来；而"内容文件里有他、网站却不显示"
+     * 几乎总是因为老库还没来得及标（本次导入要解决的正是这个）。
+     */
+    if (!existing.siteVisible) {
+      existing.siteVisible = true;
+      filled.push("网站上展示");
+    }
 
     if (filled.length > 0) {
       counts.teachersFilled += 1;
@@ -196,6 +219,11 @@ export function importSiteContent(
     // 形态只有"不展示"才会被补：机构明确设成「学科/选修」的不动
     if (existing.siteKind === "不展示" || overwrite) {
       if (existing.siteKind !== site.siteKind) { existing.siteKind = site.siteKind; filled.push("网站形态"); }
+    }
+    // 选修课的一句话介绍：内容文件里有值才写（学科卡片这里是空的，不能把文章冲掉）
+    if (site.intro !== "" && (existing.intro === "" || (overwrite && existing.intro !== site.intro))) {
+      existing.intro = site.intro;
+      filled.push("一句话介绍");
     }
 
     if (filled.length > 0) {
@@ -231,6 +259,15 @@ export function importSiteContent(
     changes.push(
       `库里已有课程正文（${working.siteContent.coursePage.subjects.length} 个学科）：未覆盖（要覆盖请勾选「用网站内容覆盖」）`,
     );
+  }
+
+  /* ── 教师页标题：库里的还是空的就写入 ── */
+  const incomingHeading = incoming.teacherPage.heading;
+  const localHeading = working.siteContent.teacherPage.heading;
+  const headingIsEmpty = localHeading.eyebrow === "" && localHeading.title === "" && localHeading.description === "";
+  if (incomingHeading.title !== "" && (headingIsEmpty || overwrite)) {
+    working.siteContent.teacherPage.heading = { ...incomingHeading };
+    changes.push(`写入教师页标题（${incomingHeading.title}）`);
   }
 
   /* ── 报价页文案：同样补空 ── */
