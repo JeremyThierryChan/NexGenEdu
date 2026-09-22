@@ -24,8 +24,15 @@ export default function AdminStatsPage() {
   const [data, setData] = useState<StatsData | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据。
+   *
+   * `quiet: true` = **安静刷新**：页面上已经有数据时**不进加载态**，因此不会在"点一下就地动作"
+   * 的同一瞬间把列表换成加载中、把页面高度塌掉 —— 页高一塌，浏览器就会把滚动位置夹回顶部
+   * （§15.3 里那条真实反馈）。首屏（useEffect 里那一次）仍然用加载态：那时本来就没有内容可保。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet !== true) setLoading(true);
     setData(await api.stats(anchor));
     setLoading(false);
   }, [anchor]);
@@ -47,7 +54,12 @@ export default function AdminStatsPage() {
         description="教室利用率与空档、教师课时分布、退课与流失。"
       />
 
-      <DataNotice onRefresh={load} />
+      <DataNotice
+        onRefresh={async () => {
+          // 安静刷新：几张表一直挂着，刷新不该把它们塌成一行（见 load 的说明）
+          await load({ quiet: true });
+        }}
+      />
 
       {/* 周切换 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">

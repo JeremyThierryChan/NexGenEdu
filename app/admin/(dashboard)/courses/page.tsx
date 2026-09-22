@@ -108,6 +108,43 @@ export default function AdminCoursesPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [syncing, setSyncing] = useState(false);
+  /**
+   * 正在切「开放 / 暂未开放」的那张卡片（防连点，也让"点了有反应"看得见）。
+   *
+   * 为什么要有它：一次切换要两趟请求（先写、再读计数）。这中间按钮不禁用的话，
+   * 连点两下会发出两条方向相反的写 —— 服务端两条都写成功，界面上哪个是"最后状态"
+   * 就看谁先回来。禁用 + 文案变「切换中…」同时告诉人"这一下已经收到了"。
+   */
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  /**
+   * 就地动作的结果，**挂在被点的那张卡片上**（不是页顶）。
+   *
+   * 为什么必须挂在卡片上（三件事是同一件事）：
+   *   1. 卡片清单在页面很下面，页顶那条横幅离眼睛几屏远 —— 结果写在那儿等于没写；
+   *   2. 页顶横幅**出现 / 消失就是一次页面高度的变化**（它在滚动位置上方），
+   *      而这一下点击最不该伴随页高变化（§15.3 那两条跳顶部的机制，一条是显式滚动，
+   *      另一条就是页高变化让浏览器夹回滚动位置）；
+   *   3. 失败（例如会话失效 401）必须**当场**说出来 —— 以前这里没有 try/catch，
+   *      失败是一个没人看得见的 rejected promise，人看到的是"点了没反应"，
+   *      就会反复点、再去猜系统坏了。
+   */
+  const [cardNote, setCardNote] = useState<{ id: string; kind: "ok" | "error"; text: string } | null>(null);
+  /**
+   * 「新增课程」那张表单展不展开（**默认收起**，理由写在渲染那一处）。
+   *
+   * 收起的状态跨保存保留（连加几门课是常事，保存后不必再点开一次）；
+   * 它只在"新增"这一个身份下才有意义（`editing === null` 时那块才渲染）。
+   */
+  const [creatingCourse, setCreatingCourse] = useState(false);
+  /**
+   * 小节级动作（删小节 / 新增小节）被拒的原因，**挂在被点的那个小节框里**。
+   *
+   * `key` 与列表项的 key 同源（学科下标-小节下标）：理由就出现在手指底下。
+   * 为什么不滚到页顶去显示：编辑器就地展开在卡片下面，页顶离得很远，
+   * 滚上去等于把人从"正在改的那一节"旁边甩开，还得再滑回来 ——
+   * 而这正是这次要消掉的东西（原来这里有一句 `window.scrollTo({ top: 0 })`）。
+   */
+  const [bandError, setBandError] = useState<{ key: string; text: string } | null>(null);
   /*
    * 「从网站导入内容」：两阶段（体检 → 确认写入）。
    * 体检结果逐条列出来给人看 —— 一次导入会动到教师资料、课程字段与课程正文，
@@ -444,24 +481,25 @@ export default function AdminCoursesPage() {
     const owners = coursesReferencingAnchor(anchorGuardCards, anchor);
     if (owners.length > 0) {
       setMessage("");
-      setError(
-        `不能删掉小节「${anchor}」：课程 ${owners.map((course) => `「${course.name}」`).join("、")} 的` +
+      /*
+       * 被拒的**理由写在这一节自己的框里**（键＝学科下标-小节下标，与列表 key 同源）。
+       *
+       * 这里原来是一句 `window.scrollTo({ top: 0, behavior: "smooth" })`，为的是
+       * "把被拒的人带到页顶那条原因跟前"。编辑器改成就地展开之后那句话就变成害人的了：
+       * 页顶离这一节好几屏，滚上去等于把人从刚点的那一节旁边甩开；而且"跳顶部"本身
+       * 正是机构反馈的毛病（§15.3）。挂在框里之后，理由出现在手指底下，页面一动不动 ——
+       * 于是全仓库再也不需要任何一句显式滚动（自检里有一条断言守着这件事）。
+       */
+      setBandError({
+        key: `${hit.subjectIndex}-${hit.bandIndex}`,
+        text:
+          `不能删掉小节「${anchor}」：课程 ${owners.map((course) => `「${course.name}」`).join("、")} 的` +
           "卡片靶点 / 标签还指着它，删了它网站上那张卡片点进去就会跳空。" +
           "请先改掉那门课的标签 / 靶点（改完保存），再回来删这个小节。",
-      );
-      /*
-       * 提示在页面上方：被拒时把人带到那条提示跟前（成功时不必 —— 别打断正在填的表单）。
-       *
-       * ⚠️ 这一句这次**刻意没动**，但它确实因为"编辑器改成就地展开"而更打断人了：
-       * 原来滚到页顶正好落回表单，现在表单在被点的那张卡片下面 —— 滚上去等于把"人正在改的那一节"
-       * 甩出屏幕，还得再滑回来。仍然留着它的理由：这是**破坏性动作被拒**的那条路
-       * （不是"点一下编辑就跳顶部"的日常路径），而被拒的原因只写在页顶，
-       * 不把人带过去就等于"点了没反应"。真要改，方向是"让原因出现在点按钮的那块旁边"
-       * （例如行内编辑器里也显示 error），那属于另一件事，这次不顺手做。
-       */
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      });
       return;
     }
+    setBandError(null);
     editSiteContent(
       (draft) => {
         draft.coursePage.subjects[hit.subjectIndex]?.bands.splice(hit.bandIndex, 1);
@@ -483,7 +521,13 @@ export default function AdminCoursesPage() {
             : slot,
         ),
     );
-    setError("");
+    /*
+     * 成功时**只写这一条提示**，不去动页顶那条 `error` 横幅。
+     *
+     * 这一条提示在页顶（会长高一行）—— 长高是安全的：它在滚动位置**上方**，页面只是把内容
+     * 往下推一点，浏览器不会把滚动位置夹回顶部。真正会夹的是**变矮**（把上面那一块拿掉，
+     * 剩下的一页装不下原来的滚动位置）。所以就地动作一律"可以多一行字，不许少一块内容"。
+     */
     setMessage(`已删掉小节「${anchor}」—— 按「保存修改」才会真的写进库里。`);
   }
 
@@ -500,6 +544,10 @@ export default function AdminCoursesPage() {
     const subjects = siteContent.coursePage.subjects;
     const subject = subjects.find((item) => item.id === subjectId) ?? subjects[0];
     if (subject === undefined) {
+      /*
+       * 一个学科都没有时无处可挂：这是**整块正文**的问题（不是某一节的问题），
+       * 因此仍然显示在页顶那条横幅里 —— 这一条没有"被点的那一节"可以挂。
+       */
       setError("课程正文里还没有学科 —— 先到下面「学科级设置与未挂到卡片的正文」里「新增学科」，再回来挂小节。");
       return;
     }
@@ -519,7 +567,7 @@ export default function AdminCoursesPage() {
         ? slots
         : [...slots, { subjectIndex, bandIndex, matched: "" }],
     );
-    setError("");
+    setBandError(null);
     setMessage(
       `已在学科「${subject.name}」下新增小节「${base}」（锚点 ${anchor}）—— ` +
         "按「保存修改」才会真的写进库里；想让它成为卡片点进去的那一节，把上面的「卡片点进哪一节」改成这个锚点。",
@@ -663,24 +711,62 @@ export default function AdminCoursesPage() {
   /**
    * 切换「开放 / 暂未开放」。
    *
-   * 刻意**就地更新这一条**（而不是整页重载）：一是不会因为列表被换掉而跳回顶部，
-   * 二是少两次请求（只补一次 summary，用来更新上面的计数）。
-   * 价格关联不受状态影响，因此不需要重算 pricingStatus。
+   * ## 这个动作**只允许**做三件事（一条都不能多）
+   *
+   *   1. 写库（`api.courses.update`）；
+   *   2. 把这一条**就地换掉**（`setCourses` 里 map 一条）—— 不是整页重载：
+   *      重载会把列表换成"加载中…"，页面高度从很高塌成一行，浏览器随即把滚动位置
+   *      夹回顶部（"点一下『设为暂未开放』就跳回页面顶部"，真实反馈）；
+   *   3. 补一次计数（`summary`，只改页顶那一行字）。
+   *
+   * **不滚动、不清空列表、不动 `loading`** —— 这三件是这一页所有就地动作的共同纪律，
+   * 自检里有源码断言守着（`scripts/check.mts` 的「就地动作」那两条）。
+   *
+   * ## 为什么现在有 try/catch
+   *
+   * 以前这里没有：写失败（最常见的是会话失效的 401 —— 后端重启过）会变成
+   * 一个没人看得见的 rejected promise，界面上什么都不发生。人看不到原因，
+   * 只会反复点、再怀疑是"点了就跳顶部"。现在失败原话显示在**那张卡片上**，
+   * 而且不往页顶放横幅（页顶横幅出现/消失＝页高变化，就在点击的同一瞬间）。
    */
   async function toggleStatus(course: Course) {
-    setError("");
+    // 只拦"同一张卡片被连点两下"：那会发出两条方向相反的写，而界面上哪个是最后状态看谁先回来。
+    // 不同卡片之间互不阻塞（各改各的一行，计数最后各读一次）。
+    if (togglingId === course.id) return;
     const next: Course["status"] = course.status === "开放" ? "暂未开放" : "开放";
-    const updated = await api.courses.update(course.id, { status: next });
-    if (updated !== null) {
-      setCourses((prev) => (prev ?? []).map((item) => (item.id === course.id ? updated : item)));
+    setTogglingId(course.id);
+    try {
+      const updated = await api.courses.update(course.id, { status: next });
+      if (updated !== null) {
+        setCourses((prev) => (prev ?? []).map((item) => (item.id === course.id ? updated : item)));
+      }
+      setCardNote({ id: course.id, kind: "ok", text: `已设为「${next}」。` });
+    } catch (cause) {
+      setCardNote({
+        id: course.id,
+        kind: "error",
+        text: `没能切换「${course.name}」的状态：${cause instanceof Error ? cause.message : "未知原因"}`,
+      });
+      return;
+    } finally {
+      setTogglingId(null);
     }
-    setSummary(await api.courses.summary());
+    /*
+     * 计数单独一趟、单独兜错：状态**已经改好了**，这里读不到只是页顶那行数字旧一会儿，
+     * 不该回过头去说"切换失败"（那会让人以为没生效，再点一下又切回去）。
+     */
+    try {
+      setSummary(await api.courses.summary());
+    } catch {
+      // 读不到计数就算了：状态已落库，下次刷新会补上
+    }
   }
 
   async function remove(course: Course) {
     const verdict = canRemoveCourse(course);
     if (!verdict.ok) {
-      setError(verdict.reason);
+      // 被拒的理由写在卡片上（页顶那条横幅离这张卡片好几屏，见 toggleStatus 的说明）
+      setCardNote({ id: course.id, kind: "error", text: verdict.reason });
       return;
     }
     if (!window.confirm(`删除课程「${course.name}」？已有课节与报课记录里的科目名不会变（它们按名字记的）。`)) {
@@ -697,10 +783,19 @@ export default function AdminCoursesPage() {
        * 删除按钮本身照旧：不禁用、确认框也不变，这一步只在删除成功之后跑。
        */
       if (editing?.id === course.id) resetForm();
+      setCardNote(null);
       setMessage(`已删除「${course.name}」。`);
       await load({ quiet: true });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "删除失败。");
+      /*
+       * 失败写在这张卡片上（卡片还在）：**不往页顶放横幅** —— 页顶横幅出现/消失
+       * 就是一次页高变化，而那正好发生在人刚点完按钮的一瞬间。
+       */
+      setCardNote({
+        id: course.id,
+        kind: "error",
+        text: cause instanceof Error ? cause.message : "删除失败。",
+      });
     }
   }
 
@@ -1014,6 +1109,18 @@ export default function AdminCoursesPage() {
                         删除这个小节
                       </button>
                     </div>
+                    {/*
+                      被拒的理由就写在这一节自己的框里（键与列表 key 同源）：
+                      眼睛不用移动，页面也不用滚动 —— 见 removeBand 的说明。
+                    */}
+                    {bandError !== null && bandError.key === `${hit.subjectIndex}-${hit.bandIndex}` && (
+                      <p
+                        role="alert"
+                        className="mt-2 rounded-md border border-danger-100 bg-danger-50 px-3 py-2 text-[11px] leading-relaxed text-danger-600"
+                      >
+                        {bandError.text}
+                      </p>
+                    )}
 
                     <div className="mt-2 grid gap-2 sm:grid-cols-2">
                       <TextField
@@ -1145,9 +1252,9 @@ export default function AdminCoursesPage() {
         description="排课的科目、教师可带科目、报课科目都取自这里。网站上还没有的课（围棋、书法）也可以在这里先建起来。"
       />
       <DataNotice
-        onRefresh={() => {
+        onRefresh={async () => {
           // 同样用安静刷新：手动刷新也不该把列表清空、把页面高度塌掉
-          void load({ quiet: true });
+          await load({ quiet: true });
         }}
       />
 
@@ -1205,14 +1312,36 @@ export default function AdminCoursesPage() {
         只有**新增**时这块才在页面顶部。编辑已经改成"在哪张卡片上点，就在哪张卡片下面展开"
         （见下面课程清单里的行内编辑器），因此这里只剩一个身份：新增课程 —— 不再有"编辑「X」"。
         新课程还没有对应的卡片行，没地方可以就地展开，所以它仍然在这儿填。
+
+        **默认收起**（一行摘要 + 右边一个按钮）。这不是为了好看，是为了"点编辑不跳顶部"：
+        这块表单在**课程清单上面**，而编辑是在卡片下面就地展开的 —— 点「编辑」时这块会被卸载，
+        于是**滚动位置上方一下子少掉几百像素**。上方变矮正是那条真实反馈的第二条机制
+        （§15.3 原因二：上方塌掉、浏览器只好把滚动位置往上收，收过头就停在顶部）。
+        收起之后它只剩一行，点编辑时上方少掉的那一块小到不会把人推回顶部；
+        而"展开新增课程"是**长高**，长高只会把内容往下推，不会把人推回顶部。
+        （与下面那块「学科级设置与未挂到卡片的正文」一个取舍：低频的东西默认只留一行。）
       */}
       {editing === null && (
         <Panel
           className="mt-5"
           title="新增课程"
           description="例如「围棋」「书法」「编程」。分类可以填网站栏目名，也可以自己写一个（如「兴趣才艺」）。"
+          actions={
+            <Button variant="outline" size="sm" onClick={() => setCreatingCourse((value) => !value)}>
+              {creatingCourse ? "收起表单" : "填写新课程"}
+            </Button>
+          }
         >
-          {renderCourseForm("space-y-3 px-4 py-4")}
+          {creatingCourse ? (
+            renderCourseForm("space-y-3 px-4 py-4")
+          ) : (
+            <p className="px-4 py-4 text-xs leading-relaxed text-ink-500">
+              点右边「填写新课程」展开表单：课程记录（名字 / 分类 / 状态 / 班型 / 备注）、
+              网站上怎么展示、这门课的**网站正文**、以及它的**报价**都在这一张表单里，
+              改完点一次保存就一起写好。改已有的课请到下面清单里点那门课的「编辑」——
+              编辑器就在它自己的卡片下面展开。
+            </p>
+          )}
         </Panel>
       )}
 
@@ -1448,9 +1577,14 @@ export default function AdminCoursesPage() {
                           <button
                             type="button"
                             onClick={() => void toggleStatus(course)}
-                            className="rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 hover:border-brand-300 hover:text-brand-700"
+                            disabled={togglingId === course.id}
+                            className="rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 hover:border-brand-300 hover:text-brand-700 disabled:opacity-50"
                           >
-                            {course.status === "开放" ? "设为暂未开放" : "设为开放"}
+                            {togglingId === course.id
+                              ? "切换中…"
+                              : course.status === "开放"
+                                ? "设为暂未开放"
+                                : "设为开放"}
                           </button>
                           {course.origin === "后台" && (
                             <button
@@ -1462,6 +1596,24 @@ export default function AdminCoursesPage() {
                             </button>
                           )}
                         </div>
+
+                        {/*
+                          就地动作的结果就写在这张卡片上（成功一行绿字 / 失败一行红字）。
+                          放在卡片里而不是页顶：一是眼睛就在这儿，二是页顶那条横幅
+                          一出现一消失就是滚动位置上面多了一块 / 少了一块 —— 而"少了一块"
+                          正是让浏览器把滚动位置夹回顶部的那个动作（见 toggleStatus 的说明）。
+                        */}
+                        {cardNote !== null && cardNote.id === course.id && (
+                          <p
+                            role={cardNote.kind === "error" ? "alert" : undefined}
+                            className={cn(
+                              "mt-1 text-[11px] leading-relaxed",
+                              cardNote.kind === "error" ? "text-danger-600" : "text-success-600",
+                            )}
+                          >
+                            {cardNote.text}
+                          </p>
+                        )}
                       </li>
                       {/*
                        编辑器**就在这张卡片下面**展开：`col-span-full`（占满整行）。

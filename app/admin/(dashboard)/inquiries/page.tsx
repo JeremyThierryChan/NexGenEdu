@@ -27,8 +27,15 @@ export default function AdminInquiriesPage() {
   const [selectedId, setSelectedId] = useState("");
   const [filter, setFilter] = useState<"全部" | InquiryStatus>("待确认");
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据。
+   *
+   * `quiet: true` = **安静刷新**：页面上已经有数据时**不进加载态**，因此不会在"点一下就地动作"
+   * 的同一瞬间把列表换成加载中、把页面高度塌掉 —— 页高一塌，浏览器就会把滚动位置夹回顶部
+   * （§15.3 里那条真实反馈）。首屏（useEffect 里那一次）仍然用加载态：那时本来就没有内容可保。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet !== true) setLoading(true);
     setInquiries(await api.inquiries.list());
     setLoading(false);
   }, []);
@@ -48,14 +55,14 @@ export default function AdminInquiriesPage() {
     );
     if (reason === null) return;
     await api.inquiries.abandon(inquiry.id, reason);
-    await load();
+    await load({ quiet: true });
   }
 
   async function remove(inquiry: Inquiry) {
     if (!window.confirm(`删除「${inquiry.studentName}」这条咨询记录？`)) return;
     await api.inquiries.remove(inquiry.id);
     if (selectedId === inquiry.id) setSelectedId("");
-    await load();
+    await load({ quiet: true });
   }
 
   return (
@@ -65,7 +72,12 @@ export default function AdminInquiriesPage() {
         description="家长咨询登记与排课可行性：这个安排能不能接，不能的话最接近的方案是什么。"
       />
 
-      <DataNotice onRefresh={load} />
+      <DataNotice
+        onRefresh={async () => {
+          // 安静刷新（见 load 的说明）
+          await load({ quiet: true });
+        }}
+      />
 
       {creating && (
         <Panel
@@ -79,7 +91,7 @@ export default function AdminInquiriesPage() {
               setCreating(false);
               setSelectedId(id);
               setFilter("全部");
-              await load();
+              await load({ quiet: true });
             }}
           />
         </Panel>
@@ -211,7 +223,7 @@ export default function AdminInquiriesPage() {
             ) : undefined
           }
         >
-          <InquiryReport inquiry={selected} onChanged={load} />
+          <InquiryReport inquiry={selected} onChanged={() => void load({ quiet: true })} />
         </Panel>
       )}
     </>

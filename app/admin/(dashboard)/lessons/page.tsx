@@ -43,8 +43,15 @@ export default function AdminLessonsPage() {
   const [recordId, setRecordId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据。
+   *
+   * `quiet: true` = **安静刷新**：页面上已经有数据时**不进加载态**，因此不会在"点一下就地动作"
+   * 的同一瞬间把列表换成加载中、把页面高度塌掉 —— 页高一塌，浏览器就会把滚动位置夹回顶部
+   * （§15.3 里那条真实反馈）。首屏（useEffect 里那一次）仍然用加载态：那时本来就没有内容可保。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet !== true) setLoading(true);
     const day = new Date(`${date}T00:00:00`);
     const [dayLessons, teacherList, classroomList, studentList] = await Promise.all([
       api.lessons.listByDate(day),
@@ -84,7 +91,7 @@ export default function AdminLessonsPage() {
         .join("、");
       setNotice(`已标记「已上」，扣课时：${detail !== "" ? detail : "无学生"}`);
     }
-    await load();
+    await load({ quiet: true });
   }
 
   async function setStatus(lesson: Lesson, status: Lesson["status"]) {
@@ -94,7 +101,7 @@ export default function AdminLessonsPage() {
     if (wasCompleted && status !== "已上") {
       setNotice("已撤销「已上」状态，这节课扣掉的课时已按流水退回。");
     }
-    await load();
+    await load({ quiet: true });
   }
 
   async function remove(lesson: Lesson) {
@@ -102,7 +109,7 @@ export default function AdminLessonsPage() {
       return;
     }
     await api.lessons.remove(lesson.id);
-    await load();
+    await load({ quiet: true });
   }
 
   const totalMinutes = lessons
@@ -118,7 +125,12 @@ export default function AdminLessonsPage() {
         description="按天排课：谁上、在哪上、跟谁上，并在保存前检查时间冲突。"
       />
 
-      <DataNotice onRefresh={load} />
+      <DataNotice
+        onRefresh={async () => {
+          // 安静刷新（见 load 的说明）
+          await load({ quiet: true });
+        }}
+      />
 
       {/* 日期切换 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">
@@ -179,7 +191,8 @@ export default function AdminLessonsPage() {
             students={students}
             onCancel={() => setSeries(false)}
             onDone={async () => {
-              await load();
+              // 安静刷新：批量排完只重读数据，不把当天列表塌成一行（见 load 的说明）
+              await load({ quiet: true });
             }}
           />
         </Panel>
@@ -205,7 +218,7 @@ export default function AdminLessonsPage() {
             onCancel={() => setCreating(false)}
             onSaved={async () => {
               setCreating(false);
-              await load();
+              await load({ quiet: true });
             }}
           />
         </Panel>
@@ -216,7 +229,7 @@ export default function AdminLessonsPage() {
         <h2 className="border-b border-ink-100 px-4 py-3 text-sm font-medium text-ink-900">
           待补课
         </h2>
-        <PendingMakeups onChanged={load} />
+        <PendingMakeups onChanged={() => void load({ quiet: true })} />
       </section>
 
       <div className="mt-4 overflow-x-auto rounded-lg border border-ink-200 bg-white">
@@ -337,7 +350,7 @@ export default function AdminLessonsPage() {
             onCancel={() => setEditingId(null)}
             onSaved={async () => {
               setEditingId(null);
-              await load();
+              await load({ quiet: true });
             }}
           />
         </Panel>

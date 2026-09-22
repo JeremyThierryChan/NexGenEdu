@@ -37,6 +37,14 @@ import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
 import { __useStoreForTesting, api } from "@/lib/backend/api";
 import { isRemoteMode } from "@/lib/backend/remote";
 import { createMemoryStore } from "@/lib/backend/storage";
+import {
+  __useConnectionStoreForTesting,
+  getConnectionState,
+  refreshConnection,
+  SERVICE_NAME,
+  setBackendOverride,
+  subscribeConnection,
+} from "@/lib/backend/connection";
 import { dateKey } from "@/lib/backend/format";
 import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
@@ -123,7 +131,7 @@ import {
   PRICING_SOURCE_ADMIN,
   PRICING_SOURCE_CONTENT,
 } from "@/lib/backend/pricing";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { LEAVE_NOTICE_HOURS, decideCharge } from "@/lib/backend/attendance";
 import {
   CLASS_HOURS_PER_DAY,
@@ -5480,6 +5488,212 @@ try {
   ok("课程卡片张数与模版一致",
     backendSide.columns.flatMap((c) => c.subgroups.flatMap((s) => s.cards)).length ===
       templateSide.columns.flatMap((c) => c.subgroups.flatMap((s) => s.cards)).length);
+}
+
+console.log("\n=== 13. 界面稳定：就地动作不滚动、不塌页高 ===");
+
+/*
+ * 这一节守的是**机构反馈过两次的那件事**：点一下卡片上的就地动作（「设为暂未开放」、
+ * 「编辑」、删一个小节），页面跳到顶部、还得重新往下滑。§15.3 把原因归成两类，
+ * 两类都在这里钉住 —— 这一节不碰后端、不需要浏览器，它是**源码结构**上的护栏
+ * （与上面那条「前端源码里不再出现口令」的扫描同类）。
+ *
+ *   A. **显式滚动**：`window.scrollTo` / `scrollIntoView` / `.scrollBy`。
+ *      历史上课程库有两处：`startEdit` 里"把表单带到眼前"、`removeBand` 里
+ *      "被拒时把人带到页顶那条原因跟前"。两处现在都不需要了 —— 编辑器就地展开、
+ *      被拒的原因写在**被点的那个小节框里**。因此这条断言的口径是**一处都不允许**
+ *      （白名单为空）。将来真要滚动，必须回来改这条断言并写清理由 ——
+ *      那正是想要的效果：谁想再加一句"跳顶部"，得先过这一关。
+ *
+ *   B. **页高塌掉**：刷新时把列表换成一行"加载中…"、页面高度从很高塌成一行，
+ *      浏览器随即把滚动位置夹回顶部。判据是源码级的：凡是页面里有 `setLoading(true)`
+ *      （＝存在加载态）的，`load()` 的调用点就必须带 `quiet: true`；
+ *      唯一例外是**首屏那一次**（裸 `load();`，每页正好一处）；
+ *      也不许把 `load` 直接当回调传下去（`onRefresh={load}` 那种写法绕过了参数，
+ *      等于让一次刷新回到"清空列表"的老行为）。
+ *
+ * 为什么放在 `check.mts` 而不是 `check-auth.mts`：这两条都是**前端源码的性质**，
+ * 不需要真后端、不需要浏览器；而 `check.mts` 在两种后端下都要跑（`npm run check:both`），
+ * 因此两种环境都拦得住。
+ */
+{
+  /** 前端源码目录（产物 `out/`、`.next/` 不算 —— 那些是生成物）。 */
+  const FRONTEND_DIRS = ["app", "components", "lib"];
+  const SOURCE_EXT = /\.(ts|tsx)$/;
+  const IGNORED = /(^|\/)(node_modules|\.next|out)\//;
+
+  /**
+   * 去掉注释再扫。
+   *
+   * 为什么必须去掉：这两个被扫的词（`window.scrollTo(...)`、`load()`）在**注释里**
+   * 是应该出现的历史说明 —— 例如课程库那句"原来这里是滚到顶部，现在改成就地展开了"。
+   * 不去掉的话，后来的人为了不触红就只能把这段历史删掉，那正好是相反的取舍：
+   * 这段历史必须留，代码里不许有。只去**块注释**与**整行注释**（一行以两个斜杠开头）：
+   * JSX 文案里出现的 `http://…` 不该被当成行注释起点（那会漏掉同一行的真代码）。
+   */
+  const stripComments = (source: string): string =>
+    source
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .split("\n")
+      .map((line) => (/^\s*\/\//.test(line) ? "" : line))
+      .join("\n");
+
+  /** 递归收集某个目录下的前端源码（路径用 `/` 分隔，便于断言里打印）。 */
+  const collectSources = (dir: string): Array<{ path: string; source: string; code: string }> => {
+    const rootUrl = new URL(`../${dir}/`, import.meta.url);
+    const files = readdirSync(rootUrl, { recursive: true }) as string[];
+    return files
+      .map((entry) => entry.replaceAll("\\", "/"))
+      .filter((entry) => SOURCE_EXT.test(entry) && !IGNORED.test(entry))
+      .map((entry) => {
+        const source = readFileSync(new URL(entry, rootUrl), "utf8");
+        return { path: `${dir}/${entry}`, source, code: stripComments(source) };
+      });
+  };
+
+  const frontendSources = FRONTEND_DIRS.flatMap(collectSources);
+  ok("源码扫描真的读到了文件（否则下面几条是空转的）", frontendSources.length > 100,
+    `读到 ${frontendSources.length} 个文件`);
+
+  // ── A. 一处显式滚动都不许有 ────────────────────────────────────────────────
+  const scrollPattern = /window\.scrollTo\s*\(|scrollIntoView\s*\(|\.scrollTo\s*\(|\.scrollBy\s*\(/;
+  eq(
+    "前端源码里一处显式滚动都没有（白名单为空；要加必须在此处写明理由）",
+    frontendSources.filter((file) => scrollPattern.test(file.code)).map((file) => file.path),
+    [],
+  );
+
+  // ── B. 有加载态的页面：就地动作必须走安静刷新 ─────────────────────────────
+  /*
+   * 只看 `app/admin/**` 的页面文件，而且只看**存在加载态**的（含 `setLoading(true)`）：
+   * 没有加载态的页面（例如「数据与备份」）刷新时不会把一个列表换成"加载中…"，
+   * 因此不在这条规则的射程内。
+   */
+  const adminDashboardUrl = new URL("../app/admin/(dashboard)/", import.meta.url);
+  const adminPages = (readdirSync(adminDashboardUrl, { recursive: true }) as string[])
+    .map((entry) => entry.replaceAll("\\", "/"))
+    .filter((entry) => entry.endsWith("page.tsx"))
+    .sort()
+    .map((entry) => {
+      const source = readFileSync(new URL(entry, adminDashboardUrl), "utf8");
+      return { path: `app/admin/(dashboard)/${entry}`, source, code: stripComments(source) };
+    });
+  const gatedPages = adminPages.filter((page) => page.code.includes("setLoading(true)"));
+  ok("扫描到了带加载态的后台页面", gatedPages.length >= 10, `${gatedPages.length} 个：${gatedPages.map((p) => p.path).join("、")}`);
+
+  // B1. 每页最多一处裸 `load()` —— 就是首屏那一处
+  const bareCalls = gatedPages
+    .map((page) => ({
+      path: page.path,
+      count: (page.code.match(/\bload\(\)/g) ?? []).length,
+    }))
+    .filter((row) => row.count !== 1)
+    .map((row) => `${row.path}（${row.count} 处）`);
+  eq("带加载态的后台页面：裸 load() 只允许首屏那一处", bareCalls, []);
+
+  // B2. `load(...)` 只要带参数，就必须是安静刷新
+  const loudCalls: string[] = [];
+  for (const page of gatedPages) {
+    for (const match of page.code.matchAll(/\bload\(/g)) {
+      const after = page.code.slice(match.index + match[0].length, match.index + match[0].length + 40);
+      if (/^\s*\)/.test(after)) continue; // 裸 load()，由 B1 管
+      if (/^\s*\{\s*quiet:\s*true\s*\}/.test(after)) continue; // 安静刷新
+      loudCalls.push(`${page.path} → load(${after.slice(0, 24).replace(/\s+/g, " ").trim()}…`);
+    }
+  }
+  eq("带加载态的后台页面：load(...) 一律带 quiet（就地动作不清空列表）", loudCalls, []);
+
+  // B3. 不许把 load 直接当回调传下去（那样就绕过了参数，回到"清空列表"的老行为）
+  eq(
+    "带加载态的后台页面：没有把 load 直接当回调传给组件",
+    gatedPages.filter((page) => /\{\s*load\s*\}/.test(page.code)).map((page) => page.path),
+    [],
+  );
+
+  // B4. 安静刷新必须是**真的实现了**（有 quiet 参数的分支），不是只把参数传了个寂寞
+  eq(
+    "带加载态的后台页面：quiet 分支真的写在 load 里（options.quiet）",
+    gatedPages.filter((page) => !page.code.includes("options.quiet")).map((page) => page.path),
+    [],
+  );
+
+  /*
+   * B5. 课程库的「新增课程」表单**默认收起**。
+   *
+   * 这是"就地动作不许让上方少一块"的那条规则在**这一页的具体形状**上的落点：那张表单整块在
+   * 课程清单上面，而「编辑」是在卡片下面就地展开的 —— 表单要是默认摊开，点一下编辑它就被卸载，
+   * 于是滚动位置上方矮掉几百像素（§15.3 原因二：上方塌掉，浏览器只好把滚动位置往上收）。
+   * 这条断言不是"漂亮代码"的检查，它挡的是一个**真的会把人推回页面顶部**的改动：
+   * 谁要把 `creatingCourse` 的初值改回 `true`，就会看到这句为什么不能改。
+   */
+  {
+    const coursesPage = adminPages.find((page) => page.path.endsWith("courses/page.tsx"));
+    ok("找得到课程库页面（否则下面那条是空转的）", coursesPage !== undefined);
+    const code = coursesPage?.code ?? "";
+    const folded =
+      /const \[creatingCourse, setCreatingCourse\] = useState\(false\)/.test(code) &&
+      /\{creatingCourse \? \(/.test(code);
+    ok(
+      "课程库：新增课程表单默认收起（点某张卡片的「编辑」时，页面上方不会少掉那一大块）",
+      folded,
+      "见 app/admin/(dashboard)/courses/page.tsx 里 creatingCourse 的说明与 §15.3",
+    );
+  }
+
+  /*
+   * ── 行为级：复查连接时**不要退回「检查中…」** ─────────────────────────────
+   *
+   * 上面 B 那一组管的是"刷新列表"。还有一条同类的页高变化：顶部那条后端提示横幅
+   * 每 30 秒被定时复查换一次说法（`checking` 是一行短字，`ok`/`ready` 是两三行），
+   * 于是它就在滚动位置上方时高时低。修法是"已经有结论时不再退回 checking"，
+   * 而这件事**可以真的跑一遍**：把探活用桩接住（不碰任何真实地址），
+   * 听状态变化的次序 —— 第一次必须经过"检查中"，第二次必须**不经过**。
+   */
+  const connectionMemory = createMemoryStore();
+  __useConnectionStoreForTesting(connectionMemory);
+  const realFetch = globalThis.fetch;
+  const savedApiBase = process.env.NEXT_PUBLIC_API_BASE;
+  const seen: string[] = [];
+  const unsubscribe = subscribeConnection(() => {
+    seen.push(getConnectionState().status);
+  });
+  try {
+    /*
+     * 探活桩：`/health` 自报为本系统的后端、`/api/status` 正常回数据库细节。
+     * 地址用 `.invalid`（保留域，永远解析不到）—— 万一桩没接住也**不会**碰到真后端。
+     */
+    globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const body = url.endsWith("/health")
+        ? { ok: true, service: SERVICE_NAME, db: "stub.db" }
+        : url.endsWith("/api/status")
+          ? { ok: true, schemaVersion: 1, counts: {}, backup: { latest: null, latestAt: null } }
+          : null;
+      return body === null
+        ? new Response("not found", { status: 404 })
+        : new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+    };
+    process.env.NEXT_PUBLIC_API_BASE = "http://stub.invalid";
+    setBackendOverride("http://stub.invalid");
+
+    seen.length = 0;
+    await refreshConnection({ token: "stub-token" });
+    eq("首次探活：先显示「检查中」再给结论", seen, ["checking", "ok"]);
+
+    seen.length = 0;
+    await refreshConnection({ token: "stub-token" });
+    eq("复查时不退回「检查中」（横幅不会每 30 秒换一次高度）", seen, ["ok"]);
+    eq("复查后状态仍然是有结论的", getConnectionState().status, "ok");
+  } finally {
+    unsubscribe();
+    globalThis.fetch = realFetch;
+    setBackendOverride(null);
+    if (savedApiBase === undefined) delete process.env.NEXT_PUBLIC_API_BASE;
+    else process.env.NEXT_PUBLIC_API_BASE = savedApiBase;
+  }
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

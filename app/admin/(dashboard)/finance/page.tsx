@@ -26,8 +26,15 @@ export default function AdminFinancePage() {
   const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据。
+   *
+   * `quiet: true` = **安静刷新**：页面上已经有数据时**不进加载态**，因此不会在"点一下就地动作"
+   * 的同一瞬间把列表换成加载中、把页面高度塌掉 —— 页高一塌，浏览器就会把滚动位置夹回顶部
+   * （§15.3 里那条真实反馈）。首屏（useEffect 里那一次）仍然用加载态：那时本来就没有内容可保。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet !== true) setLoading(true);
     const [finance, studentList] = await Promise.all([api.finance(month), api.students.list()]);
     setData(finance);
     setStudents(studentList);
@@ -47,7 +54,12 @@ export default function AdminFinancePage() {
         description="本月收入、收款流水、欠费清单与退费口径。"
       />
 
-      <DataNotice onRefresh={load} />
+      <DataNotice
+        onRefresh={async () => {
+          // 安静刷新：收款流水与欠费清单一直挂着，刷新不该把它们塌成一行（见 load 的说明）
+          await load({ quiet: true });
+        }}
+      />
 
       {/* 月份切换 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">

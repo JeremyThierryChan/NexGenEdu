@@ -23,8 +23,15 @@ export default function AdminFollowUpsPage() {
   const [copied, setCopied] = useState("");
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据。
+   *
+   * `quiet: true` = **安静刷新**：页面上已经有数据时**不进加载态**，因此不会在"点一下就地动作"
+   * 的同一瞬间把列表换成加载中、把页面高度塌掉 —— 页高一塌，浏览器就会把滚动位置夹回顶部
+   * （§15.3 里那条真实反馈）。首屏（useEffect 里那一次）仍然用加载态：那时本来就没有内容可保。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet !== true) setLoading(true);
     setItems(await api.followups());
     setLoading(false);
   }, []);
@@ -60,7 +67,12 @@ export default function AdminFollowUpsPage() {
         description="需要主动联系家长的学生：课时、欠费、作业、测评、出勤与排课。"
       />
 
-      <DataNotice onRefresh={load} />
+      <DataNotice
+        onRefresh={async () => {
+          // 安静刷新（见 load 的说明）
+          await load({ quiet: true });
+        }}
+      />
 
       {/* 概览 */}
       <dl className="mt-6 grid gap-3 sm:grid-cols-3 lg:grid-cols-4">

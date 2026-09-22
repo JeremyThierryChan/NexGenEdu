@@ -296,13 +296,27 @@ async function fetchDatabaseHealth(base: string, token: string | null): Promise<
  *
  * `autoDetect: true` 时，若当前地址连不上，会依次探测候选地址；
  * 探到就**记住它**（覆盖值），并把结果写进状态 —— 这就是"自动连接"。
+ *
+ * ## 为什么**已经有结论时不再退回 `checking`**
+ *
+ * 这一条是为了界面稳定（真实反馈推导出来的）：`checking` 的说法是"正在检查后端连接状态…"
+ * 一行短字，而 `ok` / `ready` 是两三行的说明。以前每次复查（**30 秒一次**的定时器、
+ * 窗口聚焦、手动点「重新检查」）都先切 `checking` 再切回来，于是页面顶部那块横幅
+ * **每 30 秒就换一次说法、变一次高度** —— 而它就在滚动位置上方：页高一变，浏览器就可能
+ * 把滚动位置夹一下（§15.3 里那条"页高变化 → 看起来跳到顶部"的机制）。
+ *
+ * 所以：只有**第一次**探活（还没有任何结论、也就是 `idle`）才显示"检查中…"；
+ * 已经有结论时，屏幕上继续挂上一个真实结论（哪怕它马上就过期），复查完成后直接换成新结论。
+ * 这也更诚实：右上角那个状态信号不该每半分钟改口说一次"检查中…"，它应该只在**真的变了**
+ * 的时候改口。
  */
 export async function refreshConnection(
   options: { autoDetect?: boolean; token?: string | null } = {},
 ): Promise<ConnectionState> {
-  state = { status: "checking" };
-  notify();
-
+  if (state.status === "idle") {
+    state = { status: "checking" };
+    notify();
+  }
   const base = backendBase();
   if (base === "") {
     // 没有配置地址：先试着自动找一台（本机常见端口）

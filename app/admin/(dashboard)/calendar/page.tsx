@@ -32,8 +32,15 @@ export default function AdminCalendarPage() {
 
   const days = useMemo(() => weekDays(anchor), [anchor]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据。
+   *
+   * `quiet: true` = **安静刷新**：页面上已经有数据时**不进加载态**，因此不会在"点一下就地动作"
+   * 的同一瞬间把列表换成加载中、把页面高度塌掉 —— 页高一塌，浏览器就会把滚动位置夹回顶部
+   * （§15.3 里那条真实反馈）。首屏（useEffect 里那一次）仍然用加载态：那时本来就没有内容可保。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet !== true) setLoading(true);
     const from = days[0] ?? new Date();
     const to = days[6] ?? new Date();
     const [weekLessons, teacherList, classroomList] = await Promise.all([
@@ -67,7 +74,12 @@ export default function AdminCalendarPage() {
     <>
       <PageHeading title="日历" description="按周查看排课密度与空档，点某天看当天的课。" />
 
-      <DataNotice onRefresh={load} />
+      <DataNotice
+        onRefresh={async () => {
+          // 安静刷新：周视图一直挂着，刷新不该把整块塌成一行（见 load 的说明）
+          await load({ quiet: true });
+        }}
+      />
 
       {/* 周切换 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">

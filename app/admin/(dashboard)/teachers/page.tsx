@@ -31,8 +31,15 @@ export default function AdminTeachersPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据。
+   *
+   * `quiet: true` = **安静刷新**：页面上已经有数据时**不进加载态**，因此不会在"点一下就地动作"
+   * 的同一瞬间把列表换成加载中、把页面高度塌掉 —— 页高一塌，浏览器就会把滚动位置夹回顶部
+   * （§15.3 里那条真实反馈）。首屏（useEffect 里那一次）仍然用加载态：那时本来就没有内容可保。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet !== true) setLoading(true);
     const [teacherList, lessonList] = await Promise.all([
       api.teachers.list(),
       api.lessons.list(),
@@ -61,7 +68,8 @@ export default function AdminTeachersPage() {
 
   async function toggleActive(teacher: Teacher) {
     await api.teachers.update(teacher.id, { active: !teacher.active });
-    await load();
+    // 安静刷新：表格一直挂着，切在职状态不该把整张表塌成一行（见 load 的说明）
+    await load({ quiet: true });
   }
 
   async function remove(teacher: Teacher) {
@@ -70,7 +78,7 @@ export default function AdminTeachersPage() {
     if (!window.confirm(`删除教师「${teacher.name}」？${extra}\n如果只是不带课了，建议把「在职」关掉而不是删除。`)) return;
     await api.teachers.remove(teacher.id);
     setOpenId((current) => (current === teacher.id ? null : current));
-    await load();
+    await load({ quiet: true });
   }
 
   return (
@@ -80,7 +88,12 @@ export default function AdminTeachersPage() {
         description="教师档案、可带科目、在职状态与排课量。"
       />
 
-      <DataNotice onRefresh={load} />
+      <DataNotice
+        onRefresh={async () => {
+          // 安静刷新（见 load 的说明）
+          await load({ quiet: true });
+        }}
+      />
 
       {creating && (
         <Panel className="mt-6" title="新增教师" description="科目请与课程名用同一套叫法，便于排课与前台一致。">
@@ -88,7 +101,8 @@ export default function AdminTeachersPage() {
             onCancel={() => setCreating(false)}
             onSaved={async () => {
               setCreating(false);
-              await load();
+              // 安静刷新：新增完不清空列表、不塌页高（见 load 的说明）
+              await load({ quiet: true });
             }}
           />
         </Panel>
@@ -125,7 +139,7 @@ export default function AdminTeachersPage() {
       </div>
 
             {importing && (
-        <BulkImport fixedEntity="teachers" onImported={async () => { await load(); }} />
+        <BulkImport fixedEntity="teachers" onImported={async () => { await load({ quiet: true }); }} />
       )}
 
       <div className="mt-4 overflow-x-auto rounded-lg border border-ink-200 bg-white">
@@ -231,7 +245,8 @@ export default function AdminTeachersPage() {
             onCancel={() => setEditingId(null)}
             onSaved={async () => {
               setEditingId(null);
-              await load();
+              // 安静刷新（见 load 的说明）
+              await load({ quiet: true });
             }}
           />
         </Panel>

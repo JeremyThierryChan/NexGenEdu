@@ -1,6 +1,6 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/Button";
 import { BackendStatus } from "@/components/admin/BackendStatus";
 import { backendBase, getConnectionState, subscribeConnection } from "@/lib/backend/connection";
@@ -22,14 +22,33 @@ import { backendBase, getConnectionState, subscribeConnection } from "@/lib/back
  * 点一下就会把数据全部换成示例数据 —— 对已经在录真实数据的机构来说，
  * 这是个随时可能误触的破坏性按钮，而它解决的问题（"想从头来过"）用
  * 「数据与备份 → 导入空库」就够了，而且那条路会先自动备份。
+ *
+ * ## 「刷新」按钮为什么自己管"刷新中…"
+ *
+ * 各页面的刷新现在都是**安静刷新**（`load({ quiet: true })`）：不清空列表、不进加载态 ——
+ * 这样点一下不会把页面高度塌掉（§15.3：页高在滚动位置上方塌了，浏览器会把滚动位置夹回顶部）。
+ * 代价是"刷新中"这件事不能再靠页面自己说了，所以由这个按钮说：把各页面传进来的
+ * 刷新函数**等它结束**，期间按钮上是"刷新中…"。按钮上的字不会改变页面高度（按钮一直是那一行），
+ * 这正是这次想要的：有反馈，但不动版面。
  */
-export function DataNotice({ onRefresh }: { onRefresh?: () => void }) {
+export function DataNotice({ onRefresh }: { onRefresh?: () => void | Promise<void> }) {
   /*
    * 这段话必须**依据真实探活结果**来说，不能只看"配没配地址"。
    * 以前它只判断环境变量，于是后端没在跑时照样宣称"已连接后端…数据不会丢" ——
    * 那是句假话，而且正好是出事时最不该说的一句（让人以为数据平安）。
    */
   const state = useSyncExternalStore(subscribeConnection, getConnectionState, getConnectionState);
+  /** 这次刷新还没结束（各页面传进来的刷新函数返回 Promise 时才有）。 */
+  const [refreshing, setRefreshing] = useState(false);
+
+  function onRefreshClick(): void {
+    if (onRefresh === undefined) return;
+    const result = onRefresh();
+    // 同步刷新（不用等的实现）没有"刷新中"可言：拿不到 Promise 就不假装在等
+    if (!(result instanceof Promise)) return;
+    setRefreshing(true);
+    void result.finally(() => setRefreshing(false));
+  }
 
   return (
     <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-ink-200 bg-white px-3.5 py-2.5">
@@ -64,8 +83,8 @@ export function DataNotice({ onRefresh }: { onRefresh?: () => void }) {
       <div className="flex shrink-0 items-center gap-2">
         <BackendStatus />
         {onRefresh !== undefined && (
-          <Button variant="outline" size="sm" onClick={onRefresh}>
-            刷新
+          <Button variant="outline" size="sm" onClick={onRefreshClick} disabled={refreshing}>
+            {refreshing ? "刷新中…" : "刷新"}
           </Button>
         )}
       </div>

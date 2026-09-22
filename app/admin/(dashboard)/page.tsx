@@ -43,8 +43,16 @@ export default function AdminTodayPage() {
   const [classrooms, setClassrooms] = useState<Classroom[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据（今日概览）。
+   *
+   * `quiet: true` = **安静刷新**：页面上已经有内容时**不进加载态**，因此不会在动作发生的
+   * 同一瞬间把页面高度塌掉 —— 「今日课程」「课时预警」这两块都是 `loading ? '加载中…' : 列表`，
+   * 刷新时若切进加载态，整块会从很高塌成一行，浏览器随即把滚动位置夹回顶部（§15.3，真实反馈）。
+   * 首屏（useEffect 里那一次）仍然用加载态 —— 那时本来就没有内容可保。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet !== true) setLoading(true);
     const [today, todayLessons, teacherList, studentList, classroomList] = await Promise.all([
       api.today(),
       api.lessons.listByDate(new Date()),
@@ -79,7 +87,12 @@ export default function AdminTodayPage() {
         description="今天有哪些课程、各教室是否空闲、哪些学生课时不足。"
       />
 
-      <DataNotice onRefresh={load} />
+      <DataNotice
+        onRefresh={async () => {
+          // 安静刷新：手动刷新同样不该把「今日课程」「课时预警」两块塌成一行（见 load 的说明）
+          await load({ quiet: true });
+        }}
+      />
 
       {/* 四个数字，一眼看到规模 */}
       <dl className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

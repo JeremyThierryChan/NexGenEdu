@@ -70,8 +70,16 @@ export default function AdminPricingPage() {
   /** 人数对照表：1–8 人各自的教师课时费（按当前选择与时长）。 */
   const [shareRows, setShareRows] = useState<TeacherFeeResult[]>([]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据（报价配置 + 课程库）。
+   *
+   * `quiet: true` = **安静刷新**：这一页整页都挂在 `loading` 上（`if (loading || draft === null)`
+   * 就把整页换成一行"加载中…"），所以刷新时只要进了加载态，页面高度会从好几屏塌成一行、
+   * 浏览器随即把滚动位置夹回顶部（§15.3）。手动刷新走安静模式，落在原地。
+   * 首屏那一次仍然用加载态：那时本来就没有内容可保。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet !== true) setLoading(true);
     const [config, courses] = await Promise.all([api.pricing.get(), api.courses.list()]);
     setSaved(config);
     setDraft(config);
@@ -256,8 +264,9 @@ export default function AdminPricingPage() {
         description="基础价与系数是算钱的依据：改完保存，再用试算器核对一遍，最后导出替换内容文件。"
       />
       <DataNotice
-        onRefresh={() => {
-          void load();
+        onRefresh={async () => {
+          // 安静刷新：整页挂在 loading 上，一进加载态就会塌成一页（见 load 的说明）
+          await load({ quiet: true });
         }}
       />
 

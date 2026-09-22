@@ -45,8 +45,15 @@ export default function AdminClassroomsPage() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [kindFilter, setKindFilter] = useState<"全部" | ClassroomKind>("全部");
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据。
+   *
+   * `quiet: true` = **安静刷新**：页面上已经有数据时**不进加载态**，因此不会在"点一下就地动作"
+   * 的同一瞬间把列表换成加载中、把页面高度塌掉 —— 页高一塌，浏览器就会把滚动位置夹回顶部
+   * （§15.3 里那条真实反馈）。首屏（useEffect 里那一次）仍然用加载态：那时本来就没有内容可保。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet !== true) setLoading(true);
     const [roomList, lessonList] = await Promise.all([
       api.classrooms.list(),
       api.lessons.list(),
@@ -84,7 +91,7 @@ export default function AdminClassroomsPage() {
     if (!window.confirm(`删除「${room.name}」？${extra}`)) return;
     await api.classrooms.remove(room.id);
     setOpenId((current) => (current === room.id ? null : current));
-    await load();
+    await load({ quiet: true });
   }
 
   return (
@@ -94,7 +101,12 @@ export default function AdminClassroomsPage() {
         description="上课用教室与自习室：容量、可用时段，以及今天的排课。"
       />
 
-      <DataNotice onRefresh={load} />
+      <DataNotice
+        onRefresh={async () => {
+          // 安静刷新（见 load 的说明）
+          await load({ quiet: true });
+        }}
+      />
 
       {creating && (
         <Panel
@@ -106,7 +118,8 @@ export default function AdminClassroomsPage() {
             onCancel={() => setCreating(false)}
             onSaved={async () => {
               setCreating(false);
-              await load();
+              // 安静刷新：新增完不清空列表、不塌页高（见 load 的说明）
+              await load({ quiet: true });
             }}
           />
         </Panel>
@@ -158,7 +171,7 @@ export default function AdminClassroomsPage() {
       </div>
 
             {importing && (
-        <BulkImport fixedEntity="classrooms" onImported={async () => { await load(); }} />
+        <BulkImport fixedEntity="classrooms" onImported={async () => { await load({ quiet: true }); }} />
       )}
 
       <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -235,7 +248,8 @@ export default function AdminClassroomsPage() {
                     onCancel={() => setEditingId(null)}
                     onSaved={async () => {
                       setEditingId(null);
-                      await load();
+                      // 安静刷新：编辑保存完不清空列表、不塌页高（见 load 的说明）
+                      await load({ quiet: true });
                     }}
                   />
                 </div>

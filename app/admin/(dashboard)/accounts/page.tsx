@@ -63,9 +63,25 @@ export default function AdminAccountsPage() {
   const [editing, setEditing] = useState<string | null>(null);
   const [resetting, setResetting] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  /**
+   * 点「重试」之后的在办标记。
+   *
+   * 为什么单独一个状态：重试走的是**安静刷新**（安静刷新不置 `loading` —— 理由见 load 的说明），
+   * 而"正在读取账号表…"那句话是按 `loading` 写的。没有它，点重试就一点反馈都没有；
+   * 有了它，标题照旧会说"正在读取"，同时**按钮不会消失**（`loading` 为真时整块按钮会被藏掉，
+   * 那本身就是一次页高变化 —— 正是这次要消掉的东西）。
+   */
+  const [retrying, setRetrying] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * 读数据。
+   *
+   * `quiet: true` = **安静刷新**：页面上已经有账号表时**不进加载态** —— 这一页的加载态与
+   * "读不出来"那一屏共用（`if (table === null)` 才换整页），刷新时把高度塌掉就可能让浏览器
+   * 把滚动位置夹回顶部（§15.3）。首屏那一次仍然用加载态：那时本来就没有内容可保。
+   */
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (options.quiet !== true) setLoading(true);
     try {
       const accounts = await loadAccountTable();
       if (!accounts.ok) {
@@ -128,7 +144,8 @@ export default function AdminAccountsPage() {
       setEditing(null);
       setResetting(null);
       setCreating(false);
-      await load();
+      // 安静刷新：写成功之后只重读数据，不把整页换成加载态（见 load 的说明）
+      await load({ quiet: true });
     } catch (cause) {
       setError(`操作失败：${cause instanceof Error ? cause.message : String(cause)}`);
     } finally {
@@ -149,7 +166,7 @@ export default function AdminAccountsPage() {
         />
         <Panel
           className="mt-6"
-          title={loading ? "正在读取账号表…" : "这一页打不开"}
+          title={loading || retrying ? "正在读取账号表…" : "这一页打不开"}
           description="账号管理是技术管理员专属：服务端会对其它角色返回 403，改成直接敲网址也一样进不来。"
         >
           <div className="space-y-3 px-4 py-4">
@@ -165,8 +182,17 @@ export default function AdminAccountsPage() {
                   否则请回今日概览 —— 谁的账号、什么角色，见使用手册的「谁能做什么」。
                 </p>
                 <div className="flex flex-wrap gap-2">
-                  <Button size="sm" variant="outline" disabled={busy} onClick={() => void load()}>
-                    重试
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy || retrying}
+                    onClick={() => {
+                      // 安静刷新（不置 loading）：按钮因此不会在重试时消失，标题用 retrying 说话
+                      setRetrying(true);
+                      void load({ quiet: true }).finally(() => setRetrying(false));
+                    }}
+                  >
+                    {retrying ? "重试中…" : "重试"}
                   </Button>
                   <Link
                     href="/admin"
