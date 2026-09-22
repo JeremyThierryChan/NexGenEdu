@@ -1480,8 +1480,9 @@ eq("老档案读不到的新多选字段返回空数组", profileList(seeded[1]!
  * ## 场景就是真实场景：两个客户端读到同一版
  *
  * 甲、乙各打开一次表单（都读到第 1 版）→ 甲先提交成功 → 乙后提交**必须被拒**。
- * 下面四条依次是：① 先交成功；② 同一版本再交被拒；③ 拿到新版本后能交上；
- * ④ **不传版本仍然能用**（老调用方不受影响）。
+ * 下面六条依次是：① 先交成功；② 同一版本再交被拒；③ 拿到新版本后能交上；
+ * ④ **不传版本仍然能用**（老调用方不受影响）；⑤ 调用方夹带 `version` 也改不了版本号；
+ * ⑥ 版本号算错时也拦住，但说法与"冲突"分开。
  */
 {
   const lockTeacher = await api.teachers.create({
@@ -1516,7 +1517,7 @@ eq("老档案读不到的新多选字段返回空数组", profileList(seeded[1]!
   }
   ok("② 后提交的会被拒绝（不是静默覆盖）", conflictText !== "", "没有被拒绝：第二个人把第一个人改的盖掉了");
   ok("② 错误里说清了「刚被别人改过」", conflictText.includes("刚被别人改过"), conflictText);
-  ok("② 错误里给出了当前版本号（人才知道该刷新）", conflictText.includes("2"), conflictText);
+  ok("② 错误里给出了当前版本号（人才知道该刷新）", conflictText.includes("当前版本 2"), conflictText);
   const afterConflict = (await api.teachers.get(lockTeacher.id))!;
   eq("② 被拒的提交一个字都没写进去", afterConflict.summary, "甲写的简介");
   eq("② 被拒也不会推进版本", afterConflict.version, 2);
@@ -1535,6 +1536,36 @@ eq("老档案读不到的新多选字段返回空数组", profileList(seeded[1]!
   const legacyWrite = await api.teachers.update(lockTeacher.id, { role: "老调用方" });
   eq("④ 不传版本仍然能写（老调用方不受影响）", legacyWrite?.role, "老调用方");
   eq("④ 不传版本也照样推进版本（版本＝这条记录被写过几次）", legacyWrite?.version, 4);
+
+  /*
+   * 调用方**夹带** version 也不能自己定版本号。
+   *
+   * 这条刻意写成"类型挡不住、只有运行时才可能发生"的样子：`/api/call` 是把 args
+   * 原样交给服务层的，而且自己人调用时很容易把一整个对象当 patch 传进来
+   * （TS 只在字面量上检查多余的属性）。如果服务端不把记录自己的版本盖回去，
+   * 客户端就能把版本号设成任意值 —— 乐观锁当场变成摆设，而且没有任何断言会红。
+   */
+  const sneakyPatch = { summary: "夹带了版本号", version: 999 };
+  const sneaky = await api.teachers.update(lockTeacher.id, sneakyPatch);
+  eq("⑤ 夹带 version 的提交改不了版本号（服务端盖回记录自己的值）", sneaky?.version, 5);
+
+  /*
+   * 版本号本身**算错了**（0 / NaN）时：也要拦住，但**不能说成"被别人改过"**。
+   *
+   * 两种说法对应两种处置：冲突是"刷新后重提交就能成"，参数错是"你那数字从哪来的"。
+   * 混在一起会把排障引到"谁改的"上面去（见 `lib/backend/concurrency.ts` 的 assertVersion：
+   * 不合法 → 普通 Error（接口层 400），对不上 → 冲突（接口层 409））。
+   */
+  let badVersionText = "";
+  try {
+    await api.teachers.update(lockTeacher.id, { summary: "版本号传错" }, { expectedVersion: 0 });
+  } catch (cause) {
+    badVersionText = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("⑥ 版本号不合法时同样被拦住（不会静默写入）", badVersionText !== "", "没有被拦住");
+  ok("⑥ 且不说成「被别人改过」（那是调用方算错了，不是冲突）",
+    !badVersionText.includes("刚被别人改过"), badVersionText);
+  eq("⑥ 被拒的写入没有改动记录", (await api.teachers.get(lockTeacher.id))?.summary, "夹带了版本号");
 
   // 信息采集表是**整份覆盖 profile**，因此它是最要紧的一处，单独走一遍同样的四步
   const lockStudent = await api.students.create({
@@ -3285,6 +3316,57 @@ for (const file of docFiles) {
   }
 }
 eq("文档内的锚点链接都指得到标题", brokenAnchors, []);
+
+/*
+ * **跨文件锚点也要校验**（这一条是补的，因为真出过事）。
+ *
+ * 上面那条只校验"同文件内的 `](#xxx)`" —— 而 `docs/README.md` 里写着
+ * `[技术架构 § 已知边界](./技术架构.md#10-已知边界与技术债)` 这种**跨文件**链接。
+ * 真实事故：`docs/技术架构.md` 被整份覆盖成了部署文档（371 行 → 187 行），
+ * 那一节随之消失，**死链却一条都没报** —— 同文件锚点断言根本看不见它。
+ *
+ * 现在逐个解析 `](./某文件.md#锚点)`：目标文件存在、且里面有对应标题，才放过。
+ */
+const crossFileBroken: string[] = [];
+for (const file of docFiles) {
+  const text = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  for (const match of text.matchAll(/\]\((\.{1,2}\/[^)#]+\.md)#([^)]+)\)/g)) {
+    const target = (match[1] ?? "").replace(/^\.\//, "");
+    const anchor = decodeURIComponent(match[2] ?? "");
+    const targetPath = target.startsWith("../")
+      ? new URL(`../${target.slice(3)}`, import.meta.url)
+      : new URL(`../docs/${target.replace(/^docs\//, "")}`, import.meta.url);
+    if (!existsSync(targetPath)) {
+      crossFileBroken.push(`${file} → ${target}（文件不存在）`);
+      continue;
+    }
+    const headings = [...readFileSync(targetPath, "utf8").matchAll(/^#{1,6}\s+(.+)$/gm)].map((item) =>
+      headingSlug(item[1] ?? ""),
+    );
+    if (!headings.includes(headingSlug(anchor))) {
+      crossFileBroken.push(`${file} → ${target}#${anchor}`);
+    }
+  }
+}
+eq("跨文件的锚点链接也指得到标题（整份覆盖文档这类事故靠它抓）", crossFileBroken, []);
+
+/*
+ * 每个核心文档的**首行标题**必须与它的身份相符：整份覆盖（把 A 写进 B）会让两件事同时不对 ——
+ * 内容错位、而上面的锚点断言未必都撞得上。这条按文件名与标题的对应关系兜住。
+ */
+const expectedTitles: Array<[string, string]> = [
+  ["docs/技术架构.md", "# 技术架构"],
+  ["docs/部署与发布.md", "# 部署与发布"],
+  ["docs/内容维护手册.md", "# 内容维护手册（宣传网站）"],
+  ["docs/后端开发方案.md", "# 后端开发方案（开发阶段：本机 Node + SQLite，不上 Docker）"],
+  ["docs/后台API约定.md", "# 教务后台 API 约定（服务端已实现）"],
+  ["docs/使用手册.md", "# 教务后台使用手册"],
+];
+eq("每个文档的首行标题与它的身份相符（防止整份覆盖：把 A 的内容写进 B）",
+  expectedTitles.filter(([file, title]) =>
+    readFileSync(new URL(`../${file}`, import.meta.url), "utf8").split("\n")[0]?.trim() !== title,
+  ).map(([file]) => file),
+  []);
 
 // 已经变成假话的旧说法不能残留（接上服务端后"数据只在浏览器里"不再成立）
 const staleClaims = [

@@ -121,10 +121,16 @@ export function versionOf(record: MaybeVersioned): number {
  * 有意绕过乐观锁 —— 但那是**服务端内部的脚本与业务动作**在用，
  * 它们的语义本来就是"我就是要改，别拦我"；界面上的表单全都传。
  *
- * ## 取舍二：`expectedVersion` 不是正整数时**也算冲突**（宁可误拦，不要放过）
+ * ## 取舍二：传了但**不是正整数** → 按"参数错"抛，而不是说成冲突
  *
- * 传 `NaN` / `0` / 负数只可能是调用方算错了。这时"放过"意味着**静默覆盖别人的修改**，
- * 而"拦住"只会让人看到一句"请刷新后再提交" —— 代价完全不对称，因此这里失败关闭。
+ * 传 `NaN` / `0` / 负数 / `1.5` 只可能是调用方算错了（页面上读到的一定是 ≥ 1 的整数）。
+ * 这时候说"这条记录刚被别人改过"会把排障引到"谁改的"上面去，而真正的问题是
+ * **那个数字从哪来的** —— 所以两条错误分开：
+ *   - 版本号不合法 → 普通 Error（接口层回 **400 参数错**）；
+ *   - 版本号合法但对不上 → `VersionConflictError`（接口层回 **409 冲突**）。
+ *
+ * 两条路都**不写库**（失败关闭）："宁可误拦，不要放过"这一条始终成立 ——
+ * 放过的代价是静默覆盖别人的修改，拦住的代价只是让人看到一句提示。
  */
 export function assertVersion(
   record: MaybeVersioned,
@@ -133,10 +139,16 @@ export function assertVersion(
 ): void {
   if (expected === undefined) return;
 
-  const current = versionOf(record);
-  if (!Number.isInteger(expected) || expected < 1 || expected !== current) {
-    throw new VersionConflictError(current, Number.isFinite(expected) ? expected : current, subject);
+  if (!Number.isInteger(expected) || expected < 1) {
+    throw new Error(
+      `提交时带上的版本号不合法（${String(expected)}）` +
+        (subject === "" ? "" : `：${subject}`) +
+        "。这不是「被别人改过」，而是调用方算错了版本号；请刷新页面后重新提交。",
+    );
   }
+
+  const current = versionOf(record);
+  if (expected !== current) throw new VersionConflictError(current, expected, subject);
 }
 
 /**
