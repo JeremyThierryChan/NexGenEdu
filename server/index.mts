@@ -35,9 +35,9 @@ import {
 } from "./auth.mts";
 // 多账号与角色（第 7 步）：账号表在 server/accounts.mts（口令与角色都在服务端）
 import { accountBootstrapNote } from "./accounts.mts";
-// 权限的"一份数据"：哪个角色能做哪一组接口。**绝不在这里另写一套角色判断**（见下面的闸门）
-import { allowedRolesForMethod, canAccess, type Role } from "../lib/auth/roles.ts";
-// 方法 → 接口分组的**唯一真源**：闸门按它推导，不手抄一张表（理由见下面的闸门注释）
+// 权限的"一份数据"：**方法级判定只有这一处**（见下面的闸门 —— 服务端只调用它，不自己推）
+import { allowedRolesForMethod, canAccess, groupOfMethod, type Role } from "../lib/auth/roles.ts";
+// 接口契约：分组只用来写错误文案（"运维与审计"），判定不经过它
 import { API_CONTRACT } from "../lib/backend/contract.ts";
 // 复用伪后端阶段的纯函数：课时记账与剩余课时的口径只能有一份
 import { enrollmentForLesson, remainingTotal } from "../lib/backend/enrollment.ts";
@@ -1129,8 +1129,13 @@ __useStoreForTesting(serverStore);
  * （新入口挡上了、老入口漏了），未登录的人照样把学生数据读走了。
  *
  * 所以做法是：**判定只有一个函数**（`permissionError`），两道门各自负责把
- * "我这是哪个接口"翻译成**契约里的方法名**，再交给它。翻译不过来的（没有登记归属）
- * 一律**拒绝** —— 失败方向必须是关门。
+ * "我这是哪个接口"翻译成**方法名**，再交给它。翻译不过来的（没有登记归属）一律**拒绝**
+ * —— 失败方向必须是关门。
+ *
+ * 而**"哪个角色能做哪个方法"这件事不在这个文件里**：它整份在 `lib/auth/roles.ts`
+ * （`allowedRolesForMethod`，按"特例 → 只读宽 → 分组默认 → 没登记就关门"解析）。
+ * 服务端**只调用、不复制** —— 复制一份解析逻辑就等于给自己造一个
+ * "改了那边忘了这边"的机会，而权限上这种不一致等于静默放权。
  */
 
 /**
@@ -1146,45 +1151,20 @@ __useStoreForTesting(serverStore);
  * 影响的也只是它自己那一次调用，下一个请求立刻被改回会话里的那个人。
  * （这条依赖"每请求重设"，所以 `requireAuth` 里那一行不是可有可无的。）
  *
- * 白名单必须排在"查归属"**之前**：`setRoles` 这类方法在契约里根本没登记，
- * 先查归属会把它们当成"未登记接口"拒掉。
+ * 白名单必须排在"查归属"**之前**：`setRoles` 这类方法在角色表里根本没登记，
+ * 先查归属会把它们当成"没登记归属的接口"拒掉。
  */
 const SESSION_PIPELINE_METHODS: ReadonlySet<string> = new Set(["setOperator", "setRoles"]);
 
 /**
- * 方法 → 接口分组，**从 `API_CONTRACT` 推导**（单一真源），不手抄一张表。
+ * 分组 id → 分组的中文名（"运维与审计"），**只用来写错误文案**。
  *
- * 手抄的代价很具体：`lib/auth/roles.ts` 的 `GROUP_ACCESS` 是按**分组 id** 配角色的，
- * 这里要是再抄一份"方法 → 分组"，那么"新增接口时改了一处、漏了另一处"的结果是
- * 新接口被算进某个老分组（悄悄放权）或没有归属（悄悄拦住）—— 两种都很难查。
- * `API_CONTRACT` 本身有自检盯着它和 `lib/backend/api.ts` 的真实形状，跟着它走最省事。
- *
- * 同一个方法被登记在**两个分组**里时：删掉它的归属（判定时按"没有归属"拒绝），
- * 并在错误里点名是哪两组打架 —— 悄悄取先出现的那个，等于替机构做了一个它没讨论过的决定。
+ * 判定**不经过它**（判定完全在 `lib/auth/roles.ts`）：这里要的只是"让被拒的人看懂
+ * 这件事叫什么"，所以标题去掉"七、"这种序号。取不到标题时就退回方法名本身。
  */
-const CONTRACT_GROUPS = ((): {
-  byMethod: Map<string, string>;
-  titleOf: Map<string, string>;
-  ambiguous: Map<string, string[]>;
-} => {
-  const byMethod = new Map<string, string>();
-  const titleOf = new Map<string, string>();
-  const ambiguous = new Map<string, string[]>();
-  for (const group of API_CONTRACT) {
-    // 标题去掉"七、"这种序号：错误文案里只要"运维与审计"
-    titleOf.set(group.id, group.title.replace(/^[一二三四五六七八九十]+、/, ""));
-    for (const method of group.methods) {
-      const previous = byMethod.get(method);
-      if (previous !== undefined && previous !== group.id) {
-        ambiguous.set(method, [...(ambiguous.get(method) ?? [previous]), group.id]);
-        byMethod.delete(method);
-        continue;
-      }
-      if (!ambiguous.has(method)) byMethod.set(method, group.id);
-    }
-  }
-  return { byMethod, titleOf, ambiguous };
-})();
+const GROUP_TITLES: ReadonlyMap<string, string> = new Map(
+  API_CONTRACT.map((group) => [group.id, group.title.replace(/^[一二三四五六七八九十]+、/, "")]),
+);
 
 /** 角色列表变成人话（提示里要出现"你的角色是谁"，人才知道该找谁开权限）。 */
 function roleText(roles: readonly Role[]): string {
@@ -1195,54 +1175,51 @@ function roleText(roles: readonly Role[]): string {
  * 这一次调用该不该放行：`null` = 放行；字符串 = 拒绝（内容是给人看的话）。
  *
  * 两道门都只经过这一个函数，因此"同一个动作从哪个门进来"不会有两套结论。
+ *
+ * ## 判定完全交给 `lib/auth/roles.ts`，这里**不自己推**
+ *
+ * 调用 `allowedRolesForMethod(method)`，按它的 `Role[] | null` 分两种：
+ *   - 拿到数组 → `canAccess(会话角色, 数组)`；有一个角色被允许就放行；
+ *   - 拿到 `null` → 这个方法**没登记归属** → **关门**，并在错误里写清是哪个方法。
+ *
+ * 为什么**不**在这里用 `GROUP_ACCESS[分组]` 自己判：`API_CONTRACT` 的分组是
+ * **接口分类，不总是权限边界** —— `crud` 里既有 `students.list`（读）也有
+ * `students.remove`（删）；`actions` 里既有 `students.enroll`（招生 / 财务）
+ * 也有 `lessons.markCompleted`（教师的核心动作）。同一个分组里两件事归不同角色，
+ * 按分组判就必然两头都错（我第一版就是这么写的：普通教师**读不了任何列表**
+ * ——连自己学生的课时都看不成，而报课、收款又对他开放）。
+ *
+ * `roles.ts` 里现在按"**特例 → 只读宽 → 分组默认 → 没登记就关门**"逐层解析，
+ * 那是**唯一一份**判定数据，而且自检盯着它。服务端只调用它 ——
+ * 在这里复制一份解析逻辑，就是给自己造一个"改了那边忘了这边"的机会，
+ * 而权限上这种不一致等于静默放权。
  */
 function permissionError(method: string, roles: readonly Role[]): string | null {
   // ① 会话管道方法放行（理由见 SESSION_PIPELINE_METHODS 的注释）
   if (SESSION_PIPELINE_METHODS.has(method)) return null;
 
   /*
-   * ② 归属查不到就**拒绝**，不是放行。
+   * ② 没登记归属就**拒绝**，不是放行。
    *
    * 这是整节里最重要的那个默认值：新增接口时忘了登记归属，结果必须是"用不了"，
-   * 而不是"所有人都能用"。默认开放是权限系统里最危险的一种默认值 ——
-   * 它不报错、不留痕，只会让一个"还没想清楚归谁"的新功能对所有人敞开。
-   */
-  const conflict = CONTRACT_GROUPS.ambiguous.get(method);
-  if (conflict !== undefined) {
-    return (
-      `接口「${method}」的权限归属有冲突（在 lib/backend/contract.ts 里同时登记在 ` +
-      `${conflict.join(" 与 ")} 两组），定清楚之前一律拒绝。`
-    );
-  }
-  const group = CONTRACT_GROUPS.byMethod.get(method);
-  if (group === undefined) {
-    return (
-      `这个接口没有登记权限归属：${method}。请在 lib/backend/contract.ts 里给它一个分组 —— ` +
-      "没登记的接口一律拒绝（默认开放是权限最容易出的那种错）。"
-    );
-  }
-
-  /*
-   * ③ 判定：用 `lib/auth/roles.ts` 的 `allowedRolesForMethod(method)` —— **一份数据**，
-   *    而且自检盯着它（新增方法没定归属会直接红）。
-   *
-   * 为什么不是直接查 `GROUP_ACCESS[分组]`：**分组是接口分类，不总是权限边界** ——
-   * `crud` 里既有 `students.list`（读）也有 `students.remove`（删），而
-   * "普通教师能看自己学生的课时余额"要求**读宽写严**；`actions` 里既有
-   * `students.enroll`（招生 / 财务）也有 `lessons.markCompleted`（教师的核心动作）。
-   * `allowedRolesForMethod` 里按"特例 → 只读宽 → 分组默认 → 没登记就关门"逐层解析。
-   *
-   * 我第一版这里查的是分组：结果普通教师**读不了任何列表**（连自己学生的课时都看不成），
-   * 而报课、收款又对他开放 —— 两条都反了。分组粒度不够这件事，只有真按角色跑一遍才看得出来。
+   * 而不是"所有人都能用"（连技术管理员也不行 —— 否则"未登记"会变成一句空话，
+   * 而真正需要的结果是"谁都用不了，于是有人去把它登记上"）。
+   * 默认开放是权限系统里最危险的那种默认值：它不报错、不留痕，
+   * 只会让一个"还没想清楚归谁"的新接口对所有人敞开。
    */
   const allowed = allowedRolesForMethod(method);
   if (allowed === null || allowed.length === 0) {
-    // 方法没解析出归属（自检会红，但服务端不能因此变成"放行"）
-    return `接口「${method}」（分组「${group}」）没有在 lib/auth/roles.ts 里定归属，一律拒绝。`;
+    return (
+      `这个接口没有登记权限归属：${method}（一律拒绝）。` +
+      "请在 lib/auth/roles.ts 里给它定角色 —— 方法级的 METHOD_ACCESS，或它所属分组的 GROUP_ACCESS。"
+    );
   }
+
+  // ③ 角色判定：角色集合里只要有一个被允许就放行（一个账号可兼任多个角色）
   if (canAccess(roles, allowed)) return null;
 
-  const title = CONTRACT_GROUPS.titleOf.get(group) ?? group;
+  const group = groupOfMethod(method);
+  const title = (group === null ? undefined : GROUP_TITLES.get(group)) ?? method;
   return (
     `你的角色（${roleText(roles)}）不能做这件事：${title}。` +
     `这件事需要：${allowed.join(" 或 ")}。` +
@@ -1251,7 +1228,7 @@ function permissionError(method: string, roles: readonly Role[]): string | null 
 }
 
 /**
- * 老 REST 接口 → **契约里的方法名**（分组再从 `API_CONTRACT` 推导，见上）。
+ * 老 REST 接口 → **契约里的方法名**（拿到方法名后交给 `permissionError`，角色判定在 roles.ts）。
  *
  * 为什么要逐条列：这些路径**不是方法名**（`/api/today` 对应 `today`、
  * `/api/pricing/save` 对应 `pricing.update`、`/api/logs` 对应 `logs.list`…），
@@ -1622,7 +1599,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
         const method = String(body.method ?? "");
         const args = Array.isArray(body.args) ? (body.args as unknown[]) : [];
         try {
-          // 权限闸门在 callApi 里（按 method → 分组 → 角色判定），这里只负责把会话带过去
+          // 权限闸门在 callApi 里（method → roles.ts 的 allowedRolesForMethod），这里只负责把会话带过去
           const result = await callApi(method, args.map(decodeArg), roles);
           send(response, 200, { ok: true, result });
         } catch (cause) {

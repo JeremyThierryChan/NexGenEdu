@@ -65,6 +65,16 @@ const realCredentialFile = join(repoRoot, "server/data/admin-credential.json");
 const credentialBefore = existsSync(realCredentialFile)
   ? readFileSync(realCredentialFile, "utf8")
   : null;
+/*
+ * **账号表也在护栏里**（`accounts.json`，与凭证文件同目录）。
+ *
+ * 它比凭证文件更要紧：里面是**每个账号的角色** —— 临时服务要是往真实文件里写了一条
+ * 全权限账号（或多加了一个角色），后果是"跑一次自检，机构的后台多了一个能看全部数据的账号"。
+ * 加这一条是子代理交付时提醒的（它当时只看到凭证文件被盯着），属于"新加了敏感文件、
+ * 护栏没跟上"这类最容易漏的事。
+ */
+const realAccountsFile = join(repoRoot, "server/data/accounts.json");
+const accountsBefore = existsSync(realAccountsFile) ? readFileSync(realAccountsFile, "utf8") : null;
 
 let exitCode = 1;
 try {
@@ -103,6 +113,17 @@ if (credentialAfter !== credentialBefore) {
   process.exit(1);
 }
 console.log("✓ 真实凭证文件未被测试改动");
+
+const accountsAfter = existsSync(realAccountsFile) ? readFileSync(realAccountsFile, "utf8") : null;
+if (accountsAfter !== accountsBefore) {
+  console.error(
+    "\n✗ 临时服务改动了真实账号表（server/data/accounts.json）—— 必须修：\n" +
+    "  那意味着跑一次自检就可能给机构的账号多加/改角色（等于悄悄放权）。\n" +
+    "  检查 accountsFile() 是否跟着**数据库文件所在目录**走，以及临时服务是否用了临时目录。",
+  );
+  process.exit(1);
+}
+console.log("✓ 真实账号表未被测试改动");
 
 if (backupsAfter !== backupsBefore) {
   console.error(

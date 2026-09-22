@@ -311,10 +311,14 @@ function readAccountsFile(file: string): FileRead {
 /**
  * 迁移：`accounts.json` 不存在时，按凭证文件生成第一条账号。
  *
- * 角色给**全部**（`[...ROLES]`，即技术管理员）是刻意的：老部署第一次启动这一版时，
- * 它只有一个账号，而那个账号以前能做的事就是全部的事。给一半角色会让人
- * 一升级就撞上"这个接口没有权限"，然后把权限当成 bug 去查 —— 属于自找的故障。
- * 之后的账号（老师、财务…）由人按需要加，那时才是真正的分工。
+ * 角色给**全权限**是刻意的：老部署第一次启动这一版时，它只有一个账号，
+ * 而那个账号以前能做的事就是全部的事。给一半角色会让人一升级就撞上
+ * "这个接口没有权限"，然后把权限当成 bug 去查 —— 属于自找的故障。
+ *
+ * 给的是**单一角色「技术管理员」**，而不是四个角色都写上：技术管理员在
+ * `lib/auth/roles.ts` 里就是"全权限"的定义（自检断言它等于全部页面与全部分组），
+ * 再叠另外三个角色在效果上完全一样，只会让账号表里出现一句读不懂的话
+ * （"这个人为什么同时是老师和财务？"）。**几个角色都写只有在真的兼任时才写。**
  */
 function migrateFromCredential(): AccountsState {
   const file = accountsFile();
@@ -336,9 +340,9 @@ function migrateFromCredential(): AccountsState {
     password: credential.password,
     salt: credential.salt,
     hash: credential.hash,
-    roles: [...ROLES],
+    roles: ["技术管理员"],
     teacherId: "",
-    note: "由单账号凭证（admin-credential.json）迁移而来：口令与原来一样，角色给的是全部（技术管理员）",
+    note: "由单账号凭证（admin-credential.json）迁移而来：口令与原来一样，角色是全权限（技术管理员）",
     createdAt: new Date().toISOString(),
   };
 
@@ -387,14 +391,15 @@ function syncEnvPassword(
   if (index === -1) {
     /*
      * 账号表里没有这个用户名 —— 这是"环境变量指定了一个新账号"的情况。
-     * 与迁移同样的道理：给全部角色，否则它一登录进来就什么都做不了。
+     * 与迁移同样的道理：给全权限（技术管理员这一个角色就够，见上面迁移那段注释），
+     * 否则它一登录进来就什么都做不了。
      */
     const created: Account = {
       username: credential.username,
       password: envPassword,
       salt: credential.salt,
       hash: credential.hash,
-      roles: [...ROLES],
+      roles: ["技术管理员"],
       teacherId: "",
       note: "由环境变量 NEXGENEDU_ADMIN_PASSWORD 指定（账号表里原来没有这个名字）",
       createdAt: new Date().toISOString(),
