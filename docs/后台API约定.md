@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 113 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 114 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -40,7 +40,7 @@ lib/backend/api.ts        服务层实现（当前 113 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 113 个方法）
+## 二、接口分组（当前 114 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -99,7 +99,7 @@ lib/backend/api.ts        服务层实现（当前 113 个方法）；数据一�
 
 ### 3. 业务动作（服务端必须在一个事务里完成）
 
-`students.enroll`、`students.renewEnrollment`、`students.refundEnrollment`、
+`students.enroll`、`students.updateEnrollment`、`students.renewEnrollment`、`students.refundEnrollment`、
 `students.adjustEnrollmentLessons`、`students.saveProfile`、`lessons.markCompleted`、
 `lessons.createMakeup`、`lessonRecords.save`、`assessments.add`、`payments.record`。
 
@@ -108,6 +108,7 @@ lib/backend/api.ts        服务层实现（当前 113 个方法）；数据一�
 | 动作 | 一次要落库的内容 |
 | --- | --- |
 | 建档 + 报课 | 学生档案 + N 条报课记录 + 课时流水（见 §6.3） |
+| 改报课 | 报课记录（班型 / 指定教师 / 单价 / 约定应缴 / 备注）+ **按范围**顺带更新的后续课节（见 §6.5） |
 | 报课 / 续费 | 报课记录 + 收款记录 + 实收累计 + 课时流水 |
 | 标记已上 | 课节状态 + 课时流水（按出勤决定扣不扣）+ 学生课时余额 |
 | 退课 / 退款 | 报课状态 + 退款记录 + 实收累计 + 历史留痕 + 课时流水（0 节，只留痕） |
@@ -327,6 +328,34 @@ lib/backend/api.ts        服务层实现（当前 113 个方法）；数据一�
 机构刚报完 20 节打开流水看到的是空的）。调整记的是**实际生效**的节数：
 填「减 20 节、实际只剩 15 节」时写 `-15`，否则上面这条等式当场不成立。
 退课记 `0` 节（只改状态、不减总课时），与 v4→v5 迁移的折算规则一致。
+
+### 6.5 改报课：像手机日历那样"改这条 / 改这条及以后"（`students.updateEnrollment`）
+
+报课记录建好之后要能改：换了老师、班型从一对一定制课转成小组课，都是常事。
+但**过去不能改** —— 那是发生过的事实，改了它老师与课时都对不上。
+
+| | |
+| --- | --- |
+| 方法 | `students.updateEnrollment(studentId, enrollmentId, patch, scope)` |
+| 能改 | `form`（班型）/ `teacherId`（指定教师）/ `unitPrice`（单价）/ `agreedAmount`（约定应缴）/ `note` |
+| 不能改 | **科目**、**课时数** —— 科目是"这节课扣哪条报课"的匹配键（`enrollmentForLesson` 按科目找），
+改了就与已排的课、账本里的流水对不上；课时只走「续费 / 调整」（那两条会写课时流水）。报错科目请「退课」后重报 |
+| `scope: "enrollment"` | **只改这条记录**，已排的课一节都不动 |
+| `scope: "future-lessons"` | 连**后续还没上的课**一起改（换教师、换班型通常要这样）；默认值 |
+
+**两条永不越界的规矩**（与手机日历一致）：
+
+1. `已上`的课不动；
+2. **时间已经过去的课也不动** —— 哪怕状态还挂着「已排」（那多半是忘了标记，不是未来安排）。
+   数量记在返回值的 `pastLessons` 里，界面可以如实说"另外 3 节是过去的，没动"。
+
+**逐节判冲突，能改的改、撞了的跳过并说明**：换教师最常见的后果就是"新教师那个时段已经有课"。
+每一节都先用同一套 `conflictsFor` 判一次（与排课、批量排课同一个引擎），
+撞课的进 `skippedLessons` 并带原因（「陈老师 这个时段已有课」/「教师不带这个科目」）。
+刻意不提供"强行改"：宁可少改一节并说清楚，也不要造出一堆撞课的课表让人事后一节节查。
+
+**钱与课时不受影响**：单价与约定应缴是账上的数字（课节里根本不存），
+`paidAmount` 与收款流水一个字节都不动 —— `实收 = 收款合计 − 退款合计` 这条不变式仍然成立。
 
 ### 7. 运维与审计
 

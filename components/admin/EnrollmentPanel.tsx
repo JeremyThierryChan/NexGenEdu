@@ -4,6 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { Button } from "@/components/ui/Button";
 import {
+  type EnrollmentEdit,
+  type EnrollmentEditResult,
+  type EnrollmentEditScope,
   PAYMENT_METHODS,
   api,
   type Enrollment,
@@ -168,6 +171,18 @@ export function EnrollmentPanel({
                   }),
                 )
               }
+              teachers={teachers}
+              formOptions={formOptions}
+              onEdit={async (patch, scope) => {
+                const result = await api.students.updateEnrollment(
+                  student.id,
+                  enrollment.id,
+                  patch,
+                  scope,
+                );
+                await onChanged();
+                return result;
+              }}
             />
           ))}
         </ul>
@@ -188,6 +203,9 @@ function EnrollmentRow({
   onRenew,
   onRecordPayment,
   onRefund,
+  onEdit,
+  teachers,
+  formOptions,
 }: {
   enrollment: Enrollment;
   teacherName: string;
@@ -206,10 +224,16 @@ function EnrollmentRow({
     note: string,
   ) => void | Promise<void>;
   onRefund: (refundAmount: number, method: PaymentMethod, policyId: string) => void | Promise<void>;
+  /** 改报课：返回结果（顺带改了几节、跳过了哪几节），由行内直接显示。 */
+  onEdit: (patch: EnrollmentEdit, scope: EnrollmentEditScope) => Promise<EnrollmentEditResult>;
+  /** 改报课表单要用的候选：教师与班型。 */
+  teachers: Teacher[];
+  formOptions: string[];
 }) {
   const remaining = remainingOf(enrollment);
   const refunded = enrollment.status === "已退课";
-  const [panel, setPanel] = useState<"renew" | "pay" | "refund" | null>(null);
+  const [panel, setPanel] = useState<"renew" | "pay" | "refund" | "edit" | null>(null);
+  const [editResult, setEditResult] = useState<EnrollmentEditResult | null>(null);
   const [policyId, setPolicyId] = useState(DEFAULT_REFUND_POLICY_ID);
   const [amountInput, setAmountInput] = useState("");
   const [method, setMethod] = useState<PaymentMethod>("微信");
@@ -282,6 +306,14 @@ function EnrollmentRow({
             <button
               type="button"
               disabled={pending}
+              onClick={() => setPanel(panel === "edit" ? null : "edit")}
+              className="text-xs text-brand-700 transition-colors hover:text-brand-800 disabled:opacity-60"
+            >
+              改报课
+            </button>
+            <button
+              type="button"
+              disabled={pending}
               onClick={() => setPanel(panel === "renew" ? null : "renew")}
               className="text-xs text-brand-700 transition-colors hover:text-brand-800 disabled:opacity-60"
             >
@@ -306,6 +338,57 @@ function EnrollmentRow({
           </span>
         )}
       </div>
+
+      {/* 改报课：像手机日历那样选范围（这条 / 这条及以后），过去的永不改 */}
+      {panel === "edit" && !refunded && (
+        <EnrollEditForm
+          enrollment={enrollment}
+          teachers={teachers}
+          formOptions={formOptions}
+          pending={pending}
+          onCancel={() => setPanel(null)}
+          onSubmit={async (patch, scope) => {
+            const result = await onEdit(patch, scope);
+            setEditResult(result);
+            setPanel(null);
+          }}
+        />
+      )}
+
+      {/* 上一次「改报课」的结果：改了哪几节、跳过了哪几节、有几节是过去的 */}
+      {editResult !== null && panel !== "edit" && (
+        <div className="mt-2 rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-600">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-ink-700">已改报课</span>
+            <span>{editResult.changes.join("；") || "（没有改动）"}</span>
+            <button
+              type="button"
+              onClick={() => setEditResult(null)}
+              className="ml-auto text-[11px] text-ink-400 hover:text-ink-600"
+            >
+              知道了
+            </button>
+          </div>
+          {(editResult.updatedLessons.length > 0 ||
+            editResult.skippedLessons.length > 0 ||
+            editResult.pastLessons > 0) && (
+            <p className="mt-1 text-[11px] text-ink-500">
+              后续课节：改了 {editResult.updatedLessons.length} 节 · 跳过{" "}
+              {editResult.skippedLessons.length} 节 · 已过去（含已上）
+              {editResult.pastLessons} 节未动
+            </p>
+          )}
+          {editResult.skippedLessons.length > 0 && (
+            <ul className="mt-1 space-y-0.5 text-[11px] text-warning-600">
+              {editResult.skippedLessons.map((item) => (
+                <li key={item.id}>
+                  {formatDayLabel(item.startsAt)}：{item.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* 续费：加课时 + 收款 */}
       {panel === "renew" && !refunded && (
@@ -505,6 +588,168 @@ function EnrollmentRow({
 }
 
 /** 报课表单。 */
+/**
+ * **改报课**表单（班型 / 指定教师 / 单价 / 约定应缴 / 备注 + 影响范围）。
+ *
+ * 范围那两项刻意照手机日历的说法写：改日程时它会问"只改这一次 / 改这次及以后"，
+ * 这里对应"只改这条记录 / 这条及以后的课"。**过去的永不改** ——
+ * 已上的课与时间已过的课都不动（那是发生过的事实，改了账与课表就对不上）。
+ *
+ * 科目与课时不在这个表单里：科目是"这节课扣哪条报课"的匹配键，改了它会与已排的课、
+ * 账本里的流水对不上（报错科目请退课后重报）；课时只走「续费 / 调整」，那两条会写课时流水。
+ */
+function EnrollEditForm({
+  enrollment,
+  teachers,
+  formOptions,
+  pending,
+  onCancel,
+  onSubmit,
+}: {
+  enrollment: Enrollment;
+  teachers: Teacher[];
+  formOptions: string[];
+  pending: boolean;
+  onCancel: () => void;
+  onSubmit: (patch: EnrollmentEdit, scope: EnrollmentEditScope) => void | Promise<void>;
+}) {
+  const [form, setForm] = useState(enrollment.form);
+  const [teacherId, setTeacherId] = useState(enrollment.teacherId);
+  const [unitPrice, setUnitPrice] = useState(String(enrollment.unitPrice));
+  const [agreedAmount, setAgreedAmount] = useState(String(enrollment.agreedAmount));
+  const [note, setNote] = useState(enrollment.note);
+  // 默认"这条及以后"：换老师/换班型时，后续的课本来就要跟着改
+  const [scope, setScope] = useState<EnrollmentEditScope>("future-lessons");
+
+  return (
+    <div className="mt-2 rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-600">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-1.5">
+          班型
+          <select
+            value={form}
+            onChange={(event) => setForm(event.target.value)}
+            className="rounded-md border border-ink-300 px-1.5 py-1 text-xs outline-none focus:border-brand-500"
+          >
+            {(form !== "" && !formOptions.includes(form) ? [form, ...formOptions] : formOptions).map(
+              (option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ),
+            )}
+            <option value="">（还没定）</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-1.5">
+          指定教师
+          <select
+            value={teacherId}
+            onChange={(event) => setTeacherId(event.target.value)}
+            className="rounded-md border border-ink-300 px-1.5 py-1 text-xs outline-none focus:border-brand-500"
+          >
+            <option value="">不指定</option>
+            {teachers
+              .filter((teacher) => teacher.active)
+              .map((teacher) => (
+                <option key={teacher.id} value={teacher.id}>
+                  {teacher.name}
+                </option>
+              ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1.5">
+          单价
+          <input
+            type="number"
+            min={0}
+            value={unitPrice}
+            onChange={(event) => setUnitPrice(event.target.value)}
+            className="w-20 rounded-md border border-ink-300 px-2 py-1 text-xs tabular outline-none focus:border-brand-500"
+          />
+        </label>
+        <label className="flex items-center gap-1.5">
+          约定应缴
+          <input
+            type="number"
+            min={0}
+            value={agreedAmount}
+            onChange={(event) => setAgreedAmount(event.target.value)}
+            className="w-24 rounded-md border border-ink-300 px-2 py-1 text-xs tabular outline-none focus:border-brand-500"
+          />
+        </label>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-1.5">
+          备注
+          <input
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            className="w-64 rounded-md border border-ink-300 px-2 py-1 text-xs outline-none focus:border-brand-500"
+          />
+        </label>
+      </div>
+
+      <fieldset className="mt-2">
+        <legend className="text-[11px] text-ink-500">改动影响到哪里（像手机日历改日程）：</legend>
+        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+          <label className="flex items-center gap-1.5">
+            <input
+              type="radio"
+              name={`scope-${enrollment.id}`}
+              checked={scope === "enrollment"}
+              onChange={() => setScope("enrollment")}
+            />
+            只改这条报课记录（已排的课一节不动）
+          </label>
+          <label className="flex items-center gap-1.5">
+            <input
+              type="radio"
+              name={`scope-${enrollment.id}`}
+              checked={scope === "future-lessons"}
+              onChange={() => setScope("future-lessons")}
+            />
+            这条报课记录 + 后续还没上的课（**已上过的与过去的课都不改**）
+          </label>
+        </div>
+      </fieldset>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={pending}
+          onClick={() =>
+            void onSubmit(
+              {
+                form,
+                teacherId,
+                unitPrice: Math.max(0, Number(unitPrice) || 0),
+                agreedAmount: Math.max(0, Number(agreedAmount) || 0),
+                note,
+              },
+              scope,
+            )
+          }
+          className="rounded-md bg-brand-700 px-2.5 py-1 text-xs text-white transition-colors hover:bg-brand-800 disabled:opacity-60"
+        >
+          保存改动
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-md border border-ink-200 px-2.5 py-1 text-xs text-ink-600 transition-colors hover:border-ink-300 disabled:opacity-60"
+        >
+          取消
+        </button>
+        <span className="text-[11px] text-ink-400">
+          科目与课时不在这里改：科目报错请「退课」后重报，课时走「续费 / 调整」。
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function EnrollForm({
   subjectOptions,
   formOptions,

@@ -124,6 +124,9 @@ import type {
   LessonInput,
   NewEnrollment,
   NewStudentEnrollment,
+  EnrollmentEdit,
+  EnrollmentEditScope,
+  EnrollmentEditResult,
   Lesson,
   NewClassroom,
   NewLesson,
@@ -978,6 +981,15 @@ function insufficientLessons(
   short: Array<{ studentId: string; name: string; remaining: number }>;
 } | null {
   const { subject, studentIds, count, excludeLessonId } = input;
+
+  /*
+   * **没有学生就没有课时可欠**：直接放行。
+   *
+   * 这一条是补上的：原先 `studentIds` 为空时，逐人算剩余得到空集合，
+   * 「还能排 0 节 < 要排 1 节」于是把课挡了下来，报错还是"课时不足："（名字是空的）——
+   * 界面上排课至少要选一位学生，所以只有脚本与占位课会撞上，但那种报错根本没法排查。
+   */
+  if (studentIds.length === 0) return null;
   const perStudent = studentIds.map((studentId) => {
     const student = db.students.find((item) => item.id === studentId);
     const remaining = student === undefined ? 0 : remainingTotal(
@@ -1358,6 +1370,168 @@ const localApi = {
       });
       persist(db);
       return clone(student);
+    },
+
+    /**
+     * **改报课**（班型 / 指定教师 / 单价 / 约定应缴 / 备注）。
+     *
+     * ## 影响范围像手机日历改日程
+     *
+     * `scope: "enrollment"` 只改这条记录；`scope: "future-lessons"` 连**后续还没上的**
+     * 课一起改（换教师、换班型通常要这样）。两种范围都**绝不碰过去**：
+     *   - `已上`的课不动（那是发生过的事实，改了它老师与课时都对不上）；
+     *   - 时间已经过去的课也不动（哪怕状态还挂着"已排"——它多半是忘了标记，不是未来安排）。
+     *
+     * ## 逐节检查冲突，能改的改、有冲突的跳过并说明
+     *
+     * 换教师最常见的后果就是"新教师那个时段已经有课"。这里对**每一节**先用同一套
+     * `conflictsFor` 判一次（与排课、批量排课同一个引擎），撞了就跳过并在结果里写清原因 ——
+     * 与批量排课同一套纪律：宁可少改一节并说清楚，也不要造出一堆撞课的课表让人事后一节节查。
+     *
+     * ## 为什么不在这里改科目与课时
+     *
+     * 科目是"这节课扣哪条报课"的匹配键（见 `EnrollmentEdit` 的注释），
+     * 课时只走「续费 / 调整」。这两件事动了，账本与已排的课会静默对不上。
+     */
+    async updateEnrollment(
+      studentId: string,
+      enrollmentId: string,
+      patch: EnrollmentEdit,
+      scope: EnrollmentEditScope = "future-lessons",
+    ): Promise<EnrollmentEditResult> {
+      await delay();
+      const db = load();
+      const student = db.students.find((item) => item.id === studentId);
+      const enrollment = student?.enrollments.find((item) => item.id === enrollmentId);
+      if (student === undefined || enrollment === undefined) {
+        return { student: null, changes: [], updatedLessons: [], skippedLessons: [], pastLessons: 0 };
+      }
+
+      // 指定教师必须是真实存在的人（与建档报课同一道校验）
+      if (patch.teacherId !== undefined && patch.teacherId !== "") {
+        if (!db.teachers.some((teacher) => teacher.id === patch.teacherId)) {
+          throw new Error("指定的教师不存在：请重新选择（或改成「不指定」）。");
+        }
+      }
+      for (const [label, value] of [
+        ["单价", patch.unitPrice],
+        ["约定应缴", patch.agreedAmount],
+      ] as Array<[string, number | undefined]>) {
+        if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+          throw new Error(`${label}不能是负数。`);
+        }
+      }
+
+      const changes: string[] = [];
+      /** 记下改动前后的值：日志与界面都要能回答"从什么改成了什么"。 */
+      const record = (label: string, before: string, after: string) => {
+        if (before === after) return;
+        changes.push(`${label}：${before === "" ? "（空）" : before} → ${after === "" ? "（空）" : after}`);
+      };
+
+      if (patch.form !== undefined) {
+        const next = patch.form.trim();
+        record("班型", enrollment.form, next);
+        enrollment.form = next;
+      }
+      if (patch.teacherId !== undefined) {
+        const teacherName = (id: string) =>
+          id === "" ? "不指定" : (db.teachers.find((teacher) => teacher.id === id)?.name ?? "（已删除）");
+        record("指定教师", teacherName(enrollment.teacherId), teacherName(patch.teacherId));
+        enrollment.teacherId = patch.teacherId;
+      }
+      if (patch.unitPrice !== undefined) {
+        record("单价", String(enrollment.unitPrice), String(round2(Math.max(0, patch.unitPrice))));
+        enrollment.unitPrice = round2(Math.max(0, patch.unitPrice));
+      }
+      if (patch.agreedAmount !== undefined) {
+        record("约定应缴", String(enrollment.agreedAmount), String(round2(Math.max(0, patch.agreedAmount))));
+        enrollment.agreedAmount = round2(Math.max(0, patch.agreedAmount));
+      }
+      if (patch.note !== undefined) {
+        record("备注", enrollment.note, patch.note.trim());
+        enrollment.note = patch.note.trim();
+      }
+
+      /*
+       * 影响范围：只在"改班型 / 改指定教师"时才有意义 ——
+       * 单价与约定应缴是账户上的数字，跟课表无关（课节上也不存这两个）。
+       */
+      const updatedLessons: Array<{ id: string; startsAt: string }> = [];
+      const skippedLessons: Array<{ id: string; startsAt: string; reason: string }> = [];
+      let pastLessons = 0;
+      const touchesSchedule = patch.form !== undefined || patch.teacherId !== undefined;
+
+      if (scope === "future-lessons" && touchesSchedule) {
+        const now = Date.now();
+        const related = db.lessons.filter(
+          (lesson) =>
+            lesson.subject.trim() === enrollment.subject.trim() &&
+            lesson.studentIds.includes(studentId),
+        );
+        /*
+         * `pastLessons` 的计数要**两样都算**：`已上`的，以及时间已过但状态还挂着
+         * 「已排」的（多半是忘了标记）。只算后者的话，界面会漏报"还有一节上过的没动"，
+         * 而那句话正是用来回答"为什么这节课没跟着改"的。
+         */
+        pastLessons = related.filter(
+          (lesson) => lesson.status === "已上" || new Date(lesson.startsAt).getTime() <= now,
+        ).length;
+
+        // 真正可能被改的：还没上的、状态仍是「已排」的那些
+        const candidates = related.filter(
+          (lesson) => lesson.status === "已排" && new Date(lesson.startsAt).getTime() > now,
+        );
+
+        for (const lesson of candidates) {
+          const next: LessonInput = {
+            id: lesson.id,
+            subject: lesson.subject,
+            form: patch.form !== undefined ? patch.form.trim() : lesson.form,
+            teacherId: patch.teacherId !== undefined ? patch.teacherId : lesson.teacherId,
+            classroomId: lesson.classroomId,
+            studentIds: lesson.studentIds,
+            startsAt: lesson.startsAt,
+            durationMinutes: lesson.durationMinutes,
+            status: lesson.status,
+            note: lesson.note,
+            makeupForLessonId: lesson.makeupForLessonId,
+          };
+          const report = conflictsFor(db, next);
+          if (report.total > 0) {
+            skippedLessons.push({
+              id: lesson.id,
+              startsAt: lesson.startsAt,
+              reason: describeConflicts(db, report),
+            });
+            continue;
+          }
+          lesson.form = next.form;
+          lesson.teacherId = next.teacherId;
+          updatedLessons.push({ id: lesson.id, startsAt: lesson.startsAt });
+        }
+      }
+
+      syncSubjects(student);
+      writeLog(db, {
+        entity: "报课",
+        action: "改报课",
+        targetId: enrollment.id,
+        summary:
+          `${student.name} 改报课「${enrollment.subject}」：${changes.length === 0 ? "（没有改动）" : changes.join("；")}` +
+          (scope === "future-lessons"
+            ? `；后续课节改 ${updatedLessons.length} 节、跳过 ${skippedLessons.length} 节、已过去 ${pastLessons} 节未动`
+            : "；只改记录，课节未动"),
+      });
+      persist(db);
+
+      return clone({
+        student,
+        changes,
+        updatedLessons,
+        skippedLessons,
+        pastLessons,
+      });
     },
 
     /** 续费：给某条报课累加课时，并留下流水。 */
@@ -3354,6 +3528,9 @@ export type {
   Enrollment,
   NewEnrollment,
   NewStudentEnrollment,
+  EnrollmentEdit,
+  EnrollmentEditScope,
+  EnrollmentEditResult,
   ConflictReport,
   Database,
   LessonInput,

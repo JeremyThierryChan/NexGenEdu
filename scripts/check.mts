@@ -1157,6 +1157,13 @@ ok("没有该科目课时 → 排课被拒（服务端拦，不欠账）",
 ok("拒绝理由里点名了是谁不够、还能排几节",
   blockedMessage.includes(pupil.name) && blockedMessage.includes("还能排"), blockedMessage);
 
+// 没有学生的课（占位 / 教室安排）：没有课时可欠，不该被"课时不足"挡住
+const noStudentLesson = await api.lessons.create({
+  subject: "自检·没有学生的课", form: "", teacherId: teacher.id, classroomId: room.id,
+  studentIds: [], startsAt: slot(18, 0).start, durationMinutes: 60, status: "已排", note: "",
+});
+eq("没有学生的课可以建（没有课时可欠）", noStudentLesson.studentIds, []);
+await api.lessons.remove(noStudentLesson.id);
 /*
  * 拦的必须是「排课这件事」，而不是 `create` 这一个入口。
  *
@@ -2075,6 +2082,144 @@ await api.restoreBackup();
   await api.site.saveContent(current);
   eq("内容已还原", (await api.site.publicContent()).siteContent.coursePage.subjects[0]?.bands[0]?.title,
     current.coursePage.subjects[0]?.bands[0]?.title);
+}
+
+/*
+ * ── 改报课：改这条 / 改这条及以后（**过去的永不改**）──────────────────────────
+ *
+ * 机构的原话："像 iPhone 日历那样，可以改单次和未来的日程，但不能改过去的日程安排。"
+ * 因此这一组断言的重点不是"能不能改"，而是**界线**：
+ *   - 未来的课跟着改；
+ *   - `已上`的课一节都不许动；
+ *   - 时间已过（但状态还挂着"已排"）的课也不许动 —— 那多半是忘了标记，不是未来安排；
+ *   - 换成"那个时段已经有课"的老师时，那一节**跳过并说明原因**（不硬改）。
+ */
+{
+  const editStudent = await api.students.create({
+    name: "自检·改报课学生", grade: "初三", guardian: "", status: "在读", note: "", profile: {},
+  });
+  const editEnroll = (await api.students.enroll(editStudent.id, {
+    subject: "自检·改报课科目", form: "一对一定制课", teacherId: "",
+    lessons: 10, startedAt: new Date().toISOString(), note: "",
+    unitPrice: 200, agreedAmount: 2000, paidNow: 2000, method: "微信",
+  }))!.enrollments[0]!;
+
+  /*
+   * 自己造两位老师（都带这门自检科目）。
+   *
+   * 为什么不用夹具里现成的那几位：换教师时会过一遍冲突判定，其中一条是
+   * "教师不带这个科目" —— 自检科目当然没人带，于是每一节都会被判成"科目不符"而跳过，
+   * 断言就变成在测那条规则、而不是在测"未来的课跟不跟着改"（我第一版就是这么写的）。
+   */
+  const newTeacher = (name: string) => ({
+    name, subjects: ["自检·改报课科目"], role: "", phone: "", active: true,
+    years: "", summary: "", bio: "", recommendation: "", order: 999,
+    siteVisible: false, origin: "后台" as const, kind: "教师" as const,
+  });
+  const teacherA = await api.teachers.create(newTeacher("自检·改课甲老师"));
+  const teacherB = await api.teachers.create(newTeacher("自检·改课乙老师"));
+  const pastDone = await api.lessons.create({
+    subject: editEnroll.subject, form: "一对一定制课", teacherId: teacherA.id, classroomId: room.id,
+    studentIds: [editStudent.id], startsAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+    durationMinutes: 60, status: "已上", note: "",
+  });
+  const pastOpen = await api.lessons.create({
+    subject: editEnroll.subject, form: "一对一定制课", teacherId: teacherA.id, classroomId: room.id,
+    studentIds: [editStudent.id], startsAt: new Date(Date.now() - 86_400_000).toISOString(),
+    durationMinutes: 60, status: "已排", note: "",
+  });
+  const futureLesson = await api.lessons.create({
+    subject: editEnroll.subject, form: "一对一定制课", teacherId: teacherA.id, classroomId: room.id,
+    studentIds: [editStudent.id], startsAt: new Date(Date.now() + 2 * 86_400_000).toISOString(),
+    durationMinutes: 60, status: "已排", note: "",
+  });
+
+  // ① 只改记录：课节一节都不动
+  const onlyRecord = await api.students.updateEnrollment(
+    editStudent.id, editEnroll.id,
+    { form: "一对二 / 一对三小组课", unitPrice: 260, agreedAmount: 2600 },
+    "enrollment",
+  );
+  eq("只改记录时不动课节", onlyRecord.updatedLessons.length, 0);
+  eq("记录本身改了班型", (await api.students.get(editStudent.id))!.enrollments[0]?.form, "一对二 / 一对三小组课");
+  eq("未来那节课的班型没跟着变（这正是「只改记录」的意思）",
+    (await api.lessons.get(futureLesson.id))?.form, "一对一定制课");
+  eq("单价与约定应缴改了",
+    [(await api.students.get(editStudent.id))!.enrollments[0]?.unitPrice,
+     (await api.students.get(editStudent.id))!.enrollments[0]?.agreedAmount], [260, 2600]);
+
+  // ② 改记录 + 后续还没上的课：未来的跟着改，过去的（含已上、含状态还挂着的）一律不动
+  const withFuture = await api.students.updateEnrollment(
+    editStudent.id, editEnroll.id,
+    { form: "一对一定制课", teacherId: teacherB.id },
+    "future-lessons",
+  );
+  eq("只改了未来那一节", withFuture.updatedLessons.map((item) => item.id), [futureLesson.id]);
+  eq("过去的两节都算「已过去、未动」", withFuture.pastLessons, 2);
+  eq("未来那节换成新教师了",
+    (await api.lessons.get(futureLesson.id))?.teacherId, teacherB.id);
+  eq("未来那节班型也变了", (await api.lessons.get(futureLesson.id))?.form, "一对一定制课");
+  eq("已上的课原封不动（老师没变）", (await api.lessons.get(pastDone.id))?.teacherId, teacherA.id);
+  eq("过去但状态还挂着「已排」的课也原封不动",
+    [(await api.lessons.get(pastOpen.id))?.teacherId, (await api.lessons.get(pastOpen.id))?.status],
+    [teacherA.id, "已排"]);
+
+  // ③ 钱与账本不受影响（单价变了不等于钱变了）
+  const afterEdit = (await api.students.get(editStudent.id))!.enrollments[0]!;
+  eq("实收没被改动（改价不等于改收款）", afterEdit.paidAmount, 2000);
+  eq("课时数没被改动（课时只走续费/调整）", afterEdit.totalLessons, 10);
+  ok("课时流水仍与余额自洽",
+    ledgerConsistent(afterEdit, await api.transactions.listByEnrollment(afterEdit.id)));
+
+  // ④ 换成"那个时段已经有课"的老师：跳过并说明，不硬改
+  const busyTeacher = teacherB;
+  const blockStart = new Date(Date.now() + 5 * 86_400_000);
+  await api.lessons.create({
+    subject: "自检·占位科目", form: "", teacherId: busyTeacher.id, classroomId: room.id,
+    studentIds: [], startsAt: blockStart.toISOString(), durationMinutes: 60, status: "已排", note: "",
+  });
+  const conflicting = await api.lessons.create({
+    subject: editEnroll.subject, form: "", teacherId: teacherA.id, classroomId: room.id,
+    studentIds: [editStudent.id], startsAt: blockStart.toISOString(), durationMinutes: 60,
+    status: "已排", note: "",
+  });
+  const clash = await api.students.updateEnrollment(
+    editStudent.id, editEnroll.id, { teacherId: busyTeacher.id }, "future-lessons",
+  );
+  eq("撞课的节被跳过、没被硬改",
+    [(await api.lessons.get(conflicting.id))?.teacherId, clash.skippedLessons.map((item) => item.id)],
+    [teacherA.id, [conflicting.id]]);
+  ok("跳过时说清了原因（点名老师或时段）",
+    (clash.skippedLessons[0]?.reason ?? "").includes("已有课"), clash.skippedLessons[0]?.reason ?? "");
+  eq("而没冲突的那一节改好了（同一批里逐节判定）",
+    (await api.lessons.get(futureLesson.id))?.teacherId, busyTeacher.id);
+
+  // ⑤ 非法输入被拒
+  let badTeacher = "";
+  try {
+    await api.students.updateEnrollment(editStudent.id, editEnroll.id, { teacherId: "t_不存在" }, "enrollment");
+  } catch (cause) {
+    badTeacher = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("指定不存在的教师被拒", badTeacher.includes("教师不存在"), badTeacher);
+  let negative = "";
+  try {
+    await api.students.updateEnrollment(editStudent.id, editEnroll.id, { agreedAmount: -1 }, "enrollment");
+  } catch (cause) {
+    negative = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("负数金额被拒", negative.includes("不能是负数"), negative);
+
+  // 收尾
+  await api.lessons.remove(conflicting.id);
+  await api.lessons.remove(futureLesson.id);
+  await api.lessons.remove(pastOpen.id);
+  await api.lessons.remove(pastDone.id);
+  await api.students.remove(editStudent.id);
+  await api.teachers.remove(teacherA.id);
+  await api.teachers.remove(teacherB.id);
+  eq("自检改报课学生已清理", await api.students.get(editStudent.id), null);
+  eq("自检用的两位老师也清理了", (await api.teachers.get(teacherA.id)) === null && (await api.teachers.get(teacherB.id)) === null, true);
 }
 
 // ── ICS 日历文件 ──────────────────────────────────────────────────────

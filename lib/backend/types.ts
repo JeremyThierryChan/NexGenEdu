@@ -299,6 +299,52 @@ export type TransactionKind = (typeof TRANSACTION_KINDS)[number];
 export const ENROLLMENT_STATUSES = ["在读", "已退课"] as const;
 export type EnrollmentStatus = (typeof ENROLLMENT_STATUSES)[number];
 
+/**
+ * 改报课的入参（v16 起）。
+ *
+ * ## 能改什么、不能改什么
+ *
+ * 能改：**班型 / 指定教师 / 单价 / 约定应缴 / 备注**。
+ * 不能改：**科目**与**课时数** ——
+ *   - 科目是"这节课扣哪条报课"的匹配键（`enrollmentForLesson` 按科目名找），改了它，
+ *     已排的课与账本里的流水会找不到这条报课，扣课时静默跳过；报错了科目请「退课」后重报；
+ *   - 课时数只走「续费 / 调整」，那两条会写课时流水，账才对得上。
+ */
+export type EnrollmentEdit = {
+  form?: string;
+  teacherId?: string;
+  unitPrice?: number;
+  agreedAmount?: number;
+  note?: string;
+};
+
+/**
+ * 改动的影响范围（**像手机日历改日程那样**）。
+ *
+ *   - `"enrollment"`：只改这条报课记录，已排的课一节都不动；
+ *   - `"future-lessons"`：连**后续还没上的**课一起改（换教师、换班型通常要这样）。
+ *
+ * 两种范围都**绝不碰过去**：已上的课与时间已过的课一律不动 ——
+ * 那是发生过的事实，改了它账就对不上（老师、班型、课时都对不上）。
+ */
+export type EnrollmentEditScope = "enrollment" | "future-lessons";
+
+/** 改报课的结果：改了记录，以及顺带改 / 跳过 / 没动的课。 */
+export type EnrollmentEditResult = {
+  student: Student | null;
+  /** 这条报课改了什么（人话，界面直接显示）。 */
+  changes: string[];
+  /** 跟着改掉的课节（数量与时间，用于"改了哪几节"的确认）。 */
+  updatedLessons: Array<{ id: string; startsAt: string }>;
+  /**
+   * 跳过的课：每一条都带原因 ——
+   * 与新的教师/教室撞课、教师不带这个科目、时间已过…都在这里如实说明。
+   */
+  skippedLessons: Array<{ id: string; startsAt: string; reason: string }>;
+  /** 时间已过、按规矩不动的课（用来回答"为什么这几节没跟着改"）。 */
+  pastLessons: number;
+};
+
 /** 报课入参。 */
 export type NewEnrollment = {
   subject: string;

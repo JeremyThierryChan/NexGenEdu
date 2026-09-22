@@ -83,7 +83,9 @@ export const API_CONTRACT: ContractGroup[] = [
       "报课要同时建报课记录与收款流水、标记已上要写课时流水并扣课时、退课要记账并保留历史。" +
       "全部要求**幂等**：重复提交不能重复扣课时、重复收款。审计日志也在这里写。",
     methods: [
-      "students.enroll", "students.renewEnrollment", "students.refundEnrollment",
+      "students.enroll",
+      // 改报课：班型 / 指定教师 / 单价 / 约定应缴 / 备注；可只改记录，或连后续还没上的课一起改
+      "students.updateEnrollment", "students.renewEnrollment", "students.refundEnrollment",
       "students.adjustEnrollmentLessons", "students.saveProfile",
       "lessons.markCompleted", "lessons.createMakeup", "lessons.suggestMoves",
       "lessonRecords.save",
