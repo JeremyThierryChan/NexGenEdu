@@ -21,7 +21,9 @@
 
 import { getCoursesPageFromTemplate, getTeachersPageFromTemplate } from "@/lib/data/site";
 import { getPricingData } from "@/lib/data/pricing";
+import { coursesReferencingAnchor } from "./site-bands";
 import type {
+  Course,
   SiteBand,
   SiteContent,
   SiteCoursePage,
@@ -151,12 +153,38 @@ export function coursePageAnchors(content: SiteContent): string[] {
 }
 
 /**
+ * 删除护栏要看的两样东西（都不是"内容本身"，因此单独一个参数）。
+ *
+ * 为什么不把它们塞进 `SiteContent`：这两样是**库里的现状**（课程行、改之前的那一版正文），
+ * 不是要保存的内容。混进内容对象里就会有人把它一起存进库，于是"护栏用的数据"变成
+ * 内容的一部分，下一轮校验读到的是上一轮自己写的东西。
+ */
+export type SiteContentGuard = {
+  /** 库里的课程卡片；用来判断"这个小节还有没有卡片指着它"。 */
+  courses?: readonly Course[];
+  /** 库里**当前**那一版正文：只有"原本有、这次没了"才算删除，见下面的规则。 */
+  previous?: SiteContent;
+};
+
+/**
  * 校验一份网站内容（后台要保存整份内容时用）。
  *
  * 返回问题清单；空数组表示可以用。刻意**不自动纠正**（比如给空名字补个默认名）：
  * 网站正文是给人看的，系统替人编一个名字，最后只会在页面上出现"未命名"这种东西。
+ *
+ * ## 删除护栏：被卡片指着的小节不许消失（`guard` 传进来时才判）
+ *
+ * 这是唯一一条"要看库里别的表"的规则，因此**必须在服务端**（`site.saveContent`）判：
+ * 前台拦住手滑靠的是同一份判定（课程表单的删除按钮会先说清是哪门课），
+ * 但前台可以被绕过（直接调接口），而这条规则的失败形态是**网站上的卡片跳空** ——
+ * 点「学考」跳到不存在的位置，页面上不报错、只停在页首，谁也不会发现。
+ *
+ * 判据是"**原本在、这次没了**"（拿 `previous` 比），而不是"库里的卡片指着它就必须存在"：
+ * 卡片完全可以先于正文存在（先建卡片、再写正文是正常的顺序），
+ * 按绝对值判会让那种正常情况连"保存一次现有内容"都被拒 —— 一个挡住正常操作的护栏
+ * 比没有护栏更糟（人会去关掉它）。
  */
-export function validateSiteContent(content: SiteContent): string[] {
+export function validateSiteContent(content: SiteContent, guard: SiteContentGuard = {}): string[] {
   const problems: string[] = [];
   const page = content.coursePage;
 
@@ -185,5 +213,35 @@ export function validateSiteContent(content: SiteContent): string[] {
     }
   }
 
+  /*
+   * 删除护栏（见函数头）：上一版里有、这一版没有了的锚点，只要还有卡片指着它，
+   * 整份保存就被拒 —— 并且**点名那门课**：只说"这个锚点还在被引用"，
+   * 人是找不到那门课的（21 个学科 / 60 多个小节 / 上百张卡片里翻标签）。
+   */
+  if (guard.previous !== undefined) {
+    const kept = new Set(anchorsOf(content));
+    const referenced = new Set<string>();
+    for (const anchor of anchorsOf(guard.previous)) {
+      if (kept.has(anchor)) continue;
+      const courses = coursesReferencingAnchor(guard.courses ?? [], anchor);
+      if (courses.length === 0) continue;
+      // 同一个锚点只报一次（重复的锚点在上一版里可能是数据问题，那不是这条护栏的事）
+      if (referenced.has(anchor)) continue;
+      referenced.add(anchor);
+      const names = courses.map((course) => `「${course.name}」`).join("、");
+      problems.push(
+        `不能删掉小节「${anchor}」（改名也一样）：课程 ${names} 的卡片靶点 / 标签还指着它，` +
+          "删了它，网站上那张卡片点进去就会跳空。请先改掉那门课的标签 / 靶点，再回来删。",
+      );
+    }
+  }
+
   return problems;
+}
+
+/** 一份内容里的全部小节锚点（去掉首尾空白、丢掉空串；护栏与重复检查用同一口径）。 */
+function anchorsOf(content: SiteContent): string[] {
+  return content.coursePage.subjects.flatMap((subject) =>
+    subject.bands.map((band) => band.id.trim()).filter((id) => id !== ""),
+  );
 }

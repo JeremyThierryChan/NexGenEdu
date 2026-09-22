@@ -3697,11 +3697,20 @@ const localApi = {
      *
      * 校验不通过**直接拒绝**（见 `validateSiteContent`）：不自动纠正 ——
      * 系统替人编一个学科名，最后只会在页面上出现"未命名"这种东西。
+     *
+     * 校验还连**库里的现状**一起看（`{courses, previous}`）：卡片指着的小节被删掉时要拦下来
+     * （网站上那张卡片点进去会跳空）。这一条只看"传上来的内容"判不出来，因此必须落在这里 ——
+     * 而这里就是服务端：`/api/call` 与内存后端走的是同一个方法（路线 B），
+     * 所以前台拦一次、服务端也拦一次，不是两套口径。
      */
     async saveContent(input: SiteContent): Promise<SiteContent> {
       await delay();
       const db = load();
-      const problems = validateSiteContent(input);
+      const problems = validateSiteContent(input, {
+        courses: db.courses,
+        // "原本有、这次没了"才算删除：只拿传上来的内容比对，会把"卡片先于正文存在"也判成删除
+        previous: db.siteContent,
+      });
       if (problems.length > 0) throw new Error(problems.join("；"));
 
       const before = db.siteContent.coursePage;

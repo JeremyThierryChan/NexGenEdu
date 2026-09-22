@@ -42,6 +42,12 @@ import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
 import { hasCoursePageContent } from "@/lib/backend/site-content";
+import {
+  bandsForTargets,
+  cardTargets,
+  coursesReferencingAnchor,
+  uniqueBandAnchor,
+} from "@/lib/backend/site-bands";
 import { publicSite as buildPublicSite } from "@/lib/backend/public-site";
 import { __useBackendSnapshotForTesting, backendSnapshot } from "@/lib/site/backend-source";
 import { siteTeachers as siteTeachersFromContent } from "@/lib/backend/site-import";
@@ -2344,6 +2350,182 @@ await api.restoreBackup();
   await api.site.saveContent(current);
   eq("内容已还原", (await api.site.publicContent()).siteContent.coursePage.subjects[0]?.bands[0]?.title,
     current.coursePage.subjects[0]?.bands[0]?.title);
+}
+
+/*
+ * ── 卡片 ↔ 正文小节：「一门课一张卡片里改完正文」的四条规则 ──────────────
+ *
+ * 这一组守的是课程表单里那块「网站正文（小节）」背后的规则。四条都写在**服务层**
+ * （`lib/backend/site-bands.ts` 的纯函数 + `validateSiteContent` 的删除护栏），
+ * 因此这里对**内存后端与真实 HTTP 后端各跑一遍**（`npm run check:both`）。
+ *
+ * 为什么写在 `check.mts` 而不是 `check-auth.mts`：后者只对着真实 HTTP 进程跑一遍，
+ * 验的是"鉴权闸门在不在"；而这几条是**数据规则**，重点恰恰是
+ * 「两种后端跑同一份断言、结论必须一样」—— 那正是 check.mts（经 check:both）独有的能力。
+ *
+ * 四条：
+ *   ① 命中逻辑（纯函数）：卡片给的 targets 命中的小节集合，含"命中 0 个"；
+ *   ② 新增小节：锚点重名时自动取可用值，但**硬交**重复锚点仍被服务端拒（不自动纠正）；
+ *   ③ 删除护栏：被卡片标签 / 靶点指着的小节删不掉（错误里点名那门课），改掉标签后删得掉；
+ *   ④ 小节级精编：改标题 / 锚点 / 正文后保存成功、读回来一致。
+ */
+{
+  // 起点回到夹具（上一块末尾把内容存回了原样，这里再确认一次口径一致）
+  const before = (await api.site.publicContent()).siteContent;
+  const subjects = before.coursePage.subjects;
+  const subjectIndex = subjects.findIndex((item) => item.bands.length > 0);
+  ok("夹具里有带小节的学科（否则这一组等于在空数组上通过）", subjectIndex >= 0);
+  const subject = subjects[subjectIndex]!;
+  const firstBand = subject.bands[0]!;
+
+  // ① 命中逻辑：卡片靶点 + 标签目标 → 小节集合（与课程清单的按钮、学科面板共用同一份）
+  const byAnchor = bandsForTargets(subjects, [firstBand.id]);
+  eq("命中逻辑：按锚点命中它所在的那个小节",
+    byAnchor.map((hit) => `${hit.subject.name}/${hit.band.id}`), [`${subject.name}/${firstBand.id}`]);
+  eq("命中逻辑：写小节标题也算命中（卡片上常常直接写标题）",
+    bandsForTargets(subjects, [firstBand.title]).some((hit) => hit.band.id === firstBand.id), true);
+  eq("命中逻辑：写错名字就是命中 0 个（不猜、不做模糊匹配）",
+    bandsForTargets(subjects, ["自检·这个名字不存在"]).length, 0);
+  eq("命中逻辑：空 targets 命中 0 个（没填靶点不等于全命中）",
+    bandsForTargets(subjects, ["", "   "]).length, 0);
+  /*
+   * 同一小节被靶点与标签同时命中时只算一次：
+   * 重复计数会让"保存了几个小节"这类提示说假话（多门课共用一节时尤其明显）。
+   */
+  const cardForHit = { target: firstBand.id, tags: [{ target: ` ${firstBand.title} ` }] };
+  eq("命中逻辑：靶点与标签都指向同一节时只算一次",
+    bandsForTargets(subjects, cardTargets(cardForHit)).length, 1);
+
+  // ② 新增小节：默认锚点重名 → 自动取一个可用值（编辑器自己改正，不等服务端拒）
+  const base = "自检新增小节";
+  const anchor = uniqueBandAnchor(subjects, base);
+  eq("新增小节：没重名时就用给定的锚点", anchor, base);
+  eq("新增小节：重名时自动换一个可用的锚点（进内容前就改正）",
+    uniqueBandAnchor(subjects, firstBand.id) !== firstBand.id, true);
+  eq("新增小节：自动改正后的锚点在整份正文里都不重复",
+    subjects.every((item) => item.bands.every((band) => band.id !== anchor)), true);
+
+  const added = JSON.parse(JSON.stringify(before)) as typeof before;
+  added.coursePage.subjects[subjectIndex]!.bands.push({ id: anchor, title: base, body: "自检新增小节的正文" });
+  const afterAdd = await api.site.saveContent(added);
+  const addedBand = afterAdd.coursePage.subjects[subjectIndex]!.bands.find((band) => band.id === anchor);
+  ok("新增的小节写进去了（标题 / 正文都读得回来）",
+    addedBand?.title === base && addedBand.body === "自检新增小节的正文");
+
+  // 而"硬交一个与组内已有锚点重名的"仍然被拒：自动纠正是编辑器的行为，服务端不猜
+  const withDuplicate = JSON.parse(JSON.stringify(afterAdd)) as typeof before;
+  withDuplicate.coursePage.subjects[subjectIndex]!.bands.push({
+    id: firstBand.id, title: "自检·重名小节", body: "",
+  });
+  let duplicateMessage = "";
+  try {
+    await api.site.saveContent(withDuplicate);
+  } catch (cause) {
+    duplicateMessage = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("服务端不自动纠正重复锚点（重名的整份拒收并说明原因）",
+    duplicateMessage.includes("重复") && duplicateMessage.includes(firstBand.id), duplicateMessage || "（没有被拒绝）");
+
+  // ③ 删除护栏：让一张卡片的**标签**指向刚加的小节，然后试着删掉它
+  const card = await api.courses.create({
+    name: "自检·指向小节", category: "自检", forms: [], origin: "后台", status: "开放", note: "",
+    path: "self-check-band", subgroup: "", tags: [{ label: "自检", target: anchor }], target: "",
+    order: 999, intro: "", siteKind: "学科", createdAt: new Date().toISOString(),
+  });
+  eq("纯函数：能算出是哪张卡片指着这个小节",
+    coursesReferencingAnchor(await api.courses.list(), anchor).map((item) => item.name),
+    ["自检·指向小节"]);
+
+  /** 把某个锚点的小节从这份内容里去掉（不改原对象）。 */
+  const withoutBand = (content: typeof before, id: string): typeof before => {
+    const draft = JSON.parse(JSON.stringify(content)) as typeof before;
+    for (const item of draft.coursePage.subjects) {
+      item.bands = item.bands.filter((band) => band.id !== id);
+    }
+    return draft;
+  };
+
+  const renamed = JSON.parse(JSON.stringify(afterAdd)) as typeof before;
+  const renamedBand = renamed.coursePage.subjects[subjectIndex]!.bands.find((band) => band.id === anchor)!;
+  renamedBand.id = `${anchor}改名`;
+  let renameMessage = "";
+  try {
+    await api.site.saveContent(renamed);
+  } catch (cause) {
+    renameMessage = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("改掉被卡片指着的锚点也被拒（改名和删除一样会让那一跳落空）",
+    renameMessage.includes("自检·指向小节"), renameMessage || "（没有被拒绝）");
+
+  let denyMessage = "";
+  try {
+    await api.site.saveContent(withoutBand(afterAdd, anchor));
+  } catch (cause) {
+    denyMessage = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("删掉被卡片标签指着的小节被拒", denyMessage !== "", denyMessage || "（没有被拒绝）");
+  ok("错误里**点名**了那门课（只说『还有引用』人找不到是哪门课）",
+    denyMessage.includes("自检·指向小节"), denyMessage);
+  ok("被拒时库里一个字都没改（整份拒绝，不会删一半）",
+    (await api.site.publicContent()).siteContent.coursePage.subjects[subjectIndex]?.bands.some(
+      (band) => band.id === anchor) === true);
+
+  // 卡片靶点也走同一条护栏（标签与靶点是两个字段，别只守一个）
+  await api.courses.update(card.id, { tags: [], target: anchor });
+  let targetMessage = "";
+  try {
+    await api.site.saveContent(withoutBand(afterAdd, anchor));
+  } catch (cause) {
+    targetMessage = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("卡片**靶点**指着的同样删不掉（两个字段都守）",
+    targetMessage.includes("自检·指向小节"), targetMessage || "（没有被拒绝）");
+
+  // ④ 改掉卡片上的引用之后，同一份内容就能保存了（错误提示让人做的事真的有用）
+  const cleared = await api.courses.update(card.id, { tags: [], target: "" });
+  eq("卡片上的标签与靶点已改掉", [cleared?.tags.length, cleared?.target], [0, ""]);
+  const afterDelete = await api.site.saveContent(withoutBand(afterAdd, anchor));
+  eq("改掉卡片引用后，删掉这个小节成功", 
+    afterDelete.coursePage.subjects[subjectIndex]!.bands.some((band) => band.id === anchor), false);
+
+  // ⑤ 小节级精编：新增一节后改它的标题（含竖线导语）/ 锚点 / 正文，保存后读回来一致
+  /*
+   * 刻意编辑**刚新增的这一节**，而不是随手挑一节改：
+   * 夹具里的每一节几乎都被某张卡片指着（这正是这套数据的常态），
+   * 拿它们当"随便改一节"的样本，测到的其实是删除护栏而不是编辑功能。
+   */
+  const freshAnchor = uniqueBandAnchor(afterDelete.coursePage.subjects, "自检精编小节");
+  const withFresh = JSON.parse(JSON.stringify(afterDelete)) as typeof before;
+  withFresh.coursePage.subjects[subjectIndex]!.bands.push({
+    id: freshAnchor, title: "自检精编小节", body: "旧正文",
+  });
+  const afterFresh = await api.site.saveContent(withFresh);
+  eq("精编用的小节已建好（且没有卡片指着它）",
+    [afterFresh.coursePage.subjects[subjectIndex]!.bands.some((band) => band.id === freshAnchor),
+      coursesReferencingAnchor(await api.courses.list(), freshAnchor).length],
+    [true, 0]);
+
+  const edited = JSON.parse(JSON.stringify(afterFresh)) as typeof before;
+  const editable = edited.coursePage.subjects[subjectIndex]!.bands.find((band) => band.id === freshAnchor)!;
+  const newAnchor = uniqueBandAnchor(edited.coursePage.subjects, "自检精编小节改名");
+  editable.title = "自检精编小节｜这一段是导语";
+  editable.id = newAnchor;
+  editable.body = "第一段正文。\n\n- 核心能力：自检用";
+  const afterEdit = await api.site.saveContent(edited);
+  const savedBand = afterEdit.coursePage.subjects[subjectIndex]!.bands.find((band) => band.id === newAnchor);
+  eq("小节级精编：标题 / 锚点 / 正文读回来与写进去的一致",
+    [savedBand?.title, savedBand?.id, savedBand?.body],
+    ["自检精编小节｜这一段是导语", newAnchor, "第一段正文。\n\n- 核心能力：自检用"]);
+  eq("小节级精编：只动了这一节，其它小节的数量没变",
+    afterEdit.coursePage.subjects[subjectIndex]!.bands.length, afterFresh.coursePage.subjects[subjectIndex]!.bands.length);
+
+  // 收尾：删掉自检用的卡片，正文存回原样（后面的用例还要用这份内容）
+  await api.courses.remove(card.id);
+  await api.site.saveContent(before);
+  eq("正文已还原（学科 / 小节数与开头一致）",
+    (await api.site.publicContent()).siteContent.coursePage.subjects.map((item) => item.bands.length),
+    subjects.map((item) => item.bands.length));
+  eq("自检用的卡片已删掉", (await api.courses.list()).some((item) => item.name === "自检·指向小节"), false);
 }
 
 /*
