@@ -21,6 +21,21 @@ import { api, type SiteContent } from "@/lib/backend/api";
  * 2. **小节锚点（id）可以改但要提醒**：卡片上的标签是按锚点跳转的（「学考 → 高中物理学考」），
  *    改了锚点而卡片标签没跟着改，那一跳就会落空。因此锚点单独一行、带说明。
  */
+/**
+ * 事件名：课程清单里的「网站正文」按钮 → 这块编辑器。
+ *
+ * 为什么用事件而不是把状态提到父组件：这两个面板在**同一个页面**里、但父组件（课程库页）
+ * 不该知道课程正文的内部结构（学科 / 小节 / 锚点）。事件让"跳过去"这件事只依赖一个
+ * 极小的约定（{cardName, targets}），父组件不必承担这层耦合。
+ */
+const FOCUS_EVENT = "nexgenedu:focus-site-subject";
+
+/** 让「网站课程正文」展开并定位到这门课涉及的小节（卡片与它的正文放一起看）。 */
+export function focusSiteSubject(detail: { cardName: string; targets: string[] }): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(FOCUS_EVENT, { detail }));
+}
+
 export function SiteCourseContent() {
   const [content, setContent] = useState<SiteContent | null>(null);
   /** 编辑器默认收起（21 个学科 / 61 个小节会把这页撑出好几屏，理由见下面的 render 注释）。 */
@@ -47,6 +62,36 @@ export function SiteCourseContent() {
       alive = false;
     };
   }, []);
+
+  /*
+   * 监听"从课程清单跳过来"：展开面板，并打开命中该目标的学科。
+   *
+   * 命中规则：卡片给的 targets（它自己指向的小节 + 各标签的目标）里，**任一**小节锚点
+   * 落在某个学科里，就打开那个学科（多门命中时打开第一个 —— 卡片与小节通常是一对一，
+   * 一对多时（如「高中物理」有学考/选考两节）打开含第一个命中的那个学科即可）。
+   */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onFocus = (event: Event) => {
+      const detail = (event as CustomEvent<{ cardName: string; targets: string[] }>).detail;
+      if (detail === undefined || content === null) return;
+      setExpanded(true);
+      setMessage("");
+      const targets = detail.targets.filter((item) => item.trim() !== "");
+      const hit = content.coursePage.subjects.find((subject) =>
+        subject.bands.some((band) => targets.includes(band.id) || targets.includes(band.title)),
+      );
+      // 找不到（卡片没写对锚点、或这门课还没有小节）时也展开，让人自己找 —— 静默不动作更糟
+      setOpenSubject(hit?.id ?? "");
+      setMessage(
+        hit === undefined
+          ? `「${detail.cardName}」还没有对应的小节正文：可以「新增学科」或让卡片指向已有小节。`
+          : `已定位到「${hit.name}」的小节正文（「${detail.cardName}」指向它）。`,
+      );
+    };
+    window.addEventListener(FOCUS_EVENT, onFocus);
+    return () => window.removeEventListener(FOCUS_EVENT, onFocus);
+  }, [content]);
 
   /** 就地改一份草稿（不改原对象，避免"改了没有保存"看不出来）。 */
   function edit(next: (draft: SiteContent) => void) {

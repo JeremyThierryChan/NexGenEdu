@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { BulkImport } from "@/components/admin/BulkImport";
 import { MultiSelect } from "@/components/admin/MultiSelect";
-import { SiteCourseContent } from "@/components/admin/SiteCourseContent";
+import { SiteCourseContent, focusSiteSubject } from "@/components/admin/SiteCourseContent";
 import { Panel, SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
 import {
   api,
@@ -689,6 +689,29 @@ export default function AdminCoursesPage() {
                         >
                           编辑
                         </button>
+                        {/*
+                          从课程清单直接跳到**这门课在网站上的正文**。
+                          卡片与它指向的小节其实是同一门课的两半，分在两个面板里找很别扭；
+                          这里把两者接起来：点一下就展开「网站课程正文」并定位到对应学科/小节。
+                          （按钮只对"会上网站"的课程显示 —— 不展示的课没有正文可改。）
+                        */}
+                        {course.siteKind !== "不展示" && course.path !== "" && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              focusSiteSubject({
+                                cardName: course.name,
+                                targets: [
+                                  ...(course.target === "" ? [] : [course.target]),
+                                  ...course.tags.map((tag) => tag.target),
+                                ],
+                              })
+                            }
+                            className="rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 hover:border-brand-300 hover:text-brand-700"
+                          >
+                            网站正文
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => void toggleStatus(course)}
