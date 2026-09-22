@@ -755,6 +755,7 @@ server/kv-store.mts       SQLite：kv 表存整份 JSON 快照（server/data/nex
 | 收费 | `/admin/finance` | ✅ 本月收款/退款/净收入、按方式拆分、欠费清单、退费口径说明 |
 | 报价 | `/admin/pricing` | ✅ 基础价 / 系数 / 计费规则 / 教师分成可改 + 家长报测试算 + 教师课时费与人数对照表 + 导出上线 |
 | 数据与备份 | `/admin/data` | ✅ 全量 JSON 导出/导入（含备份后悔药）、学生名单 CSV、课程 ICS、操作日志 |
+| 账号 | `/admin/accounts` | ✅ 只有技术管理员能进：加人、改角色（多选）、绑定教师（下拉选人）、重置口令、停用 / 删除，改完立刻生效（服务端四条独立路由 `/api/accounts`，不在 `/api/call` 里） |
 
 共用件：`components/admin/AdminFields.tsx`（后台表单控件）、
 `components/admin/DataNotice.tsx`（**连没连上后端**的状态提示条；接后端之前它显示的是

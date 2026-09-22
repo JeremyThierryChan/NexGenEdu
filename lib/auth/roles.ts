@@ -69,6 +69,15 @@ export const PAGE_ACCESS: Record<string, Role[]> = {
   "/admin/finance": ["技术管理员", "财务管理员"],
   "/admin/pricing": ["技术管理员", "财务管理员", "招生老师"],
   "/admin/data": ["技术管理员"],
+  /*
+   * 账号管理（后台「账号」页）：**只有技术管理员**。
+   *
+   * 它决定"谁能登录这个系统、各是什么角色"—— 给了别的角色等于把权限本身交出去，
+   * 于是"分权"这件事就没有意义了。与 `server/index.mts` 的 `/api/accounts` 那条闸门
+   * （`ACCOUNTS_ROUTE_ROLES`）是同一个答案，`scripts/check-auth.mts` 的 [10] 节
+   * 用真实 HTTP 断言普通教师调那四条路由一律 403。
+   */
+  "/admin/accounts": ["技术管理员"],
 };
 
 /**
@@ -259,7 +268,7 @@ export const SCOPE_ALL: SessionScope = { kind: "all", teacherId: "", warning: ""
 export const EMPTY_SCOPE_WARNING =
   "这个账号是普通教师，但账号里没填 teacherId（要填教师档案的 id，不是姓名），" +
   "因此你的范围是空的：登录后看不到任何学生与排课。" +
-  "请让技术管理员在 accounts.json 里给这条账号补上 teacherId，然后重启后端。";
+  "请让技术管理员在后台的「账号」页给这条账号补上 teacherId（备用做法：改 accounts.json 里那一条，然后重启后端）。";
 
 /**
  * 这个账号是不是"**只有**普通教师这一个角色"。

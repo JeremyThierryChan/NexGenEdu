@@ -41,7 +41,19 @@ import {
   type Session,
 } from "./auth.mts";
 // 多账号与角色（第 7 步）：账号表在 server/accounts.mts（口令与角色都在服务端）
-import { accountBootstrapNote } from "./accounts.mts";
+// 账号管理（加人 / 改角色 / 绑教师 / 重置口令 / 停用 / 删除）也走它 —— 见下面 /api/accounts 那一节
+import {
+  accountBootstrapNote,
+  accountsFile,
+  accountsReadOnlyReason,
+  createAccount,
+  deleteAccount,
+  listAccounts,
+  updateAccount,
+  type AccountSummary,
+  type CreateAccountInput,
+  type UpdateAccountInput,
+} from "./accounts.mts";
 // 权限的"一份数据"：**方法级判定只有这一处**（见下面的闸门 —— 服务端只调用它，不自己推）
 import {
   allowedRolesForMethod,
@@ -1132,9 +1144,326 @@ async function scopeWarningFor(scope: SessionScope): Promise<string> {
   );
 }
 
+/* ── 账号管理（`/api/accounts`：加人 / 改角色 / 绑教师 / 重置口令 / 停用 / 删除）───────────
+ *
+ * ## 为什么是**四条独立路由**，而不是 `/api/call` 的方法
+ *
+ * 服务层的 `api`（`lib/backend/api.ts`）在**浏览器里也会跑**（没配 `NEXT_PUBLIC_API_BASE`
+ * 时它直接用 localStorage 那份实现），而账号表是**服务端进程里的一个文件**。
+ * 把它做成 `api.accounts.create()` 的后果有两个，都很糟：
+ *   1. 界面在浏览器里根本调不通它（或者更糟：被实现成一个假的成功）；
+ *   2. 它会进入 `API_CONTRACT`（自检要求"服务层每个方法都必须在契约里"），
+ *      于是契约里出现一个"浏览器里没有意义、服务端才有"的方法 —— 契约就不再是
+ *      "页面对服务层的形状"了。
+ *
+ * 所以这四条路由是**服务端自己的接口**（页面用 `lib/auth/accounts.ts` 直接 fetch），
+ * 也因此在 `REST_CONTRACT_METHODS` 里是 `contract: null`（登录即可），
+ * 角色判定由下面的 `accountsRouteDenial` 自己判一次。
+ *
+ * ## 口径与纪律
+ *
+ *   - **只有技术管理员**（与 `PAGE_ACCESS["/admin/accounts"]` 一致）：其它角色一律 403，
+ *     文案与 `permissionError` 同一个形状（"你的角色…不能做这件事…这件事需要…分工见文档"）；
+ *   - **绝不放出口令**：列表与写操作的响应里都没有 password / salt / hash
+ *     （`listAccounts()` 给的是 `AccountSummary`），口令只在**写入时**收一次；
+ *   - **参数错 400 / 没有这条 404 / 只读钩子 409 / 落盘失败 500**：判定在
+ *     `server/accounts.mts` 里做，状态码跟着结果一起回来（不在这一层重新解释一遍）；
+ *   - **留痕**：写成功之后用库里那条日志通道记一条（`writeLog`，与老 REST 接口同一个写法），
+ *     操作人来自会话，**口令不进日志**；
+ *   - 每条路由都要过统一闸门（未登录 401）—— 这一段在 `createServer` 里排在闸门**之后**。
+ */
+
+/** 账号管理允许的角色（**只有一处**：与 `lib/auth/roles.ts` 的 `PAGE_ACCESS["/admin/accounts"]` 对应）。 */
+const ACCOUNTS_ROUTE_ROLES: readonly Role[] = ["技术管理员"];
+
+/**
+ * 这一次账号管理请求该不该放行：`null` = 放行；字符串 = 拒绝（403）。
+ *
+ * 复用 `canAccess`（"角色集合里有一个允许就允许"）与 `permissionError` 的文案形状，
+ * 但**不经过** `permissionError`：它的输入是契约方法名，而账号管理刻意不是服务层方法
+ * （理由见上面那一节）。两条路用的仍然是同一份角色数据。
+ */
+function accountsRouteDenial(roles: readonly Role[]): string | null {
+  if (canAccess(roles, ACCOUNTS_ROUTE_ROLES)) return null;
+  return (
+    `你的角色（${roleText(roles)}）不能做这件事：账号管理。` +
+    `这件事需要：${ACCOUNTS_ROUTE_ROLES.join(" 或 ")}。` +
+    "分工见 docs/使用手册.md 的「谁能做什么」。"
+  );
+}
+
+/** 账号管理页面要的"这份账号表能不能改"（列表与写操作的错误文案共用同一份口径）。 */
+function accountTableInfo(): { readOnly: boolean; readOnlyReason: string; file: string } {
+  const reason = accountsReadOnlyReason();
+  return { readOnly: reason !== null, readOnlyReason: reason ?? "", file: accountsFile() };
+}
+
+/** 请求体里一个字符串字段读出来的三种结果（"没给" 与 "类型不对" 必须分开，理由见 `badField`）。 */
+type FieldRead = { kind: "absent" } | { kind: "bad" } | { kind: "ok"; value: string };
+
+function readTextField(body: Record<string, unknown>, key: string): FieldRead {
+  if (!Object.prototype.hasOwnProperty.call(body, key)) return { kind: "absent" };
+  const value = body[key];
+  return typeof value === "string" ? { kind: "ok", value } : { kind: "bad" };
+}
+
+function hasField(body: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(body, key);
+}
+
+/**
+ * 字段读不出来时的 400 响应。
+ *
+ * 为什么把"没给"与"类型不对"分开说：类型不对（例如 `disabled: "true"`）如果当成"没给"，
+ * 这一项就**悄悄没生效** —— 人以为停用了，账号照样能登进来，而且没有任何提示。
+ * 这类静默失败比一句 400 难查得多。
+ */
+function badField(response: ServerResponse, key: string, reason: "absent" | "bad" | "shape"): void {
+  const detail =
+    reason === "absent"
+      ? `缺少字段 ${key}。`
+      : reason === "shape"
+        ? `字段 ${key} 必须是字符串数组（例如 ["财务管理员", "招生老师"]）。`
+        : `字段 ${key} 的类型不对。`;
+  send(response, 400, { ok: false, error: detail });
+}
+
+/** 请求体里的角色数组：没给 → `undefined`（不改角色）；不是字符串数组 → `null`（400）。 */
+function rolesField(value: unknown): string[] | null | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return null;
+  return value.every((item): item is string => typeof item === "string") ? value : null;
+}
+
+/**
+ * 账号要绑的教师档案必须**真的存在**。
+ *
+ * 为什么必须查：`teacherId` 填错的后果是"登录成功但什么都看不到"（空范围），
+ * 而那位老师在机构现场只会看到一片空白的后台。这一条能在**建账号的时候**就拦住，
+ * 比让他自己发现好得多。查的是**服务层的读接口**（`api.teachers.list()`）：
+ * 这里要的是"教师档案里到底有没有这个 id"，与页面下拉用的是同一份数据。
+ *
+ * 空串（不绑定）是允许的 —— 那是"还没配好"而不是"配错了"，
+ * 提示由 `scopeWarningFor` 那句统一的 warning 给出（与登录时的口径一致）。
+ */
+async function teacherIdProblem(teacherId: string): Promise<string | null> {
+  const id = teacherId.trim();
+  if (id === "") return null;
+  const teachers = await api.teachers.list();
+  if (teachers.some((teacher) => teacher.id === id)) return null;
+  return (
+    `绑定的教师档案不存在：${id}。` +
+    "这里要填教师档案的 id（形如 t_xxxxxx，在「教师」页那条记录上），不是姓名；" +
+    "确实不需要绑定就留空 —— 但普通教师账号留空的后果是登录后看不到任何数据。"
+  );
+}
+
+/**
+ * 改完之后给界面的一句范围提示（空串 = 没问题）。
+ *
+ * 与登录响应、`/api/session` **同一套判定**（`scopeForAccount` + `scopeWarningFor`）：
+ * 三处各写一套的话，早晚出现"登录时说没绑 teacherId、账号页却说一切正常"这种自相矛盾。
+ */
+function accountScopeWarning(roles: readonly Role[], teacherId: string): Promise<string> {
+  return scopeWarningFor(scopeForAccount(roles, teacherId));
+}
+
+/** 一条账号的"给界面看的一句话"（日志里用，**绝不含口令**）。 */
+function accountLine(account: AccountSummary): string {
+  return `${account.username}（角色：${roleText(account.roles)}${account.disabled ? "，已停用" : ""}）`;
+}
+
+/**
+ * 账号管理的四条路由（**统一闸门之后**调用：登录与"这条路要不要放行"都已经过了）。
+ *
+ * 判定与落盘都在 `server/accounts.mts`（那里才是账号表的家），这里只做三件事：
+ * 把请求体读成有类型的输入、把结果翻成 HTTP 响应、写一条操作日志。
+ */
+async function handleAccountsRoute(
+  db: Database.Database,
+  request: IncomingMessage,
+  response: ServerResponse,
+  session: Session,
+): Promise<void> {
+  /*
+   * 角色闸门放在**最前面**：任何分支（包括只读的 GET）都不能在没判权限之前先做事。
+   * 与 `/api/call` 那边一样，403 的响应体里不带上任何数据。
+   */
+  const denied = accountsRouteDenial(session.roles);
+  if (denied !== null) {
+    send(response, 403, { ok: false, error: denied });
+    return;
+  }
+
+  const method = request.method ?? "GET";
+
+  if (method === "GET") {
+    /*
+     * 列表：`listAccounts()` 给的是 `AccountSummary`（**没有 password / salt / hash**）。
+     * 顺带把"这份账号表能不能改"告诉界面：来自 `NEXGENEDU_ACCOUNTS_JSON` 时整表只读，
+     * 界面要把按钮禁掉并说明原因 —— 否则人会对着"点了没反应"发呆。
+     */
+    send(response, 200, { ok: true, accounts: listAccounts(), ...accountTableInfo() });
+    return;
+  }
+
+  const body = await readBody(request);
+
+  if (method === "POST") {
+    const username = readTextField(body, "username");
+    const password = readTextField(body, "password");
+    if (username.kind !== "ok") return badField(response, "username", username.kind);
+    if (password.kind !== "ok") return badField(response, "password", password.kind);
+    const roles = rolesField(body.roles);
+    if (roles === null) return badField(response, "roles", "shape");
+    const teacherId = readTextField(body, "teacherId");
+    if (teacherId.kind === "bad") return badField(response, "teacherId", teacherId.kind);
+    const note = readTextField(body, "note");
+    if (note.kind === "bad") return badField(response, "note", note.kind);
+
+    const problem = await teacherIdProblem(teacherId.kind === "ok" ? teacherId.value : "");
+    if (problem !== null) {
+      send(response, 400, { ok: false, error: problem });
+      return;
+    }
+
+    const input: CreateAccountInput = {
+      username: username.value,
+      password: password.value,
+      roles: roles ?? [],
+      teacherId: teacherId.kind === "ok" ? teacherId.value : "",
+      note: note.kind === "ok" ? note.value : "",
+    };
+    const result = createAccount(input);
+    if (!result.ok) {
+      send(response, result.status, { ok: false, error: result.error });
+      return;
+    }
+    const warning = await accountScopeWarning(result.account.roles, result.account.teacherId);
+    // 留痕：谁在什么时候开了哪个账号、什么角色。**口令不进日志**（日志会被导出、被人翻）
+    writeLog(db, {
+      entity: "账号",
+      action: "新建",
+      targetId: result.account.username,
+      summary: `新建账号 ${accountLine(result.account)}`,
+    });
+    send(response, 201, {
+      ok: true,
+      account: result.account,
+      warnings: warning === "" ? [] : [warning],
+    });
+    return;
+  }
+
+  if (method === "PATCH") {
+    const username = readTextField(body, "username");
+    if (username.kind !== "ok") return badField(response, "username", username.kind);
+
+    // 逐字段从严读：给了的才进 patch（`undefined` 语义 = 这一项不动）
+    const patch: UpdateAccountInput = { username: username.value };
+    const roles = rolesField(body.roles);
+    if (roles === null) return badField(response, "roles", "shape");
+    if (roles !== undefined) patch.roles = roles;
+
+    const teacherId = readTextField(body, "teacherId");
+    if (teacherId.kind === "bad") return badField(response, "teacherId", teacherId.kind);
+    if (teacherId.kind === "ok") patch.teacherId = teacherId.value;
+
+    const note = readTextField(body, "note");
+    if (note.kind === "bad") return badField(response, "note", note.kind);
+    if (note.kind === "ok") patch.note = note.value;
+
+    const password = readTextField(body, "password");
+    if (password.kind === "bad") return badField(response, "password", password.kind);
+    if (password.kind === "ok") patch.password = password.value;
+
+    if (hasField(body, "disabled")) {
+      const disabled = body.disabled;
+      if (typeof disabled !== "boolean") {
+        send(response, 400, {
+          ok: false,
+          error: "字段 disabled 必须是 JSON 布尔（true / false），不是字符串 —— 写错格式时按「没停用」处理会让人以为停了。",
+        });
+        return;
+      }
+      patch.disabled = disabled;
+    }
+
+    // 改了 teacherId 才去查教师档案（没改就不查：避免"只想改备注"也被一个旧 id 挡住）
+    if (patch.teacherId !== undefined) {
+      const problem = await teacherIdProblem(patch.teacherId);
+      if (problem !== null) {
+        send(response, 400, { ok: false, error: problem });
+        return;
+      }
+    }
+
+    const result = updateAccount(patch);
+    if (!result.ok) {
+      send(response, result.status, { ok: false, error: result.error });
+      return;
+    }
+    const warning = await accountScopeWarning(result.account.roles, result.account.teacherId);
+
+    /*
+     * 留痕：改了哪几项。动作名取"最主要的那件事"（重置口令 / 停用 / 启用 / 修改），
+     * 摘要里把各项都列出来 —— 口令**只写"重置了口令"，绝不把口令写进去**。
+     * 日志是会被导出、会被人翻的东西（见「数据与备份」页）。
+     */
+    const changes: string[] = [];
+    if (patch.roles !== undefined) changes.push(`角色：${roleText(result.account.roles)}`);
+    if (patch.teacherId !== undefined) {
+      changes.push(`绑定教师：${result.account.teacherId === "" ? "（不绑）" : result.account.teacherId}`);
+    }
+    if (patch.note !== undefined) changes.push("备注");
+    if (patch.password !== undefined) changes.push("重置口令");
+    if (patch.disabled !== undefined) changes.push(result.account.disabled ? "停用" : "启用");
+    const action =
+      patch.password !== undefined
+        ? "重置口令"
+        : patch.disabled !== undefined
+          ? result.account.disabled
+            ? "停用"
+            : "启用"
+          : "修改";
+    writeLog(db, {
+      entity: "账号",
+      action,
+      targetId: result.account.username,
+      summary: `修改账号 ${result.account.username}：${changes.join("；")}（当前角色：${roleText(result.account.roles)}）`,
+    });
+    send(response, 200, {
+      ok: true,
+      account: result.account,
+      warnings: warning === "" ? [] : [warning],
+    });
+    return;
+  }
+
+  if (method === "DELETE") {
+    const username = readTextField(body, "username");
+    if (username.kind !== "ok") return badField(response, "username", username.kind);
+
+    const removed = deleteAccount(username.value);
+    if (!removed.ok) {
+      send(response, removed.status, { ok: false, error: removed.error });
+      return;
+    }
+    writeLog(db, {
+      entity: "账号",
+      action: "删除",
+      targetId: removed.username,
+      summary: `删除账号 ${removed.username}（他再也登不进来；要留痕请用「停用」而不是删除）`,
+    });
+    send(response, 200, { ok: true, deleted: true, username: removed.username });
+    return;
+  }
+
+  send(response, 405, { ok: false, error: `账号管理不支持 ${method}：可用 GET / POST / PATCH / DELETE。` });
+}
+
 const db = openDatabase();
 const migration = migrate(db);
-
 /*
  * 路线 B 的核心一步：把 api.ts 的存储换成 SQLite 支持的实现。
  * 之后 `api` 上的 106 个方法全部可用，且**与浏览器里跑的是同一套逻辑**。
@@ -1330,6 +1659,25 @@ const REST_CONTRACT_METHODS: ReadonlyArray<{
    */
   { http: "POST", pattern: /^\/api\/call$/, contract: null, note: "统一调用入口：按方法名在 callApi 里判" },
   { http: "*", pattern: /^\/api\/status$/, contract: null, note: "服务状态：登录即可（不属于任何业务分组）" },
+
+  /*
+   * 账号管理（`/api/accounts`）：**登录即可过这道闸门，角色判定在路由里自己那一节**。
+   *
+   * 为什么不给它一个契约方法名（像其它路由那样走 `permissionError`）：账号表是服务端进程里
+   * 的一个文件，服务层的 `api`（`lib/backend/api.ts`）在浏览器里也跑、没有文件访问，
+   * 因此账号管理**刻意不做成服务层方法**，也就不在 `API_CONTRACT` 里。
+   * 而 `permissionError` 的输入正是"契约方法名"（查不到归属就一律关门），
+   * 硬塞一个假方法名进去只会让"这个方法到底存不存在"变成一句假话。
+   *
+   * 于是它自己判一次（`accountsRouteDenial`，只有技术管理员），**仍然用同一个
+   * `canAccess` 与同一句文案形状** —— 判定数据只有 `lib/auth/roles.ts` 那一份。
+   * 这四条必须逐条列出来：漏一条会落到下面的兜底（"没有登记归属"）而被全拒，
+   * 那种 403 会让人以为是权限配错了，其实是路由表少了一行。
+   */
+  { http: "GET", pattern: /^\/api\/accounts$/, contract: null, note: "账号列表（技术管理员；路由内判定）" },
+  { http: "POST", pattern: /^\/api\/accounts$/, contract: null, note: "新建账号（技术管理员；路由内判定）" },
+  { http: "PATCH", pattern: /^\/api\/accounts$/, contract: null, note: "改账号（技术管理员；路由内判定）" },
+  { http: "DELETE", pattern: /^\/api\/accounts$/, contract: null, note: "删账号（技术管理员；路由内判定）" },
 
   /* 读接口（ROUTES / READS）：按它读的东西对应的方法名翻译 */
   { http: "GET", pattern: /^\/api\/students$/, contract: "students.list", note: "学生列表" },
@@ -1726,6 +2074,40 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
     session = requireAuth(request, response);
     if (session === null) return;
     if (!requireRestPermission(request.method ?? "GET", url.pathname, session, response)) return;
+  }
+
+  /*
+   * ── 账号管理（加人 / 改角色 / 绑教师 / 重置口令 / 停用 / 删除）────────────────
+   *
+   * 排在统一闸门**之后**（未登录的 401 已经拦过，也没走老 REST 那套路径翻译），
+   * 角色判定交给 `handleAccountsRoute`（只有技术管理员）—— 它不是 `/api/call` 的方法，
+   * 理由写在 `handleAccountsRoute` 上面那一段。
+   *
+   * 它是异步的（要读请求体、要查教师档案），因此与 `/api/call` 一样用 `void … .catch` 收尾：
+   * 所有异常都要变成一个响应，绝不能让请求挂在那里（那种"点了没反应"最难查）。
+   */
+  if (url.pathname === "/api/accounts") {
+    if (session === null) {
+      send(response, 401, { ok: false, error: "未登录或登录已过期，请先登录。" });
+      return;
+    }
+    void handleAccountsRoute(db, request, response, session).catch((cause: unknown) => {
+      /*
+       * 请求体不是合法 JSON（或超过 1MB）是**客户端把请求写错了** → 400；
+       * 其余是服务端自己的问题 → 500。两者分开的理由与业务错误一样：
+       * 400 表示"改一改再提交就行"，500 表示"这不是你的错，去看后端日志"。
+       */
+      const syntax = cause instanceof SyntaxError;
+      send(response, syntax ? 400 : 500, {
+        ok: false,
+        error: syntax
+          ? `请求体不是合法 JSON：${cause instanceof Error ? cause.message : String(cause)}`
+          : cause instanceof Error
+            ? cause.message
+            : "服务器内部错误",
+      });
+    });
+    return;
   }
 
   /** 通用调用：{ method: "students.list", args: [] }。第 5 步前端就切到这一个入口。 */

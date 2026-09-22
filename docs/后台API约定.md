@@ -510,6 +510,67 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 `logs.clear`，只要登录就能清空，做到"防篡改"要等单账号之外有按人区分的权限，
 并且把清空这条收进运维通道（见技术架构第 10 节）。
 
+### 7.1 账号管理：四条**独立路由**（`/api/accounts`，不在 `/api/call` 里）
+
+后台「账号」页（加人 / 改角色 / 绑教师 / 重置口令 / 停用 / 删除）用的是服务端自己的四个端点：
+
+| 路由 | 作用 | 请求体 | 响应 |
+| --- | --- | --- | --- |
+| `GET /api/accounts` | 列账号 | — | `{ ok, accounts: [{ username, roles, teacherId, note, createdAt, disabled }], readOnly, readOnlyReason, file }` |
+| `POST /api/accounts` | 新建 | `{ username, password, roles: string[], teacherId, note }` | `201 { ok, account, warnings: string[] }` |
+| `PATCH /api/accounts` | 改某一条 | `{ username, roles?, teacherId?, note?, password?, disabled? }`（**给了才改**） | `200 { ok, account, warnings }` |
+| `DELETE /api/accounts` | 删某一条 | `{ username }` | `200 { ok, deleted: true, username }` |
+
+#### 为什么是独立路由，而不是 `/api/call` 的一个方法
+
+服务层的 `api`（`lib/backend/api.ts`）在**浏览器里也会跑**（没配 `NEXT_PUBLIC_API_BASE` 时它直接用
+localStorage 那份实现），而**账号表是服务端进程里的一个文件**（与数据库同目录的 `accounts.json`）。
+做成 `api.accounts.create()` 的后果有两个，都很糟：
+
+1. 界面在浏览器里根本调不通它（或者更糟：被实现成一个"假的成功"）；
+2. 它会进入 `API_CONTRACT` —— 而自检要求"服务层每个方法都必须在契约里"，
+   于是契约里出现一个"只有服务端才有意义"的方法，契约就不再是"页面对服务层的形状"了。
+
+**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 115 个方法，
+这四条路由**刻意不登记**（它们不是服务层方法）；页面的客户端是 `lib/auth/accounts.ts`，
+与 `lib/auth/session.ts` 调 `/api/login`、`/api/session` 是同一个做法。
+自检里对它们的要求写在 `scripts/check-auth.mts` 的 [10] 节（真实 HTTP、真实写盘），
+而不是"契约清单里有没有提到"。
+
+#### 权限：只有技术管理员
+
+四条都是"登录 + 会话角色里有技术管理员"，其它角色一律 **403**（文案与其它权限错误同一形状，
+说清"这件事需要技术管理员"）。判定在 `server/index.mts` 的 `accountsRouteDenial`
+（用的是 `lib/auth/roles.ts` 的 `canAccess`，与页面映射 `PAGE_ACCESS["/admin/accounts"]` 同一个答案）。
+
+#### 安全线（每条都有断言盯着，见 `npm run check:auth` 的 [10] 节）
+
+1. **不能把系统锁死**：这次操作若会让"还能登录的技术管理员"变成 0（删掉最后一位、
+   把最后一位改成别的角色、**停用**最后一位），一律拒绝并说明原因 ——
+   账号管理只有技术管理员能进、口令也只能在这里改，做完那一步就没人能救回来了。
+   反过来**允许换人**：先给接任的人加上技术管理员，再动原来那位（判定看的是"结果还有没有管理员"，
+   不是"动了管理员就不行"）。
+2. **绝不放出口令**：列表与任何写响应里都没有 `password` / `salt` / `hash`
+   （返回的是 `AccountSummary`）；口令只在**写入时**收一次，校验用 `server/auth.mts` 那一套 scrypt
+   （**不另写一份**）。操作日志里只写"重置了口令"，**不写口令本身**。
+3. **参数与规则**：账号名非空、去空格、**不能重名**；角色必须是 `lib/auth/roles.ts` 里那四个
+   （不认识的角色**拒绝**，而不是像读文件那样静默丢掉 —— 界面上静默丢是"说一套做一套"）；
+   口令非空且**至少 8 位**（新建与重置同一套下限）；`teacherId` 给了就必须**真的存在**
+   （在服务端进程内查 `api.teachers.list()`）；留空允许，但**纯「普通教师」留空会在响应里回一句
+   `warnings`**（"他会看不到任何数据"）—— 与登录响应 / `/api/session` 的 `scopeWarning` 同一套判定。
+   字段类型写错（例如 `disabled: "true"`）也报 400，**不当成"没给"**（那会让"停用"悄悄没生效）。
+4. **写盘**：`accounts.json`（0600，格式与人手工编辑的那份一致：2 空格缩进 + 末尾换行），
+   落盘写的是**原始条目**（只有被改的那一条变，其余账号的字段与格式**一字不动**），
+   写完**清掉内存缓存** —— 新账号马上能登录，不需要重启后端。
+5. **只读钩子**：`NEXGENEDU_ACCOUNTS_JSON`（自检/验收用的账号表）下，写操作一律拒绝（409）
+   并说明"本次是环境变量提供的只读账号表"，且**不落盘**。
+6. **`disabled`（停用）**：账号还在表里但不许登录；登录时**先验口令、再说停用**
+   （"这个账号已停用"只讲给口令正确的人听，不破坏"不区分账号不存在与口令不对"那条纪律）。
+   已登录的会话要到退出 / 过期才失效（会话在内存里，角色在登录那一刻定下来）。
+7. **与启动环境变量同名的那条账号**：`NEXGENEDU_ADMIN_PASSWORD` 存在时，账号表里没有同名账号
+   就会被**自动建回来**（见 `server/accounts.mts`），所以那条账号**删不掉**（明确拒绝，不是含混的失败），
+   它的口令也改不了（每次读账号表都会被同步回环境变量的值）。
+
 ## 三、行级范围（Phase B：普通教师只看自己的课与自己学生的课时余额）
 
 方法级权限回答"**这件事归谁做**"（不满足就 403）；行级范围回答"**这件事里你只看得到哪几行**"。

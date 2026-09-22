@@ -61,4 +61,9 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     label: "数据与备份",
     description: "导出 / 导入全部数据，导出课表到手机日历",
   },
+  {
+    href: "/admin/accounts",
+    label: "账号",
+    description: "谁能登录后台、各是什么角色（加账号、改角色、绑定教师、重置口令、停用）",
+  },
 ] as const;

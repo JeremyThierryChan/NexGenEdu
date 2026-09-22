@@ -60,13 +60,14 @@ export function RoleGuard({ children }: { children: React.ReactNode }) {
 /**
  * 「这一页需要什么角色」的提示语（按路径前缀）。
  *
- * 只写那些**真的会有人问**的几页：财务、报价改价、数据与备份、咨询。
+ * 只写那些**真的会有人问**的几页：财务、报价改价、数据与备份、账号、咨询。
  * 其余页面不提示，免得出现一句多数情况下不准确的话 —— 宁可少说，也不要瞎说。
  */
 const roleHints: Array<[string, string]> = [
   ["/admin/finance", "财务管理员 或 技术管理员"],
   ["/admin/pricing", "财务管理员 或 技术管理员"],
   ["/admin/data", "技术管理员"],
+  ["/admin/accounts", "技术管理员"],
   ["/admin/inquiries", "招生老师 或 技术管理员"],
   ["/admin/scripts", "招生老师 或 技术管理员"],
   ["/admin/followups", "招生老师 或 财务管理员 或 技术管理员"],

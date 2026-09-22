@@ -23,7 +23,7 @@
  */
 
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { run, startServer, withTempServer } from "./temp-server.mts";
@@ -974,6 +974,471 @@ try {
 } catch (cause) {
   failures += 1;
   console.error(`\n✗ 自检中断：${cause instanceof Error ? cause.message : String(cause)}`);
+}
+
+/*
+ * ── 账号管理（后台「账号」页：加人 / 改角色 / 绑教师 / 重置口令 / 停用 / 删除）────────────
+ *
+ * ## 为什么这一节必须真的起服务端
+ *
+ * 账号表是**服务端进程里的一个文件**（与数据库同目录的 `accounts.json`），
+ * 而这一节要守的性质全都是"只有真进程才看得见"的东西：
+ *   - 未登录 401 / 非技术管理员 403（权限边界）；
+ *   - 改完**落盘**了吗（读文件比对）、文件权限还是 0600 吗、格式还是人手工编辑的那种吗；
+ *   - 新账号**马上能登录**吗（写完之后内存缓存有没有失效）—— 忘了失效的症状是
+ *     "我明明加了账号，怎么登不上、重启一下就好了"，这类问题只有真登录一次才验得到；
+ *   - 被拒的写操作**真的什么都没改**吗（前后读文件比对）。
+ *
+ * ## 为什么是两个服务端
+ *
+ * ① 第一个**不带** `NEXGENEDU_ACCOUNTS_JSON`（账号表由凭证迁移落在**临时目录**里）——
+ *    只有这种形态才允许写：加人、改角色、重置口令、删除都在它上面真跑一遍；
+ * ② 第二个**带上**那个环境变量（只读钩子）—— 写操作必须被拒，而且**不落盘**。
+ *    这一条单独验，因为"钩子下还能写"会直接毁掉自检的可信度（改的其实是另一份账号表）。
+ *
+ * 两个都是 `withTempServer`（临时库 + 临时目录），跑完即删：**绝不碰真实账号表**。
+ */
+console.log("\n[10] 账号管理：只有技术管理员能改、写盘立刻生效、锁死保护");
+try {
+  /* ① 可写的那一个：加人 / 改角色 / 重置口令 / 删除全走一遍 */
+  await withTempServer(async (base, info) => {
+    /** 账号表就在临时数据库的旁边（`accountsFile()` 跟着 `credentialFile()` 走）。 */
+    const accountsPath = path.join(path.dirname(info.dbPath), "accounts.json");
+    const readTableText = (): string =>
+      existsSync(accountsPath) ? readFileSync(accountsPath, "utf8") : "";
+    const readEntries = (): Array<Record<string, unknown>> =>
+      JSON.parse(readTableText()) as Array<Record<string, unknown>>;
+    /** 按用户名取一条**原始条目**（"其它账号原样"这类断言靠它逐条比）。 */
+    const entryOf = (username: string): unknown =>
+      readEntries().find((item) => item.username === username) ?? null;
+
+    /** 裸请求（要拿到**响应原文**：有一条断言是"响应文本里不出现 password/salt/hash"）。 */
+    const accounts = async (
+      options: { method?: string; token?: string | null; body?: unknown } = {},
+    ): Promise<{ status: number; text: string; body: Record<string, unknown> }> => {
+      const response = await fetch(`${base}/api/accounts`, {
+        method: options.method ?? "GET",
+        headers: {
+          ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+          ...(options.token === undefined || options.token === null
+            ? {}
+            : { authorization: `Bearer ${options.token}` }),
+        },
+        ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+      });
+      const text = await response.text();
+      let body: Record<string, unknown> = {};
+      try {
+        body = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        body = {};
+      }
+      return { status: response.status, text, body };
+    };
+    /** 登录（失败直接抛错 —— 这一节里"应该能登录"的那些必须真能登）。 */
+    const loginAs = async (username: string, password: string): Promise<string> => {
+      const response = await raw(base, "/api/login", {
+        method: "POST",
+        body: { username, password },
+      });
+      if (response.status !== 200) {
+        throw new Error(`登录 ${username} 失败：HTTP ${response.status} ${JSON.stringify(response.body)}`);
+      }
+      return String(response.body.token ?? "");
+    };
+    const loginStatus = async (username: string, password: string): Promise<number> =>
+      (await raw(base, "/api/login", { method: "POST", body: { username, password } })).status;
+
+    console.log("\n[10.1] 未登录：四条路由全是 401");
+    equal("未登录读账号表 401", (await accounts()).status, 401);
+    equal("未登录建账号 401",
+      (await accounts({ method: "POST", body: { username: "谁" } })).status, 401);
+    equal("未登录改账号 401",
+      (await accounts({ method: "PATCH", body: { username: "谁" } })).status, 401);
+    equal("未登录删账号 401",
+      (await accounts({ method: "DELETE", body: { username: "谁" } })).status, 401);
+
+    const adminToken = await loginAs(info.username, info.password);
+
+    console.log("\n[10.2] 技术管理员读账号表：拿得到，但**绝不含口令与哈希**");
+    const listed = await accounts({ token: adminToken });
+    equal("读账号表成功", listed.status, 200);
+    /*
+     * 这三条是硬断言（直接查**响应原文**）：它们不是"字段看起来对了"，而是
+     * "口令那几样东西根本没有出现在响应里" —— 一旦有人图省事把整个 Account 回给界面
+     * （或把 salt / hash 塞进某个调试字段），这里立刻红。
+     */
+    check("响应里没有 password（字段名与明文都没有）", !listed.text.includes("password"),
+      listed.text.slice(0, 200));
+    check("响应里没有 salt", !listed.text.includes("salt"), listed.text.slice(0, 200));
+    check("响应里没有 hash", !listed.text.includes("hash"), listed.text.slice(0, 200));
+    const roster = (listed.body.accounts ?? []) as Array<{ username: string; roles: string[] }>;
+    equal("列表里有那条迁移出来的技术管理员账号（角色对）",
+      roster.find((item) => item.username === info.username)?.roles, ["技术管理员"]);
+    equal("这份账号表不是只读的（没有 NEXGENEDU_ACCOUNTS_JSON）", listed.body.readOnly, false);
+    check("列表告诉界面账号表文件在哪（手工改文件是备用做法）",
+      String(listed.body.file ?? "").endsWith("accounts.json"), String(listed.body.file ?? ""));
+
+    // 造一位教师：teacherId 的"存在性校验"要有真的教师档案才验得了
+    const teacherId = String(((await call(base, adminToken, "teachers.create", [{
+      name: "账号自检教师", subjects: [], role: "", phone: "", active: true, years: "",
+      summary: "", bio: "", recommendation: "", order: 998, siteVisible: false, origin: "后台", kind: "教师",
+    }])).body.result as { id?: string } | undefined)?.id ?? "");
+    check("播种教师成功（下面用它验 teacherId 校验）", teacherId !== "", teacherId);
+
+    console.log("\n[10.3] 新建：账号马上能用，文件是 0600，其余账号一字不动");
+    const adminEntryBefore = entryOf(info.username);
+    const textBefore = readTableText();
+    check("（前置）迁移出来的账号表已落盘", textBefore !== "", textBefore.slice(0, 120));
+    equal("（前置）写盘格式就是「手工编辑的那种」（2 空格缩进 + 末尾换行）",
+      textBefore, `${JSON.stringify(JSON.parse(textBefore), null, 2)}\n`);
+
+    const created = await accounts({
+      method: "POST",
+      token: adminToken,
+      body: {
+        username: "账号自检老师",
+        password: "pw-manage-a1",
+        roles: ["普通教师"],
+        teacherId,
+        note: "账号管理自检",
+      },
+    });
+    equal("新建账号返回 201", created.status, 201);
+    const createdRow = created.body.account as
+      | { username: string; roles: string[]; teacherId: string; disabled: boolean }
+      | undefined;
+    equal("新建的账号形状对（角色 / 绑定教师 / 未停用）",
+      [createdRow?.username, createdRow?.roles, createdRow?.teacherId, createdRow?.disabled],
+      ["账号自检老师", ["普通教师"], teacherId, false]);
+    check("新建的响应里不带明文口令", !created.text.includes("pw-manage-a1"), created.text);
+    check("新建的响应里没有 password / salt / hash",
+      !created.text.includes("password") && !created.text.includes("salt") && !created.text.includes("hash"),
+      created.text);
+    equal("绑了教师档案 → 没有范围警告", created.body.warnings, []);
+
+    equal("账号表里真的多了这一条（落盘了）",
+      readEntries().some((item) => item.username === "账号自检老师"), true);
+    check("账号表文件权限仍然是 0600（里面有明文口令）",
+      (statSync(accountsPath).mode & 0o777) === 0o600,
+      `mode = ${(statSync(accountsPath).mode & 0o777).toString(8)}`);
+    equal("**其它账号一个字都没动**（技术管理员那条前后完全一样）",
+      entryOf(info.username), adminEntryBefore);
+
+    /*
+     * 关键断言：写完之后**不需要重启后端**就能登录。
+     * 做法是服务端写盘成功之后清掉账号表的内存缓存（下一次读会重新读文件）。
+     * 忘了清缓存的症状是"我明明加了账号，怎么登不上" —— 而重启一下就好了，
+     * 所以那种 bug 在手工点页面时很容易被"重启试试"掩盖过去。
+     */
+    check("新账号**马上就能登录**（不需要重启后端：内存缓存已失效）",
+      (await loginAs("账号自检老师", "pw-manage-a1")).length >= 32);
+
+    const unbound = await accounts({
+      method: "POST",
+      token: adminToken,
+      body: { username: "没绑档老师", password: "pw-manage-b2", roles: ["普通教师"], teacherId: "", note: "" },
+    });
+    equal("建一个不绑教师档案的普通教师账号：201", unbound.status, 201);
+    const unboundWarnings = (unbound.body.warnings ?? []) as string[];
+    check("没绑 teacherId 的普通教师账号拿到一句警告（解释他会看不到数据）",
+      unboundWarnings.some((item) => item.includes("teacherId")), JSON.stringify(unboundWarnings));
+    const unboundEntryBefore = entryOf("没绑档老师");
+
+    console.log("\n[10.4] 普通教师调这四条路由：全部 403");
+    const teacherToken = await loginAs("没绑档老师", "pw-manage-b2");
+    const teacherGet = await accounts({ token: teacherToken });
+    equal("普通教师读账号表 403", teacherGet.status, 403);
+    check("403 里说清了需要什么角色（与其它权限错误同一套文案）",
+      String(teacherGet.body.error ?? "").includes("技术管理员"), String(teacherGet.body.error ?? ""));
+    check("403 的响应里没有账号数据（被拒时不能顺手把数据带出来）",
+      teacherGet.body.accounts === undefined, teacherGet.text.slice(0, 160));
+    equal("普通教师建账号 403",
+      (await accounts({
+        method: "POST", token: teacherToken,
+        body: { username: "教师偷建的", password: "pw-manage-c3", roles: ["技术管理员"], teacherId: "" },
+      })).status, 403);
+    equal("普通教师改账号 403",
+      (await accounts({
+        method: "PATCH", token: teacherToken,
+        body: { username: info.username, roles: ["普通教师"] },
+      })).status, 403);
+    equal("普通教师删账号 403",
+      (await accounts({ method: "DELETE", token: teacherToken, body: { username: info.username } })).status, 403);
+    equal("（这几次被拒也什么都没改：技术管理员那条前后一致）",
+      entryOf(info.username), adminEntryBefore);
+
+    console.log("\n[10.5] 改角色与绑定教师（只改这一条，别的账号原样）");
+    const patched = await accounts({
+      method: "PATCH",
+      token: adminToken,
+      body: { username: "账号自检老师", roles: ["财务管理员", "招生老师"], teacherId: "", note: "改成兼两个角色" },
+    });
+    equal("改角色成功（200）", patched.status, 200);
+    const patchedRow = patched.body.account as { roles: string[]; teacherId: string; note: string } | undefined;
+    equal("角色存下来时按 ROLES 的顺序排（文件是给人看的，稳定才好 diff）",
+      patchedRow?.roles, ["财务管理员", "招生老师"]);
+    equal("teacherId 与备注也改了", [patchedRow?.teacherId, patchedRow?.note], ["", "改成兼两个角色"]);
+    equal("不再是普通教师 → 没有范围警告", patched.body.warnings, []);
+    equal("（对照）另一位教师账号的条目一字未动（写盘只改被改的那一条）",
+      entryOf("没绑档老师"), unboundEntryBefore);
+    equal("（对照）技术管理员那条也没被牵连", entryOf(info.username), adminEntryBefore);
+
+    console.log("\n[10.6] 重置口令：新口令真能登录、旧口令立刻失效");
+    const reset = await accounts({
+      method: "PATCH", token: adminToken,
+      body: { username: "账号自检老师", password: "pw-manage-new2" },
+    });
+    equal("重置口令成功（200）", reset.status, 200);
+    check("重置口令的响应里不含新口令", !reset.text.includes("pw-manage-new2"), reset.text);
+    check("重置口令的响应里也没有 password / salt / hash",
+      !reset.text.includes("password") && !reset.text.includes("salt") && !reset.text.includes("hash"),
+      reset.text);
+    check("用新口令能登录", (await loginAs("账号自检老师", "pw-manage-new2")).length >= 32);
+    equal("用旧口令登不上了（401）", await loginStatus("账号自检老师", "pw-manage-a1"), 401);
+    equal("账号表里存的是新口令的明文（找回用，与凭证文件同一约定）",
+      readEntries().find((item) => item.username === "账号自检老师")?.password, "pw-manage-new2");
+
+    console.log("\n[10.7] 锁死保护：最后一位技术管理员不能删 / 降级 / 停用（但换人是允许的）");
+    /** 被拒的写操作前后要比对文件：**一个字都不能变**。 */
+    const guardBefore = readTableText();
+    const deleteAdmin = await accounts({
+      method: "DELETE", token: adminToken, body: { username: info.username },
+    });
+    equal("删掉唯一的技术管理员：被拒（400）", deleteAdmin.status, 400);
+    check("拒绝理由说清了原因（最后一位技术管理员 + 那样就锁死了）",
+      String(deleteAdmin.body.error ?? "").includes("最后一位技术管理员"),
+      String(deleteAdmin.body.error ?? ""));
+    const demoteAdmin = await accounts({
+      method: "PATCH", token: adminToken, body: { username: info.username, roles: ["普通教师"] },
+    });
+    equal("把唯一的技术管理员改成别的角色：被拒（400）", demoteAdmin.status, 400);
+    check("降级被拒的理由里点名了技术管理员",
+      String(demoteAdmin.body.error ?? "").includes("技术管理员"), String(demoteAdmin.body.error ?? ""));
+    equal("停用唯一的技术管理员：也被拒（他登不进来，同样是锁死）",
+      (await accounts({
+        method: "PATCH", token: adminToken, body: { username: info.username, disabled: true },
+      })).status, 400);
+    equal("这三次被拒都没有改动账号表（前后读文件一致）", readTableText(), guardBefore);
+
+    /*
+     * 对照（这条很重要）：**不是一刀切地禁止动技术管理员**。
+     * 真换人的做法就是"先给接任的人加上技术管理员，再删掉原来那位" ——
+     * 如果连这也拦，那条安全线就成了没法正常换人的障碍（于是有人会去手工改文件绕过它）。
+     */
+    equal("（对照）给技术管理员**加**一个角色：允许（管理员数没减少）",
+      (await accounts({
+        method: "PATCH", token: adminToken, body: { username: info.username, roles: ["技术管理员", "财务管理员"] },
+      })).status, 200);
+    // 造两位"来接任的人"（用它们演一遍换人，不碰上面那位 admin）
+    for (const name of ["旧技术", "新技术"]) {
+      equal(`（对照）新建技术管理员「${name}」：允许`,
+        (await accounts({
+          method: "POST", token: adminToken,
+          body: { username: name, password: `pw-${name}-d4`, roles: ["技术管理员"], teacherId: "", note: "" },
+        })).status, 201);
+    }
+    equal("现在一共有三位技术管理员", readEntries().filter((item) => (
+      Array.isArray(item.roles) && item.roles.includes("技术管理员")
+    )).length, 3);
+    equal("有接任的人之后，删掉旧的那位：允许（换人正是这么做的）",
+      (await accounts({ method: "DELETE", token: adminToken, body: { username: "旧技术" } })).status, 200);
+    equal("删掉一位之后还剩两位（不是全禁，也不是全放）", readEntries().filter((item) => (
+      Array.isArray(item.roles) && item.roles.includes("技术管理员")
+    )).length, 2);
+    /*
+     * 一条**与环境变量挂钩**的特殊情况：与 `NEXGENEDU_ADMIN_PASSWORD` 同名的那条账号删不掉。
+     * 理由在 `server/accounts.mts`（那条路的语义是"没有同名账号就新建一条"，
+     * 所以删掉之后下一次读账号表会把它**建回来**）。这里要钉住的是"拒绝的理由说得清"，
+     * 而不是让人看到一句含混的失败（当初没这条判定时，删除会以 500"改动不可信"收场，
+     * 人会以为账号表坏了）。
+     */
+    const deleteEnvAccount = await accounts({
+      method: "DELETE", token: adminToken, body: { username: info.username },
+    });
+    equal("删掉与 NEXGENEDU_ADMIN_PASSWORD 同名的那条账号：明确拒绝（409，而不是含混的失败）",
+      deleteEnvAccount.status, 409);
+    check("拒绝理由说清了「会被环境变量重建」与怎么绕开",
+      String(deleteEnvAccount.body.error ?? "").includes("NEXGENEDU_ADMIN_PASSWORD") &&
+        String(deleteEnvAccount.body.error ?? "").includes("自动建回来"),
+      String(deleteEnvAccount.body.error ?? ""));
+    equal("（清理）删掉接任的那位：允许（此时 admin 还在位）",
+      (await accounts({ method: "DELETE", token: adminToken, body: { username: "新技术" } })).status, 200);
+    equal("（回到起点）技术管理员现在仍然只有 admin 一位",
+      readEntries().filter((item) => Array.isArray(item.roles) && item.roles.includes("技术管理员")).length, 1);
+    equal("清理：admin 的角色恢复成只有技术管理员",
+      (await accounts({
+        method: "PATCH", token: adminToken, body: { username: info.username, roles: ["技术管理员"] },
+      })).status, 200);
+
+    console.log("\n[10.8] 参数错与规则错：一律被拒，且账号表一字未动");
+    const before = readTableText();
+    const rejected = async (
+      label: string,
+      options: { method: string; body: unknown },
+      expected: number,
+      mustMention = "",
+    ): Promise<void> => {
+      const response = await accounts({ token: adminToken, ...options });
+      equal(label, response.status, expected);
+      if (mustMention !== "") {
+        check(`${label}：理由里点名了「${mustMention}」`,
+          String(response.body.error ?? "").includes(mustMention), String(response.body.error ?? ""));
+      }
+    };
+    await rejected("重名（账号名不能重复）",
+      { method: "POST", body: { username: "账号自检老师", password: "pw-manage-x9", roles: ["普通教师"], teacherId: "" } },
+      400, "重名");
+    await rejected("空口令",
+      { method: "POST", body: { username: "空口令的", password: "", roles: ["普通教师"], teacherId: "" } }, 400, "口令");
+    await rejected("口令太短（下限 8 位）",
+      { method: "POST", body: { username: "短口令的", password: "1234567", roles: ["普通教师"], teacherId: "" } },
+      400, "8 位");
+    await rejected("不认识的角色（**拒绝**，而不是静默丢掉）",
+      { method: "POST", body: { username: "怪角色的", password: "pw-manage-y8", roles: ["超级管理员"], teacherId: "" } },
+      400, "超级管理员");
+    await rejected("一个角色都不给",
+      { method: "POST", body: { username: "没角色的", password: "pw-manage-z7", roles: [], teacherId: "" } }, 400);
+    await rejected("teacherId 指向不存在的教师档案",
+      { method: "POST", body: { username: "绑错档的", password: "pw-manage-w6", roles: ["普通教师"], teacherId: "t_不存在" } },
+      400, "t_不存在");
+    await rejected("改一个不存在的账号",
+      { method: "PATCH", body: { username: "根本不存在", note: "改一下" } }, 404);
+    await rejected("删一个不存在的账号",
+      { method: "DELETE", body: { username: "根本不存在" } }, 404);
+    await rejected("改账号却什么都没给（至少给一项）",
+      { method: "PATCH", body: { username: "账号自检老师" } }, 400);
+    /*
+     * 类型写错也要报错，不能当"没给"：`disabled: "true"` 若被当成没给，
+     * "停用"就会**悄悄没生效**（账号照样能登），而界面上还显示成功 —— 这种静默失败最难查。
+     */
+    await rejected("disabled 写成字符串（类型不对要报错，不能当没给）",
+      { method: "PATCH", body: { username: "账号自检老师", disabled: "true" } }, 400, "disabled");
+    await rejected("roles 不是字符串数组",
+      { method: "PATCH", body: { username: "账号自检老师", roles: "财务管理员" } }, 400, "roles");
+    equal("以上被拒的操作都没有改动账号表（前后读文件比对一致）", readTableText(), before);
+
+    console.log("\n[10.9] 停用 / 启用");
+    equal("停用「账号自检老师」成功",
+      (await accounts({
+        method: "PATCH", token: adminToken, body: { username: "账号自检老师", disabled: true },
+      })).status, 200);
+    const disabledLogin = await raw(base, "/api/login", {
+      method: "POST", body: { username: "账号自检老师", password: "pw-manage-new2" },
+    });
+    equal("停用之后他登不进来（401）", disabledLogin.status, 401);
+    check("而且说的是「已停用」而不是「口令不对」（只有口令正确的人才知道原因，不泄漏账号是否存在）",
+      String(disabledLogin.body.error ?? "").includes("停用"), String(disabledLogin.body.error ?? ""));
+    equal("启用回来成功",
+      (await accounts({
+        method: "PATCH", token: adminToken, body: { username: "账号自检老师", disabled: false },
+      })).status, 200);
+    check("启用之后又能登录了", (await loginAs("账号自检老师", "pw-manage-new2")).length >= 32);
+
+    console.log("\n[10.10] 删除，以及操作日志留痕（口令不进日志）");
+    equal("删掉「账号自检老师」",
+      (await accounts({ method: "DELETE", token: adminToken, body: { username: "账号自检老师" } })).status, 200);
+    equal("列表里没有它了",
+      ((((await accounts({ token: adminToken })).body.accounts ?? []) as Array<{ username: string }>)
+        .some((item) => item.username === "账号自检老师")), false);
+    equal("删掉的账号登不进来（401）", await loginStatus("账号自检老师", "pw-manage-new2"), 401);
+    equal("再删一次：404（没有这个账号）",
+      (await accounts({ method: "DELETE", token: adminToken, body: { username: "账号自检老师" } })).status, 404);
+    equal("清理：删掉「没绑档老师」",
+      (await accounts({ method: "DELETE", token: adminToken, body: { username: "没绑档老师" } })).status, 200);
+    equal("账号表回到只有 admin 一条（这一节没有留下测试账号）", readEntries().length, 1);
+
+    /*
+     * 留痕：走的是**服务端自己那套**日志（`writeLog` 写的 SQL `logs` 表，与老 REST 接口
+     * 同一个通道），所以要去 `GET /api/logs` 看，而不是 `logs.list`（那个读的是 kv 快照里
+     * "页面自己"那份日志）。断言两件事：① 记了这些操作、操作人来自会话；② 摘要里**没有口令**。
+     */
+    const logRows = (await raw(base, "/api/logs?entity=账号", { token: adminToken })).body as unknown as
+      Array<{ action?: string; operator?: string; summary?: string }>;
+    check("账号操作留下了日志（老 REST 的 /api/logs 里看得到）",
+      Array.isArray(logRows) && logRows.length >= 4, JSON.stringify(logRows).slice(0, 200));
+    const createLog = logRows.find(
+      (row) => row.action === "新建" && String(row.summary ?? "").includes("账号自检老师"),
+    );
+    check("新建账号那条日志写清了「新建账号 X（角色…）」",
+      createLog !== undefined && String(createLog.summary).includes("普通教师"), JSON.stringify(createLog));
+    equal("日志里的操作人来自会话（不是前端说了算）", createLog?.operator, info.username);
+    check("日志里有「重置口令」这一条，但**没有任何口令内容**",
+      logRows.some((row) => row.action === "重置口令") &&
+        logRows.every((row) => !JSON.stringify(row.summary ?? "").includes("pw-manage")),
+      JSON.stringify(logRows.map((row) => row.summary)));
+    check("日志里有「停用」「启用」与「删除」",
+      ["停用", "启用", "删除"].every((action) => logRows.some((row) => row.action === action)),
+      JSON.stringify(logRows.map((row) => row.action)));
+  });
+
+  /* ② 只读钩子（NEXGENEDU_ACCOUNTS_JSON）：读得到，写一律被拒，而且不落盘 */
+  await withTempServer(
+    async (base, info) => {
+      const accountsPath = path.join(path.dirname(info.dbPath), "accounts.json");
+      const request = async (
+        method: string,
+        token: string | null,
+        body?: unknown,
+      ): Promise<{ status: number; body: Record<string, unknown> }> => {
+        const response = await fetch(`${base}/api/accounts`, {
+          method,
+          headers: {
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
+            ...(token === null ? {} : { authorization: `Bearer ${token}` }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        return {
+          status: response.status,
+          body: (await response.json().catch(() => ({}))) as Record<string, unknown>,
+        };
+      };
+      const loginAs = async (username: string, password: string): Promise<string> => {
+        const response = await raw(base, "/api/login", { method: "POST", body: { username, password } });
+        return String(response.body.token ?? "");
+      };
+
+      const adminToken = await loginAs("技术甲", "pw-admin");
+      const listed = await request("GET", adminToken);
+      equal("只读钩子下**读**得到账号表（只看不改）", listed.status, 200);
+      equal("界面能知道这份账号表是只读的", listed.body.readOnly, true);
+      check("只读的原因写清了是环境变量提供的账号表",
+        String(listed.body.readOnlyReason ?? "").includes("NEXGENEDU_ACCOUNTS_JSON") &&
+          String(listed.body.readOnlyReason ?? "").includes("只读"),
+        String(listed.body.readOnlyReason ?? ""));
+
+      const writes: Array<[string, unknown]> = [
+        ["POST", { username: "想加的", password: "pw-should-not-apply", roles: ["普通教师"], teacherId: "" }],
+        ["PATCH", { username: "教师甲", roles: ["技术管理员"] }],
+        ["DELETE", { username: "教师甲" }],
+      ];
+      for (const [method, body] of writes) {
+        const response = await request(method, adminToken, body);
+        equal(`只读钩子下 ${method} 被拒（409：再试也没用）`, response.status, 409);
+        check(`只读钩子下 ${method} 的理由说清了「本次是环境变量提供的只读账号表」`,
+          String(response.body.error ?? "").includes("只读") &&
+            String(response.body.error ?? "").includes("NEXGENEDU_ACCOUNTS_JSON"),
+          String(response.body.error ?? ""));
+      }
+      equal("只读钩子下**一个字都没有落到盘上**（不落盘是它的定义）", existsSync(accountsPath), false);
+      equal("（对照）只读钩子下技术管理员读账号表仍然正常", (await request("GET", adminToken)).status, 200);
+      equal("只读钩子下普通教师读账号表同样是 403",
+        (await request("GET", await loginAs("教师甲", "pw-teacher"))).status, 403);
+    },
+    // 只读、不落盘的测试账号表（与 [8] 节同一套钩子）：临时库 → 临时目录，绝不碰真实账号
+    {
+      env: {
+        NEXGENEDU_ACCOUNTS_JSON: JSON.stringify([
+          { username: "技术甲", password: "pw-admin", roles: ["技术管理员"] },
+          { username: "教师甲", password: "pw-teacher", roles: ["普通教师"], teacherId: "t_随便" },
+        ]),
+      },
+    },
+  );
+} catch (cause) {
+  failures += 1;
+  console.error(`\n✗ 账号管理这一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
 }
 
 console.log(
