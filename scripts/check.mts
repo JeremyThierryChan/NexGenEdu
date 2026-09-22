@@ -64,6 +64,16 @@ import {
   teachersForSubject,
 } from "@/lib/backend/inquiry";
 import { API_CONTRACT, MIGRATION_STEPS, SERVER_MUST_VALIDATE } from "@/lib/backend/contract";
+import { ADMIN_NAV } from "@/lib/site/admin-nav";
+import {
+  GROUP_ACCESS,
+  PAGE_ACCESS,
+  ROLES,
+  STUDENT_ACTION_ACCESS,
+  allowedGroups,
+  canAccess,
+  visiblePages,
+} from "@/lib/auth/roles";
 import {
   SCRIPT_GROUPS,
   SCRIPTS,
@@ -3157,6 +3167,61 @@ ok("教师课时费分成（内部成本口径）不在公开数据里",
 // 分组本身也要有内容与说明
 ok("每个分组都有说明", API_CONTRACT.every((group) => group.note.length > 30));
 ok("每个分组都有方法", API_CONTRACT.every((group) => group.methods.length > 0));
+
+/*
+ * ── 角色与权限的映射不能走样（现在还没有拦，但归属必须齐全）──────────────────
+ *
+ * 权限最容易出的问题不是"判错了"，而是**新增功能时没人给它定归属**：
+ * 加了页面、加了接口，映射表还是旧的，于是新功能默认对所有人开放。
+ * 这三条断言把"必须想清楚归谁"变成构建时就红的事。
+ */
+{
+  const navHrefs = ADMIN_NAV.map((item) => item.href);
+  eq("每个后台页面都有角色映射（新增页面要顺手定归属）",
+    navHrefs.filter((href) => PAGE_ACCESS[href] === undefined), []);
+  eq("角色映射里没有已不存在的页面（删页面要同步删映射）",
+    Object.keys(PAGE_ACCESS).filter((href) => !navHrefs.includes(href)), []);
+
+  const groupIds = API_CONTRACT.map((group) => group.id);
+  eq("每个接口分组都有角色映射（新增分组要顺手定归属）",
+    groupIds.filter((id) => GROUP_ACCESS[id] === undefined), []);
+  eq("分组映射里没有已不存在的分组",
+    Object.keys(GROUP_ACCESS).filter((id) => !groupIds.includes(id)), []);
+
+  // "技术管理员 = 全权限"必须是**验出来的**，不能只是文档里的一句话
+  eq("技术管理员能进全部页面", visiblePages(["技术管理员"]).length, navHrefs.length);
+  eq("技术管理员能用全部分组", allowedGroups(["技术管理员"]).length, groupIds.length);
+
+  // 其余三个角色必须是**真受限**的：一个都不许等于全集（否则等于没分权）
+  ok("财务 / 招生 / 教师都不是全权限（否则等于没分权）",
+    (["财务管理员", "招生老师", "普通教师"] as const).every(
+      (role) =>
+        visiblePages([role]).length < navHrefs.length ||
+        allowedGroups([role]).length < groupIds.length,
+    ));
+  ok("普通教师进不了数据与备份、收费、报价改价",
+    visiblePages(["普通教师"]).includes("/admin/data") === false &&
+      visiblePages(["普通教师"]).includes("/admin/finance") === false &&
+      allowedGroups(["普通教师"]).includes("ops") === false &&
+      allowedGroups(["普通教师"]).includes("pricing") === false);
+  ok("招生老师进不了数据与备份（运维与审计是技术管理员的）",
+    allowedGroups(["招生老师"]).includes("ops") === false);
+
+  // 四条已确认的边界：逐一钉在断言里，免得以后被"顺手收紧"
+  ok("机构确认①：财务管理员能建档 / 报课",
+    canAccess(["财务管理员"], STUDENT_ACTION_ACCESS["students.enroll"]!) &&
+      canAccess(["财务管理员"], STUDENT_ACTION_ACCESS["students.write"]!));
+  ok("机构确认②：招生老师能退课（含那笔退款）",
+    canAccess(["招生老师"], STUDENT_ACTION_ACCESS["students.money"]!));
+  ok("机构确认③：普通教师能看自己学生的课时余额",
+    canAccess(["普通教师"], STUDENT_ACTION_ACCESS["students.read"]!));
+  ok("机构确认④：一个账号兼任多个角色时，按「有一个允许就允许」判定",
+    canAccess(["普通教师", "财务管理员"], GROUP_ACCESS.pricing!) &&
+      canAccess(["普通教师", "技术管理员"], GROUP_ACCESS.ops!) &&
+      !canAccess(["普通教师"], GROUP_ACCESS.ops!));
+  ok("每个角色都进得了今日概览（登录后不至于一片空白）",
+    ROLES.every((role) => visiblePages([role]).includes("/admin")));
+}
 
 // 服务端必须复核的清单：这些是接服务端时的验收项，不能被悄悄删掉
 ok("服务端校验清单覆盖关键项（冲突 / 幂等 / 金额 / 鉴权 / 审计）", (() => {
