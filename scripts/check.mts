@@ -3381,6 +3381,8 @@ const staleClaims = [
 eq("文档里没有残留的过时说法（数据只在浏览器里）",
   staleClaims.filter(([, text, claim]) => String(text).includes(String(claim))).map(([file]) => file), []);
 
+
+
 // ── 接口契约（第八组）─────────────────────────────────────────────────
 // 文档最容易「写完就过期」。这里让契约清单与代码互相校验：
 // 有方法没登记（漏文档）或登记了却不存在（文档漂移）都会失败。
@@ -3653,6 +3655,40 @@ const apiDoc = readFileSync(new URL("../docs/后台API约定.md", import.meta.ur
 const mentionedInDoc = (name: string) =>
   new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z])`).test(apiDoc);
 eq("API 文档漏掉的方法", realMethods.filter((name) => !mentionedInDoc(name)), []);
+
+/*
+ * ── 文档里写死的计数必须与真实一致（或者干脆别写死）────────────────────────
+ *
+ * 这一条是"文档对账"的自动化版本：**能被机器算出来的数字，就不该靠人记得去改**。
+ * 起因是真事：`accept` 早就从 43 项长到 53 项，而六个文档里还写着"43/43 通过"；
+ * 服务层方法从 106 长到 115，也有五处还写着 106。
+ *
+ * 两条规则：
+ *   1. 文档里凡出现「N 个方法」，N 必须等于 `realMethods.length`（真实方法数）；
+ *   2. `accept` 的旧签名「43/43」不许再出现 —— 它是"写死了就会过期"的典型，
+ *      要写就写当前值并配一句"以命令输出为准"（那类数字没法在自检里复算，
+ *      因为复算它等于跑一遍 accept）。
+ */
+const methodCountMentions: Array<{ file: string; value: number }> = [];
+const staleAcceptCount: string[] = [];
+for (const file of docFiles) {
+  const text = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  for (const match of text.matchAll(/(\d+)\s*个方法/g)) {
+    /*
+     * 排除「9 个资源 × 5 个方法」这种**每个资源的 CRUD 个数** —— 它不是总方法数。
+     * 判据：这个数字前面紧挨着「×」。第一版没排除，于是 PROJECT.md 与
+     * 后台API约定.md 里那句 "× 5 个方法" 被误报成"方法数漂移"。
+     */
+    const before = text.slice(Math.max(0, (match.index ?? 0) - 3), match.index ?? 0);
+    if (before.includes("×")) continue;
+    methodCountMentions.push({ file, value: Number(match[1]) });
+  }
+  if (text.includes("43/43")) staleAcceptCount.push(file);
+}
+eq("文档里的「N 个方法」都等于真实方法数（写死了就要跟着改，否则别写死）",
+  methodCountMentions.filter((item) => item.value !== realMethods.length).map((item) => `${item.file}: ${item.value}`),
+  []);
+eq("文档里不再出现旧的 accept 计数签名（43/43 —— 写死就会过期）", staleAcceptCount, []);
 ok("API 文档提到服务端必须复核的校验", apiDoc.includes("服务端") && apiDoc.includes("复核"));
 
 // ── 咨询可行性（第九组）───────────────────────────────────────────────

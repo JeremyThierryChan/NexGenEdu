@@ -249,7 +249,7 @@ components/
 
 lib/
 ├── data/                 宣传站数据访问层：页面取数的唯一入口（`content.ts` 解析 Markdown）
-├── backend/              **服务层**：`api.ts`（当前 106 个方法）+ 领域纯函数（排课与冲突、课时账本、报价、统计…）
+├── backend/              **服务层**：`api.ts`（当前 115 个方法，以 `contract.ts` 为准）+ 领域纯函数（排课与冲突、课时账本、报价、统计…）
 │   ├── initial.ts        空库起点（正式使用从这里开始；`seed.ts` 只是自检/演示夹具）
 │   └── remote.ts         本机使用时把 `api` 换成对后端 `POST /api/call` 的代理
 ├── auth/                 `session.ts`（登录）、`token.ts`（前端唯一持有的凭证：令牌）
