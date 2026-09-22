@@ -31,7 +31,14 @@ import {
   prepareCredential,
   tokenFromHeader,
   verifyToken,
+  type Session,
 } from "./auth.mts";
+// 多账号与角色（第 7 步）：账号表在 server/accounts.mts（口令与角色都在服务端）
+import { accountBootstrapNote } from "./accounts.mts";
+// 权限的"一份数据"：哪个角色能做哪一组接口。**绝不在这里另写一套角色判断**（见下面的闸门）
+import { allowedRolesForMethod, canAccess, type Role } from "../lib/auth/roles.ts";
+// 方法 → 接口分组的**唯一真源**：闸门按它推导，不手抄一张表（理由见下面的闸门注释）
+import { API_CONTRACT } from "../lib/backend/contract.ts";
 // 复用伪后端阶段的纯函数：课时记账与剩余课时的口径只能有一份
 import { enrollmentForLesson, remainingTotal } from "../lib/backend/enrollment.ts";
 // 金额与退费口径、请假扣课时规则：同样只复用伪后端阶段的纯函数
@@ -1036,27 +1043,36 @@ function send(response: ServerResponse, status: number, payload: unknown): void 
 }
 
 /**
- * 老 REST 接口（/api/students、/api/pricing…）的鉴权闸。
+ * 鉴权闸（`/api/` 下除公开入口外一律先过它）。
  *
- * 这些接口是路线 A 的参考实现，页面并不用它们（页面走 `/api/call`），
- * 但它们**能读也能写**同一个库，所以一样必须挡在登录之后 —— 只保护新入口、
- * 忘了旧入口，等于门锁上了而窗户开着。命中未登录就回 401 并返回 false。
+ * 它管**登录**这件事（令牌 → 会话）。**权限**（这个角色能不能做这件事）在下一步：
+ * `/api/call` 在 `callApi` 里判，老 REST 接口在 `requireRestPermission` 里判 ——
+ * 两者共用 `permissionError` 一个判定函数（理由见上面那一节的开头）。
+ *
+ * 返回**会话**（而不是 true/false）：角色是权限判定的输入，直接往下传，
+ * 而不是存进一个模块级变量 —— 模块级变量在多账号下会串：
+ * `/api/call` 要先 `await` 读请求体，这期间另一个请求可能已经把它改掉了
+ * （读写体是异步的，而"当前是谁"必须是这个请求自己的）。那就成了
+ * "A 的调用拿着 B 的角色过闸门"，是权限里最不该有的那种错。
  */
-function requireAuth(request: IncomingMessage, response: ServerResponse): boolean {
+function requireAuth(request: IncomingMessage, response: ServerResponse): Session | null {
   const session = verifyToken(tokenFromHeader(request.headers.authorization));
   if (session === null) {
     send(response, 401, { ok: false, error: "未登录或登录已过期，请先登录。" });
-    return false;
+    return null;
   }
   /*
    * 按会话记操作人，两套日志写入都要用它：
    *   - `api.setOperator` 影响走 kv 快照的那一套（页面用的）；
    *   - `currentOperator` 影响服务端自己写 SQL 的那一套（老 REST 接口用的）。
    * 少设哪一个，都会让"谁改的"在其中一条路上变成默认值。
+   *
+   * 这两处确实是模块级状态（与 api.ts 的 operatorName 一致），因此**每个请求**都要重设一次：
+   * 这是"前端调 setOperator 也不能冒充别人"这条性质成立的前提（见权限闸门那一节）。
    */
   void api.setOperator(session.username);
   currentOperator = session.username;
-  return true;
+  return session;
 }
 
 
@@ -1101,12 +1117,282 @@ if (serverStore.read(SNAPSHOT_KEY) === null) {
 
 __useStoreForTesting(serverStore);
 
+/* ── 权限闸门（第 7 步：按角色拦接口）──────────────────────────────────── */
+
 /**
- * 通用分发：按 `api` 的真实形状逐级查表调用。
+ * 关于这一节的一句话总纲：**两道门的判定必须是同一套**。
  *
- * 用「方法名 + 参数数组」而不是逐个写 REST 路由，是为了**不重复描述一遍接口**：
- * 契约已经在 contract.ts / docs/后台API约定.md 里，这里是机器照做。
+ * 后端对外有两个入口 —— 页面走的 `/api/call`，以及路线 A 留下的老 REST 接口
+ * （`/api/students`、`/api/pricing`…）—— 而它们**读写同一份数据**。
+ * 只给其中一个加权限，等于前门锁了、窗户开着。这不是假设：
+ * 第 6 步加"要登录"时，第一次跑 `npm run check:auth` 就抓到了 `/api/students` 没挡
+ * （新入口挡上了、老入口漏了），未登录的人照样把学生数据读走了。
+ *
+ * 所以做法是：**判定只有一个函数**（`permissionError`），两道门各自负责把
+ * "我这是哪个接口"翻译成**契约里的方法名**，再交给它。翻译不过来的（没有登记归属）
+ * 一律**拒绝** —— 失败方向必须是关门。
  */
+
+/**
+ * 会话管道方法：不做业务、只把"当前是谁"交给服务层，因此不属于任何权限分组。
+ *
+ * 为什么要白名单：`setOperator` 在契约里归在"运维与审计"（它确实属于审计那一摊），
+ * 可它是**每个请求开场时由服务端按会话调用**的（见 `requireAuth`）：
+ * 少了它，操作日志里的操作人就会退回默认值。如果按 ops 拦，
+ * 除技术管理员之外的任何人**连正常写数据都会失败** —— 而那和"他不能改数据"是两件事。
+ *
+ * 放行它安全吗？安全，而且理由要说清楚：操作人在**每个请求开头**都会被按会话重设一次，
+ * 而一次 `/api/call` 只处理一个方法 —— 前端就算调 `setOperator("老板")`，
+ * 影响的也只是它自己那一次调用，下一个请求立刻被改回会话里的那个人。
+ * （这条依赖"每请求重设"，所以 `requireAuth` 里那一行不是可有可无的。）
+ *
+ * 白名单必须排在"查归属"**之前**：`setRoles` 这类方法在契约里根本没登记，
+ * 先查归属会把它们当成"未登记接口"拒掉。
+ */
+const SESSION_PIPELINE_METHODS: ReadonlySet<string> = new Set(["setOperator", "setRoles"]);
+
+/**
+ * 方法 → 接口分组，**从 `API_CONTRACT` 推导**（单一真源），不手抄一张表。
+ *
+ * 手抄的代价很具体：`lib/auth/roles.ts` 的 `GROUP_ACCESS` 是按**分组 id** 配角色的，
+ * 这里要是再抄一份"方法 → 分组"，那么"新增接口时改了一处、漏了另一处"的结果是
+ * 新接口被算进某个老分组（悄悄放权）或没有归属（悄悄拦住）—— 两种都很难查。
+ * `API_CONTRACT` 本身有自检盯着它和 `lib/backend/api.ts` 的真实形状，跟着它走最省事。
+ *
+ * 同一个方法被登记在**两个分组**里时：删掉它的归属（判定时按"没有归属"拒绝），
+ * 并在错误里点名是哪两组打架 —— 悄悄取先出现的那个，等于替机构做了一个它没讨论过的决定。
+ */
+const CONTRACT_GROUPS = ((): {
+  byMethod: Map<string, string>;
+  titleOf: Map<string, string>;
+  ambiguous: Map<string, string[]>;
+} => {
+  const byMethod = new Map<string, string>();
+  const titleOf = new Map<string, string>();
+  const ambiguous = new Map<string, string[]>();
+  for (const group of API_CONTRACT) {
+    // 标题去掉"七、"这种序号：错误文案里只要"运维与审计"
+    titleOf.set(group.id, group.title.replace(/^[一二三四五六七八九十]+、/, ""));
+    for (const method of group.methods) {
+      const previous = byMethod.get(method);
+      if (previous !== undefined && previous !== group.id) {
+        ambiguous.set(method, [...(ambiguous.get(method) ?? [previous]), group.id]);
+        byMethod.delete(method);
+        continue;
+      }
+      if (!ambiguous.has(method)) byMethod.set(method, group.id);
+    }
+  }
+  return { byMethod, titleOf, ambiguous };
+})();
+
+/** 角色列表变成人话（提示里要出现"你的角色是谁"，人才知道该找谁开权限）。 */
+function roleText(roles: readonly Role[]): string {
+  return roles.length === 0 ? "没有角色" : roles.join("、");
+}
+
+/**
+ * 这一次调用该不该放行：`null` = 放行；字符串 = 拒绝（内容是给人看的话）。
+ *
+ * 两道门都只经过这一个函数，因此"同一个动作从哪个门进来"不会有两套结论。
+ */
+function permissionError(method: string, roles: readonly Role[]): string | null {
+  // ① 会话管道方法放行（理由见 SESSION_PIPELINE_METHODS 的注释）
+  if (SESSION_PIPELINE_METHODS.has(method)) return null;
+
+  /*
+   * ② 归属查不到就**拒绝**，不是放行。
+   *
+   * 这是整节里最重要的那个默认值：新增接口时忘了登记归属，结果必须是"用不了"，
+   * 而不是"所有人都能用"。默认开放是权限系统里最危险的一种默认值 ——
+   * 它不报错、不留痕，只会让一个"还没想清楚归谁"的新功能对所有人敞开。
+   */
+  const conflict = CONTRACT_GROUPS.ambiguous.get(method);
+  if (conflict !== undefined) {
+    return (
+      `接口「${method}」的权限归属有冲突（在 lib/backend/contract.ts 里同时登记在 ` +
+      `${conflict.join(" 与 ")} 两组），定清楚之前一律拒绝。`
+    );
+  }
+  const group = CONTRACT_GROUPS.byMethod.get(method);
+  if (group === undefined) {
+    return (
+      `这个接口没有登记权限归属：${method}。请在 lib/backend/contract.ts 里给它一个分组 —— ` +
+      "没登记的接口一律拒绝（默认开放是权限最容易出的那种错）。"
+    );
+  }
+
+  /*
+   * ③ 判定：用 `lib/auth/roles.ts` 的 `allowedRolesForMethod(method)` —— **一份数据**，
+   *    而且自检盯着它（新增方法没定归属会直接红）。
+   *
+   * 为什么不是直接查 `GROUP_ACCESS[分组]`：**分组是接口分类，不总是权限边界** ——
+   * `crud` 里既有 `students.list`（读）也有 `students.remove`（删），而
+   * "普通教师能看自己学生的课时余额"要求**读宽写严**；`actions` 里既有
+   * `students.enroll`（招生 / 财务）也有 `lessons.markCompleted`（教师的核心动作）。
+   * `allowedRolesForMethod` 里按"特例 → 只读宽 → 分组默认 → 没登记就关门"逐层解析。
+   *
+   * 我第一版这里查的是分组：结果普通教师**读不了任何列表**（连自己学生的课时都看不成），
+   * 而报课、收款又对他开放 —— 两条都反了。分组粒度不够这件事，只有真按角色跑一遍才看得出来。
+   */
+  const allowed = allowedRolesForMethod(method);
+  if (allowed === null || allowed.length === 0) {
+    // 方法没解析出归属（自检会红，但服务端不能因此变成"放行"）
+    return `接口「${method}」（分组「${group}」）没有在 lib/auth/roles.ts 里定归属，一律拒绝。`;
+  }
+  if (canAccess(roles, allowed)) return null;
+
+  const title = CONTRACT_GROUPS.titleOf.get(group) ?? group;
+  return (
+    `你的角色（${roleText(roles)}）不能做这件事：${title}。` +
+    `这件事需要：${allowed.join(" 或 ")}。` +
+    "分工见 docs/使用手册.md 的「谁能做什么」。"
+  );
+}
+
+/**
+ * 老 REST 接口 → **契约里的方法名**（分组再从 `API_CONTRACT` 推导，见上）。
+ *
+ * 为什么要逐条列：这些路径**不是方法名**（`/api/today` 对应 `today`、
+ * `/api/pricing/save` 对应 `pricing.update`、`/api/logs` 对应 `logs.list`…），
+ * 没有"按规则推导"的可能，只能写下来。写在这里的好处是**看得完**：
+ * 新增老接口时漏了一行，它会被下面的兜底拒绝掉，而不是悄悄对所有角色开放。
+ * 顺序有讲究：**具体的在前、泛化的在后**（`/api/students/get` 必须排在 `/api/students` 前面）。
+ */
+const REST_CONTRACT_METHODS: ReadonlyArray<{
+  http: string | "*";
+  pattern: RegExp;
+  /** 对应的契约方法名；null 表示"登录即可"的接口（见 note）。 */
+  contract: string | null;
+  note: string;
+}> = [
+  /*
+   * 这两个不是业务接口，刻意"只要登录就放行"：
+   *   - `/api/call` 是自己的一道门，它按**方法名**在 callApi 里判（见那里的闸门）；
+   *   - `/api/status` 是服务状态（库路径、表条数、备份状态），登录了就说明是自己人，
+   *     而且它不属于 `API_CONTRACT` 的任何分组（分组是按业务方法划的）。
+   *     把它按 ops 拦会让"连上后端了吗"这类探活在非技术管理员那里变成 403，
+   *     而那与权限无关 —— 会让排障时看到假故障。
+   */
+  { http: "POST", pattern: /^\/api\/call$/, contract: null, note: "统一调用入口：按方法名在 callApi 里判" },
+  { http: "*", pattern: /^\/api\/status$/, contract: null, note: "服务状态：登录即可（不属于任何业务分组）" },
+
+  /* 读接口（ROUTES / READS）：按它读的东西对应的方法名翻译 */
+  { http: "GET", pattern: /^\/api\/students$/, contract: "students.list", note: "学生列表" },
+  { http: "GET", pattern: /^\/api\/students\/get$/, contract: "students.get", note: "单个学生" },
+  { http: "GET", pattern: /^\/api\/teachers$/, contract: "teachers.list", note: "教师列表" },
+  { http: "GET", pattern: /^\/api\/teachers\/active$/, contract: "teachers.listActive", note: "在职教师（排课下拉）" },
+  { http: "GET", pattern: /^\/api\/classrooms$/, contract: "classrooms.list", note: "教室列表" },
+  { http: "GET", pattern: /^\/api\/courses$/, contract: "courses.list", note: "课程列表" },
+  { http: "GET", pattern: /^\/api\/lessons$/, contract: "lessons.list", note: "排课列表" },
+  { http: "GET", pattern: /^\/api\/inquiries$/, contract: "inquiries.list", note: "咨询列表" },
+  { http: "GET", pattern: /^\/api\/today$/, contract: "today", note: "今日概览" },
+  { http: "GET", pattern: /^\/api\/payments$/, contract: "payments.list", note: "收款记录" },
+  { http: "GET", pattern: /^\/api\/transactions$/, contract: "transactions.listByStudent", note: "课时流水（按学生查）" },
+  { http: "GET", pattern: /^\/api\/lesson-records$/, contract: "lessonRecords.list", note: "课堂记录" },
+  { http: "GET", pattern: /^\/api\/homework$/, contract: "homework.list", note: "作业记录" },
+  { http: "GET", pattern: /^\/api\/assessments$/, contract: "assessments.list", note: "阶段测评" },
+  { http: "GET", pattern: /^\/api\/logs$/, contract: "logs.list", note: "操作日志" },
+
+  /* 报价与课程库（PRICING_ROUTES）：读与写都在那一个表里，逐条对上方法名 */
+  { http: "GET", pattern: /^\/api\/pricing$/, contract: "pricing.get", note: "读报价配置" },
+  { http: "POST", pattern: /^\/api\/pricing\/save$/, contract: "pricing.update", note: "保存报价配置" },
+  { http: "POST", pattern: /^\/api\/pricing\/reset$/, contract: "pricing.reset", note: "恢复默认报价" },
+  { http: "POST", pattern: /^\/api\/pricing\/quote$/, contract: "pricing.quote", note: "试算报价" },
+  { http: "POST", pattern: /^\/api\/pricing\/teacher-fee$/, contract: "pricing.teacherFee", note: "教师课时费" },
+  { http: "GET", pattern: /^\/api\/pricing\/export-markdown$/, contract: "pricing.exportMarkdown", note: "导出报价 Markdown" },
+  { http: "GET", pattern: /^\/api\/courses\/summary$/, contract: "courses.summary", note: "课程库汇总" },
+  { http: "POST", pattern: /^\/api\/courses\/sync-from-site$/, contract: "courses.syncFromSite", note: "从网站同步课程" },
+
+  /* 作业 / 测评 / 日志的专用写接口 */
+  { http: "POST", pattern: /^\/api\/homework\/create$/, contract: "homework.create", note: "新建作业记录" },
+  { http: "POST", pattern: /^\/api\/assessments\/add$/, contract: "assessments.add", note: "新增阶段测评" },
+  { http: "POST", pattern: /^\/api\/logs\/clear$/, contract: "logs.clear", note: "清空操作日志" },
+  { http: "DELETE", pattern: /^\/api\/homework\/[^/]+$/, contract: "homework.remove", note: "删除作业记录" },
+  { http: "DELETE", pattern: /^\/api\/assessments\/[^/]+$/, contract: "assessments.remove", note: "删除阶段测评" },
+
+  /* 业务动作（WRITES）：一个请求 = 一个事务的那些 */
+  { http: "POST", pattern: /^\/api\/students\/[^/]+\/enroll$/, contract: "students.enroll", note: "报课" },
+  { http: "POST", pattern: /^\/api\/lessons\/[^/]+\/complete$/, contract: "lessons.markCompleted", note: "标记已上" },
+  { http: "POST", pattern: /^\/api\/students\/[^/]+\/enrollments\/[^/]+\/renew$/, contract: "students.renewEnrollment", note: "续费" },
+  { http: "POST", pattern: /^\/api\/students\/[^/]+\/enrollments\/[^/]+\/refund$/, contract: "students.refundEnrollment", note: "退课退款" },
+  { http: "GET", pattern: /^\/api\/students\/[^/]+\/enrollments\/[^/]+\/refund-quote$/, contract: "students.refundEnrollment", note: "退费试算（与退课同一件事的预览，不单独放宽）" },
+  { http: "POST", pattern: /^\/api\/payments$/, contract: "payments.record", note: "收款 / 退款" },
+];
+
+/**
+ * 通用增删改（`/api/teachers`、`/api/students/<id>`…）的资源名。
+ *
+ * 这些路径的形状和契约里的方法前缀**同名**（`students` → `students.create`），
+ * 所以能按"资源 + 请求方法"推出来，不用在表里写 6 × 3 行
+ * （那种表没人会去核对，而漏一行就是"这个资源可以对所有人开放"）。
+ */
+const REST_CRUD_RESOURCES = ["students", "teachers", "classrooms", "courses", "lessons", "inquiries"] as const;
+
+/** 老 REST 的写方法 → 契约里的动作名（与 `handleCrud` 的行为一致：POST 建、PATCH 改、DELETE 删）。 */
+const REST_CRUD_VERBS: Record<string, string> = { POST: "create", PATCH: "update", DELETE: "remove" };
+
+/**
+ * 老 REST 请求该按哪个契约方法判权限。
+ *
+ * 顺序原则：**具体的表在前、泛化的规则在后**。`/api/students/get` 必须先匹配到
+ * `students.get`；将来加规则时也要照这个顺序想一遍，别让泛化规则把具体接口吃掉。
+ */
+type RestTarget =
+  /** 登录即可（`/api/call` 与 `/api/status`，见表里的说明）。 */
+  | { kind: "exempt" }
+  | { kind: "contract"; method: string }
+  /** 路径在这个文件里认不出来 —— 拒绝（理由见 `resolveRestContract` 末尾）。 */
+  | { kind: "unregistered" };
+
+function resolveRestContract(httpMethod: string, pathname: string): RestTarget {
+  for (const entry of REST_CONTRACT_METHODS) {
+    if (entry.http !== "*" && entry.http !== httpMethod) continue;
+    if (entry.pattern.test(pathname)) {
+      return entry.contract === null ? { kind: "exempt" } : { kind: "contract", method: entry.contract };
+    }
+  }
+  const crudPath = /^\/api\/([a-z]+)(?:\/[^/]+)?$/.exec(pathname);
+  const resource = crudPath?.[1] ?? "";
+  const verb = REST_CRUD_VERBS[httpMethod];
+  if (verb !== undefined && (REST_CRUD_RESOURCES as readonly string[]).includes(resource)) {
+    return { kind: "contract", method: `${resource}.${verb}` };
+  }
+  /*
+   * 认不出来的路径：**不是"放过去让它自己 404"**，而是拒掉。
+   *
+   * 理由与 `/api/call` 那边一样，但这里更隐蔽：老 REST 的路径表与处理分支是**两处**
+   * （表在上面、分支在下面），将来加一个分支忘了加一行，这条兜底就是唯一还在拦它的东西。
+   * 所以这里得出"没有归属"的结论，由调用方拒掉 —— 顺带把那句"请补一行"的提示带出去。
+   */
+  return { kind: "unregistered" };
+}
+
+/**
+ * 老 REST 接口的**角色**闸门（登录闸门之后、任何处理之前跑一次）。
+ *
+ * 放在"一处"而不是每个分支里各写一遍：逐个分支加判断一定会漏，
+ * 而漏掉的那一个就是"门锁了、窗户开着"。
+ */
+function requireRestPermission(
+  httpMethod: string,
+  pathname: string,
+  session: Session,
+  response: ServerResponse,
+): boolean {
+  const target = resolveRestContract(httpMethod, pathname);
+  if (target.kind === "exempt") return true;
+  const denied =
+    target.kind === "unregistered"
+      ? `这个接口没有登记权限归属：${httpMethod} ${pathname}。` +
+        "如果是新加的老接口，请在 server/index.mts 的 REST_CONTRACT_METHODS 里补一行" +
+        "（路径 → 契约方法名），也顺便确认一下路径有没有写错；没登记的接口一律拒绝。"
+      : permissionError(target.method, session.roles);
+  if (denied === null) return true;
+  send(response, 403, { ok: false, error: denied });
+  return false;
+}
+
 /** 还原远端代理显式标记的 Date（`{ __date: ISO }`），其余参数原样。 */
 function decodeArg(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(decodeArg);
@@ -1120,7 +1406,27 @@ function decodeArg(value: unknown): unknown {
   return value;
 }
 
-async function callApi(method: string, args: unknown[]): Promise<unknown> {
+/** 权限不足（与"参数不对"分开：接口层按它回 403，而不是 400）。 */
+class PermissionDenied extends Error {}
+
+/**
+ * 通用分发：按 `api` 的真实形状逐级查表调用。
+ *
+ * 用「方法名 + 参数数组」而不是逐个写 REST 路由，是为了**不重复描述一遍接口**：
+ * 契约已经在 contract.ts / docs/后台API约定.md 里，这里是机器照做。
+ *
+ * 第 7 步起，**权限闸门就在这里**（这个函数最前面）。为什么选这个位置：
+ * 它是 `/api/call` 唯一的进门函数，任何"查到那个函数再调用"的路径都得从这里过。
+ * 如果把闸门写在路由分支里（`url.pathname === "/api/call"` 那一处），
+ * 将来多一个入口就多一处"要记得加闸门"的地方 —— 而"漏加一处"正是这一节要防的事。
+ *
+ * 角色是从**会话**传进来的（由 `requireAuth` 校验令牌得到），不是前端传的：
+ * 前端说自己是什么角色不作数。
+ */
+async function callApi(method: string, args: unknown[], roles: readonly Role[]): Promise<unknown> {
+  const denied = permissionError(method, roles);
+  if (denied !== null) throw new PermissionDenied(denied);
+
   const parts = method.split(".");
   let target: unknown = api;
   for (const part of parts.slice(0, -1)) {
@@ -1212,6 +1518,12 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
           ok: true,
           token: result.token,
           username: result.username,
+          /*
+           * 角色要回给前端：界面靠它决定"显示哪些入口"（服务端那边才是真的拦）。
+           * 字段名就是 `roles`，且类型是 `Role[]` —— `/api/session` 用的是同一个字段，
+           * 前端两处读的是同一份东西（`lib/auth/session.ts` 的 readRoles）。
+           */
+          roles: result.roles,
           expiresAt: result.expiresAt,
         });
       })
@@ -1254,23 +1566,51 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
       send(response, 401, { ok: false, error: "未登录或登录已过期。" });
       return;
     }
-    send(response, 200, { ok: true, username: session.username });
+    /*
+     * **已登录探活**：字段名必须是 `roles`、类型是 `Role[]`。
+     *
+     * 前端靠它决定显示哪些导航（`lib/auth/session.ts` 的 readRoles 只认
+     * `lib/auth/roles.ts` 里那四个名字，认不出来就按"全角色"处理，
+     * 免得"升级了服务端忘了升级前端"让后台突然变空）。
+     * 它**不是**权限本身：藏起来的入口照样能被直接调接口试，
+     * 真正说了算的是服务端的两道闸门。
+     */
+    send(response, 200, { ok: true, username: session.username, roles: session.roles });
     return;
   }
 
   /*
-   * ── 统一闸门：/api/ 下除上面三个公开入口外，一律要登录 ──────────────────────
+   * ── 统一闸门：/api/ 下除上面几个公开入口外，一律要登录 ──────────────────────
    *
    * 为什么放在**一处**而不是每个分支里各写一遍：逐个分支加鉴权一定会漏 ——
    * 这一版第一次跑 `npm run check:auth` 就抓到了：`/api/call` 与写的接口都挡上了，
    * 而**读接口 `/api/students` 忘了挡**，未登录直接 200 把学生数据交出去。
    * 那种漏法很隐蔽（"我明明加了鉴权"），所以改成结构性的：
    * 只要在 /api/ 下，默认就是关门状态，新加接口不需要谁记得加一行。
+   *
+   * 第 7 步在这条闸门后面又加了**一道**：下面那行 `requireRestPermission`
+   * 管的是"这个角色能不能做这件事"。两道都要过：先证明你是谁，再证明你能做。
    */
-  if (url.pathname.startsWith("/api/") && !requireAuth(request, response)) return;
+  let session: Session | null = null;
+  if (url.pathname.startsWith("/api/")) {
+    session = requireAuth(request, response);
+    if (session === null) return;
+    if (!requireRestPermission(request.method ?? "GET", url.pathname, session, response)) return;
+  }
 
   /** 通用调用：{ method: "students.list", args: [] }。第 5 步前端就切到这一个入口。 */
   if (url.pathname === "/api/call" && request.method === "POST") {
+    /*
+     * 会话在闸门那里已经校验过；这里再判一次 null 不是为了"应该不会发生"，
+     * 而是为了让**权限判定永远有一个真实输入**：拿不到会话就拒绝，
+     * 绝不出现"角色未知 → 当成没有限制"这种默认值。
+     */
+    if (session === null) {
+      send(response, 401, { ok: false, error: "未登录或登录已过期，请先登录。" });
+      return;
+    }
+    // 捕获成常量：下面读请求体是异步的，`session` 是 let，闭包里用它会被当成可能为 null
+    const roles: readonly Role[] = session.roles;
     void readBody(request)
       .then(async (body) => {
         /*
@@ -1282,9 +1622,19 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
         const method = String(body.method ?? "");
         const args = Array.isArray(body.args) ? (body.args as unknown[]) : [];
         try {
-          const result = await callApi(method, args.map(decodeArg));
+          // 权限闸门在 callApi 里（按 method → 分组 → 角色判定），这里只负责把会话带过去
+          const result = await callApi(method, args.map(decodeArg), roles);
           send(response, 200, { ok: true, result });
         } catch (cause) {
+          /*
+           * 权限不足回 **403**，与"参数写错了(400)"分开：
+           * 403 是"你有身份、但这件事不归你"，排障时看一眼状态码就知道该找谁，
+           * 而不是去翻请求参数。
+           */
+          if (cause instanceof PermissionDenied) {
+            send(response, 403, { ok: false, error: cause.message });
+            return;
+          }
           send(response, 400, { ok: false, error: cause instanceof Error ? cause.message : "调用失败" });
         }
       })
@@ -1497,6 +1847,15 @@ server.listen(PORT, HOST, () => {
   } else {
     console.log(`[登录] 口令在 ${credentialFile()} 里（文件里有明文，忘了就看它）。`);
   }
+  /*
+   * 账号与角色（第 7 步）**必须**在启动日志里出现：升级成多账号之后，
+   * "现在到底有几个账号、各是什么角色"是运维第一眼要看的东西
+   * （比如"我明明给王老师加了账号，怎么没生效"）。
+   * 这里**不打印口令**（唯一会打印口令的是上面那条"本次新生成"的凭证 ——
+   * 不打印就第一次都登不进去）；账号文件的位置与提醒一并打印，
+   * 因为"加人、改角色"要动的是那个文件。
+   */
+  for (const line of accountBootstrapNote().split("\n")) console.log(line);
   scheduleBackups();
 });
 

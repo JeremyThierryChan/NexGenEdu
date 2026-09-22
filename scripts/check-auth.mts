@@ -389,6 +389,112 @@ try {
       .find?.((row) => row.action === "收款");
     equal("走老接口写入的日志也带会话操作人（不是写死的 admin）", paymentLog?.operator, info.username);
   });
+
+/*
+ * ── 权限闸门（按角色拦接口）────────────────────────────────────────────────
+ *
+ * 起一个**带三个账号**的临时服务端（技术管理员 / 财务管理员 / 普通教师），
+ * 逐条验"这个角色能不能做这件事"。这一节存在的理由：
+ *   - 前端把入口藏起来**不是**权限（直接调接口就绕过去了），所以必须有一条断言
+ *     证明**服务端真的拒了**；
+ *   - 角色判定最容易在"读"与"写"之间出偏差（我第一版就把普通教师挡在读列表之外、
+ *     却让他能报课与收款 —— 两条都反了，只有真按角色跑一遍才看得出来）。
+ */
+console.log("\n[8] 权限闸门：按角色拦接口");
+try {
+  await withTempServer(
+    async (base) => {
+      const asRole = async (username: string, password: string) => {
+        const login = await fetch(`${base}/api/login`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+        const body = (await login.json()) as { token?: string; roles?: string[] };
+        return { token: body.token ?? "", roles: body.roles ?? [] };
+      };
+      /** 调一次接口，返回状态码（403 = 被权限闸门拦住）。 */
+      const attempt = async (token: string, method: string) => {
+        const response = await fetch(`${base}/api/call`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          body: JSON.stringify({ method, args: [] }),
+        });
+        return response.status;
+      };
+
+      const admin = await asRole("技术甲", "pw-admin");
+      const cashier = await asRole("财务甲", "pw-cashier");
+      const teacher = await asRole("教师甲", "pw-teacher");
+
+      equal("登录响应带回角色（技术管理员）", admin.roles, ["技术管理员"]);
+      equal("登录响应带回角色（普通教师）", teacher.roles, ["普通教师"]);
+      const sessionResponse = await fetch(`${base}/api/session`, {
+        headers: { authorization: `Bearer ${teacher.token}` },
+      });
+      equal("会话接口回角色（前端靠它决定显示哪些导航）",
+        ((await sessionResponse.json()) as { roles?: string[] }).roles, ["普通教师"]);
+
+      /*
+       * 「能」与「不能」的判据不同，这一点要说清楚：
+       *   - **403 = 被权限闸门拦住**（我们要拒的就是它）；
+       *   - 200 = 正常执行；**400 = 允许了，只是我这次没传参数**（自检只验权限，不造业务数据）。
+       * 因此"能"的那几条断言 `!== 403`，而不是 `=== 200` ——
+       * 我第一版写成 200，于是"财务能改价"因为没传参数回了 400 而误报成失败。
+       */
+      equal("教师能读学生列表（读宽）", await attempt(teacher.token, "students.list"), 200);
+      equal("教师能读课程列表", await attempt(teacher.token, "courses.list"), 200);
+      check("教师能标记已上（教学动作）", (await attempt(teacher.token, "lessons.markCompleted")) !== 403);
+      equal("教师不能新建学生（写严）", await attempt(teacher.token, "students.create"), 403);
+      equal("教师不能报课（那是招生 / 财务的活）", await attempt(teacher.token, "students.enroll"), 403);
+      equal("教师不能记收款", await attempt(teacher.token, "payments.record"), 403);
+      equal("教师不能改价", await attempt(teacher.token, "pricing.update"), 403);
+      equal("教师不能看操作日志", await attempt(teacher.token, "logs.list"), 403);
+      equal("教师不能导出整库", await attempt(teacher.token, "exportDatabase"), 403);
+
+      // 财务管理员：钱与报课能用（机构确认①），运维仍然不行
+      check("财务能报课（机构确认①：财务也要能报课）",
+        (await attempt(cashier.token, "students.enroll")) !== 403);
+      check("财务能记收款", (await attempt(cashier.token, "payments.record")) !== 403);
+      check("财务能改价", (await attempt(cashier.token, "pricing.update")) !== 403);
+      equal("财务不能运维（导出 / 日志是技术管理员的）",
+        await attempt(cashier.token, "logs.list"), 403);
+
+      // 技术管理员：全权限
+      equal("技术管理员能看日志", await attempt(admin.token, "logs.list"), 200);
+      equal("技术管理员能导出整库", await attempt(admin.token, "exportDatabase"), 200);
+
+      // 没登记归属的接口：**关门**（默认开放是权限最危险的那种错）
+      equal("没登记归属的接口一律拒绝", await attempt(admin.token, "不存在的.method"), 403);
+
+      // 被拒的响应里不能顺手把数据带出来，而且要说清需要什么角色
+      const denied = await fetch(`${base}/api/call`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${teacher.token}` },
+        body: JSON.stringify({ method: "logs.list", args: [] }),
+      });
+      const deniedBody = (await denied.json()) as { result?: unknown; error?: string };
+      check("403 响应里没有数据", deniedBody.result === undefined,
+        JSON.stringify(deniedBody).slice(0, 120));
+      check("403 说清了需要什么角色", (deniedBody.error ?? "").includes("技术管理员"),
+        deniedBody.error ?? "");
+    },
+    {
+      // 只读、不落盘：临时账号表由环境变量给（临时库 → 临时目录，绝不动真实账号与凭据）
+      env: {
+        NEXGENEDU_ACCOUNTS_JSON: JSON.stringify([
+          { username: "技术甲", password: "pw-admin", roles: ["技术管理员"] },
+          { username: "财务甲", password: "pw-cashier", roles: ["财务管理员"] },
+          { username: "教师甲", password: "pw-teacher", roles: ["普通教师"] },
+        ]),
+      },
+    },
+  );
+} catch (cause) {
+  failures += 1;
+  console.error(`\n✗ 权限闸门这一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
+}
+
 } catch (cause) {
   failures += 1;
   console.error(`\n✗ 自检中断：${cause instanceof Error ? cause.message : String(cause)}`);

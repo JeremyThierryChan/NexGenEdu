@@ -1,5 +1,5 @@
 /**
- * 服务端会话认证（第 6 步）。
+ * 服务端会话认证（第 6 步；第 7 步接上了多账号与角色）。
  *
  * ## 要解决的是什么
  *
@@ -9,6 +9,21 @@
  *   - 前端只拿一个**令牌**，拿不到口令；
  *   - `/api/call` 与各 REST 接口未登录一律 401；
  *   - 口令存服务端本机的文件里（0600），或由环境变量给出。
+ *
+ * ## 第 7 步之后：凭证文件只是"第一条账号的来源"
+ *
+ * 账号**不再只有一条**：账号表在 `server/accounts.mts`（`accounts.json`，
+ * 与凭证文件同目录、同样 0600、同样存明文），每个账号可以兼多个角色；
+ * 接口按角色拦（闸门在 `server/index.mts`，角色表在 `lib/auth/roles.ts`）。
+ *
+ * 本文件保留的职责：
+ *   - `credentialFile()`（凭证文件在哪）—— 账号文件的位置也跟着它走；
+ *   - 首次启动生成一条随机口令并打印一次（否则第一次都登不进去）；
+ *   - 会话：签发令牌、校验令牌、续期、退出、闲置过期。
+ *
+ * 登录本身改走账号表（`loginAccount`），因此这里**不再比对**那条凭证口令：
+ * 凭证文件在 `accounts.json` 不存在时会被用来**迁移**出第一条账号（角色给全部），
+ * 并在显式设置 `NEXGENEDU_ADMIN_PASSWORD` 时把新口令同步进账号表（见 accounts.mts）。
  *
  * ## 口令从哪来（三种情况，优先级从高到低）
  *
@@ -33,6 +48,9 @@
  * 令牌放**内存**，重启即失效。理由：单用户本机使用，重启后重新登录一次不麻烦；
  * 而把令牌持久化会引入"过期与回收"这一整套逻辑，收益几乎为零。
  * 令牌有闲置有效期（默认 12 小时），每次使用都会续期。
+ *
+ * 会话里带上**角色**（第 7 步）：接口闸门按会话里的角色判定，而不是每次去查账号表 ——
+ * 账号表改了之后，已经登录的人要重新登录才换角色（这一条写在 `accounts.mts` 的提示里）。
  */
 
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
@@ -77,7 +95,22 @@ function idleTimeoutMs(): number {
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : 12 * 60 * 60_000;
 }
 
-type StoredCredential = {
+/**
+ * 环境变量里**显式指定**的口令（没设就是 null）。
+ *
+ * 单独一个函数是为了"这个环境变量只读一处"：`prepareCredential` 用它决定要不要生成口令，
+ * `accounts.mts` 用它决定要不要把新口令同步进账号表。两处各自写一遍
+ * `typeof process.env.X === "string" && X !== ""`，早晚会有一处漏掉某种写法（空串、只有空格）。
+ */
+export function credentialPasswordFromEnv(): string | null {
+  const value = process.env.NEXGENEDU_ADMIN_PASSWORD;
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+/**
+ * 凭证文件里那一条（**导出**：账号表迁移时会用它，见 accounts.mts）。
+ */
+export type StoredCredential = {
   username: string;
   /**
    * 当前口令的**明文**（连同 hash 一起存，见文件头"为什么明文口令要落一份在文件里"）。
@@ -95,12 +128,19 @@ type StoredCredential = {
   hash: string;
 };
 
-/** 口令哈希：scrypt + 随机盐。用 Node 内置的 crypto，不引第三方依赖。 */
-function hashPassword(password: string, salt: string): string {
+/**
+ * 口令哈希：scrypt + 随机盐。用 Node 内置的 crypto，不引第三方依赖。
+ *
+ * **导出给 `accounts.mts` 共用**（账号表的每条账号也用这一套）。为什么强调这一点：
+ * 在这里存一套参数、在那边另存一套（比如一个 64 字节、一个 32 字节）不会报错，
+ * 只会让"某些账号永远登不上"，而那种故障极难查。所以：实现只有这一份。
+ */
+export function hashPassword(password: string, salt: string): string {
   return scryptSync(password, salt, 64).toString("hex");
 }
 
-function constantTimeEqual(a: string, b: string): boolean {
+/** 常量时间比较（同样是共用的一份，理由同上）。 */
+export function constantTimeEqual(a: string, b: string): boolean {
   const left = Buffer.from(a, "hex");
   const right = Buffer.from(b, "hex");
   if (left.length !== right.length) return false;
@@ -160,15 +200,28 @@ function hasLegacyCredentialFile(file: string): boolean {
 }
 
 /**
+ * 当前**生效**的凭证：内存里那份优先，其次凭证文件。
+ *
+ * 内存里那份必须排在前面：只读挂载（或权限不够）时 `prepareCredential` 写不进文件，
+ * 但那条口令是**本次启动真正生效**的 —— 账号表迁移时必须用它，
+ * 否则会在"环境变量指定了口令、文件却写不进去"的机器上迁移出一条谁也登不上的账号。
+ *
+ * 这个函数给 `accounts.mts` 用（迁移与口令同步），本文件自己不需要它。
+ */
+export function activeCredential(): StoredCredential | null {
+  return cached ?? readCredentialFile(credentialFile());
+}
+
+/**
  * 准备凭证（服务端启动时调用一次）。
  *
  * 返回的 `generatedPassword` 只在**新生成**时有值，调用方打印它一次。
  */
 export function prepareCredential(): CredentialSetup {
   const username = (process.env.NEXGENEDU_ADMIN_USER ?? "admin").trim() || "admin";
-  const fromEnv = process.env.NEXGENEDU_ADMIN_PASSWORD;
+  const fromEnv = credentialPasswordFromEnv();
 
-  if (typeof fromEnv === "string" && fromEnv !== "") {
+  if (fromEnv !== null) {
     const salt = randomBytes(16).toString("hex");
     cached = { username, password: fromEnv, salt, hash: hashPassword(fromEnv, salt) };
     /*
@@ -211,10 +264,20 @@ export function prepareCredential(): CredentialSetup {
 }
 
 export type LoginResult =
-  | { ok: true; token: string; username: string; expiresAt: string }
+  | { ok: true; token: string; username: string; roles: Role[]; expiresAt: string }
   | { ok: false; error: string };
 
-type Session = { username: string; expiresAt: number };
+/**
+ * 一个会话。
+ *
+ * 角色记在**会话**里（而不是每次拿账号表现查）：
+ *   - 接口闸门每个请求都要判权限，会话里带着角色就不用反复读账号表；
+ *   - 账号表改了（加了角色 / 减了角色）**要重新登录才生效** —— 这是可接受的，
+ *     而且比"正在操作的人权限突然变了"更好解释。
+ *
+ * `teacherId` 是普通教师账号对应的教师档案 id（"只看自己的课"要用，现在可以留空）。
+ */
+export type Session = { username: string; roles: Role[]; teacherId: string; expiresAt: number };
 
 /** 会话表：令牌 → 会话。放内存，重启即失效（理由见文件头）。 */
 const sessions = new Map<string, Session>();
@@ -228,28 +291,42 @@ function sweep(now: number): void {
 /**
  * 校验账号口令，成功则签发令牌。
  *
- * 失败时**不区分**"账号不存在"与"口令不对"，都回同一句：
+ * 校验交给**账号表**（`accounts.mts`，第 7 步起支持多账号与角色）：
+ * 这里不再比对那条凭证口令 —— 它只在"账号表还不存在"时被用来迁移出第一条账号。
+ *
+ * 失败时**不区分**"账号不存在"与"口令不对"，都回同一句（账号表那边也是同一条规则）：
  * 区分开来等于告诉试探者"这个账号是存在的"。
  */
 export function login(username: string, password: string): LoginResult {
+  /*
+   * 凭证没准备好就拒绝登录。
+   *
+   * 这条守卫留着不是因为"登录要用凭证"（现在用的是账号表），而是因为
+   * `prepareCredential()` 是**服务端启动流程的第一步**：它保证凭证文件存在，
+   * 也就保证了账号表第一次迁移时一定有来源。少了它，一个从没启动过的目录
+   * 会出现"账号表空着、谁也登不进去"的局面。
+   */
   if (cached === null) return { ok: false, error: "服务端尚未准备好凭证，请重启后端。" };
 
   const now = Date.now();
   sweep(now);
 
-  const usernameMatches = username.trim() === cached.username;
-  const passwordMatches = constantTimeEqual(hashPassword(password, cached.salt), cached.hash);
-  if (!usernameMatches || !passwordMatches) {
-    return { ok: false, error: "账号或密码不正确。" };
-  }
+  const matched = loginAccount(username, password);
+  if (!matched.ok) return { ok: false, error: matched.error };
 
   const token = randomBytes(32).toString("hex");
   const expiresAt = now + idleTimeoutMs();
-  sessions.set(token, { username: cached.username, expiresAt });
+  sessions.set(token, {
+    username: matched.username,
+    roles: matched.roles,
+    teacherId: matched.teacherId,
+    expiresAt,
+  });
   return {
     ok: true,
     token,
-    username: cached.username,
+    username: matched.username,
+    roles: matched.roles,
     expiresAt: new Date(expiresAt).toISOString(),
   };
 }
