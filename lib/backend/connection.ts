@@ -209,8 +209,22 @@ export type ConnectionState =
   /** 还没检查过。 */
   | { status: "idle" }
   | { status: "checking" }
-  /** 后端在，但没登录 → 只能确认"服务活着"，数据库细节要登录后才看得到。 */
-  | { status: "ready"; base: string; service: string; db: string; database: null }
+  /**
+   * 后端在、但这台浏览器没能拿到数据库细节 → 只能确认"服务活着"。
+   *
+   * `dbReason` 把"为什么"分开说 —— 原先三种原因都显示成"未登录，数据库细节看不到"，
+   * 而**"会话已失效"（后端重启过）**那种最容易被误解：界面右上角还写着"已登录：admin"，
+   * 状态那行却说你没登录，两边自相矛盾，人只会觉得系统坏了。
+   * 真事：机构在重启后端之后看到这句话来问"为什么说我未登录"。
+   */
+  | {
+      status: "ready";
+      base: string;
+      service: string;
+      db: string;
+      database: null;
+      dbReason: "no-token" | "expired" | "unreachable";
+    }
   /** 后端在且已登录 → 连数据库状态也能报。 */
   | { status: "ok"; base: string; service: string; db: string; database: DatabaseHealth }
   /** 连不上（含"那个地址上不是本系统的后端"）。 */
@@ -238,31 +252,42 @@ export function subscribeConnection(listener: () => void): () => void {
  * `/api/status` 需要令牌；把它放在这里而不是散在组件里，是为了让"数据库是否正常"
  * 只有一个判定处。拿不到就退化成 `ready`（后端在、细节未知），**不猜**。
  */
-async function fetchDatabaseHealth(
-  base: string,
-  token: string | null,
-): Promise<DatabaseHealth | null> {
-  if (token === null) return null;
+type DatabaseProbe =
+  | { ok: true; health: DatabaseHealth }
+  /** 没令牌 = 还没登录（正常状态，不是故障）。 */
+  | { ok: false; reason: "no-token" }
+  /** 令牌被服务端拒了 = **会话已失效**（后端重启过、或闲置过期）→ 需要重新登录。 */
+  | { ok: false; reason: "expired" }
+  /** 请求发不出去 / 超时 / 服务端 5xx → 说"拿不到"，不猜原因。 */
+  | { ok: false; reason: "unreachable" };
+
+async function fetchDatabaseHealth(base: string, token: string | null): Promise<DatabaseProbe> {
+  if (token === null) return { ok: false, reason: "no-token" };
   try {
     const response = await fetch(`${base}/api/status`, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
       cache: "no-store",
     });
-    if (!response.ok) return null;
+    // 401 = 服务端不认这个令牌：会话失效（最常见的原因是后端重启过）
+    if (response.status === 401) return { ok: false, reason: "expired" };
+    if (!response.ok) return { ok: false, reason: "unreachable" };
     const payload = (await response.json()) as {
       schemaVersion?: number;
       counts?: Record<string, number>;
       backup?: { latest?: string | null; latestAt?: string | null };
     };
     return {
-      schemaVersion: Number(payload.schemaVersion ?? 0),
-      counts: payload.counts ?? {},
-      latestBackup: payload.backup?.latest ?? null,
-      latestBackupAt: payload.backup?.latestAt ?? null,
+      ok: true,
+      health: {
+        schemaVersion: Number(payload.schemaVersion ?? 0),
+        counts: payload.counts ?? {},
+        latestBackup: payload.backup?.latest ?? null,
+        latestBackupAt: payload.backup?.latestAt ?? null,
+      },
     };
   } catch {
-    return null;
+    return { ok: false, reason: "unreachable" };
   }
 }
 
@@ -299,9 +324,16 @@ export async function refreshConnection(
   const probed = await probeBackend(base);
   if (probed.ok) {
     const database = await fetchDatabaseHealth(probed.base, options.token ?? null);
-    state = database === null
-      ? { status: "ready", base: probed.base, service: probed.service, db: probed.db, database: null }
-      : { status: "ok", base: probed.base, service: probed.service, db: probed.db, database };
+    state = database.ok
+      ? { status: "ok", base: probed.base, service: probed.service, db: probed.db, database: database.health }
+      : {
+          status: "ready",
+          base: probed.base,
+          service: probed.service,
+          db: probed.db,
+          database: null,
+          dbReason: database.reason,
+        };
     notify();
     return state;
   }
@@ -328,6 +360,13 @@ export function connectionSummary(value: ConnectionState): string {
     case "checking":
       return "后端：检查中…";
     case "ready":
+      /*
+       * 三种原因分开说。原先一律写"未登录" —— 而"会话已失效"那种最误导：
+       * 界面右上角还写着"已登录：admin"，这里却说没登录，人会以为系统坏了
+       * （机构真问过这句话）。现在直接把该做的事说出来。
+       */
+      if (value.dbReason === "expired") return "后端：已连接 · 登录已失效，请重新登录";
+      if (value.dbReason === "unreachable") return "后端：已连接（数据库细节暂时读不到）";
       return "后端：已连接（未登录，数据库细节看不到）";
     case "ok":
       return `后端：已连接 · 数据库 v${value.database.schemaVersion}`;

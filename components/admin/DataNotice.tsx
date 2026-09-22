@@ -33,7 +33,14 @@ export function DataNotice({ onRefresh }: { onRefresh?: () => void }) {
 
   return (
     <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-ink-200 bg-white px-3.5 py-2.5">
-      {state.status === "ok" || state.status === "ready" ? (
+      {state.status === "ready" && state.dbReason === "expired" ? (
+        <p className="min-w-0 text-xs leading-relaxed text-warning-600">
+          <strong className="font-medium">登录已失效</strong>（后端重启过，或闲置超时）：
+          服务端还在，但它已经不认这个令牌了 —— 这一页上的操作会失败。
+          <strong className="font-medium text-ink-700">数据没有丢</strong>，
+          点右上角状态里的「重新登录」再进来即可。
+        </p>
+      ) : state.status === "ok" || state.status === "ready" ? (
         <p className="min-w-0 text-xs leading-relaxed text-ink-500">
           已连接后端（<span className="font-mono text-ink-600">{backendBase()}</span>）：
           数据保存在<strong className="font-medium text-ink-700">服务端数据库</strong>里，

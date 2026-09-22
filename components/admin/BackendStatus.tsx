@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/Button";
-import { readToken } from "@/lib/auth/token";
+import { clearToken, readToken } from "@/lib/auth/token";
 import {
   autoDetectBackend,
   backendBase,
@@ -154,8 +154,36 @@ export function BackendStatus({ compact = false }: { compact?: boolean }) {
                 )}
                 {state.status === "ready" && (
                   <span className="mt-1 block leading-relaxed text-ink-500">
-                    服务在（库文件 <span className="font-mono">{state.db}</span>），
-                    登录后才能看到数据库结构版本与各表条数。
+                    {/*
+                      三种原因分开写。**"登录已失效"要给出下一步**（一个按钮），
+                      而不是只说一句状态 —— 人会卡在"明明登录了却说我未登录"里。
+                    */}
+                    {state.dbReason === "expired" ? (
+                      <>
+                        会话已失效（后端重启过，或闲置超时）—— 服务端已经不认这个令牌了，
+                        因此看不到数据库结构版本与各表条数。
+                        <button
+                          type="button"
+                          onClick={() => {
+                            clearToken();
+                            window.location.assign("/admin/login");
+                          }}
+                          className="ml-1 rounded border border-ink-300 px-2 py-0.5 text-xs text-ink-700 transition-colors hover:border-brand-400 hover:text-brand-700"
+                        >
+                          重新登录
+                        </button>
+                      </>
+                    ) : state.dbReason === "unreachable" ? (
+                      <>
+                        服务在（库文件 <span className="font-mono">{state.db}</span>），
+                        但这次请求没拿到数据库细节（网络或服务端一时的问题）—— 点「重新检查」再试一次。
+                      </>
+                    ) : (
+                      <>
+                        服务在（库文件 <span className="font-mono">{state.db}</span>），
+                        登录后才能看到数据库结构版本与各表条数。
+                      </>
+                    )}
                   </span>
                 )}
               </dd>
