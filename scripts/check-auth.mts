@@ -376,6 +376,56 @@ try {
     const newest = rows.find((row) => row.entity === "学生" && row.action === "新建");
     equal("新建学生留下的日志里操作人就是登录账号", newest?.operator, info.username);
 
+    /*
+     * ── [5.5] 乐观锁的**状态码**：冲突必须是 409，不能混进 400 ────────────────
+     *
+     * `check.mts` 那一节验的是"后提交的人会看到「刚被别人改过」"（两种后端都跑），
+     * 但**状态码**只有在真实 HTTP 上才看得见 —— 内存实现里抛的是异常，没有状态码。
+     *
+     * 为什么值得单独钉一条：400 的意思是"你参数写错了"（改改表单再交就行），
+     * 409 的意思是"这条记录被别人改过了"（该做的是刷新）。两者混在一起，
+     * 前端就只能显示一句"参数不对"，而人看到的是"我什么都没改错啊" ——
+     * 于是开始乱改表单，而真正该做的是刷新。
+     *
+     * 场景就是真的两个客户端：同一个版本号提交两次。
+     */
+    console.log("\n[5.5] 乐观锁冲突回 409（与 400 参数错分开）");
+    const lockTeacher = await call(base, token, "teachers.create", [{
+      name: "认证自检·乐观锁教师", subjects: [], role: "", phone: "", active: true,
+      years: "", summary: "", bio: "", recommendation: "", order: 999,
+      siteVisible: false, origin: "后台", kind: "教师",
+    }]);
+    equal("建一条用于冲突测试的教师", lockTeacher.status, 200);
+    const lockId = (lockTeacher.body.result as { id?: string; version?: number } | undefined)?.id ?? "";
+    const lockVersion = (lockTeacher.body.result as { version?: number } | undefined)?.version ?? 0;
+    equal("新记录带来的版本是 1", lockVersion, 1);
+
+    const firstWrite = await call(base, token, "teachers.update", [lockId, { summary: "甲写的" }, { expectedVersion: 1 }]);
+    equal("第一个客户端带上版本提交：成功（200）", firstWrite.status, 200);
+    equal("写入成功之后版本递增", (firstWrite.body.result as { version?: number } | undefined)?.version, 2);
+
+    // 第二个客户端手上还是第 1 版（他打开表单时读到的）
+    const secondWrite = await call(base, token, "teachers.update", [lockId, { summary: "乙写的" }, { expectedVersion: 1 }]);
+    equal("第二个客户端用同一个版本提交：**409**（不是 400，也不是静默成功）", secondWrite.status, 409);
+    check("409 的文案里说了「刚被别人改过」",
+      String(secondWrite.body.error ?? "").includes("刚被别人改过"), String(secondWrite.body.error ?? ""));
+    const afterConflict = await call(base, token, "teachers.get", [lockId]);
+    equal("被拒的提交没有写进库（甲写的还在）",
+      (afterConflict.body.result as { summary?: string } | undefined)?.summary, "甲写的");
+    equal("被拒也不会推进版本",
+      (afterConflict.body.result as { version?: number } | undefined)?.version, 2);
+
+    // 刷新后再交就能成 —— 这才是"提示刷新"的意义
+    const reloaded = await call(base, token, "teachers.get", [lockId]);
+    const freshVersion = (reloaded.body.result as { version?: number } | undefined)?.version ?? 0;
+    equal("刷新拿到新版本后提交：成功",
+      (await call(base, token, "teachers.update", [lockId, { summary: "乙刷新后写的" }, { expectedVersion: freshVersion }])).status, 200);
+    // 参数错仍然是 400（两种错误不能互相冒充）
+    const anyCourse = ((await call(base, token, "courses.list")).body.result ?? []) as Array<{ id?: string }>;
+    equal("参数错仍然回 400（没被冲突的 409 顶掉）",
+      (await call(base, token, "courses.update", [String(anyCourse[0]?.id ?? ""), { name: "  " }])).status, 400);
+    await call(base, token, "teachers.remove", [lockId]);
+
     console.log("\n[6] 退出登录");
     equal("退出成功", (await raw(base, "/api/logout", { method: "POST", token })).status, 200);
     equal("退出后同一个令牌立刻失效（401）", (await call(base, token, "students.list")).status, 401);

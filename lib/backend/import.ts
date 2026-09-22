@@ -1,4 +1,5 @@
 import { getHomeContent, getTeachersPageFromTemplate } from "@/lib/data/site";
+import { bumpVersion } from "./concurrency";
 import type {
   Classroom,
   Course,
@@ -478,11 +479,11 @@ export type ApplyOutcome = {
 /** 覆盖时**不能动**的字段：结构性或派生的数据，改了就破坏不变式。 */
 const STRUCTURAL_FIELDS: Record<ImportEntity, string[]> = {
   // 报课记录、采集表、科目（由报课推导）都不属于"档案基础字段"
-  students: ["id", "enrollments", "profile", "subjects", "createdAt"],
-  teachers: ["id"],
+  students: ["id", "enrollments", "profile", "subjects", "createdAt", "version"],
+  teachers: ["id", "version"],
   // 可用时段是单独在页面上设的，导入不该把它清掉
-  classrooms: ["id", "availability"],
-  courses: ["id", "createdAt", "origin"],
+  classrooms: ["id", "availability", "version"],
+  courses: ["id", "createdAt", "origin", "version"],
 };
 
 /** 给"保留两份"的第二条生成一个不重名的名字：王老师 → 王老师（2）。 */
@@ -567,6 +568,8 @@ function finalize(entity: ImportEntity, record: Record<string, unknown>): Record
     case "students":
       return {
         name: String(record.name ?? ""),
+        // 新记录从第 1 版开始（乐观锁，见 concurrency.ts）
+        version: 1,
         grade: String(record.grade ?? ""),
         guardian: String(record.guardian ?? ""),
         status: (record.status as string) ?? "在读",
@@ -579,6 +582,7 @@ function finalize(entity: ImportEntity, record: Record<string, unknown>): Record
     case "teachers":
       return {
         name: String(record.name ?? ""),
+        version: 1,
         subjects: (record.subjects as string[]) ?? [],
         role: String(record.role ?? ""),
         phone: String(record.phone ?? ""),
@@ -603,6 +607,7 @@ function finalize(entity: ImportEntity, record: Record<string, unknown>): Record
     case "classrooms":
       return {
         name: String(record.name ?? ""),
+        version: 1,
         kind: (record.kind as string) ?? "上课用教室",
         capacity: Number(record.capacity ?? 0),
         // 时段留空 = 不限（与页面上的语义一致）
@@ -612,6 +617,7 @@ function finalize(entity: ImportEntity, record: Record<string, unknown>): Record
     case "courses":
       return {
         name: String(record.name ?? ""),
+        version: 1,
         category: String(record.category ?? ""),
         forms: (record.forms as string[]) ?? [],
         origin: "后台",
@@ -710,6 +716,15 @@ export function applyImport(
           if (typeof provided === "string" && provided.trim() === "" && field !== "note") continue;
           existing[field] = value;
         }
+        /*
+         * 覆盖也是一次真实写入：把这条记录的版本推进一格。
+         *
+         * 少了这一步，批量导入就成了乐观锁的后门 —— 导完表之后，别人手上还开着的
+         * 表单（读到的版本没变）一保存就会把这次导入的内容静默盖回去，
+         * 而界面上写的是"保存成功"。`version` 已列进 STRUCTURAL_FIELDS，
+         * 因此导入行**不可能**自己传一个版本号进来。见 `lib/backend/concurrency.ts`。
+         */
+        bumpVersion(existing as { version?: number });
         overwritten += 1;
         return;
       }

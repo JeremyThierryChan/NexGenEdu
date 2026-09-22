@@ -37,6 +37,7 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     .teachers.filter((teacher) => teacher.kind === "teacher")
     .map((teacher, index) => ({
       id: `t${index + 1}`,
+      version: 1,
       name: teacher.name,
       subjects: teacher.subjects,
       role: teacher.role,
@@ -60,6 +61,7 @@ export function createSeedDatabase(now: Date = new Date()): Database {
   const classrooms: Classroom[] = [
     {
       id: "c1",
+      version: 1,
       name: "301 教室",
       kind: "上课用教室",
       capacity: 8,
@@ -71,6 +73,7 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     },
     {
       id: "c2",
+      version: 1,
       name: "302 教室",
       kind: "上课用教室",
       capacity: 20,
@@ -81,6 +84,7 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     },
     {
       id: "c3",
+      version: 1,
       name: "自习区",
       kind: "自习室",
       capacity: 6,
@@ -292,6 +296,8 @@ function student(
 ): Student {
   return {
     id,
+    // 夹具是"刚刚建好"的记录，因此与新建同口径：第 1 版
+    version: 1,
     name,
     grade,
     guardian,
@@ -424,7 +430,9 @@ function lesson(
   status: Lesson["status"] = "已排",
 ): Lesson {
   return {
-    id, subject, form, teacherId, classroomId, studentIds, startsAt, durationMinutes, status,
+    id,
+    version: 1,
+    subject, form, teacherId, classroomId, studentIds, startsAt, durationMinutes, status,
     note: "",
     makeupForLessonId: "",
   };

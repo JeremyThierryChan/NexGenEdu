@@ -18,6 +18,12 @@ import { acquireDbLock } from "./db-lock.mts";
 import { createSqliteStore, snapshotSize } from "./kv-store.mts";
 // 伪后端的**同一份实现**：服务端只是换了一个 KeyValueStore，业务口径一行都不用重写
 import { api, __useStoreForTesting } from "../lib/backend/api.ts";
+/*
+ * 版本冲突的类型：接口层要靠**类型**把它翻成 409。
+ * 不按错误文字匹配是有意的（见下面 /api/call 的错误分支）——
+ * 那种做法改一个字就悄悄失效，而这正是"冲突被当成参数错误"的开始。
+ */
+import { VersionConflictError } from "../lib/backend/concurrency.ts";
 import { createEmptyDatabase } from "../lib/backend/initial.ts";
 import { createSeedDatabase } from "../lib/backend/seed.ts";
 import { currentVersion, migrate } from "./migrate.mts";
@@ -1611,6 +1617,23 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
            */
           if (cause instanceof PermissionDenied) {
             send(response, 403, { ok: false, error: cause.message });
+            return;
+          }
+          /*
+           * 版本冲突回 **409**（乐观锁，v17）。三种错误各有各的处理方式，因此不能混：
+           *   - 400 参数错 → 改一改表单再提交（**大概率能成**）；
+           *   - 403 权限不足 → 找管理员开权限（**再试多少次都没用**）；
+           *   - 409 冲突 → 先把这条记录重新读一遍（**刷新后重提交就能成**）。
+           * 把冲突混进 400 的后果很具体：前端只能显示一句"参数不对"，
+           * 而人看到的是"我什么都没改错啊"，于是开始乱改表单 ——
+           * 而真正该做的是刷新。文案与服务端抛出来的**原话**一致（含"刚被别人改过"），
+           * 因此界面上不必再翻译一遍。
+           *
+           * 判定用 `instanceof` 而不是匹配错误文字：文字随时会被改得更啰嗦，
+           * 而"改了文案 → 冲突悄悄退回 400"是没有任何检查会发现的那种退化。
+           */
+          if (cause instanceof VersionConflictError) {
+            send(response, 409, { ok: false, error: cause.message });
             return;
           }
           send(response, 400, { ok: false, error: cause instanceof Error ? cause.message : "调用失败" });

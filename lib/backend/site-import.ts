@@ -24,6 +24,7 @@
  */
 
 import { coursesFromSite } from "./courses";
+import { bumpVersion } from "./concurrency";
 import { getTeachersPageFromTemplate } from "@/lib/data/site";
 import { siteContentFromContent } from "./site-content";
 import type { Course, CourseTag, Database, SiteBand, SiteSubject, Teacher } from "./types";
@@ -129,6 +130,8 @@ export function importSiteContent(
     if (existing === undefined) {
       working.teachers.push({
         id: `t_site_${working.teachers.length + 1}_${Date.now().toString(36)}`,
+        // 新增的教师也是一条新记录：从第 1 版开始（乐观锁，见 concurrency.ts）
+        version: 1,
         name: site.name,
         subjects: site.subjects,
         role: site.role,
@@ -194,6 +197,8 @@ export function importSiteContent(
     }
 
     if (filled.length > 0) {
+      // 补字段／按网站覆盖也是一次真实写入：把这条教师的版本推进一格
+      bumpVersion(existing);
       counts.teachersFilled += 1;
       changes.push(`教师「${site.name}」${overwrite ? "按网站内容更新" : "补上"} ${filled.join(" / ")}`);
     }
@@ -227,6 +232,8 @@ export function importSiteContent(
     }
 
     if (filled.length > 0) {
+      // 同上：课程卡片字段被改过，版本 +1
+      bumpVersion(existing);
       counts.coursesFilled += 1;
       changes.push(`课程「${site.name}」补上 ${filled.join(" / ")}`);
     }

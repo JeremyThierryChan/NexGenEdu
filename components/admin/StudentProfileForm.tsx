@@ -24,6 +24,14 @@ import { cn } from "@/lib/utils/cn";
  *
  * 六节内容较长，因此每一节是可折叠的；心理与情绪健康一节带敏感标记，
  * 默认折叠并提示「仅限指定人员查看」。
+ *
+ * ## 乐观锁（v17）：为什么这里最要紧
+ *
+ * 采集表是**整份覆盖** `student.profile`（不是逐项合并），因此两个人同时填同一张表时，
+ * 后保存的那份会把前一个人填的**整块**盖掉，而且没有任何报错 ——
+ * 症状是"我明明填过，怎么空了"。所以保存时带上**读到的那一版**（`expectedVersion`），
+ * 与库里不一致时服务端会拒绝，界面上把服务端那句话原样显示出来（同一个 `error` 位置，
+ * 不新造弹窗）。
  */
 export function StudentProfileForm({
   student,
@@ -38,6 +46,18 @@ export function StudentProfileForm({
   const [openSections, setOpenSections] = useState<string[]>(["basic"]);
   const [pending, setPending] = useState(false);
   const [savedAt, setSavedAt] = useState("");
+  /*
+   * **打开表单时读到的那一版**。
+   *
+   * 刻意用 state 存下来（而不是提交时读 `student.version`）：`student` 是父组件的 prop，
+   * 父组件刷新列表时会换一个新对象，那时读到的版本已经不是"我手上这份内容"对应的版本了
+   * —— 用新的版本号提交，等于把乐观锁关掉（永远对得上，永远不报冲突）。
+   *
+   * 保存成功后要用**服务端返回的记录**把这里更新掉：否则接着改第二次时，
+   * 手上还是上一版的号，会对着自己的成功保存报一次假冲突。
+   */
+  const [version, setVersion] = useState(student.version);
+  const [error, setError] = useState("");
 
   function setValue(key: string, value: ProfileValue) {
     setProfile((current) => ({ ...current, [key]: value }));
@@ -51,10 +71,24 @@ export function StudentProfileForm({
 
   async function save() {
     setPending(true);
-    await api.students.saveProfile(student.id, profile);
-    setPending(false);
-    setSavedAt(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
-    await onSaved();
+    setError("");
+    try {
+      const saved = await api.students.saveProfile(student.id, profile, {
+        expectedVersion: version,
+      });
+      if (saved !== null) setVersion(saved.version);
+      setSavedAt(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
+      await onSaved();
+    } catch (cause) {
+      /*
+       * 冲突与普通失败走同一个位置：冲突时显示的就是服务端原话
+       * （「…刚被别人改过（当前版本 3，你手上的是 2），请刷新后再提交。」）——
+       * 界面上不重写一遍文案，免得两处说法不一致。
+       */
+      setError(cause instanceof Error ? cause.message : "保存失败，请重试。");
+    } finally {
+      setPending(false);
+    }
   }
 
   return (
@@ -73,6 +107,15 @@ export function StudentProfileForm({
           </Button>
         </div>
       </div>
+
+      {error !== "" && (
+        <p
+          role="alert"
+          className="mx-4 mb-2 rounded-md border border-danger-100 bg-danger-50 px-3 py-2 text-sm text-danger-600"
+        >
+          {error}
+        </p>
+      )}
 
       <div className="divide-y divide-ink-100">
         {PROFILE_SECTIONS.map((section) => {

@@ -23,6 +23,11 @@ import {
 } from "./import";
 import { isWithinAvailability } from "./availability";
 import { CURRENT_VERSION } from "./version";
+import {
+  assertVersion,
+  bumpVersion,
+  type WriteOptions,
+} from "./concurrency";
 import { createRemoteApi, isRemoteMode, remoteBase } from "./remote";
 import { addTransaction, nowIso, reconcileCharge, recordPayment } from "./charges";
 import { enrollmentForLesson, remainingOf, remainingTotal } from "./enrollment";
@@ -142,6 +147,14 @@ import type {
   CourseSiteKind,
 } from "./types";
 
+/*
+ * 冲突错误在这里**对外再导出一次**：界面与将来的调用方只认 `lib/backend/api`
+ * 这一个出口（与 `PricingConfig` / `ExportFormat` 那几个类型的做法一致）。
+ * 服务端自己不从这里拿 —— 它直接 import `concurrency.ts`（少一层间接）。
+ */
+export { VersionConflictError } from "./concurrency";
+export type { WriteOptions } from "./concurrency";
+
 /**
  * 伪后端服务：后台页面的**唯一**数据入口。
  *
@@ -157,7 +170,11 @@ import type {
  *
  * 明确的局限（不是 bug，是「纯前端」的边界）：
  * - 数据在**当前浏览器**里，换设备看不到；清缓存会丢；
- * - 没有并发控制：两个标签页同时写会以最后写入的为准。
+ * - **同一条记录**的并发编辑有乐观锁保护（v17 起记录带 `version`，见
+ *   `lib/backend/concurrency.ts`）：两个人同时改同一条时，后提交的会被**拒绝**并
+ *   提示刷新，而不是静默覆盖先提交的。**跨记录**的并发（"要么全成要么全不成"的
+ *   多表动作）与**跨进程**的并发仍不在范围内（后者由 `server/db-lock.mts`
+ *   的单写者锁拒绝，不是这一层能解决的）。
  */
 
 const STORAGE_KEY = "nexgenedu.admin.db.v1";
@@ -549,6 +566,38 @@ function migrate(db: Database): Database | null {
     db.version = 16;
   }
 
+  if (db.version === 16) {
+    /*
+     * v16 → v17：给五个实体的记录补**记录级版本号** `version`（乐观锁用）。
+     *
+     * ## 为什么默认是 1，而不是"按已有日志推一个更高的数"
+     *
+     * 版本号的含义是「**升级之后**这条记录被写过几次」—— 这是一条**从这一刻开始**的
+     * 计数器，不是对历史的重建。上限只有一个：**猜**。
+     *
+     * 猜高（比如拿操作日志条数当次数）会立刻产生真实故障：机构手上那些"升级前导出的
+     * JSON"里没有版本号，恢复/导入之后与库里的数字对不上，于是**每次保存都报冲突**，
+     * 而人只能一直刷新、永远保存不上 —— 一个假冲突比没有锁还糟，因为它把正常操作也挡了。
+     * 补 1 则保证"升级后第一次保存一定成功"，冲突只在**真的**有人先把这条记录改过之后才出现。
+     *
+     * ## 为什么不做成"缺失就当作不校验"
+     *
+     * 那等于给老数据开了一个永久后门：任何一份没有版本号的记录（老导出文件、
+     * 手改过的夹具）都可以被静默覆盖，而这正是这次要修的问题。
+     * 因此这里是**补齐**而不是留空 —— 与 v13/v14 那几个字段的纪律一致：补默认值，不猜内容。
+     *
+     * 只补这五类实体：信息采集表（学生）、课程表单、教师表单、教室表单、排课表单
+     * 都是"先读出来 → 人改 → 整份提交"，因此都需要这层保护；
+     * 其余实体为什么没有，写在 `types.ts` 里 `Student.version` 那一段的说明上。
+     */
+    db.students = db.students.map((student) => ({ ...student, version: student.version ?? 1 }));
+    db.teachers = db.teachers.map((teacher) => ({ ...teacher, version: teacher.version ?? 1 }));
+    db.classrooms = db.classrooms.map((room) => ({ ...room, version: room.version ?? 1 }));
+    db.lessons = db.lessons.map((lesson) => ({ ...lesson, version: lesson.version ?? 1 }));
+    db.courses = db.courses.map((course) => ({ ...course, version: course.version ?? 1 }));
+    db.version = 17;
+  }
+
   return db.version === CURRENT_VERSION ? db : null;
 }
 
@@ -624,6 +673,27 @@ function writeLog(
   if (db.logs.length > LOG_LIMIT) {
     db.logs.splice(0, db.logs.length - LOG_LIMIT);
   }
+}
+
+/**
+ * 学生这条记录被写过（报课 / 续费 / 退课 / 调整课时 / 收款…）：把版本推进一格。
+ *
+ * ## 为什么业务动作也要推版本，而不是只推"表单类的写"
+ *
+ * `version` 是**整条记录**的"代"（generation），不是字段级的。业务动作改的是这条记录
+ * 的一部分（课时、金额），而所有写入口都是"整份覆盖 / 整份 patch"—— 服务端**判断不出**
+ * 这次提交会不会盖掉对方改的那一部分，因此只能按"整条记录已经变了"来对待。
+ *
+ * 换个做法（给每个字段再挂一个版本号）能少报几次冲突，代价是：字段清单要手工维护、
+ * 加一个字段就要记得加一次，漏了就是静默失效 —— 那种"看着有锁、其实漏了一类写入"
+ * 的状态比偶发一次冲突危险得多。
+ *
+ * 一次用户动作只推一格（而不是每个字段各推一格）：版本号要能回答"这条记录被**用过**几次"，
+ * 一次报课在数据里写了四五处，但人只做了一件事。
+ */
+function touchStudent(db: Database, studentId: string): void {
+  const student = db.students.find((item) => item.id === studentId);
+  if (student !== undefined) bumpVersion(student);
 }
 
 /** 导入日志的一句话摘要。 */
@@ -797,6 +867,97 @@ function collection<T extends { id: string }>(
   };
 }
 
+/**
+ * **带乐观锁的通用集合**：与 `collection` 同一套取数组 → 改 → 存的写法，
+ * 但记录带 `version`，并且 `update` 多接一个可选的 `expectedVersion`。
+ *
+ * ## 为什么另起一个工厂，而不是给 `collection` 加一个开关
+ *
+ * `create` / `update` 的**签名**是不一样的：带版本的实体里 `version` 与 `id` 同级
+ * 由服务端管（新建入参必须排除它，否则"这条记录从第 7 版开始"这种数据迟早会出现）。
+ * 用一个 `versioned?: boolean` 开关的话，返回类型会随这个布尔值变化 ——
+ * 要么写成重载、要么写成一堆条件类型，读的人得先解一遍类型才敢改。
+ * 两个工厂各自 30 行、一眼看得懂，比一个"聪明"的工厂便宜。
+ *
+ * `list` / `get` / `remove` 直接**复用** `collection` 的实现（`...base` 的三个方法）：
+ * 这三件事与版本号无关，再写一遍就是两处要同步维护的口径。
+ */
+function versionedCollection<T extends { id: string; version: number }>(
+  pick: (db: Database) => T[],
+  prefix: string,
+  label = "",
+) {
+  const base = collection<T>(pick, prefix, label);
+  return {
+    list: base.list,
+    get: base.get,
+    remove: base.remove,
+
+    async create(input: Omit<T, "id" | "version">): Promise<T> {
+      await delay();
+      const db = load();
+      // 新记录一律从第 1 版开始（与迁移给老数据补的口径一致：见 migrate 的 v16 → v17）
+      const created = { ...input, id: nextId(prefix), version: 1 } as T;
+      pick(db).push(created);
+      if (label !== "") {
+        writeLog(db, {
+          entity: label,
+          action: "新建",
+          targetId: created.id,
+          summary: `新建${label}${describeTarget(created)}`,
+        });
+      }
+      persist(db);
+      return clone(created);
+    },
+
+    /**
+     * 改一条记录（字段级 patch），可选带上"我读到的是哪一版"。
+     *
+     * 先比版本、再记日志、最后 +1：
+     *   - 版本不一致 → 抛 `VersionConflictError`，**什么都不写**（连日志都不写：
+     *     "有人试图覆盖别人的修改"不是数据改动，不该混进操作日志）；
+     *   - 一致或没传 → 正常写入，并把版本推进一格。
+     */
+    async update(
+      id: string,
+      patch: Partial<Omit<T, "id" | "version">>,
+      options: WriteOptions = {},
+    ): Promise<T | null> {
+      await delay();
+      const db = load();
+      const list = pick(db);
+      const index = list.findIndex((item) => item.id === id);
+      if (index === -1) return null;
+
+      const current = list[index]!;
+      assertVersion(current, options.expectedVersion, `${label}${describeTarget(current)}`);
+
+      /*
+       * `version: current.version` 是**故意显式盖回去**的：
+       * 类型上 patch 已经排除了 `version`，但**运行时没有类型**（`/api/call` 的 args
+       * 原样传给服务层；自己人调用时也可能把一整个对象当 patch 传进来 ——
+       * TS 对"多余的属性"只在字面量上检查，`api.courses.update(id, wholeCourse)` 是能编过的）。
+       * 不盖回去就等于"调用方可以自己定版本号"，乐观锁当场变成摆设。
+       */
+      const updated = { ...current, ...patch, version: current.version } as T;
+      bumpVersion(updated);
+      list[index] = updated;
+      if (label !== "") {
+        writeLog(db, {
+          entity: label,
+          action: "修改",
+          targetId: id,
+          // 记下改了哪些字段：只说「修改了学生」等于没说
+          summary: `修改${label}${describeTarget(updated)}（${Object.keys(patch).join("、")}）`,
+        });
+      }
+      persist(db);
+      return clone(updated);
+    },
+  };
+}
+
 /** 日期键：YYYY-MM-DD（本地时区），用于按天分组。 */
 export function dateKey(value: string | Date): string {
   const date = typeof value === "string" ? new Date(value) : value;
@@ -805,7 +966,12 @@ export function dateKey(value: string | Date): string {
   return `${date.getFullYear()}-${month}-${day}`;
 }
 
-const studentCollection = collection<Student>((db) => db.students, "s", "学生");
+/*
+ * 学生与排课走**带乐观锁**的集合（v17 起）：信息采集表是整份覆盖 `profile`，
+ * 排课表单是整份覆盖"这节课排给谁/什么时候"，两类都是最不能被静默盖掉的东西。
+ * 咨询线索仍是普通集合：它是"还没落定的口头咨询"，改它不会毁掉别人的一份档案。
+ */
+const studentCollection = versionedCollection<Student>((db) => db.students, "s", "学生");
 const inquiryCollection = collection<Inquiry>((db) => db.inquiries, "iq", "咨询");
 
 /** 按周批量排课的入参（见 lib/backend/recurrence.ts 与 lessons.planSeries）。 */
@@ -1143,7 +1309,7 @@ function planSeries(db: Database, input: SeriesInput): SeriesPlan {
  * 单独存一份，是为了在 `lessons` 组里**覆盖 create**（排课要过"课时够不够"这一关），
  * 而覆盖之后仍然能调用通用实现（不像直接展开那样丢掉原方法）。
  */
-const lessonCollection = collection<Lesson>((db) => db.lessons, "l", "排课");
+const lessonCollection = versionedCollection<Lesson>((db) => db.lessons, "l", "排课");
 
 /**
  * 把「建档时一并报课」的宽松入参补全成一条正式的报课入参。
@@ -1319,6 +1485,7 @@ const localApi = {
       const student: Student = {
         ...rest,
         id: nextId("s"),
+        version: 1,
         subjects: subjects ?? [],
         profile: input.profile ?? {},
         enrollments: [],
@@ -1362,6 +1529,7 @@ const localApi = {
       const enrollment = addEnrollment(db, student, input);
 
       syncSubjects(student);
+      touchStudent(db, student.id);
       writeLog(db, {
         entity: "报课",
         action: "报课",
@@ -1508,11 +1676,21 @@ const localApi = {
           }
           lesson.form = next.form;
           lesson.teacherId = next.teacherId;
+          /*
+           * 跟着改掉的课节**也是被写过的记录**：把它们的版本推进一格。
+           *
+           * 少了这一步就会出现一个很隐蔽的静默覆盖：李四排课页上开着这节课的表单
+           * （读到的版本还是旧的），张三改报课把这位老师换掉了，李四一保存 ——
+           * 教师又变回去了，而他的表单上写的是"保存成功"。推一格之后李四会看到
+           * "刚被别人改过，请刷新"，正好是我们要的效果。
+           */
+          bumpVersion(lesson);
           updatedLessons.push({ id: lesson.id, startsAt: lesson.startsAt });
         }
       }
 
       syncSubjects(student);
+      touchStudent(db, student.id);
       writeLog(db, {
         entity: "报课",
         action: "改报课",
@@ -1579,6 +1757,7 @@ const localApi = {
       }
 
       syncSubjects(student);
+      touchStudent(db, student.id);
       writeLog(db, {
         entity: "报课",
         action: "续费",
@@ -1647,6 +1826,7 @@ const localApi = {
       }
 
       syncSubjects(student);
+      touchStudent(db, student.id);
       writeLog(db, {
         entity: "报课",
         action: "退课",
@@ -1700,20 +1880,37 @@ const localApi = {
       }
 
       syncSubjects(student);
+      touchStudent(db, student.id);
       persist(db);
       return clone(student);
     },
 
-    /** 保存信息采集表（整份覆盖；调用方传完整对象）。 */
+    /**
+     * 保存信息采集表（整份覆盖；调用方传完整对象）。
+     *
+     * ## 这里是乐观锁最要紧的一处
+     *
+     * `student.profile` 是**整份替换**（不是逐字段合并）：两个人同时填同一张采集表时，
+     * 后保存的那份会把前一个人填的**整块**盖掉 —— 症状是"我明明填过，怎么空了"，
+     * 而且没有任何报错。因此这里比课程/教师表单更需要 `expectedVersion`。
+     *
+     * 参数刻意是**可选**的（`options?: WriteOptions`）：老调用方（脚本、验收、自检、
+     * 将来别的内部入口）一行都不用改，行为与今天完全一样；界面上的表单一定传。
+     */
     async saveProfile(
       id: string,
       profile: StudentProfile,
+      options: WriteOptions = {},
     ): Promise<Student | null> {
       await delay();
       const db = load();
       const student = db.students.find((item) => item.id === id);
       if (student === undefined) return null;
+
+      assertVersion(student, options.expectedVersion, `学生「${student.name}」`);
+
       student.profile = profile;
+      bumpVersion(student);
       writeLog(db, {
         entity: "学生",
         action: "填写采集表",
@@ -1748,7 +1945,7 @@ const localApi = {
    * 注意边界：这里加课程**不会**让宣传网站上多出一张卡片 —— 网站是静态内容。
    */
   courses: {
-    ...collection<Course>((db) => db.courses, "course", "课程"),
+    ...versionedCollection<Course>((db) => db.courses, "course", "课程"),
 
     /**
      * 新建课程（先校验再落库）。
@@ -1756,14 +1953,15 @@ const localApi = {
      * 课程名是引用键（排课、教师科目、报课记录都按名字记），重名必须拦住：
      * 「数学」有两门课时，课时扣到哪一门就说不清了。
      */
-    async create(input: Omit<Course, "id">): Promise<Course> {
+    async create(input: Omit<Course, "id" | "version">): Promise<Course> {
       await delay();
       const db = load();
       const normalized = normalizeCourse(input);
       const problems = validateCourse(normalized, db.courses);
       if (problems.length > 0) throw new Error(problems.join("；"));
 
-      const created: Course = { ...normalized, id: nextId("course") };
+      // 新记录从第 1 版开始；normalizeCourse 对没带版本的入参也会补 1，这里显式写出来
+      const created: Course = { ...normalized, id: nextId("course"), version: 1 };
       db.courses.push(created);
       syncPricingWithCourses(db);
       writeLog(db, {
@@ -1776,18 +1974,40 @@ const localApi = {
       return clone(created);
     },
 
-    /** 修改课程：改名同样要防重名；网站来源的课程也能改状态 / 班型 / 分类 / 备注 / 网站卡片字段。 */
-    async update(id: string, patch: Partial<Omit<Course, "id">>): Promise<Course | null> {
+    /**
+     * 修改课程：改名同样要防重名；网站来源的课程也能改状态 / 班型 / 分类 / 备注 / 网站卡片字段。
+     *
+     * 课程表单是整份提交（名字 / 分类 / 班型 / 状态 / 备注 / 网站卡片字段一起交上来），
+     * 因此这里接 `expectedVersion`：两个人同时编辑同一门课，后提交的会被拒绝并要求刷新。
+     *
+     * **先比版本、再校验参数**：版本不一致时，手上这份表单本来就是过期的 ——
+     * 这时候去报"课程名重复"很可能只是过期的错觉（对方刚改了名字），
+     * 让人先刷新再说，比让他去改一个不存在的重名问题有用。
+     */
+    async update(
+      id: string,
+      patch: Partial<Omit<Course, "id" | "version">>,
+      options: WriteOptions = {},
+    ): Promise<Course | null> {
       await delay();
       const db = load();
       const target = db.courses.find((item) => item.id === id);
       if (target === undefined) return null;
 
-      const next = normalizeCourse({ ...target, ...patch });
+      assertVersion(target, options.expectedVersion, `课程「${target.name}」`);
+
+      /*
+       * `version: target.version`：与通用集合那一处同一个理由 ——
+       * patch 在运行时不保证没有 version（类型只在字面量上挡得住多余的属性）。
+       * normalizeCourse 会保留传进去的版本，因此必须在**进它之前**把版本钉住。
+       */
+      const next = normalizeCourse({ ...target, ...patch, version: target.version });
       const problems = validateCourse(next, db.courses, id);
       if (problems.length > 0) throw new Error(problems.join("；"));
 
       Object.assign(target, next);
+      // next 是从 target 展开来的，version 还是旧值；写入成功之后才推一格
+      bumpVersion(target);
       syncPricingWithCourses(db);
       writeLog(db, {
         entity: "课程",
@@ -1859,8 +2079,14 @@ const localApi = {
     },
   },
 
+  /*
+   * 教师与教室走**带乐观锁**的集合：两边的表单都是"读出来 → 人改 → 整份提交"，
+   * 教师表单一次交上来十来个字段（资料 / 网站展示 / 顺序 / 可带科目…），
+   * 教室表单连**可用时段**一起交上来 —— 而可用时段直接决定排课冲突判定，
+   * 被别人静默盖掉就会出现"排了节不该排的课，却没人知道为什么"。
+   */
   teachers: {
-    ...collection<Teacher>((db) => db.teachers, "t", "教师"),
+    ...versionedCollection<Teacher>((db) => db.teachers, "t", "教师"),
     /**
      * 在职**教师**，排课下拉用。
      *
@@ -1876,7 +2102,7 @@ const localApi = {
     },
   },
 
-  classrooms: collection<Classroom>((db) => db.classrooms, "c", "教室"),
+  classrooms: versionedCollection<Classroom>((db) => db.classrooms, "c", "教室"),
 
   /** 收款流水（钱的账本）。 */
   payments: {
@@ -1925,6 +2151,8 @@ const localApi = {
         amount: round2(Math.max(0, input.amount)),
         at: nowIso(),
       });
+      // 收款会改报课记录的"实收累计"，因此这条学生记录也被写过（见 touchStudent 的说明）
+      touchStudent(db, student.id);
       persist(db);
       return clone(created);
     },
@@ -2103,6 +2331,14 @@ const localApi = {
       const lesson = db.lessons.find((item) => item.id === input.lessonId);
       if (lesson !== undefined && lesson.status === "已上") {
         reconcileCharge(db, lesson, input.studentId);
+        /*
+         * 出勤改动会连着改课时账（上面那一步），因此这条学生记录也被写过。
+         * 这里**不去看** reconcileCharge 的结果就一律推一格：它的返回值只说明
+         * "这次扣没扣"，而我们要回答的是"这条记录变没变"—— 用调用方的判断去决定要不要推，
+         * 漏一处就是一类静默失效（正是这次要修的问题）。多推一格的代价仅仅是
+         * "别人手上那份学生档案显示过期"，而那本来就该让人刷新。
+         */
+        touchStudent(db, input.studentId);
       }
 
       writeLog(db, {
@@ -2207,12 +2443,21 @@ const localApi = {
      * 退课时撤销的是「这节课对应的那些上课流水」（reversedAt 打上时间），
      * 而不是简单地把 usedLessons 减 1：一张报课记录可能被这节课扣过不止一次
      * （同一节课被反复标记的边界情形），按流水撤销才不会多退少退。
+     *
+     * `expectedVersion`（v17）：排课表单整份覆盖时间 / 教师 / 教室 / 学生，
+     * 而"这节课排给谁、什么时候"是最不能被人静默改掉的东西 —— 后提交的会被拒绝。
      */
-    async update(id: string, patch: Partial<Omit<Lesson, "id">>): Promise<Lesson | null> {
+    async update(
+      id: string,
+      patch: Partial<Omit<Lesson, "id" | "version">>,
+      options: WriteOptions = {},
+    ): Promise<Lesson | null> {
       await delay();
       const db = load();
       const lesson = db.lessons.find((item) => item.id === id);
       if (lesson === undefined) return null;
+
+      assertVersion(lesson, options.expectedVersion, `排课「${lesson.subject}」`);
 
       const wasCompleted = lesson.status === "已上";
       const becomesNotCompleted =
@@ -2243,9 +2488,21 @@ const localApi = {
         }
       }
 
-      Object.assign(lesson, patch);
+      /*
+       * `{ version: currentVersion }`：patch 里若夹带了 version（运行时不看类型）就用记录
+       * 自己的值盖回去 —— 否则"客户端可以自己定版本号"，乐观锁就成了摆设。
+       */
+      const currentVersion = lesson.version;
+      Object.assign(lesson, patch, { version: currentVersion });
+      // 改课就是一次写入：推进这条课节的版本（别人手上那份排课表单要过期）
+      bumpVersion(lesson);
 
       if (wasCompleted && becomesNotCompleted) {
+        /*
+         * 撤销「已上」会把课时退回去 —— 这一步改的是**学生**那条记录的课时账，
+         * 因此顺手把那些学生的版本也推进一格（与 markCompleted 同一个道理）。
+         */
+        const refunded = new Set<string>();
         for (const transaction of db.transactions) {
           if (
             transaction.lessonId !== id ||
@@ -2260,8 +2517,10 @@ const localApi = {
             .find((item) => item.id === transaction.enrollmentId);
           if (enrollment !== undefined) {
             enrollment.usedLessons = Math.max(0, enrollment.usedLessons - 1);
+            refunded.add(transaction.studentId);
           }
         }
+        for (const studentId of refunded) touchStudent(db, studentId);
       }
 
       /*
@@ -2332,6 +2591,7 @@ const localApi = {
         }
         const lesson: Lesson = {
           id: nextId("l"),
+          version: 1,
           subject: input.subject,
           form: input.form,
           teacherId: input.teacherId,
@@ -2437,6 +2697,17 @@ const localApi = {
       }
 
       if (!alreadyCompleted) {
+        /*
+         * 「标记已上」也是一次写入：课节的状态被改了、学生的课时账也被改了。
+         * 两边的版本号都要推进 —— 否则"老师刚标了已上、另一个人那边的排课表单
+         * 还开着旧的版本"，那个人一保存就会把这节课悄悄改回"已排"，课时也跟着退回来。
+         *
+         * 只在**真的写了**（`!alreadyCompleted`）时推：重复点"标记已上"是幂等的、
+         * 什么都没改写，推版本会让别人白白看到一次冲突。
+         */
+        bumpVersion(lesson);
+        for (const item of deducted) touchStudent(db, item.studentId);
+
         writeLog(db, {
           entity: "排课",
           action: "标记已上",
@@ -2494,6 +2765,7 @@ const localApi = {
 
       const created: Lesson = {
         id: nextId("l"),
+        version: 1,
         subject: original.subject,
         form: original.form,
         teacherId: input.teacherId !== "" ? input.teacherId : original.teacherId,
@@ -3241,6 +3513,7 @@ const localApi = {
         );
         const lesson: Lesson = {
           id: nextId("l"),
+          version: 1,
           subject: inquiry.subject,
           form: "",
           teacherId: input.teacherId,

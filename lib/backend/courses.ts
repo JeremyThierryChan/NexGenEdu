@@ -22,6 +22,7 @@
  */
 
 import { getCourseColumnsFromTemplate, getCoursesPageFromTemplate } from "@/lib/data/site";
+import { versionOf } from "./concurrency";
 import type { Course, CourseOrigin, CourseTag } from "./types";
 
 /** 下拉里的一项。 */
@@ -80,6 +81,8 @@ export function coursesFromSite(): Course[] {
           const tags: CourseTag[] = card.tags.map((tag) => ({ label: tag.label, target: tag.target }));
           courses.push({
             id: `course-site-${card.path}`,
+            // 网站同步进来的课程也是一条新记录：从第 1 版开始（乐观锁，见 concurrency.ts）
+            version: 1,
             name: card.title,
             category: column.title,
             forms: card.forms,
@@ -196,11 +199,17 @@ export function summarizeCourses(courses: Course[]): CourseSummary {
  *   - `path` 空串 = 网站上不展示这张卡片；
  *   - `siteKind` 记「不展示」= 只用于排课/记课时；
  *   - `order` 999 = 排在最后（比 0 更安全：0 会排到最前面，抢掉别人定的顺序）。
+ *
+ * v17 起顺带兜 `version`：**它必须在这里兜住**，因为 `{...target, ...patch}` 这种写法
+ * 会让"没带版本的入参"把记录上的版本号覆盖成 `undefined` —— 那就等于把这一条记录的
+ * 乐观锁悄悄关掉了（比较变成 `undefined !== 5`，每次保存都报假冲突）。
+ * 用 `versionOf` 归一（缺失/非法一律当 1），口径与迁移、与集合的 update 完全一致。
  */
-export function normalizeCourse(input: Omit<Course, "id"> | Course): Course {
+export function normalizeCourse(input: Omit<Course, "id" | "version"> | Course): Course {
   const course = input as Course;
   return {
     ...course,
+    version: versionOf(course),
     path: typeof course.path === "string" ? course.path.trim() : "",
     subgroup: typeof course.subgroup === "string" ? course.subgroup.trim() : "",
     tags: Array.isArray(course.tags)

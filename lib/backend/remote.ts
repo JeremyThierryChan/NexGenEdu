@@ -130,6 +130,14 @@ async function callRemote(base: string, method: string, args: unknown[]): Promis
   } catch {
     throw new Error(`后端返回的不是 JSON（HTTP ${response.status}）：${base} 在跑吗？`);
   }
+  /*
+   * 失败一律包成**带服务端原文**的 Error —— 包括乐观锁冲突（服务端回 409，
+   * 文案是「…刚被别人改过（当前版本 X，你手上的是 Y），请刷新后再提交。」）。
+   *
+   * 刻意**不**在这一层把 409 翻译成别的类型或别的说法：服务端那句提示已经写全了
+   * 「发生了什么 + 该怎么办」，界面把它原样显示出来最好（见各表单的 catch）。
+   * 多一层翻译只会多一处会说错话的地方，而且会导致"内存后端与真实后端提示不一样"。
+   */
   if (payload.ok !== true) throw new Error(payload.error ?? `调用 ${method} 失败`);
   return payload.result;
 }

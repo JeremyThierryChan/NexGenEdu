@@ -1467,6 +1467,150 @@ eq("老档案读不到的新字段返回空串", profileText(seeded[1]!.profile,
 eq("老档案读不到的新多选字段返回空数组", profileList(seeded[1]!.profile, "不存在的字段"), []);
 
 /*
+ * ── 记录级乐观锁（v17）：同一条记录的并发编辑不能静默覆盖 ──────────────
+ *
+ * ## 这一节为什么要跑在**两种后端**上
+ *
+ * 内存实现里抛的是 `VersionConflictError`（有类型、有 `currentVersion`），
+ * 而走 HTTP 时前端拿到的是**服务端返回的那句话**（`remote.ts` 把它包成一个普通 Error，
+ * 状态码 409 由 `server/index.mts` 给出）。因此断言只认**文案**：
+ * 「刚被别人改过」+ 当前版本号。这样同一份断言在两边都成立，
+ * 也顺带钉住了"两边的提示说法不许分叉"。
+ *
+ * ## 场景就是真实场景：两个客户端读到同一版
+ *
+ * 甲、乙各打开一次表单（都读到第 1 版）→ 甲先提交成功 → 乙后提交**必须被拒**。
+ * 下面四条依次是：① 先交成功；② 同一版本再交被拒；③ 拿到新版本后能交上；
+ * ④ **不传版本仍然能用**（老调用方不受影响）。
+ */
+{
+  const lockTeacher = await api.teachers.create({
+    name: "自检·乐观锁教师", subjects: [], role: "", phone: "", active: true,
+    years: "", summary: "", bio: "", recommendation: "", order: 999,
+    siteVisible: false, origin: "后台", kind: "教师",
+  });
+  eq("新建记录的版本从 1 开始", lockTeacher.version, 1);
+
+  // 甲与乙手里的表单：都读到第 1 版
+  const readByA = (await api.teachers.get(lockTeacher.id))!;
+  const readByB = (await api.teachers.get(lockTeacher.id))!;
+  eq("两个客户端读到的是同一个版本", [readByA.version, readByB.version], [1, 1]);
+
+  const savedByA = await api.teachers.update(
+    lockTeacher.id,
+    { summary: "甲写的简介" },
+    { expectedVersion: readByA.version },
+  );
+  eq("① 先提交的那个成功", savedByA?.summary, "甲写的简介");
+  eq("① 写入成功之后版本递增", savedByA?.version, 2);
+
+  let conflictText = "";
+  try {
+    await api.teachers.update(
+      lockTeacher.id,
+      { summary: "乙写的简介（基于他看到的第一版）" },
+      { expectedVersion: readByB.version },
+    );
+  } catch (cause) {
+    conflictText = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("② 后提交的会被拒绝（不是静默覆盖）", conflictText !== "", "没有被拒绝：第二个人把第一个人改的盖掉了");
+  ok("② 错误里说清了「刚被别人改过」", conflictText.includes("刚被别人改过"), conflictText);
+  ok("② 错误里给出了当前版本号（人才知道该刷新）", conflictText.includes("2"), conflictText);
+  const afterConflict = (await api.teachers.get(lockTeacher.id))!;
+  eq("② 被拒的提交一个字都没写进去", afterConflict.summary, "甲写的简介");
+  eq("② 被拒也不会推进版本", afterConflict.version, 2);
+
+  // 乙刷新：重新读到第 2 版之后再提交
+  const fresh = (await api.teachers.get(lockTeacher.id))!;
+  const savedByB = await api.teachers.update(
+    lockTeacher.id,
+    { summary: "乙刷新后写的简介" },
+    { expectedVersion: fresh.version },
+  );
+  eq("③ 刷新之后提交成功", savedByB?.summary, "乙刷新后写的简介");
+  eq("③ 版本继续递增", savedByB?.version, 3);
+
+  // 老调用方：不传 expectedVersion 时行为与今天完全一样（不校验，但版本照样推进）
+  const legacyWrite = await api.teachers.update(lockTeacher.id, { role: "老调用方" });
+  eq("④ 不传版本仍然能写（老调用方不受影响）", legacyWrite?.role, "老调用方");
+  eq("④ 不传版本也照样推进版本（版本＝这条记录被写过几次）", legacyWrite?.version, 4);
+
+  // 信息采集表是**整份覆盖 profile**，因此它是最要紧的一处，单独走一遍同样的四步
+  const lockStudent = await api.students.create({
+    name: "自检·乐观锁学生", grade: "初二", guardian: "", status: "在读", note: "", profile: {},
+  });
+  const profileA = (await api.students.get(lockStudent.id))!;
+  const profileB = (await api.students.get(lockStudent.id))!;
+
+  const profileSavedFirst = await api.students.saveProfile(
+    lockStudent.id,
+    { gender: "男", school: "甲填的学校" },
+    { expectedVersion: profileA.version },
+  );
+  eq("采集表：先保存的成功", profileText(profileSavedFirst!.profile, "school"), "甲填的学校");
+  eq("采集表：版本递增", profileSavedFirst?.version, 2);
+
+  let profileConflict = "";
+  try {
+    await api.students.saveProfile(
+      lockStudent.id,
+      { gender: "女" },
+      { expectedVersion: profileB.version },
+    );
+  } catch (cause) {
+    profileConflict = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("采集表：整份覆盖被挡住（否则甲填的会整块消失）",
+    profileConflict.includes("刚被别人改过"), profileConflict);
+  const profileAfter = (await api.students.get(lockStudent.id))!;
+  eq("采集表：甲的填写还在（没有被盖掉）", profileText(profileAfter.profile, "school"), "甲填的学校");
+  eq("采集表：版本没被推进", profileAfter.version, 2);
+
+  // 不带版本的老调用方（验收脚本、内部业务动作）照旧能用
+  const profileLegacy = await api.students.saveProfile(lockStudent.id, { gender: "男" });
+  ok("采集表：不传版本仍然能保存", profileLegacy !== null);
+  eq("采集表：不传版本也推进版本", profileLegacy?.version, 3);
+
+  /*
+   * 排课表单同样受保护：它整份覆盖「这节课排给谁 / 什么时候」。
+   * 这条走的是**手写的** lessons.update（它还带课时复核与撤销逻辑），
+   * 因此和通用集合那两条不是同一条代码路径，值得单独跑一遍。
+   */
+  const lockLesson = (await api.lessons.list())[0];
+  ok("夹具里至少有一节课（排课用例要在真实记录上跑）", lockLesson !== undefined);
+  if (lockLesson !== undefined) {
+    const lessonA = (await api.lessons.get(lockLesson.id))!;
+    const lessonB = (await api.lessons.get(lockLesson.id))!;
+    const lessonSaved = await api.lessons.update(
+      lockLesson.id,
+      { note: "甲改的备注" },
+      { expectedVersion: lessonA.version },
+    );
+    eq("排课：先改的那个成功", lessonSaved?.note, "甲改的备注");
+    let lessonConflict = "";
+    try {
+      await api.lessons.update(
+        lockLesson.id,
+        { note: "乙改的备注" },
+        { expectedVersion: lessonB.version },
+      );
+    } catch (cause) {
+      lessonConflict = cause instanceof Error ? cause.message : String(cause);
+    }
+    ok("排课：后改的被挡住（不会把别人的改动盖掉）",
+      lessonConflict.includes("刚被别人改过"), lessonConflict);
+    eq("排课：甲改的备注还在", (await api.lessons.get(lockLesson.id))?.note, "甲改的备注");
+  }
+
+  // 收尾：删掉这两条自检记录，别影响后面的断言
+  await api.students.remove(lockStudent.id);
+  await api.teachers.remove(lockTeacher.id);
+  eq("自检记录已清理（学生）", await api.students.get(lockStudent.id), null);
+  eq("自检记录已清理（教师）", await api.teachers.get(lockTeacher.id), null);
+}
+
+/*
  * 清空（`api.reset()`）的语义：**回到空库**，而不是"灌回示例数据"。
  *
  * 早期它灌回 8 位示例学生 —— 那在真实使用下是个陷阱：机构点一下就把自己录的数据
@@ -2027,6 +2171,76 @@ if (hiddenTeacher !== undefined) {
   eq("导入不会把机构关掉展示的教师翻回来（内容文件里没有他）",
     (await api.teachers.get(handmade.id))?.siteVisible, false);
   await api.teachers.remove(handmade.id);
+}
+await api.restoreBackup();
+
+/*
+ * v16 → v17：五个实体补**记录级版本号**（乐观锁）。
+ *
+ * ## 这一节真正在守的是什么
+ *
+ * 不是"迁移加了字段"，而是**补的那个值必须是 1**。
+ *
+ * 如果迁移去"猜"一个更高的数（比如按操作日志条数），机构手上那些升级前导出的 JSON
+ * 在导入/恢复之后就会与库里的数字对不上 —— 于是**每次保存都报冲突**，
+ * 人只能一遍遍刷新、永远保存不上。一个假冲突比没有锁糟得多：它把正常操作也挡了。
+ * 因此下面除了"每条记录都有 version"，还专门验一条：
+ * **升级之后第一次保存一定成功**（不传版本、以及带上 expectedVersion=1 都要成）。
+ *
+ * 夹具照旧用"示例数据降级"（v13/v14/v15 那几个用例的做法）：手写一份 v16 要凑齐
+ * 全部的表，少一张就会在迁移链的下一次写入上崩掉。**五个实体都要删掉 version 字段**
+ * 并把库版本改成 16 —— 漏删一个，"迁移补 1"这条就变成空转了。
+ */
+{
+  const v16Db = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+    students: Array<Record<string, unknown>>;
+    teachers: Array<Record<string, unknown>>;
+    classrooms: Array<Record<string, unknown>>;
+    lessons: Array<Record<string, unknown>>;
+    courses: Array<Record<string, unknown>>;
+    version: number;
+  };
+  v16Db.version = 16;
+  const versionedEntities = ["students", "teachers", "classrooms", "lessons", "courses"] as const;
+  for (const key of versionedEntities) {
+    v16Db[key] = v16Db[key].map((row) => {
+      const copy = { ...row };
+      delete copy.version;
+      return copy;
+    });
+  }
+  eq("降级夹具：五个实体都没有 version（确实是 v16 的样子）",
+    versionedEntities.every((key) => v16Db[key].every((row) => !("version" in row))), true);
+
+  eq("v16 文件可以升级导入", (await api.importDatabase(JSON.stringify(v16Db))).ok, true);
+
+  const upgradedTo17 = await api.exportDatabase();
+  const versionRows: Array<{ version: unknown }> = [
+    ...upgradedTo17.students, ...upgradedTo17.teachers, ...upgradedTo17.classrooms,
+    ...upgradedTo17.lessons, ...upgradedTo17.courses,
+  ];
+  ok("五个实体都还是「有内容」的（否则下面的断言等于在空数组上通过）",
+    versionedEntities.every((key) => v16Db[key].length > 0), String(versionedEntities.map((key) => v16Db[key].length)));
+  eq("每条记录都补上了 version", versionRows.every((row) => typeof row.version === "number"), true);
+  eq("补的默认值是 1（不是猜出来的更大的数）",
+    [...new Set(versionRows.map((row) => row.version))], [1]);
+
+  /*
+   * 默认值选 1 的**全部意义**就在这两条：升级之后第一次保存必须成功 ——
+   * 不带版本的老调用方要能写，带上"我读到第 1 版"的表单也要能写。
+   */
+  const upgradedTeacher = (await api.teachers.list())[0]!;
+  eq("升级后的记录读到的是第 1 版", upgradedTeacher.version, 1);
+  const legacySave = await api.teachers.update(upgradedTeacher.id, { role: "升级后第一次保存" });
+  eq("升级后：不传版本的保存成功（老调用方不受影响）", legacySave?.role, "升级后第一次保存");
+  const formSave = await api.teachers.update(
+    (await api.teachers.list())[1]!.id,
+    { role: "升级后表单保存" },
+    // 表单读到的是第 1 版 —— 必须对得上，否则升级当天所有人都会被假冲突挡住
+    { expectedVersion: 1 },
+  );
+  eq("升级后：带上「我读到第 1 版」的表单保存成功（不会出现假冲突）",
+    formSave?.role, "升级后表单保存");
 }
 await api.restoreBackup();
 

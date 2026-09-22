@@ -38,6 +38,14 @@ export function StudentForm({
   const [note, setNote] = useState(student?.note ?? "");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  /*
+   * 乐观锁（v17）：打开表单时读到的那一版。
+   *
+   * 存成 state 而不是提交时读 `student.version`：父组件的列表刷新之后那个 prop
+   * 已经是新对象了，用它提交等于把锁关掉（版本永远对得上）。保存成功后用服务端
+   * 返回的记录更新它，免得下一次保存对着自己的成功报一次假冲突。
+   */
+  const [version, setVersion] = useState(student?.version ?? 1);
 
   /*
    * 报课（只有新建时用）：勾选的科目 + 每门各自的节数。
@@ -127,10 +135,19 @@ export function StudentForm({
     };
 
     try {
-      if (editing) await api.students.update(student.id, payload);
-      else await api.students.create({ ...payload, profile: {}, enrollments });
+      if (editing) {
+        /*
+         * 整份提交（姓名 / 年级 / 家长 / 状态 / 备注），因此带上读到的版本：
+         * 别人先改过这位学生时服务端会拒绝，而不是静默盖掉对方改的。
+         * （信息采集表整份覆盖 `profile`，走的是另一个入口 `saveProfile`，那里同样带版本。）
+         */
+        const saved = await api.students.update(student.id, payload, { expectedVersion: version });
+        if (saved !== null) setVersion(saved.version);
+      } else {
+        await api.students.create({ ...payload, profile: {}, enrollments });
+      }
     } catch (cause) {
-      // 服务端拒绝的理由（例如同一门科目报了两次）要原样显示出来
+      // 服务端拒绝的理由（同一门科目报了两次、或这条记录刚被别人改过）原样显示出来
       setPending(false);
       setError(cause instanceof Error ? cause.message : String(cause));
       return;

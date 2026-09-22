@@ -49,6 +49,13 @@ export function LessonForm({
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  /*
+   * 乐观锁（v17）：打开这节课的表单时读到的版本。
+   *
+   * 存成 state 而不是提交时读 `lesson.version`：父组件的列表刷新之后那个 prop
+   * 已经是新对象了（老师刚标了"已上"、或别人改过时间），用它提交等于把锁关掉。
+   */
+  const [version, setVersion] = useState(lesson?.version ?? 1);
 
   const initialDate = useMemo(() => {
     const source = lesson !== undefined ? new Date(lesson.startsAt) : defaultDate;
@@ -204,15 +211,28 @@ export function LessonForm({
     setPending(true);
     setError("");
 
-    if (editing) {
-      // 编辑：id 不进 patch（服务端以路径参数为准）
-      const patch: Partial<LessonInput> = { ...input };
-      delete patch.id;
-      await api.lessons.update(lesson.id, patch);
-    } else {
-      const payload: Partial<LessonInput> = { ...input };
-      delete payload.id;
-      await api.lessons.create(payload as Omit<LessonInput, "id">);
+    try {
+      if (editing) {
+        // 编辑：id 不进 patch（服务端以路径参数为准）
+        const patch: Partial<LessonInput> = { ...input };
+        delete patch.id;
+        /*
+         * 带上读到的版本（乐观锁，v17）：这节课可能刚被标成「已上」、或被别人挪了时间，
+         * 那时服务端会拒绝（409），界面上把服务端原话显示在下面同一个 error 位置 ——
+         * 而不是让"保存成功"背后把对方改的东西悄悄盖掉。
+         */
+        const saved = await api.lessons.update(lesson.id, patch, { expectedVersion: version });
+        if (saved !== null) setVersion(saved.version);
+      } else {
+        const payload: Partial<LessonInput> = { ...input };
+        delete payload.id;
+        await api.lessons.create(payload as Omit<LessonInput, "id">);
+      }
+    } catch (cause) {
+      // 冲突（409）与课时不足、参数错都在这里显示服务端原话
+      setError(cause instanceof Error ? cause.message : "保存失败，请重试。");
+      setPending(false);
+      return;
     }
 
     setPending(false);

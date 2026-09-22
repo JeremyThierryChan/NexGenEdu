@@ -188,7 +188,13 @@ export default function AdminCoursesPage() {
             : `已添加课程「${payload.name}」，并会在网站上以「${siteKind}」出现（连上后端构站时才生效）。`,
         );
       } else {
-        await api.courses.update(editing.id, payload);
+        /*
+         * 带上**打开编辑时读到的那一版**（乐观锁，v17）：两个人同时改同一门课时，
+         * 后提交的会被服务端拒绝，而不是把对方改的一整份静默盖掉。
+         * 冲突时 `cause.message` 就是服务端原话（含"刚被别人改过"），
+         * 由下面同一个 `setError` 显示 —— 界面上不另造一套提示。
+         */
+        await api.courses.update(editing.id, payload, { expectedVersion: editing.version });
         setMessage(`已保存「${payload.name}」。`);
       }
       resetForm();

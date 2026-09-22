@@ -28,6 +28,14 @@ export type CourseStatus = (typeof COURSE_STATUSES)[number];
 export type Course = {
   /** id：网站课程用 `course-site-<卡片路径>`（稳定，重复同步不会重复添加）。 */
   id: string;
+  /**
+   * 记录级版本号（v17 起）：初始 1，**每写一次 +1**，用于同一条记录的乐观锁。
+   *
+   * 概念、为什么是乐观锁而不是悲观锁、以及"不传 expectedVersion 也 +1"的取舍，
+   * 全部写在 `lib/backend/concurrency.ts` 的文件头与 `bumpVersion` 的注释里 ——
+   * 这一层只声明字段，不重复一遍理由（口径只留一份）。
+   */
+  version: number;
   /** 课程名（唯一）：排课科目、教师可带科目、报课科目都用这个名字。 */
   name: string;
   /** 分类：网站栏目名，或后台自定义（如「兴趣才艺」）。 */
@@ -202,6 +210,29 @@ export type SiteBand = {
 /** 学生档案。 */
 export type Student = {
   id: string;
+  /**
+   * 记录级版本号（v17 起）：口径与取舍见 `lib/backend/concurrency.ts`。
+   *
+   * ## 哪些实体有它、哪些没有（以及为什么）
+   *
+   * 判据是「这条记录会不会被一个**先读出来 → 人改 → 整份提交**的表单写」：
+   *
+   * | 实体 | 有版本？ | 为什么 |
+   * | --- | --- | --- |
+   * | `Student` | ✅ | 信息采集表**整份覆盖** `profile`（后交的把前一个人填的整块盖掉）、学生档案表单整份提交 |
+   * | `Teacher` | ✅ | 教师表单一次交上来十来个字段（资料 / 网站展示 / 顺序 / 可带科目） |
+   * | `Course` | ✅ | 课程表单整份提交（名字 / 分类 / 班型 / 状态 / 网站卡片字段） |
+   * | `Classroom` | ✅ | 教室表单连**可用时段**一起交 —— 而它直接决定排课冲突判定 |
+   * | `Lesson` | ✅ | 排课表单整份覆盖时间 / 教师 / 教室 / 学生 |
+   * | `Enrollment` | ❌（见下） | 它是 `Student.enrollments` 里的**数组元素**，位置靠 `id` 在数组里现找；而且真正被整份覆盖的表单是"学生"这条记录本身 —— **学生版本号已经覆盖它了**（报课 / 续费 / 退课 / 调整都会推学生的版本）。给它单独加版本号，就要在每条写入口同时维护两个版本号，多一处会对不上的口径 |
+   * | `LessonRecord` | ❌ | 按「课节 + 学生」upsert，没有"读出来改再整份交"的长时间编辑；重复保存就是覆盖（本来就是最后填写的人说了算） |
+   * | `HomeworkRecord` / `Assessment` | ❌ | 按次追加的记录（一次作业 / 一次测评），页面是"再记一条"而不是"改这一条" |
+   * | `Payment` / `LessonTransaction` | ❌ | **账本**：只追加、只能整条撤销（`reversedAt`），不允许改写已发生的钱与课时 |
+   * | `Inquiry` | ❌ | 咨询线索是"还没落定的口头咨询"，改它不会毁掉别人一份已成立的档案；判定与安排走的是业务动作而不是整份覆盖表单 |
+   * | `OperationLog` | ❌ | 只追加的审计记录 |
+   * | `pricing` / `siteContent` | ❌ **已知缺口** | 它们是**单份配置**（不是记录集合），同样有"两个人同时改价格"的风险，但给它们加版本号要单独一套（配置没有 `id`、也不是数组里的一条），因此这一轮**没做**。边界写在 `docs/后端开发方案.md` §7 的边界表里，不假装已经盖住 |
+   */
+  version: number;
   name: string;
   /** 年级，例如「初二」。 */
   grade: string;
@@ -409,6 +440,8 @@ export type TeacherKind = "教师" | "AI";
 
 export type Teacher = {
   id: string;
+  /** 记录级版本号（v17 起）：教师表单整份覆盖这条记录，因此必须受乐观锁保护。 */
+  version: number;
   name: string;
   /** 可带科目，与课程页的科目叫法保持一致。 */
   subjects: string[];
@@ -486,6 +519,8 @@ export type ClassroomAvailability = {
 /** 教室 / 场地。 */
 export type Classroom = {
   id: string;
+  /** 记录级版本号（v17 起）：教室表单整份覆盖（含可用时段），改动会影响排课冲突判定。 */
+  version: number;
   /** 名称，例如「301 教室」。 */
   name: string;
   /** 用途：上课用教室 / 自习室。 */
@@ -504,6 +539,11 @@ export type LessonStatus = (typeof LESSON_STATUSES)[number];
 /** 一节排好的课。 */
 export type Lesson = {
   id: string;
+  /**
+   * 记录级版本号（v17 起）：排课表单整份覆盖时间 / 教师 / 教室 / 学生，
+   * 而"这节课到底排给谁"正是最不能被人静默改掉的东西。
+   */
+  version: number;
   /** 科目，例如「初中数学」。 */
   subject: string;
   /** 班型，例如「一对一定制课」。 */
@@ -755,14 +795,20 @@ export type NewStudentEnrollment = {
  *
  * `enrollments` 是**建档时一并报课**（见 `NewStudentEnrollment`）：
  * 传了就顺手把报课记录建好（一次落盘、一条日志），不传就是只建档。
+ *
+ * `version` 与 `id` 同级**由服务端管**（新建一律从 1 开始），调用方传什么都不作数 ——
+ * 与 id 同理：让调用方填版本号，就会出现"第一条记录从 37 开始"这种没人解释得清的数据。
  */
-export type NewStudent = Omit<Student, "id" | "createdAt" | "enrollments" | "subjects"> & {
+export type NewStudent = Omit<
+  Student,
+  "id" | "createdAt" | "enrollments" | "subjects" | "version"
+> & {
   subjects?: string[];
   enrollments?: NewStudentEnrollment[];
 };
-export type NewTeacher = Omit<Teacher, "id">;
-export type NewClassroom = Omit<Classroom, "id">;
-export type NewLesson = Omit<Lesson, "id">;
+export type NewTeacher = Omit<Teacher, "id" | "version">;
+export type NewClassroom = Omit<Classroom, "id" | "version">;
+export type NewLesson = Omit<Lesson, "id" | "version">;
 
 import type { StudentProfile } from "./student-profile";
 

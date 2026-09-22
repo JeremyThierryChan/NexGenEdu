@@ -343,6 +343,15 @@ function TeacherForm({
   const [kind, setKind] = useState<string>(teacher?.kind ?? "教师");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  /*
+   * 乐观锁（v17）：**打开表单时读到的那一版**。
+   *
+   * 为什么存成 state、而不是提交时读 `teacher.version`：这个 `teacher` 是父组件
+   * 从列表里查出来的（`teachers.find(...)`），列表一刷新它就是个新对象 ——
+   * 那时读到的版本已经不是"我这份表单内容"对应的版本了，用它提交等于把锁关掉。
+   * 保存成功后用服务端返回的记录把这里更新掉，免得下一次保存对着自己的成功报冲突。
+   */
+  const [version, setVersion] = useState(teacher?.version ?? 1);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -372,8 +381,23 @@ function TeacherForm({
       origin: teacher?.origin ?? ("后台" as const),
     };
 
-    if (editing) await api.teachers.update(teacher.id, payload);
-    else await api.teachers.create(payload);
+    try {
+      if (editing) {
+        /*
+         * 教师表单是整份提交（十来个字段一起交上来），因此带上读到的版本：
+         * 别人先改过同一位教师时，服务端会拒绝（409），而不是把对方改的盖掉。
+         * 冲突文案就是服务端原话，由下面同一个 error 位置显示。
+         */
+        const saved = await api.teachers.update(teacher.id, payload, { expectedVersion: version });
+        if (saved !== null) setVersion(saved.version);
+      } else {
+        await api.teachers.create(payload);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "保存失败。");
+      setPending(false);
+      return;
+    }
 
     setPending(false);
     await onSaved();

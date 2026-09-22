@@ -351,6 +351,12 @@ function ClassroomForm({
   );
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  /*
+   * 乐观锁（v17）：打开表单时读到的那一版。存成 state 而不是提交时读
+   * `classroom.version` —— 父组件的列表一刷新，那个 prop 就是新对象了，
+   * 用新版本提交等于把锁关掉（永远对得上）。保存成功后用返回的记录更新它。
+   */
+  const [version, setVersion] = useState(classroom?.version ?? 1);
 
   function addRow() {
     setRows((current) => [
@@ -399,8 +405,24 @@ function ClassroomForm({
       note: note.trim(),
     };
 
-    if (editing) await api.classrooms.update(classroom.id, payload);
-    else await api.classrooms.create(payload);
+    try {
+      if (editing) {
+        /*
+         * 整份提交（连**可用时段**一起交上来），而可用时段直接决定排课冲突判定：
+         * 被别人静默盖掉就会出现"排了一节本该排不进去的课"。因此带上读到的版本，
+         * 冲突时把服务端原话显示在下面同一个 error 位置。
+         */
+        const saved = await api.classrooms.update(classroom.id, payload, { expectedVersion: version });
+        if (saved !== null) setVersion(saved.version);
+      } else {
+        await api.classrooms.create(payload);
+      }
+    } catch (cause) {
+      // 冲突（409）与参数错（400）都在这里显示服务端原话，不另造一套提示
+      setError(cause instanceof Error ? cause.message : "保存失败，请重试。");
+      setPending(false);
+      return;
+    }
 
     setPending(false);
     await onSaved();
