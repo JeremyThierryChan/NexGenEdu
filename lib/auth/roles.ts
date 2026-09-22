@@ -198,6 +198,244 @@ export function canAccess(roles: readonly Role[], allowed: readonly Role[]): boo
   return roles.some((role) => allowed.includes(role));
 }
 
+/* ── 行级范围（Phase B）：普通教师只看自己的课与自己学生的课时余额 ────────────────
+ *
+ * ## 这一层与上面那一层的分工
+ *
+ * 上半部分是**方法级**归属（"这件事归谁做"）：不满足就 403（`allowedRolesForMethod`）。
+ * 这一部分是**行级**范围（"这件事里你只看得到哪几行"）：满足归属之后，
+ * 普通教师仍然只能看到**自己带的课**与**自己课上的学生**。
+ *
+ * 两层都判定在服务端（`server/index.mts` 的 `permissionError` 与 `lib/backend/api.ts`
+ * 各读一次这里的规则），因此"哪件事归谁""哪一行归谁"这两份口径都只有一处定义。
+ *
+ * ## 判定规则（写死的三条，机构已确认）
+ *
+ * ① **只有"当前身份恰好是普通教师"才启用范围**（`isPlainTeacher`）：
+ *    一个账号可以兼任多个角色（机构确认④），兼职时按更高角色看 ——
+ *    兼任财务的教师要看全部钱的账，兼任技术管理员的校长更是什么都要管。
+ *    实现上是"角色集合恰好只含普通教师"，而不是"含普通教师就限"。
+ *
+ * ② **账号没绑 `teacherId` → 范围是空的**（登录成功但什么都看不到）。
+ *    为什么选"空范围"而不是"拒绝启动/拒绝登录"：这是**数据配置**问题，不是身份问题 ——
+ *    拒绝登录会让那位老师在机构现场彻底用不了系统（连"这节课是谁上的"都查不到），
+ *    而机构加账号时漏填一个字段是必然会发生的（账号表是手写的）。
+ *    空范围是"宁可少给"的正确方向：不会多给一行数据，而且提示写在登录响应 / 会话里
+ *    （`scopeWarning`）说清了"为什么什么都看不到、该去哪里补"，人一看就知道怎么修。
+ *    这条提示也写进了 docs/使用手册.md 的账号那一节。
+ *
+ * ③ **"自己的学生" = 在我的课里出现过的学生**（`lessons.teacherId === 我`，
+ *    排除已取消的课；见 `lib/backend/api.ts` 的 `visibleStudentIds`）。
+ *    刻意不做"报课记录里指定了这位教师"那种更宽的口径：一节我带的课上就有这个学生，
+ *    我却看不到他的课时余额，老师的日常（家长问"还剩几节"）就断了；
+ *    反过来把"只是报课时指定了我、但课都不是我上"的学生也算进来，才是多给。
+ *
+ * ## 默认关门，显式放行
+ *
+ * 规则表（`TEACHER_SCOPE_RULES`）里**没登记**的方法，对普通教师**一律拒绝**
+ * （见 `teacherScopeDenial`）。这条默认值是这个文件里最重要的约定：
+ * 角色表是"读宽写严"的（`crud` / `query` 里的只读方法默认四类角色都能用），
+ * 于是**新增一个读接口时它会自动对教师开放** —— 如果范围那一层是"默认放行、逐个加过滤"，
+ * 那么"教师能读到全校学生的接口"会随着每次加接口再出现一次，而且没人会发现。
+ * 写成默认关门之后，新增接口的后果是"教师一点都调不到，于是有人去登记它"，
+ * 这正是我们要的那种默认值。`scripts/check.mts` 里有一条断言盯着它：
+ * **角色上允许普通教师的每个方法，都必须在这里登记**，漏一个就红。
+ */
+
+/** 一次会话的行级范围（服务端每请求按会话设置，见 `api.setScope`）。 */
+export type SessionScope = {
+  /** `"all"` = 不受行级范围限制；`"own"` = 只看 `teacherId` 名下的课与学生。 */
+  kind: "all" | "own";
+  /** `kind === "own"` 时的教师档案 id；空串表示"账号没绑教师档案"→ 范围为空。 */
+  teacherId: string;
+  /** 说清"为什么这个范围不正常"的一句话（空串 = 正常）；服务端把它放进登录响应与会话。 */
+  warning: string;
+};
+
+/** 不受限制的范围（技术管理员 / 财务管理员 / 招生老师 / 兼任多角色的账号）。 */
+export const SCOPE_ALL: SessionScope = { kind: "all", teacherId: "", warning: "" };
+
+/** 教师账号没填 `teacherId` 时的提示（放登录响应与会话里，界面直接显示）。 */
+export const EMPTY_SCOPE_WARNING =
+  "这个账号是普通教师，但账号里没填 teacherId（要填教师档案的 id，不是姓名），" +
+  "因此你的范围是空的：登录后看不到任何学生与排课。" +
+  "请让技术管理员在 accounts.json 里给这条账号补上 teacherId，然后重启后端。";
+
+/**
+ * 这个账号是不是"**只有**普通教师这一个角色"。
+ *
+ * 判据刻意是 `every`（而不是 `includes`）：兼任多角色的账号不受行级范围限制 ——
+ * 机构确认过"一个账号能兼任多个角色"，给了更高角色就按更高角色看。
+ */
+export function isPlainTeacher(roles: readonly Role[]): boolean {
+  return roles.length > 0 && roles.every((role) => role === "普通教师");
+}
+
+/**
+ * 由**账号**（角色 + teacherId）算出这次会话的行级范围。
+ *
+ * 服务端用它（`requireAuth` 里按会话设置），前端算不了也不需要算 ——
+ * 范围是服务端的事，前端说了不算（与角色同一条纪律）。
+ */
+export function scopeForAccount(roles: readonly Role[], teacherId: string): SessionScope {
+  if (!isPlainTeacher(roles)) return SCOPE_ALL;
+  const id = teacherId.trim();
+  return { kind: "own", teacherId: id, warning: id === "" ? EMPTY_SCOPE_WARNING : "" };
+}
+
+/**
+ * 普通教师能调到的方法 → 范围处理方式。
+ *
+ * 七种取值分别对应服务层里**七种不同的做法**（不是七种措辞）：
+ *   - `global`    ：与"我的课 / 我的学生"无关的数据（教师、教室、课程库、网站公开内容）→ 原样返回；
+ *   - `lessons`   ：只返回**我带的课**（含按课查的课堂记录）；
+ *   - `students`  ：只返回**我的学生**那条线的东西（学生档案、他们的课时流水、课堂记录、作业、测评），
+ *                   并且**剥掉金额字段**（见 api.ts 的 hideStudentMoney）；
+ *   - `aggregate` ：按我的口径**重算**的看板（今日概览 / 统计：只算我的课、我的学生）；
+ *   - `search`    ：全局搜索：学生与排课只搜我的，教师 / 教室 / 课程照旧；
+ *   - `teach`     ：教学**写动作**（标记已上 / 课堂记录 / 阶段测评 / 补课）——
+ *                   目标必须在我名下，否则当作"这条记录不存在"；
+ *   - `hidden`    ：教师看不到的整块业务（**钱**、待跟进、排课、课程库写入）→ **明确拒绝**。
+ *
+ * ## 口径（服务端与文档里都写这一句）
+ *
+ *   - **行级越界 → 看不到**：读接口给空集 / `null`，写动作按"这条记录不存在"处理，
+ *     一律**不报 403** —— "这个学生不是你的"与"这件事不归你"是两件事，
+ *     用 403 会让人以为要找管理员开权限，实际要找的是"这门课是不是你带"；
+ *     而且 403 本身就是一句"存在但不是你的"的信息泄漏。
+ *   - **方法级没登记 / 标了 `hidden` → 403 明确拒绝**：
+ *     那才是"这件事不归你"。这条边界是**可枚举的**（就是下表里标了 hidden 的那些），
+ *     所以不会出现"同一个人一会儿 403 一会儿空列表"那种说不清的行为。
+ */
+export type TeacherScopeRule =
+  | "global"
+  | "lessons"
+  | "students"
+  | "aggregate"
+  | "search"
+  | "teach"
+  | "hidden";
+
+export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
+  /*
+   * 参考数据：与"我的课 / 我的学生"无关，教师本来就要用
+   * （排课下拉要教师列表、日历要教室、报课要科目），而且不含学生 / 金额信息。
+   * 教师 / 教室页对普通教师本来就是"只读"（见 PAGE_ACCESS 的注释）。
+   */
+  "teachers.list": "global",
+  "teachers.get": "global",
+  "teachers.listActive": "global",
+  "classrooms.list": "global",
+  "classrooms.get": "global",
+  "courses.list": "global",
+  "courses.get": "global",
+  "courses.options": "global",
+  "courses.summary": "global",
+  "site.publicContent": "global",
+
+  /* 我的课：列表、单条、按日期 / 区间 / 教室 / 学生 / 教师取 */
+  "lessons.list": "lessons",
+  "lessons.get": "lessons",
+  "lessons.listByDate": "lessons",
+  "lessons.listBetween": "lessons",
+  "lessons.listByClassroom": "lessons",
+  "lessons.listByStudent": "lessons",
+  "lessons.listByTeacher": "lessons",
+  "lessons.pendingMakeups": "lessons",
+  "lessonRecords.list": "lessons",
+  "lessonRecords.get": "lessons",
+  "lessonRecords.listByLesson": "lessons",
+  "lessonRecords.listByStudent": "students",
+
+  /* 我的学生：档案、课时流水，以及只挂在某个学生身上的记录 */
+  "students.list": "students",
+  "students.get": "students",
+  "students.search": "students",
+  "transactions.listByStudent": "students",
+  "transactions.listByEnrollment": "students",
+  "homework.list": "students",
+  "homework.get": "students",
+  "homework.listByStudent": "students",
+  "assessments.list": "students",
+  "assessments.get": "students",
+  "assessments.listByStudent": "students",
+
+  /* 看板：按我的口径重算，而不是"过滤掉别人的行" */
+  "today": "aggregate",
+  "stats": "aggregate",
+  "search": "search",
+
+  /* 教学写动作：目标必须在我名下 */
+  "lessons.markCompleted": "teach",
+  "lessons.createMakeup": "teach",
+  "lessonRecords.save": "teach",
+  "assessments.add": "teach",
+
+  /*
+   * 教师看不到的整块业务（→ 403）。逐条理由：
+   *   - 收款 / 财务汇总 / 欠费：**钱**。使用手册的角色表写着"教师看不到档案里的钱"，
+   *     机构确认的边界也只要"课时余额"这一个数字（③）；
+   *   - 待跟进：PAGE_ACCESS 里这一页本来就没给普通教师（那是招生 / 财务的跟进口径：
+   *     欠费催缴、成交跟进，混进教师的后台只会多出一堆不归他管的事）；
+   *   - 排课（预检 / 批量 / 调课建议 / 冲突检查）：教师不带排课这件事（PAGE_ACCESS 里
+   *     "课程安排"那几行的写动作归招生与技术），而且冲突结论里会点名**别的教师与别的学生**
+   *     （"和 X 老师的那节课撞了"）—— 那正是行级范围要挡住的东西；
+   *   - 课程库写入：教师对课程库只读（使用手册的角色表），
+   *     这条在角色表里原先漏了（`courses.syncFromSite` 被归进了 actions 分组），
+   *     范围层按"默认关门"把它关掉。
+   */
+  "payments.list": "hidden",
+  "payments.get": "hidden",
+  "payments.listByStudent": "hidden",
+  "payments.listByEnrollment": "hidden",
+  "payments.listBetween": "hidden",
+  "finance": "hidden",
+  "outstandingByStudent": "hidden",
+  "followups": "hidden",
+  "lessons.findConflicts": "hidden",
+  "lessons.planSeries": "hidden",
+  "lessons.createSeries": "hidden",
+  "lessons.suggestMoves": "hidden",
+  "courses.syncFromSite": "hidden",
+};
+
+/**
+ * 这个方法对普通教师怎么处理；返回 `null` 表示**没登记** ——
+ * 调用方必须按**关门**处理（与 `allowedRolesForMethod` 的 `null` 同一个约定）。
+ */
+export function teacherScopeRule(method: string): TeacherScopeRule | null {
+  return TEACHER_SCOPE_RULES[method] ?? null;
+}
+
+/**
+ * 普通教师这一次调用**该不该被拒**：`null` = 放行（行级过滤在服务层做）；字符串 = 拒绝（403）。
+ *
+ * 两道门都只经过 `permissionError`（`server/index.mts`），因此这一条判定也只在这一处生效。
+ * 注意判定**只看角色**，不看 teacherId：没绑 teacherId 的教师账号不是"被拒"，
+ * 而是"能进来、但什么都看不到"（见文件头的取舍 ②）。
+ */
+export function teacherScopeDenial(method: string, roles: readonly Role[]): string | null {
+  if (!isPlainTeacher(roles)) return null;
+
+  const rule = teacherScopeRule(method);
+  if (rule === null) {
+    return (
+      `这个接口没有登记「普通教师」的范围处理：${method}（一律拒绝）。` +
+      "请在 lib/auth/roles.ts 的 TEACHER_SCOPE_RULES 里说明它对教师是哪一类：" +
+      "「与我的课 / 我的学生无关」「只看我的课 / 我的学生」「只写我名下的」「教师看不到」。" +
+      "没登记的接口默认关门 —— 否则「新增一个读接口就顺便对全校学生开放」会一次次重演。"
+    );
+  }
+  if (rule === "hidden") {
+    return (
+      `这件事不归普通教师：${method}。` +
+      "教师能看的是自己的课、自己学生的课时余额（以及排课要用的教师 / 教室 / 课程）。" +
+      "钱、待跟进与排课不在其中 —— 分工见 docs/使用手册.md 的「谁能做什么」。"
+    );
+  }
+  return null;
+}
+
 /** 这个账号能进哪些页面（权限落地后，导航按它过滤）。 */
 export function visiblePages(roles: readonly Role[]): string[] {
   return Object.entries(PAGE_ACCESS)

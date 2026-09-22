@@ -263,8 +263,22 @@ export function prepareCredential(): CredentialSetup {
   };
 }
 
+/**
+ * 登录结果。
+ *
+ * `teacherId`（Phase B）：普通教师账号对应的教师档案 id，**行级范围**要用它
+ * （服务端在登录响应里按它算 `scopeWarning`，会话也带着它）。它必须回给调用方 ——
+ * 服务端只有拿到它才能算出"这位老师能看到什么"，而会话对象是在这个模块内部建的。
+ */
 export type LoginResult =
-  | { ok: true; token: string; username: string; roles: Role[]; expiresAt: string }
+  | {
+      ok: true;
+      token: string;
+      username: string;
+      roles: Role[];
+      teacherId: string;
+      expiresAt: string;
+    }
   | { ok: false; error: string };
 
 /**
@@ -327,6 +341,7 @@ export function login(username: string, password: string): LoginResult {
     token,
     username: matched.username,
     roles: matched.roles,
+    teacherId: matched.teacherId,
     expiresAt: new Date(expiresAt).toISOString(),
   };
 }

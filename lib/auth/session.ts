@@ -42,6 +42,15 @@ export type Session = {
    * 前端藏起来只是体验：直接调接口一样会被服务端拒。
    */
   roles: Role[];
+  /**
+   * 行级范围不正常的提示（Phase B；空串 = 一切正常）。
+   *
+   * 服务端在登录响应与 `/api/session` 里都回它，内容是"这个账号的范围为什么是空的、
+   * 该去哪里补"（普通教师账号没填 / 填错了 `teacherId` 时会出现）。
+   * 界面把它显示在后台顶部 —— 否则那位老师看到的是一个**空后台**，
+   * 而"账号少填了一个字段"这件事没有任何地方会告诉他。
+   */
+  scopeWarning: string;
   /** 登录时间（ISO）。服务端目前只回账号，因此这里是空串。 */
   loginAt: string;
 };
@@ -124,11 +133,25 @@ export async function checkSession(): Promise<SessionCheck> {
     ok?: boolean;
     username?: string;
     roles?: unknown;
+    scopeWarning?: unknown;
   };
   if (payload.ok !== true || typeof payload.username !== "string") {
     return { session: null, reason: "unreachable", detail: "服务端返回的会话格式不认识。" };
   }
-  return { session: { username: payload.username, roles: readRoles(payload.roles), loginAt: "" }, reason: "ok" };
+  return {
+    session: {
+      username: payload.username,
+      roles: readRoles(payload.roles),
+      /*
+       * 范围提示只认**字符串**：老服务端（还没有行级范围）不回这个字段，
+       * 那时按"没有提示"处理 —— 与 readRoles 的兜底方向一致
+       * （升级服务端忘了升级前端时，表现应该是"和以前一样"，而不是弹出假警报）。
+       */
+      scopeWarning: typeof payload.scopeWarning === "string" ? payload.scopeWarning : "",
+      loginAt: "",
+    },
+    reason: "ok",
+  };
 }
 
 /**

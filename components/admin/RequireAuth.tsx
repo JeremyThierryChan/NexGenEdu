@@ -51,8 +51,16 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
       if (cancelled) return;
 
       if (check.session !== null) {
-        // 会话里带着角色（一个账号可能兼多个）：界面按它决定显示哪些入口
-        setAuth({ username: check.session.username, roles: check.session.roles });
+        /*
+         * 会话里带着角色（一个账号可能兼多个）：界面按它决定显示哪些入口。
+         * 也带着**范围提示**（Phase B）：普通教师账号没填 / 填错 teacherId 时，
+         * 服务端那边范围是空的，界面靠这句话说清"为什么你什么都看不到"。
+         */
+        setAuth({
+          username: check.session.username,
+          roles: check.session.roles,
+          scopeWarning: check.session.scopeWarning,
+        });
         setState("authed");
         return;
       }

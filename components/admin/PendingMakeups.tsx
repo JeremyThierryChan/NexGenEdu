@@ -179,6 +179,9 @@ function MakeupForm({
         note: "",
         makeupForLessonId: original.id,
       })
+      // 同上：普通教师拿不到冲突结论（服务端拒绝，理由见 docs/后台API约定.md §三），
+      // 当作"没有提示"处理，别让失败冒成未处理的 Promise 错误
+      .catch(() => null)
       .then((report) => {
         if (!cancelled) setConflicts(report);
       });

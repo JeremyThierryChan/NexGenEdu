@@ -21,6 +21,14 @@ import { ROLES, type Role } from "@/lib/auth/roles";
 export type AuthState = {
   username: string;
   roles: Role[];
+  /**
+   * 行级范围不正常的提示（空串 = 正常；Phase B）。
+   *
+   * 服务端在登录响应与 `/api/session` 里都给这一句：普通教师账号没填 / 填错了
+   * `teacherId` 时，范围是空的（登录后什么都看不到）。界面必须把它显示出来 ——
+   * 否则那位老师面对一个空后台，而原因（账号少填了一个字段）没有任何地方说得出。
+   */
+  scopeWarning: string;
 };
 
 export const AuthContext = createContext<AuthState | null>(null);

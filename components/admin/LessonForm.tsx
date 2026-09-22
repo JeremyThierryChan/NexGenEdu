@@ -131,12 +131,20 @@ export function LessonForm({
 
     let cancelled = false;
     setChecking(true);
-    void api.lessons.findConflicts(input).then((report) => {
-      if (!cancelled) {
+    /*
+     * 冲突提示是**给有排课权限的人**用的（服务端对普通教师拒绝 findConflicts：
+     * 那份结论里会点名别的教师与别的学生，属于行级范围要挡住的东西，见
+     * docs/后台API约定.md §三）。教师这边就当作"没有提示" ——
+     * 关键是不能让这次失败冒成未处理的 Promise 错误（那会让整块表单看着像坏了）。
+     */
+    void api.lessons
+      .findConflicts(input)
+      .catch(() => null)
+      .then((report) => {
+        if (cancelled) return;
         setConflicts(report);
         setChecking(false);
-      }
-    });
+      });
     return () => {
       cancelled = true;
     };

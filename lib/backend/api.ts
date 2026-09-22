@@ -54,6 +54,12 @@ import {
   type TeacherWorkload,
 } from "./stats";
 import { weekDays } from "./format";
+/*
+ * 行级范围的规则（谁是普通教师、哪些方法要过滤、哪些对教师关门）**只在 `lib/auth/roles.ts`**，
+ * 这里只 import 常量与类型 —— 服务端闸门与这一层读的是同一份判定，不可能分叉。
+ * 没有循环引用：roles.ts 只 import `contract.ts`（接口分组），而 contract.ts 不 import 任何实现。
+ */
+import { SCOPE_ALL, type SessionScope } from "@/lib/auth/roles";
 import { DEFAULT_TEACHER_SHARE_RULES } from "@/lib/data/pricing";
 import {
   PRICING_SOURCE_ADMIN,
@@ -648,6 +654,177 @@ let operatorName = "admin";
 /** 设置操作人。页面在登录后调用一次即可。 */
 export function setOperator(name: string): void {
   operatorName = name.trim() === "" ? "admin" : name.trim();
+}
+
+/* ── 行级范围（Phase B）：普通教师只看自己的课与自己学生的课时余额 ────────────────
+ *
+ * ## 与 `setOperator` 是同一套机制（模块级状态 + 每请求重设）
+ *
+ * 规则本身**不在这个文件里**：谁是"普通教师"、哪些方法要过滤、哪些方法对教师关门，
+ * 全在 `lib/auth/roles.ts`（`scopeForAccount` / `TEACHER_SCOPE_RULES`）。
+ * 这里只做两件事：**接住**服务端按会话设置的范围，以及**按它过滤**返回值。
+ *
+ * ## 为什么必须是"每请求重设"，以及为什么服务端要在**调用前**再设一次
+ *
+ * 与操作人一样，它是模块级状态：某人设一次就管到下一次被覆盖。所以服务端
+ * `requireAuth` 每个请求都按会话重设（`api.setScope(...)`），否则会出现
+ * "教师 B 的请求拿到教师 A 的范围"这种串号。
+ *
+ * 更进一步：`/api/call` 在读完请求体（一次 `await`）之后、**真正调方法之前**又设了一次
+ * （见 `server/index.mts`）。因为"设置范围"与"读请求体"之间隔着一次异步，
+ * 并发时下一个请求可能已经把范围换掉了 —— 那会让 A 的请求用 B 的范围去过滤数据。
+ * 在调用前用**同一个请求闭包里**算好的范围再设一次，中间没有任何 `await`，
+ * 这段窗口就不存在了；而各方法在**方法体第一行**就把范围读进局部常量（`captureView()`），
+ * 于是"过滤用的是哪个范围"从进方法那一刻起就定死了。
+ *
+ * （口径与边界写在 docs/后台API约定.md 的「行级范围」一节；
+ *  `lib/auth/roles.ts` 的文件头写了三条判定规则与"默认关门"的理由。）
+ */
+
+/** 当前请求的行级范围。默认 `SCOPE_ALL`：脚本、自检、浏览器本地实现都不受限。 */
+let scope: SessionScope = SCOPE_ALL;
+
+/** 一次调用读到的范围快照（进方法第一行读，之后不会变）。 */
+type ScopeView = { kind: "all" } | { kind: "own"; teacherId: string };
+
+/**
+ * 取本次调用的范围快照。
+ *
+ * 刻意**同步**读、且各方法在第一个 `await` 之前读：`scope` 是模块级状态，
+ * 晚一步读就可能读到下一个请求设进去的值（见上面那段注释）。
+ */
+function captureView(): ScopeView {
+  return scope.kind === "all" ? { kind: "all" } : { kind: "own", teacherId: scope.teacherId };
+}
+
+/**
+ * 这个范围内的学生 id 集合；返回 `null` 表示**不限制**。
+ *
+ * 口径（`lib/auth/roles.ts` 文件头 ③）：**在我的课里出现过的学生**，排除已取消的课。
+ * 没绑教师档案的账号（`teacherId === ""`）这里返回空集 —— 刻意**不**回退成
+ * "teacherId 为空的课的学生"（那种课是"还没安排老师"的课，把它们的学生的档案
+ * 交给一个没绑档案的教师账号，正好是最不该发生的那种多给）。
+ */
+function visibleStudentIds(view: ScopeView, db: Database): Set<string> | null {
+  if (view.kind === "all") return null;
+  const ids = new Set<string>();
+  if (view.teacherId === "") return ids;
+  for (const lesson of db.lessons) {
+    if (lesson.teacherId !== view.teacherId) continue;
+    if (lesson.status === "已取消") continue;
+    for (const studentId of lesson.studentIds) ids.add(studentId);
+  }
+  return ids;
+}
+
+/**
+ * 剥掉学生档案里的**金额字段**（单价 / 约定应缴 / 实收）。
+ *
+ * ## 为什么剥字段，而不是拒绝整个接口
+ *
+ * 机构确认的边界③是"普通教师能看到自己学生的**课时余额**"—— 家长最常问的
+ * "还剩几节课"就在同一个对象上（`Student.enrollments`）。拒绝接口等于连课时也看不到，
+ * 那就把机构要的功能一起关掉了；而只剥金额，教师拿到的正是"课时 + 学生信息"，
+ * 一点钱都没有。
+ *
+ * ## 为什么置 0 而不是删键
+ *
+ * 前端与类型的口径是"这三个字段是数字"（`Enrollment`，见 types.ts）。
+ * 删掉键会让界面算出 `undefined` / `¥NaN` —— 那比空白更糟（会显示给家长看）。
+ * 置 0 与"这门课没有登记价格"是同一个既有语义（`unitPrice = 0` 的注释就是这么写的），
+ * 界面上那几块金额自己会按 `agreedAmount > 0` 隐藏，欠费也算成 0。
+ *
+ * ⚠️ 返回的是**深拷贝**：`load()` 拿到的是内存里那份库，直接改字段会把数据改坏。
+ */
+function hideStudentMoney(student: Student): Student {
+  const copy = clone(student);
+  for (const enrollment of copy.enrollments) {
+    enrollment.unitPrice = 0;
+    enrollment.agreedAmount = 0;
+    enrollment.paidAmount = 0;
+  }
+  return copy;
+}
+
+/** 按范围过滤学生（并剥金额）。`view` 是 `all` 时原样返回（不剥）。 */
+function scopeStudents(view: ScopeView, db: Database, students: Student[]): Student[] {
+  const ids = visibleStudentIds(view, db);
+  if (ids === null) return students;
+  return students.filter((student) => ids.has(student.id)).map(hideStudentMoney);
+}
+
+/**
+ * 单个学生：范围外一律 `null`（**看不到**，不报 403 —— 口径见 roles.ts）。
+ *
+ * 与 `scopeStudents` 分开写是因为"单条"的语义不同：`students.get(别人的学生)`
+ * 必须与"这个学生不存在"长得一模一样，否则"返回了 403 / 返回了空对象"本身
+ * 就是在告诉人"这个 id 是存在的"。
+ */
+function scopeStudent(view: ScopeView, db: Database, student: Student): Student | null {
+  const ids = visibleStudentIds(view, db);
+  if (ids === null) return student;
+  return ids.has(student.id) ? hideStudentMoney(student) : null;
+}
+
+/** 按范围过滤课（只留 `teacherId === 我` 的）。`view` 是 `all` 时原样返回。 */
+function scopeLessons(view: ScopeView, lessons: Lesson[]): Lesson[] {
+  if (view.kind === "all") return lessons;
+  if (view.teacherId === "") return [];
+  return lessons.filter((lesson) => lesson.teacherId === view.teacherId);
+}
+
+/** 这一行（学生）在这个范围里看不看得到。 */
+function canSeeStudent(view: ScopeView, db: Database, studentId: string): boolean {
+  const ids = visibleStudentIds(view, db);
+  return ids === null || ids.has(studentId);
+}
+
+/** 这一行（课）在这个范围里看不看得到。 */
+function canSeeLesson(view: ScopeView, lesson: Lesson | undefined): boolean {
+  if (lesson === undefined) return false;
+  if (view.kind === "all") return true;
+  return view.teacherId !== "" && lesson.teacherId === view.teacherId;
+}
+
+/** 这一节课（按 id）看不看得到（课堂记录挂在课节上，需要按 id 判）。 */
+function canSeeLessonId(view: ScopeView, db: Database, lessonId: string): boolean {
+  if (view.kind === "all") return true;
+  return canSeeLesson(view, db.lessons.find((item) => item.id === lessonId));
+}
+
+/** 按范围过滤"挂在课节上"的记录（课堂记录）。 */
+function scopeLessonRecords(
+  view: ScopeView,
+  db: Database,
+  records: LessonRecord[],
+): LessonRecord[] {
+  if (view.kind === "all") return records;
+  return records.filter((record) => canSeeLessonId(view, db, record.lessonId));
+}
+
+/** 按范围过滤"挂在自己学生身上"的记录（作业 / 测评）。 */
+function scopeStudentRecords<T extends { studentId: string }>(
+  view: ScopeView,
+  db: Database,
+  records: T[],
+): T[] {
+  const ids = visibleStudentIds(view, db);
+  if (ids === null) return records;
+  return records.filter((record) => ids.has(record.studentId));
+}
+
+/**
+ * 写动作碰到范围外的数据时抛的话。
+ *
+ * 读接口的表现是"看不到"（空集 / `null`），写动作不能那样：**假装写成功比报错更坏** ——
+ * 老师会以为"这节课我标了已上"，而课时扣在别人那边、或者压根没扣。
+ * 所以写动作越界 = 拒绝并说清原因（接口层按 400 回，文案就是这句）。
+ */
+function outOfScopeError(what: string): Error {
+  return new Error(
+    `${what}不在你的名下：你的账号只能看 / 只能改自己带的学生与排课。` +
+    "如果你确实需要处理它，请找技术管理员或在你的课上安排。",
+  );
 }
 
 /**
@@ -1466,6 +1643,37 @@ function addEnrollment(db: Database, student: Student, input: NewEnrollment): En
 const localApi = {
   students: {
     ...studentCollection,
+
+    /**
+     * 学生列表。
+     *
+     * 普通教师只看到**自己课上的学生**，并且这些学生的档案里**没有金额**
+     * （`hideStudentMoney`：单价 / 约定应缴 / 实收一律置 0）——
+     * 机构确认的边界③是"教师能看自己学生的课时余额"，而余额与金额在同一个对象上，
+     * 所以剥字段而不是拒绝整个接口（理由写在 `hideStudentMoney` 上面）。
+     */
+    async list(): Promise<Student[]> {
+      const view = captureView();
+      await delay();
+      const db = load();
+      return clone(scopeStudents(view, db, db.students));
+    },
+
+    /**
+     * 单个学生。
+     *
+     * 不在你的范围里 → **`null`（当作不存在）**，不报错：口径是"行级越界＝看不到"，
+     * 报 403 等于告诉对方"这个学生是存在的，只是不归你"（那本身就是泄漏）。
+     */
+    async get(id: string): Promise<Student | null> {
+      const view = captureView();
+      await delay();
+      const db = load();
+      const student = db.students.find((item) => item.id === id);
+      if (student === undefined) return null;
+      const visible = scopeStudent(view, db, student);
+      return visible === null ? null : clone(visible);
+    },
     /**
      * 建档（**可以同时报课**：一个学生报多门，每门节数各自独立）。
      *
@@ -1921,12 +2129,22 @@ const localApi = {
       return clone(student);
     },
 
+    /**
+     * 模糊搜索学生（姓名 / 年级 / 家长联系方式 / 在读科目）。
+     *
+     * **先按范围过滤、再匹配关键词**：反过来做（先搜全校、再过滤）虽然结果一样，
+     * 但会让"搜到别人班的学生名字"这种事只取决于过滤那一步有没有被漏掉 ——
+     * 而"先缩小范围"是默认关门那一侧的写法。
+     */
     async search(keyword: string): Promise<Student[]> {
+      const view = captureView();
       await delay();
+      const db = load();
+      const visible = scopeStudents(view, db, db.students);
       const text = keyword.trim().toLowerCase();
-      if (text === "") return clone(load().students);
+      if (text === "") return clone(visible);
       return clone(
-        load().students.filter((student) =>
+        visible.filter((student) =>
           [student.name, student.grade, student.guardian, ...student.subjects]
             .join(" ")
             .toLowerCase()
@@ -2208,6 +2426,7 @@ const localApi = {
     churn: ChurnStats;
     summary: ReturnType<typeof rangeSummary>;
   }> {
+    const view = captureView();
     await delay();
     const db = load();
     const days = weekDays(anchor);
@@ -2216,7 +2435,22 @@ const localApi = {
     const toEnd = new Date(to);
     toEnd.setHours(23, 59, 59, 999);
 
-    const weekLessons = db.lessons.filter((lesson) => withinRange(lesson.startsAt, from, toEnd));
+    /*
+     * 教师看统计时**只算自己的课**（口径与今日概览一致）：
+     *   - `weekLessons` 先按范围收窄 → 教室利用率 / 时段分布 / 汇总都只反映我的课表；
+     *   - 教师课时只算**我这一位**（传进去的教师名单收窄成我自己）——
+     *     否则这一页会变成"全校老师的课时我都看得到"；
+     *   - 退课与流失只算我的学生。
+     *
+     * 副作用要说清：教师看到的"教室利用率"会明显偏低（因为分母是整周的教室可用时段，
+     * 分子只有我的课）。这不是 bug，是"只算我的课"这条口径的直接结果 ——
+     * 机构要的口径就是"教师看自己的"。
+     */
+    const churn = churnStats(scopeStudents(view, db, db.students));
+    const visibleLessons = scopeLessons(view, db.lessons);
+    const weekLessons = visibleLessons.filter((lesson) => withinRange(lesson.startsAt, from, toEnd));
+    const visibleTeachers =
+      view.kind === "all" ? db.teachers : db.teachers.filter((teacher) => teacher.id === view.teacherId);
 
     return clone({
       from: from.toISOString(),
@@ -2224,8 +2458,12 @@ const localApi = {
       days: days.map((day) => dateKey(day)),
       rooms: roomUtilization(db.classrooms, weekLessons, days),
       hourly: hourlyLoad(weekLessons),
-      teachers: teacherWorkload(db.teachers, weekLessons),
-      churn: churnStats(db.students),
+      teachers: teacherWorkload(visibleTeachers, weekLessons),
+      /*
+       * 退课金额（`refundedAmount`）是**钱**：教师的范围里不含金额，
+       * 因此这一项与 `hideStudentMoney` 同一个口径 —— 置 0，而不是让它泄漏出去。
+       */
+      churn: view.kind === "all" ? churn : { ...churn, refundedAmount: 0 },
       summary: rangeSummary(weekLessons, from, toEnd),
     });
   },
@@ -2269,21 +2507,42 @@ const localApi = {
     );
   },
 
-  /** 课时流水（只读；写入由报课 / 续费 / 上课 / 撤销等业务动作负责）。 */
+  /**
+   * 课时流水（只读；写入由报课 / 续费 / 上课 / 撤销等业务动作负责）。
+   *
+   * 普通教师**只能查自己学生**的流水（机构确认③：家长问"还剩几节课"时，
+   * 教师要看得到这个学生的课时是怎么来的）；别人的学生一律给空数组 ——
+   * 空数组与"这个学生没有流水"是同一个样子，"看不到"不需要单独一种错误。
+   * 流水里没有金额字段（`LessonTransaction` 只有节数与科目），因此不需要剥。
+   */
   transactions: {
     listByStudent: async (studentId: string): Promise<LessonTransaction[]> => {
+      const view = captureView();
       await delay();
+      const db = load();
+      if (!canSeeStudent(view, db, studentId)) return [];
       return clone(
-        load()
-          .transactions.filter((item) => item.studentId === studentId)
+        db.transactions
+          .filter((item) => item.studentId === studentId)
           .sort((a, b) => b.at.localeCompare(a.at)),
       );
     },
     listByEnrollment: async (enrollmentId: string): Promise<LessonTransaction[]> => {
+      const view = captureView();
       await delay();
+      const db = load();
+      /*
+       * 按"这条报课记录属于哪个学生"来判范围，而不是按 `enrollmentId` 本身：
+       * 报课记录是学生档案里的数组元素（没有独立的学生字段），
+       * 用 id 反查学生是唯一可靠的办法 —— 而查不到的都当作看不到。
+       */
+      const owner = db.students.find((student) =>
+        student.enrollments.some((enrollment) => enrollment.id === enrollmentId),
+      );
+      if (owner === undefined || !canSeeStudent(view, db, owner.id)) return [];
       return clone(
-        load()
-          .transactions.filter((item) => item.enrollmentId === enrollmentId)
+        db.transactions
+          .filter((item) => item.enrollmentId === enrollmentId)
           .sort((a, b) => b.at.localeCompare(a.at)),
       );
     },
@@ -2297,22 +2556,64 @@ const localApi = {
    */
   lessonRecords: {
     ...collection<LessonRecord>((db) => db.lessonRecords, "lr"),
-    listByLesson: async (lessonId: string): Promise<LessonRecord[]> => {
+
+    /** 课堂记录列表：教师只看得到**自己课**上的记录。 */
+    async list(): Promise<LessonRecord[]> {
+      const view = captureView();
       await delay();
-      return clone(load().lessonRecords.filter((item) => item.lessonId === lessonId));
+      const db = load();
+      return clone(scopeLessonRecords(view, db, db.lessonRecords));
+    },
+
+    /** 单条课堂记录：不在自己课上就当作不存在（`null`）。 */
+    async get(id: string): Promise<LessonRecord | null> {
+      const view = captureView();
+      await delay();
+      const db = load();
+      const record = db.lessonRecords.find((item) => item.id === id);
+      if (record === undefined) return null;
+      return canSeeLessonId(view, db, record.lessonId) ? clone(record) : null;
+    },
+
+    listByLesson: async (lessonId: string): Promise<LessonRecord[]> => {
+      const view = captureView();
+      await delay();
+      const db = load();
+      if (!canSeeLessonId(view, db, lessonId)) return [];
+      return clone(db.lessonRecords.filter((item) => item.lessonId === lessonId));
     },
     listByStudent: async (studentId: string): Promise<LessonRecord[]> => {
+      const view = captureView();
       await delay();
+      const db = load();
+      if (!canSeeStudent(view, db, studentId)) return [];
       return clone(
-        load()
-          .lessonRecords.filter((item) => item.studentId === studentId)
+        db.lessonRecords
+          .filter((item) => item.studentId === studentId)
           .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt)),
       );
     },
-    /** 按「课节 + 学生」写入；已存在则更新。 */
+    /**
+     * 按「课节 + 学生」写入；已存在则更新。
+     *
+     * 普通教师只能记录**自己课**上的出勤（机构确认的教学动作之一）。
+     * 越界时不写、直接报错：课堂记录会**改课时账**（出勤变了课时跟着退 / 补），
+     * 让它"静默成功"是最坏的结果 —— 老师会以为记上了，而账在别人那边。
+     */
     async save(input: NewLessonRecord): Promise<LessonRecord> {
+      const view = captureView();
       await delay();
       const db = load();
+      if (!canSeeLessonId(view, db, input.lessonId)) {
+        throw outOfScopeError("这节课（或它上面的学生）");
+      }
+      /*
+       * 名单里的学生也要在自己的范围里。已取消的课不算"我的课"（口径见 roles.ts ③），
+       * 因此不能借"这节课挂在我名下"给范围外的学生写记录 —— 两处都判，方向是关门。
+       */
+      if (!canSeeStudent(view, db, input.studentId)) {
+        throw outOfScopeError("这位学生");
+      }
       const existing = db.lessonRecords.find(
         (item) => item.lessonId === input.lessonId && item.studentId === input.studentId,
       );
@@ -2355,14 +2656,38 @@ const localApi = {
     },
   },
 
-  /** 作业记录（按次）。 */
+  /**
+   * 作业记录（按次）。
+   *
+   * 普通教师只看得到自己学生的（作业是"某个学生的一次提交"，范围跟着学生走）。
+   */
   homework: {
     ...collection<HomeworkRecord>((db) => db.homeworkRecords, "hw", "作业记录"),
-    listByStudent: async (studentId: string): Promise<HomeworkRecord[]> => {
+
+    async list(): Promise<HomeworkRecord[]> {
+      const view = captureView();
       await delay();
+      const db = load();
+      return clone(scopeStudentRecords(view, db, db.homeworkRecords));
+    },
+
+    async get(id: string): Promise<HomeworkRecord | null> {
+      const view = captureView();
+      await delay();
+      const db = load();
+      const record = db.homeworkRecords.find((item) => item.id === id);
+      if (record === undefined) return null;
+      return canSeeStudent(view, db, record.studentId) ? clone(record) : null;
+    },
+
+    listByStudent: async (studentId: string): Promise<HomeworkRecord[]> => {
+      const view = captureView();
+      await delay();
+      const db = load();
+      if (!canSeeStudent(view, db, studentId)) return [];
       return clone(
-        load()
-          .homeworkRecords.filter((item) => item.studentId === studentId)
+        db.homeworkRecords
+          .filter((item) => item.studentId === studentId)
           .sort((a, b) => b.date.localeCompare(a.date)),
       );
     },
@@ -2377,17 +2702,48 @@ const localApi = {
    */
   assessments: {
     ...collection<Assessment>((db) => db.assessments, "as", "测评"),
-    listByStudent: async (studentId: string): Promise<Assessment[]> => {
+
+    /** 阶段测评列表：普通教师只看得到自己学生的（范围跟着学生走）。 */
+    async list(): Promise<Assessment[]> {
+      const view = captureView();
       await delay();
+      const db = load();
+      return clone(scopeStudentRecords(view, db, db.assessments));
+    },
+
+    async get(id: string): Promise<Assessment | null> {
+      const view = captureView();
+      await delay();
+      const db = load();
+      const record = db.assessments.find((item) => item.id === id);
+      if (record === undefined) return null;
+      return canSeeStudent(view, db, record.studentId) ? clone(record) : null;
+    },
+
+    listByStudent: async (studentId: string): Promise<Assessment[]> => {
+      const view = captureView();
+      await delay();
+      const db = load();
+      if (!canSeeStudent(view, db, studentId)) return [];
       return clone(
-        load()
-          .assessments.filter((item) => item.studentId === studentId)
+        db.assessments
+          .filter((item) => item.studentId === studentId)
           .sort((a, b) => b.date.localeCompare(a.date)),
       );
     },
+    /**
+     * 记一次阶段测评（教师的核心教学动作之一）。
+     *
+     * 越界报错而不是静默成功：测评会带出"上一次分数"（`previousScore`），
+     * 给别人的学生记一条，等于把别人的教学记录也改了。
+     */
     async add(input: NewAssessment): Promise<Assessment> {
+      const view = captureView();
       await delay();
       const db = load();
+      if (!canSeeStudent(view, db, input.studentId)) {
+        throw outOfScopeError("这位学生");
+      }
       const previous = db.assessments
         .filter((item) => item.studentId === input.studentId && item.subject === input.subject)
         .sort((a, b) => a.date.localeCompare(b.date))
@@ -2410,6 +2766,22 @@ const localApi = {
      * 然后**覆盖 create**：排课必须过"课时够不够"这一关。
      */
     ...lessonCollection,
+
+    /** 排课列表：普通教师只看到**自己带的课**（`lessons.list` 是全站课表，最需要收口的一个）。 */
+    async list(): Promise<Lesson[]> {
+      const view = captureView();
+      await delay();
+      return clone(scopeLessons(view, load().lessons));
+    },
+
+    /** 单节课：不是自己的课就当作不存在（返回 `null`，不报错；口径见 roles.ts）。 */
+    async get(id: string): Promise<Lesson | null> {
+      const view = captureView();
+      await delay();
+      const lesson = load().lessons.find((item) => item.id === id);
+      if (lesson === undefined) return null;
+      return canSeeLesson(view, lesson) ? clone(lesson) : null;
+    },
 
     /**
      * 新建排课（**服务端复核课时**）。
@@ -2635,10 +3007,21 @@ const localApi = {
      * 自检里专门有一条断言守住它。
      */
     async markCompleted(id: string): Promise<CompletionResult> {
+      const view = captureView();
       await delay();
       const db = load();
       const lesson = db.lessons.find((item) => item.id === id);
       if (lesson === undefined) {
+        return { lesson: null, deducted: [], skipped: [], alreadyCompleted: false, overused: [] };
+      }
+      /*
+       * 范围外的课：**返回与"这节课不存在"完全一样的形状**（`lesson: null` + 空结果）。
+       *
+       * 这里的取舍值得写清楚：标记已上会**扣课时**，所以绝不能放它过去；
+       * 但也**不能报错**（报错就是在回答"这节课存在，只是不归你"）。返回"空结果"
+       * 既没扣任何课时，也没告诉对方任何新信息 —— 对调用方来说它跟"id 写错了"没有区别。
+       */
+      if (!canSeeLesson(view, lesson)) {
         return { lesson: null, deducted: [], skipped: [], alreadyCompleted: false, overused: [] };
       }
 
@@ -2719,13 +3102,14 @@ const localApi = {
 
       return clone({ lesson, deducted, skipped, alreadyCompleted, overused });
     },
-    /** 某一天的课，按开始时间升序。 */
+    /** 某一天的课，按开始时间升序（普通教师只看到自己那几节）。 */
     async listByDate(date: Date): Promise<Lesson[]> {
+      const view = captureView();
       await delay();
       const key = dateKey(date);
       return clone(
-        load()
-          .lessons.filter((lesson) => dateKey(lesson.startsAt) === key)
+        scopeLessons(view, load().lessons)
+          .filter((lesson) => dateKey(lesson.startsAt) === key)
           .sort((a, b) => a.startsAt.localeCompare(b.startsAt)),
       );
     },
@@ -2746,16 +3130,28 @@ const localApi = {
       studentIds: string[];
       note: string;
     }): Promise<Lesson | null> {
+      const view = captureView();
       await delay();
       const db = load();
       const original = db.lessons.find((item) => item.id === input.originalLessonId);
       if (original === undefined) return null;
+      /*
+       * 补课以"被补的那节课"为模板（科目 / 学生 / 默认教师都跟着它走），
+       * 因此普通教师只能给**自己的课**安排补课；不在自己名下 → `null`（与"原课不存在"同形）。
+       *
+       * 另外还要逐个确认补课名单里的学生都是自己的（表单允许改名单）——
+       * 少了这一条，教师就能借"补课"把别人的学生排进自己的课表。
+       */
+      if (!canSeeLesson(view, original)) return null;
+      const makeupStudents = input.studentIds.length > 0 ? input.studentIds : original.studentIds;
+      for (const studentId of makeupStudents) {
+        if (!canSeeStudent(view, db, studentId)) return null;
+      }
 
       /*
        * 补课同样占用教师与教室、同样扣 1 节课时 —— 因此也过"课时够不够"这一关：
        * 课时不足时先续费，再排补课（否则补课本身又变成一笔欠账）。
        */
-      const makeupStudents = input.studentIds.length > 0 ? input.studentIds : original.studentIds;
       const shortage = insufficientLessons(db, {
         subject: original.subject,
         studentIds: makeupStudents,
@@ -2792,6 +3188,7 @@ const localApi = {
     async pendingMakeups(): Promise<
       Array<{ original: Lesson; student: Student; record: LessonRecord; reason: string }>
     > {
+      const view = captureView();
       await delay();
       const db = load();
       const rows: Array<{ original: Lesson; student: Student; record: LessonRecord; reason: string }> = [];
@@ -2801,6 +3198,8 @@ const localApi = {
 
         const original = db.lessons.find((item) => item.id === record.lessonId);
         if (original === undefined || original.status === "已取消") continue;
+        // 普通教师只补**自己课**上缺的课（这不是自己的课，缺不缺不归我管）
+        if (!canSeeLesson(view, original)) continue;
 
         // 已经补过了吗（该学生出现在以这节为原课的补课里）
         const covered = db.lessons.some(
@@ -2900,39 +3299,56 @@ const localApi = {
 
     /** 某个学生的课，按时间升序（学生详情用）。 */
     async listByStudent(studentId: string): Promise<Lesson[]> {
+      const view = captureView();
       await delay();
+      const db = load();
+      /*
+       * 先判"这个学生是不是我的"，再取课 —— 与 `students.get` 同一个口径：
+       * 别人的学生连"他有哪几节课"都不该看到（连空数组以外的东西都不给）。
+       */
+      if (!canSeeStudent(view, db, studentId)) return [];
       return clone(
-        load()
-          .lessons.filter((lesson) => lesson.studentIds.includes(studentId))
+        scopeLessons(view, db.lessons)
+          .filter((lesson) => lesson.studentIds.includes(studentId))
           .sort((a, b) => a.startsAt.localeCompare(b.startsAt)),
       );
     },
-    /** 某个教师的课，按时间升序（教师详情用）。 */
+    /**
+     * 某个教师的课，按时间升序（教师详情用）。
+     *
+     * 普通教师查**别人**（`teacherId !== 我`）时返回**空数组**，而不是别人的课表 ——
+     * 这一条是"行级越界＝看不到"的直接体现：返回空数组与"这位老师没有课"长得一样，
+     * 不构成"他在这个时段有没有空"的信息泄漏。
+     */
     async listByTeacher(teacherId: string): Promise<Lesson[]> {
+      const view = captureView();
       await delay();
+      if (view.kind === "own" && (view.teacherId === "" || teacherId !== view.teacherId)) return [];
       return clone(
         load()
           .lessons.filter((lesson) => lesson.teacherId === teacherId)
           .sort((a, b) => a.startsAt.localeCompare(b.startsAt)),
       );
     },
-    /** 某个教室的课，按时间升序（教室占用用）。 */
+    /** 某个教室的课，按时间升序（教室占用用）：教师只看到自己在这个教室的课。 */
     async listByClassroom(classroomId: string): Promise<Lesson[]> {
+      const view = captureView();
       await delay();
       return clone(
-        load()
-          .lessons.filter((lesson) => lesson.classroomId === classroomId)
+        scopeLessons(view, load().lessons)
+          .filter((lesson) => lesson.classroomId === classroomId)
           .sort((a, b) => a.startsAt.localeCompare(b.startsAt)),
       );
     },
-    /** 一段区间内的课（含首尾两天）。 */
+    /** 一段区间内的课（含首尾两天）。普通教师只看到自己那几节。 */
     async listBetween(from: Date, to: Date): Promise<Lesson[]> {
+      const view = captureView();
       await delay();
       const fromKey = dateKey(from);
       const toKey = dateKey(to);
       return clone(
-        load()
-          .lessons.filter((lesson) => {
+        scopeLessons(view, load().lessons)
+          .filter((lesson) => {
             const key = dateKey(lesson.startsAt);
             return key >= fromKey && key <= toKey;
           })
@@ -2943,10 +3359,18 @@ const localApi = {
 
   /** 今日概览的汇总。 */
   async today(now: Date = new Date()): Promise<TodaySummary> {
+    const view = captureView();
     await delay();
     const db = load();
     const key = dateKey(now);
-    const todays = db.lessons.filter((lesson) => dateKey(lesson.startsAt) === key);
+    /*
+     * 今日概览按**我的口径**重算，而不是"把别人的课从总数里减掉"：
+     * 课只算我的；教室占用只数我的课；低课时预警只列我的学生（且不含金额）。
+     * `studentCount` 也跟着变成"我的学生数" —— 教师这一页上的每个数字
+     * 都回答"我今天要做什么"，掺进全校的数就答不了这个问题了。
+     */
+    const todays = scopeLessons(view, db.lessons).filter((lesson) => dateKey(lesson.startsAt) === key);
+    const myStudents = scopeStudents(view, db, db.students);
 
     const classroomUsage = db.classrooms.map((classroom) => ({
       classroom,
@@ -2959,13 +3383,18 @@ const localApi = {
       teacherCount: new Set(todays.map((lesson) => lesson.teacherId)).size,
       totalMinutes: todays.reduce((total, lesson) => total + lesson.durationMinutes, 0),
       classroomUsage,
-      lowLessonStudents: db.students
+      lowLessonStudents: myStudents
         .filter((student) => student.status !== "结课")
         .map((student) => ({ student, remainingLessons: remainingTotal(student.enrollments) }))
         // 没有任何在读报课的学生也算「需要跟进」，否则会从预警里消失
         .filter((item) => item.remainingLessons <= 5)
         .sort((a, b) => a.remainingLessons - b.remainingLessons),
-      studentCount: db.students.length,
+      studentCount: myStudents.length,
+      /*
+       * 在职教师数是**机构名册**上的数字（不涉及学生），教师本来就看得到教师页，
+       * 因此这里不跟着范围变 —— 否则"学校里几位老师在带课"会显示成 1，
+       * 而那个数字对教师是公开信息（教师页一直是四类角色都能进的）。
+       */
       activeTeacherCount: db.teachers.filter((teacher) => teacher.active).length,
     });
   },
@@ -3080,6 +3509,26 @@ const localApi = {
   /** 设置操作人（登录后由后台外壳调用一次，用于操作日志）。 */
   async setOperator(name: string): Promise<void> {
     operatorName = name.trim() === "" ? "admin" : name.trim();
+  },
+
+  /**
+   * 设置本次请求的**行级范围**（服务端在每个请求开头按会话调用，见 `requireAuth`）。
+   *
+   * 与 `setOperator` 是同一种方法：不做业务、不属于任何权限分组
+   * （因此登记在服务端的"会话管道方法"白名单里），但**必须每请求重设** ——
+   * 它是模块级状态，少设一次就会让下一个请求用上一个人的范围。
+   *
+   * 前端调它**不作数**：和操作人一样，服务端在调用业务方法之前会按会话再设一次，
+   * 前端那一次只影响它自己那次调用（一次 `/api/call` 只处理一个方法）。
+   *
+   * 注意这里**没有 `await delay()`**（与 `setOperator` 一致）：赋值必须在下一次
+   * 事件循环之前同步完成，否则"调用前设范围"那一步会变成异步，白设。
+   */
+  async setScope(next: SessionScope): Promise<void> {
+    scope =
+      next.kind === "own"
+        ? { kind: "own", teacherId: next.teacherId.trim(), warning: next.warning }
+        : SCOPE_ALL;
   },
 
   /**
@@ -3568,15 +4017,21 @@ const localApi = {
    * 匹配规则在 lib/backend/search.ts；服务层负责把数据快照与课程列表凑齐。
    */
   async search(keyword: string): Promise<SearchHit[]> {
+    const view = captureView();
     await delay();
     const db = load();
+    /*
+     * 全局搜索也要收口：搜索框在后台的**每一页**都有（顶栏），因此它是最容易
+     * "教师随手一搜就搜到别人班学生"的地方。学生与排课按范围收窄；
+     * 教师 / 教室 / 课程是参考数据（教师本来就看得到这几页），照旧全文匹配。
+     */
     return clone(
       searchAll({
         keyword,
-        students: db.students,
+        students: scopeStudents(view, db, db.students),
         teachers: db.teachers,
         classrooms: db.classrooms,
-        lessons: db.lessons,
+        lessons: scopeLessons(view, db.lessons),
         courses: getCourseColumnsFromTemplate().flatMap((column) =>
           column.subgroups.flatMap((subgroup) =>
             subgroup.cards.map((card) => ({

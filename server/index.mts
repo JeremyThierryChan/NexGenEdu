@@ -43,7 +43,16 @@ import {
 // 多账号与角色（第 7 步）：账号表在 server/accounts.mts（口令与角色都在服务端）
 import { accountBootstrapNote } from "./accounts.mts";
 // 权限的"一份数据"：**方法级判定只有这一处**（见下面的闸门 —— 服务端只调用它，不自己推）
-import { allowedRolesForMethod, canAccess, groupOfMethod, type Role } from "../lib/auth/roles.ts";
+import {
+  allowedRolesForMethod,
+  canAccess,
+  groupOfMethod,
+  isPlainTeacher,
+  scopeForAccount,
+  teacherScopeDenial,
+  type Role,
+  type SessionScope,
+} from "../lib/auth/roles.ts";
 // 接口契约：分组只用来写错误文案（"运维与审计"），判定不经过它
 import { API_CONTRACT } from "../lib/backend/contract.ts";
 // 复用伪后端阶段的纯函数：课时记账与剩余课时的口径只能有一份
@@ -1079,10 +1088,49 @@ function requireAuth(request: IncomingMessage, response: ServerResponse): Sessio
    */
   void api.setOperator(session.username);
   currentOperator = session.username;
+  /*
+   * 行级范围（Phase B）也在这里按会话设一次 —— 与操作人是**同一套机制、同一处调用点**。
+   *
+   * 范围是"普通教师只看自己的课与自己学生的课时余额"那条限制的输入：
+   * 服务层（`lib/backend/api.ts`）按它过滤返回值。它同样是模块级状态，
+   * 因此也必须**每请求重设**：少了这一行，教师 B 的请求就会用上教师 A 的范围
+   * （或者更糟：非教师账号的请求用上某位教师的空范围，看着像"数据全没了"）。
+   *
+   * 判定本身不在这里：`scopeForAccount` 在 `lib/auth/roles.ts`（"只有恰好是普通教师才限"
+   * 与"没绑 teacherId 就给空范围"两条规则都写在那儿）。
+   */
+  void api.setScope(scopeForAccount(session.roles, session.teacherId));
   return session;
 }
 
 
+
+/**
+ * 这次会话的**范围提示**（空串 = 没问题）：给"教师账号没绑 teacherId / 绑了一个
+ * 不存在的教师档案"这两种情况一句人话。
+ *
+ * ## 为什么要单独算一次、而不是只写一句静态提示
+ *
+ * `scopeForAccount` 只能判"填没填"（它是纯函数，看不到库）。而机构实际最容易犯的错
+ * 是**填错**：把教师姓名填进 `teacherId`、或者复制了另一个环境的 id。
+ * 那种情况下范围一样是空的，但静态提示说不到点子上（他会以为"我明明填了"）。
+ * 所以这里额外查一次教师档案：查不到就把 id 原样带出来，人一眼能看出填错了什么。
+ *
+ * 这条提示出现在**登录响应**与 `/api/session` 两处（界面在后台顶部把它显示出来）——
+ * 少了它，那位老师看到的是一个空后台，而且没有任何线索指向"账号少填了一个字段"。
+ */
+async function scopeWarningFor(scope: SessionScope): Promise<string> {
+  if (scope.kind !== "own") return "";
+  if (scope.warning !== "") return scope.warning;
+  const teacher = await api.teachers.get(scope.teacherId);
+  if (teacher !== null) return "";
+  return (
+    `账号绑定的教师档案找不到（teacherId = ${scope.teacherId}）：` +
+    "这个 id 在教师档案里不存在，因此你的范围是空的，会看不到任何学生与排课。" +
+    "teacherId 要填教师档案的 id（形如 t_xxxxxx，不是姓名）；" +
+    "请让技术管理员在 accounts.json 里改成正确的 id，然后重启后端。"
+  );
+}
 
 const db = openDatabase();
 const migration = migrate(db);
@@ -1160,8 +1208,14 @@ __useStoreForTesting(serverStore);
  *
  * 白名单必须排在"查归属"**之前**：`setRoles` 这类方法在角色表里根本没登记，
  * 先查归属会把它们当成"没登记归属的接口"拒掉。
+ *
+ * `setScope`（Phase B 的行级范围）也是这样进来的：它不做业务、只把"这次请求按谁的
+ * 范围看"交给服务层，而它在契约里归在"运维与审计"（与 `setOperator` 同一处）。
+ * 放行它一样安全，而且理由更硬：范围在**每个请求开头**都会被按会话重设一次，
+ * 而一次 `/api/call` 只处理一个方法 —— 前端就算调 `setScope(全放开)`，
+ * 影响的也只是它自己那一次调用，下一个请求立刻被改回会话算出来的那个范围。
  */
-const SESSION_PIPELINE_METHODS: ReadonlySet<string> = new Set(["setOperator", "setRoles"]);
+const SESSION_PIPELINE_METHODS: ReadonlySet<string> = new Set(["setOperator", "setRoles", "setScope"]);
 
 /**
  * 分组 id → 分组的中文名（"运维与审计"），**只用来写错误文案**。
@@ -1223,15 +1277,31 @@ function permissionError(method: string, roles: readonly Role[]): string | null 
   }
 
   // ③ 角色判定：角色集合里只要有一个被允许就放行（一个账号可兼任多个角色）
-  if (canAccess(roles, allowed)) return null;
+  if (!canAccess(roles, allowed)) {
+    const group = groupOfMethod(method);
+    const title = (group === null ? undefined : GROUP_TITLES.get(group)) ?? method;
+    return (
+      `你的角色（${roleText(roles)}）不能做这件事：${title}。` +
+      `这件事需要：${allowed.join(" 或 ")}。` +
+      "分工见 docs/使用手册.md 的「谁能做什么」。"
+    );
+  }
 
-  const group = groupOfMethod(method);
-  const title = (group === null ? undefined : GROUP_TITLES.get(group)) ?? method;
-  return (
-    `你的角色（${roleText(roles)}）不能做这件事：${title}。` +
-    `这件事需要：${allowed.join(" 或 ")}。` +
-    "分工见 docs/使用手册.md 的「谁能做什么」。"
-  );
+  /*
+   * ④ 行级范围（Phase B）：角色放行之后，再判"普通教师这一次能不能调"。
+   *
+   * 判定完全在 `lib/auth/roles.ts`（`teacherScopeDenial`）：没登记范围处理的方法一律拒绝；
+   * 标了 `hidden` 的整块业务（钱 / 待跟进 / 排课 / 课程库写入）也拒绝；
+   * 其余放行 —— **放行之后由服务层按范围过滤返回值**（那是 ⑤，在 `lib/backend/api.ts`）。
+   *
+   * 这里**不复制**任何规则：复制一份解析逻辑就是给自己造一个"改了那边忘了这边"的机会，
+   * 而权限上这种不一致等于静默放权。
+   *
+   * 为什么排在第 ③ 步之后：角色已经不让教师做的事（报课、收款、日志…）会先被角色的 403
+   * 拦掉，两条信息不该互相盖住 —— "这件事需要财务管理员"比"这件事不归普通教师"
+   * 更能告诉人该找谁。
+   */
+  return teacherScopeDenial(method, roles);
 }
 
 /**
@@ -1372,9 +1442,45 @@ function requireRestPermission(
         "如果是新加的老接口，请在 server/index.mts 的 REST_CONTRACT_METHODS 里补一行" +
         "（路径 → 契约方法名），也顺便确认一下路径有没有写错；没登记的接口一律拒绝。"
       : permissionError(target.method, session.roles);
-  if (denied === null) return true;
+  if (denied === null) {
+    const restDenied = teacherRestDenial(session);
+    if (restDenied === null) return true;
+    send(response, 403, { ok: false, error: restDenied });
+    return false;
+  }
   send(response, 403, { ok: false, error: denied });
   return false;
+}
+
+/**
+ * **老 REST 接口对普通教师整条关门**（Phase B 的一个刻意取舍）。
+ *
+ * ## 为什么
+ *
+ * 行级范围是在**服务层**（`lib/backend/api.ts`）按 `teacherId` 过滤实现的，
+ * 而老 REST 接口（路线 A 留下的参考实现）**压根不走服务层**：它直接拿自己的 SQL 表
+ * 拼结果（见 docs/后端开发方案.md §5.2.2）。于是 `GET /api/students` 会返回
+ * **全校学生**，把范围整个绕过去 —— 而这两条路读写的是同一个库，只挡一条等于没挡
+ * （第 6 步加登录时就踩过这个坑：`/api/students` 忘了挡，未登录也能读走学生数据）。
+ *
+ * 三个选择，选第三个：
+ *   1. 在老 REST 里再实现一遍范围过滤 —— 等于把"谁该看到什么"写第二份，
+ *      两份迟早分叉；而这条路本来就不再是页面的通路（页面只走 `/api/call`）；
+ *   2. 装作没看见 —— 那就是留一个后门：教师带上自己的令牌 `curl /api/students`
+ *      就能把全校学生读走；
+ *   3. **对普通教师整条拒绝**（默认关门）：这条路没有范围过滤，那就别让它服务"有范围的人"。
+ *
+ * 影响面很小：页面（`lib/backend/remote.ts`）、自检、验收、演练用的都是 `/api/call`；
+ * 技术管理员 / 财务管理员 / 招生老师**完全不受影响**（他们本来就没有行级范围）。
+ * `/api/call` 与 `/api/status` 是"登录即可"的例外（`exempt`），保持原样。
+ */
+function teacherRestDenial(session: Session): string | null {
+  if (!isPlainTeacher(session.roles)) return null;
+  return (
+    "普通教师不能用老 REST 接口（" +
+    "这条路直接读另一套表，没有行级范围过滤，所以对教师整条关闭）。" +
+    "后台页面走的是 /api/call，用页面就行；如果你是在调接口，请改用 POST /api/call。"
+  );
 }
 
 /** 还原远端代理显式标记的 Date（`{ __date: ISO }`），其余参数原样。 */
@@ -1498,6 +1604,21 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
           send(response, 401, { ok: false, error: result.error });
           return;
         }
+        /*
+         * 行级范围（Phase B）：登录时就按账号算一次范围，并把"这个范围不正常"的提示
+         * 一并回给界面（`scopeWarning`，空串 = 正常）。
+         *
+         * 为什么在登录这里算：① 这是唯一能**同步**知道"谁刚进来"的时刻；
+         * ② 提示要让人**当场**看到（教师登录后什么都没有，总得有人说清为什么）。
+         * 会话里那份范围由 `requireAuth` 每个请求重算（那儿才是真正生效的地方）。
+         *
+         * 先设范围再查教师档案：`scopeWarningFor` 会调一次 `api.teachers.get`，
+         * 而服务层的范围是**模块级状态** —— 不先设好，这一次查询就可能用上
+         * 上一个请求留下的范围（那种串号正是"每请求重设"要防的事）。
+         */
+        const scope = scopeForAccount(result.roles, result.teacherId);
+        void api.setScope(scope);
+        const scopeWarning = await scopeWarningFor(scope);
         send(response, 200, {
           ok: true,
           token: result.token,
@@ -1509,6 +1630,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
            */
           roles: result.roles,
           expiresAt: result.expiresAt,
+          scopeWarning,
         });
       })
       .catch((cause: unknown) => send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" }));
@@ -1558,8 +1680,32 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
      * 免得"升级了服务端忘了升级前端"让后台突然变空）。
      * 它**不是**权限本身：藏起来的入口照样能被直接调接口试，
      * 真正说了算的是服务端的两道闸门。
+     *
+     * `scopeWarning`（Phase B）：范围不正常的账号（教师账号没绑 / 绑错了 teacherId）
+     * 在这里也回一句人话，界面把它显示在后台顶部 —— 否则那位老师看到的是一个空后台，
+     * 而"账号少填了一个字段"这件事没有任何地方会告诉他。
+     *
+     * 这一支改成异步（要查一次教师档案），因此包一层 async IIFE：响应只在其中发一次，
+     * 异常也照样落成 500，不会出现"请求挂住"。
      */
-    send(response, 200, { ok: true, username: session.username, roles: session.roles });
+    void (async () => {
+      try {
+        const scope = scopeForAccount(session.roles, session.teacherId);
+        void api.setScope(scope);
+        const scopeWarning = await scopeWarningFor(scope);
+        send(response, 200, {
+          ok: true,
+          username: session.username,
+          roles: session.roles,
+          scopeWarning,
+        });
+      } catch (cause) {
+        send(response, 500, {
+          ok: false,
+          error: cause instanceof Error ? cause.message : "服务器内部错误",
+        });
+      }
+    })();
     return;
   }
 
@@ -1595,6 +1741,17 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
     }
     // 捕获成常量：下面读请求体是异步的，`session` 是 let，闭包里用它会被当成可能为 null
     const roles: readonly Role[] = session.roles;
+    /*
+     * 范围也在闭包里算好一份（同步算，值本身就固定了）。
+     *
+     * 为什么不用"闸门里已经设过的那份"：设置范围（`requireAuth`）与真正调用方法之间
+     * 隔着一次 `await readBody` —— 并发时另一个请求可能已经把模块级的那份换掉了，
+     * 于是 A 的请求会拿 B 的范围去过滤数据（教师之间串号）。
+     * 这里在**调用前**用本请求算好的值再设一次，中间没有任何 `await`，
+     * 那段窗口就不存在；而服务层各方法在**方法体第一行**把范围读进局部常量，
+     * 于是"这次调用按谁的范围看"从进方法那一刻起就定死了。
+     */
+    const requestScope = scopeForAccount(session.roles, session.teacherId);
     void readBody(request)
       .then(async (body) => {
         /*
@@ -1606,6 +1763,12 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
         const method = String(body.method ?? "");
         const args = Array.isArray(body.args) ? (body.args as unknown[]) : [];
         try {
+          /*
+           * 调方法**之前**重设一次范围（理由见上面 `requestScope` 那段：中间隔着 `await`，
+           * 模块级状态可能已经被下一个请求换掉）。赋值在下一次事件循环之前同步完成
+           * （`setScope` 里没有 await），因此紧接着的调用读到的一定是这一份。
+           */
+          void api.setScope(requestScope);
           // 权限闸门在 callApi 里（method → roles.ts 的 allowedRolesForMethod），这里只负责把会话带过去
           const result = await callApi(method, args.map(decodeArg), roles);
           send(response, 200, { ok: true, result });

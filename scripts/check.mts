@@ -66,14 +66,19 @@ import {
 import { API_CONTRACT, MIGRATION_STEPS, SERVER_MUST_VALIDATE } from "@/lib/backend/contract";
 import { ADMIN_NAV } from "@/lib/site/admin-nav";
 import {
+  EMPTY_SCOPE_WARNING,
   GROUP_ACCESS,
   PAGE_ACCESS,
   ROLES,
   STUDENT_ACTION_ACCESS,
+  TEACHER_SCOPE_RULES,
   allowedGroups,
   allowedRolesForMethod,
   canAccess,
   groupOfMethod,
+  scopeForAccount,
+  teacherScopeDenial,
+  teacherScopeRule,
   visiblePages,
 } from "@/lib/auth/roles";
 import {
@@ -3553,6 +3558,77 @@ ok("每个分组都有方法", API_CONTRACT.every((group) => group.methods.lengt
       }));
   ok("没登记归属的方法一律关门（返回 null 而不是「谁都行」）",
     allowedRolesForMethod("不存在的.method") === null);
+}
+
+/*
+ * ── 行级范围（Phase B）：普通教师只看自己的课与自己学生的课时余额 ────────────────
+ *
+ * ## 这一节为什么只钉"判定"，不钉"过滤后的数据"
+ *
+ * 过滤发生在**服务层按会话范围**的那条路上（`lib/backend/api.ts` 读 `api.setScope`
+ * 设进去的范围）。这个脚本会跑两遍 —— 内存后端与真实 HTTP 后端 —— 而 HTTP 那遍的
+ * 范围由**服务端按会话**算，脚本手上只有技术管理员一个账号，`api.setScope` 在
+ * HTTP 后端只影响它自己那一次调用（服务端在调方法前会按会话再设一次）。
+ * 也就是说"教师到底看到几行"这件事在这里**验不了**，写在这儿只会变成一条
+ * 一边真、一边假通过的断言（本项目最讨厌的那种）。
+ * 因此：**判定与登记完整性放这里**（两种后端跑的是同一份纯函数，结论必须一样），
+ * **真正的过滤效果放 `scripts/check-auth.mts`**（那里有真实会话与真实教师账号）。
+ *
+ * ## 钉住的三件事
+ *
+ *   1. **默认关门**：角色上允许普通教师的**每一个**方法，都必须在范围表里登记 ——
+ *      否则新增一个读接口（读接口默认四类角色都能用）就顺手对全校学生开放了；
+ *   2. **范围表里没有死配置**：登记了范围、角色却压根不让教师调的方法，等于没人维护的假条目；
+ *   3. **只有"恰好是普通教师"才受限，账目类对教师一律关门** —— 这两条都是机构确认过的边界。
+ */
+{
+  const teacherAllowed = realMethods.filter((method) =>
+    canAccess(["普通教师"], allowedRolesForMethod(method) ?? []),
+  );
+  eq("角色上允许普通教师的每个方法都登记了行级范围处理（没登记＝新增读接口默认对全校开放）",
+    teacherAllowed.filter((method) => teacherScopeRule(method) === null), []);
+  eq("行级范围表里没有「角色压根不让教师调」的死条目（那是没人维护的假配置）",
+    Object.keys(TEACHER_SCOPE_RULES).filter(
+      (method) => !teacherAllowed.includes(method),
+    ), []);
+
+  // 设定值：教师账号的实际范围
+  eq("普通教师 + 填了 teacherId → 只看自己名下的课与学生",
+    scopeForAccount(["普通教师"], "t_abc"), { kind: "own", teacherId: "t_abc", warning: "" });
+  const emptyScope = scopeForAccount(["普通教师"], "");
+  ok("普通教师 + 没填 teacherId → 登录成功但范围为空（不拒绝登录，理由写在 roles.ts）",
+    emptyScope.kind === "own" && emptyScope.teacherId === "" && emptyScope.warning === EMPTY_SCOPE_WARNING);
+  ok("空范围的提示说清了原因与怎么修（teacherId / accounts.json / 重启）",
+    EMPTY_SCOPE_WARNING.includes("teacherId") &&
+      EMPTY_SCOPE_WARNING.includes("accounts.json") &&
+      EMPTY_SCOPE_WARNING.includes("重启"));
+  eq("兼任多角色的账号不受行级范围限制（机构确认④：给了更高角色就按更高角色看）",
+    scopeForAccount(["普通教师", "财务管理员"], "t_abc").kind, "all");
+  eq("技术管理员不受限制", scopeForAccount(["技术管理员"], "").kind, "all");
+  eq("没有角色的账号不按「受范围限制的教师」处理（它连方法都调不到，角色闸门会全拒）",
+    scopeForAccount([], "t_abc").kind, "all");
+
+  // 判定：放行 = 由服务层过滤；hidden / 没登记 = 明确拒绝
+  ok("教师调得到的是「放行、由服务层过滤」，不是拒绝",
+    teacherScopeDenial("students.list", ["普通教师"]) === null &&
+      teacherScopeDenial("lessons.list", ["普通教师"]) === null &&
+      teacherScopeDenial("today", ["普通教师"]) === null);
+  ok("钱与排课这些整块不归教师的业务一律拒绝（payments / finance / 欠费 / 排课 / 待跟进）",
+    ["payments.list", "payments.listByStudent", "finance", "outstandingByStudent",
+      "followups", "lessons.createSeries", "lessons.suggestMoves"].every(
+      (method) => teacherScopeDenial(method, ["普通教师"]) !== null));
+  ok("范围表里标了 hidden 的对教师一律拒绝，其余一律放行（口径只有这两种，不会一会儿 403 一会儿空）",
+    Object.entries(TEACHER_SCOPE_RULES).every(([method, rule]) =>
+      (teacherScopeDenial(method, ["普通教师"]) === null) === (rule !== "hidden")));
+  ok("没登记范围的方法对教师默认关门（新增接口忘登记＝教师一点都调不到）",
+    teacherScopeDenial("不存在的.method", ["普通教师"]) !== null);
+  ok("非普通教师账号不吃这一层判定（兼任财务的教师照样能看收款）",
+    teacherScopeDenial("payments.list", ["普通教师", "财务管理员"]) === null &&
+      teacherScopeDenial("payments.list", ["技术管理员"]) === null);
+  // 范围限制**只**看角色、不看 teacherId：没绑 teacherId 是"什么都看不到"，不是"被拒"
+  ok("没绑 teacherId 的教师账号不是「被拒」而是「空范围」（两者表现不同，别混）",
+    teacherScopeDenial("students.list", ["普通教师"]) === null &&
+      scopeForAccount(["普通教师"], "").teacherId === "");
 }
 
 // 服务端必须复核的清单：这些是接服务端时的验收项，不能被悄悄删掉

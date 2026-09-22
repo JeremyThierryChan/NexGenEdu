@@ -166,7 +166,14 @@ export const API_CONTRACT: ContractGroup[] = [
     methods: [
       "exportDataset",
       "exportDatabase", "importDatabase", "imports.apply", "imports.fromSite", "hasBackup", "restoreBackup", "reset",
-      "setOperator", "logs.list", "logs.clear",
+      /*
+       * 两个"会话管道"方法：不做业务，只把"这次请求是谁、按谁的范围看"交给服务层。
+       * 它们由**服务端**在每个请求开头按会话调用（见 server/index.mts 的 requireAuth），
+       * 前端调它们不作数（服务端在调用业务方法前会再设一次）。
+       * 列在这里是为了保持 api 的形状一致，也因为它们确实属于"运维与审计"这一摊
+       * （`setScope` 是 Phase B 的行级范围：普通教师只看自己的课与自己学生的课时余额）。
+       */
+      "setOperator", "setScope", "logs.list", "logs.clear",
     ],
   },
 ];

@@ -21,7 +21,7 @@ export function AdminTopBar() {
    * 账号与角色来自 `RequireAuth` 问的那一次会话（它已经问过了，这里不再重复请求）。
    * 显示角色是有用的：一个人兼多个角色时，他会想知道"现在按哪个身份在看这个后台"。
    */
-  const { username, roles } = useAuth() ?? { username: "", roles: [] };
+  const { username, roles } = useAuth() ?? { username: "", roles: [], scopeWarning: "" };
 
   function onLogout() {
     void logout().then(() => router.replace("/admin/login"));

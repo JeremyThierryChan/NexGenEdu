@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 114 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 115 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -42,14 +42,16 @@ lib/backend/api.ts        服务层实现（当前 114 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 114 个方法）
+## 二、接口分组（当前 115 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
 
 > **乐观锁（v17）没有新增方法**：它只是给已有的写接口多接一个**可选参数**
 > `options?: { expectedVersion?: number }`（见 §6.6），
-> 因此这份清单的条数不变（114）。新增方法才需要登记进 `contract.ts` 并改这里的计数。
+> 因此那份 114 个方法没有因为乐观锁而增减。**计数后来变成 115**：Phase B 的行级范围
+> 加了 `setScope`（与 `setOperator` 同类的"会话管道"方法，见 §7 与 §三）。
+> 新增方法才需要登记进 `contract.ts` 并改这里的计数。
 
 （下面每组写的 REST 形状是**路线 A 的参考实现**：`server/index.mts` 里确实有
 `/api/students`、`/api/lessons` 这类接口，它们读写自己的 SQL 表，**不在页面用的数据通路上**。
@@ -491,6 +493,9 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 
 `setOperator` 现在**由服务端自己调**（每个请求按令牌所属账号设置），前端调它不作数 ——
 它留在清单里是为了保持 `api` 的形状一致，不代表页面可以自己指定操作人。
+`setScope`（Phase B 的行级范围）同理，而且更硬：范围**每个请求都会被服务端按会话重设一次**，
+前端调它只影响它自己那一次调用（一次 `/api/call` 只处理一个方法），
+下一个请求立刻被改回会话算出来的范围。完整的口径见下面「三、行级范围」那一节。
 `reset` 的语义是**清空业务数据**（回到 `createEmptyDatabase()`：业务表全空 + 网站课程 + 报价配置），
 不是"回到示例数据"。
 
@@ -505,7 +510,97 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 `logs.clear`，只要登录就能清空，做到"防篡改"要等单账号之外有按人区分的权限，
 并且把清空这条收进运维通道（见技术架构第 10 节）。
 
-## 三、服务端必须自己复核的校验
+## 三、行级范围（Phase B：普通教师只看自己的课与自己学生的课时余额）
+
+方法级权限回答"**这件事归谁做**"（不满足就 403）；行级范围回答"**这件事里你只看得到哪几行**"。
+两层都在服务端判定，规则都只有一处：`lib/auth/roles.ts`（`allowedRolesForMethod` / `scopeForAccount`
+/ `TEACHER_SCOPE_RULES` / `teacherScopeDenial`）。
+
+### 谁会受范围限制
+
+**只有"角色恰好是普通教师"的账号**（`isPlainTeacher`）。兼任多角色的账号**不受限制** ——
+机构确认过"一个账号能兼任多个角色"，给了更高角色就按更高角色看
+（兼任财务的教师本来就要看全部钱的账）。
+
+范围靠账号里的 **`teacherId`**（对应教师档案 `teachers.id`）：服务端在
+`requireAuth` 里按会话算出范围、写进服务层（`api.setScope`，与操作人是同一套"每请求重设"的机制），
+再由 `lib/backend/api.ts` 的各方法按它过滤返回值。
+
+| 账号情况 | 结果 |
+| --- | --- |
+| 技术管理员 / 财务管理员 / 招生老师 | 不受范围限制（与以前完全一样） |
+| 兼任多个角色（含普通教师） | 不受范围限制 |
+| 普通教师 + 填了正确的 `teacherId` | 只看自己带的课、自己课上的学生 |
+| 普通教师 + **没填 `teacherId`** | **登录成功、但什么都看不到**（空范围），登录响应与 `/api/session` 里带 `scopeWarning` 说明原因与怎么修 |
+| 普通教师 + 填了**不存在**的 `teacherId`（填成姓名 / 别的环境的 id） | 同上：空范围 + `scopeWarning`（提示里带上那个 id，一眼能看出填错了什么） |
+
+> 为什么"没填"不直接拒绝登录：那是**数据配置**问题、不是身份问题 ——
+> 拒绝登录会让那位老师在现场彻底用不了系统，而账号表是手写的、漏填一个字段必然会发生。
+> 空范围是"宁可少给"的方向：不会多给一行数据，而且提示说清了怎么修。
+
+"**自己的学生**"的口径 = **在我的课里出现过的学生**（`lessons.teacherId === 我`，排除已取消的课）。
+刻意不采用"报课时指定了我"那种更宽的口径：一节我带的课上就有这个学生，我却看不到他的课时余额，
+老师日常（家长问"还剩几节课"）就断了。
+
+### 两条口径（避免"一会儿 403 一会儿空列表"）
+
+| 情况 | 表现 | 为什么 |
+| --- | --- | --- |
+| **行级越界**（别人的学生 / 别人的课） | **看不到**：读接口给空集或 `null`，课节相关的写动作按"这条记录不存在"处理 | 403 的意思是"这件事不归你"，会让人去找管理员开权限，而实际要找的是"这门课是不是你带"；而且 403 本身就说漏了"这个 id 是存在的" |
+| **方法级没登记 / 标了 `hidden`** | **403 明确拒绝**（文案说清"这件事不归普通教师"） | 那才是"不归你"。这类拒绝是**可枚举的**（就是下两张表里的清单），不是随手加的 |
+
+写动作越界时**不能**装作成功（会让人以为"这节课我标了已上"，而课时扣在别人那边）：
+返回形状允许"空"的（`lessons.markCompleted` 返回 `lesson: null`）就返回空，
+必须返回实体的（`lessonRecords.save` / `assessments.add`）就**报错**并说清原因。
+
+### 受范围影响的方法（`TEACHER_SCOPE_RULES` 全表）
+
+| 处理方式 | 方法 | 教师看到什么 |
+| --- | --- | --- |
+| `global` | `teachers.list` / `teachers.get` / `teachers.listActive`、`classrooms.list` / `classrooms.get`、`courses.list` / `courses.get` / `courses.options` / `courses.summary`、`site.publicContent` | 原样（排课、报课、看课表要用的**参考数据**，不含学生与金额） |
+| `lessons` | `lessons.list` / `lessons.get` / `listByDate` / `listBetween` / `listByClassroom` / `listByStudent` / `listByTeacher` / `pendingMakeups`、`lessonRecords.list` / `get` / `listByLesson` | 只有**自己带的课**；`listByTeacher(别人的 id)` 返回**空数组** |
+| `students` | `students.list` / `students.get` / `students.search`、`transactions.listByStudent` / `listByEnrollment`、`homework.list` / `get` / `listByStudent`、`assessments.list` / `get` / `listByStudent`、`lessonRecords.listByStudent` | 只有**自己课上的学生**那条线；`students.get(别人的学生)` 返回 `null` |
+| `aggregate` | `today`、`stats` | **按我的口径重算**：今日概览只算我的课、低课时预警只列我的学生；统计里教室利用率 / 时段分布 / 教师课时 / 退课流失都只算我的（因此"利用率"会明显偏低，这是"只算我的课"的直接结果） |
+| `search` | `search` | 学生与排课只搜我的；教师 / 教室 / 课程照旧（搜索框在每个页面都有，最容易顺手搜到别人班的学生） |
+| `teach` | `lessons.markCompleted`、`lessons.createMakeup`、`lessonRecords.save`、`assessments.add` | 目标必须在自己名下，否则按"记录不存在"处理或报错（这几条会**改课时账**，绝不能静默成功） |
+| `hidden`（→ 403） | `payments.list` / `get` / `listByStudent` / `listByEnrollment` / `listBetween`、`finance`、`outstandingByStudent`、`followups`、`lessons.findConflicts` / `planSeries` / `createSeries` / `suggestMoves`、`courses.syncFromSite` | **看不到**：钱、待跟进、排课、课程库写入都不归教师 |
+
+**没登记在这个表里的方法** → 对普通教师**一律拒绝**（默认关门）。
+这不是洁癖：角色表是"读宽写严"的（`crud` / `query` 里的只读方法默认四类角色都能用），
+于是**新增一个读接口时它会自动对教师开放**。写成默认关门之后，新增接口的后果是
+"教师一点都调不到，于是有人去登记它"；`npm run check` 有一条断言盯着它。
+
+**两处刻意收紧、值得写清的副作用**：
+
+- `lessons.findConflicts` 对教师也是 403：那份冲突结论会点名**别的教师与别的学生**
+  （"和 X 老师的那节课撞了"），把它当查询接口反复试就能把别人的课表问出来 ——
+  那正是行级范围要挡住的东西。代价是教师在排课 / 补课表单里**看不到冲突提示**
+  （界面把它当作"没有提示"，不会报错）；服务端本来就不拦补课的冲突，因此这只影响提示。
+- `courses.syncFromSite` 对教师是 403：使用手册的角色表写着教师对课程库**只读**，
+  而它被归进了 `actions` 分组（角色表的一处小疏漏），范围层按默认关门把它关掉。
+
+### 金额字段被剥掉（不是拒绝接口）
+
+教师看得到学生的**课时余额**（机构确认③），但看不到**钱**。这两样在同一个对象上
+（课时在 `Student.enrollments` 里），所以做法是**剥字段**而不是拒绝接口：
+`hideStudentMoney` 把每条报课记录的 `unitPrice`（标价单价）/ `agreedAmount`（约定应缴）/
+`paidAmount`（实收）**置 0**（`lib/backend/api.ts`，一处实现、所有返回学生对象的方法共用）。
+
+- 置 0 而不是删键：前端与类型的口径是"这三个字段是数字"，删键会算出 `undefined` / `¥NaN`
+  （会显示给家长看）；置 0 与"这门课没有登记价格"是同一个既有语义，界面上的金额块自己会隐藏。
+- `stats` 的退课金额（`churn.refundedAmount`）同样置 0 —— 口径一致，别让钱从看板漏出去。
+
+**导出属于 `ops`（只有技术管理员）**：`exportDataset` / `exportDatabase` 这类接口
+教师连方法都调不到（403，与以前一样），因此不需要在导出里再过滤一遍。
+
+### 老 REST 接口对普通教师整条关闭
+
+`GET /api/students` 这类老接口（路线 A 的参考实现）**不走服务层**、直接读自己的 SQL 表，
+因此**没有行级范围过滤**。两条路读写同一个库，只挡一条等于没挡（第 6 步加登录时踩过同样的坑），
+所以正常教师在那条路上被**整条拒绝**（403，提示里让他改走 `/api/call`）。
+技术管理员 / 财务 / 招生不受影响；`/api/call` 与 `/api/status`（登录即可）保持原样。
+
+## 四、服务端必须自己复核的校验
 
 页面侧已经没有这些防线可言（也不需要有）：页面只把方法名与参数发到服务端，
 判定全部在服务端发生。下面 12 项（第 8 项是服务端自己那套，其余 11 项跑在服务端复用的那同一份 `api.ts` 里）
@@ -546,7 +641,7 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 （`server/db-lock.mts`）。要更强的原子性/多实例，得换 Postgres 那类数据库服务
 （见 [后端开发方案](./后端开发方案.md) §7 的边界表）。
 
-## 四、从 localStorage 搬到服务端（✅ 六步都已完成）
+## 五、从 localStorage 搬到服务端（✅ 六步都已完成）
 
 > **这一节已经落地**（走的是"服务端复用同一份 `api.ts`"的路线，不是下面第 2、3 步原本设想的"逐个接口重写"）：
 > 现状与踩过的坑见 `docs/后端开发方案.md` §5.3 / §5.6 / §5.7。
@@ -575,7 +670,7 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 与每天自动备份 + 恢复演练（`npm run drill:restore`：备份 → 验备份文件本身 → 删库 →
 只靠备份恢复 → 核对一致）。
 
-## 五、自检怎么保证这份文档不过期
+## 六、自检怎么保证这份文档不过期
 
 `npm run check` 里有一节专门比对：
 

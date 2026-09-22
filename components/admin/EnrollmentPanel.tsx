@@ -60,7 +60,18 @@ export function EnrollmentPanel({
     let cancelled = false;
     void Promise.all([
       api.transactions.listByStudent(student.id),
-      api.payments.listByStudent(student.id),
+      /*
+       * 收款记录**单独兜住失败**（Phase B 的行级范围）：
+       * 普通教师看得到自己学生的课时流水，但**看不到钱** —— 服务端对
+       * `payments.*` 一律回 403。如果让这一条把 `Promise.all` 带崩，
+       * 教师连**课时流水**（他本该看得见的那部分）都显示不出来了，
+       * 而且 `useEffect` 里的失败没人接住，界面会出现未处理的报错。
+       *
+       * 因此这里的语义是"钱这一块你本来就不该看到，那就当作没有收款记录"：
+       * 教师看到的是空的收款区（金额字段服务端也已经剥成 0），
+       * 而技术 / 财务 / 招生账号走的是同一条成功路径，行为与以前完全一样。
+       */
+      api.payments.listByStudent(student.id).catch(() => [] as Payment[]),
     ]).then(([rows, payments]) => {
       if (cancelled) return;
       setTransactions(rows);

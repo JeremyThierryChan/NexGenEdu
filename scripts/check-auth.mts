@@ -26,7 +26,7 @@ import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { run, withTempServer } from "./temp-server.mts";
+import { run, startServer, withTempServer } from "./temp-server.mts";
 import { login, prepareCredential } from "../server/auth.mts";
 import { createMemoryStore } from "../lib/backend/storage.ts";
 import {
@@ -572,6 +572,403 @@ try {
 } catch (cause) {
   failures += 1;
   console.error(`\n✗ 权限闸门这一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
+}
+
+/*
+ * ── 行级范围（Phase B）：普通教师只看自己的课与自己学生的课时余额 ──────────────────
+ *
+ * ## 为什么这一段必须在这里，而不能放进 `check.mts`
+ *
+ * 行级范围是**按会话**生效的：服务端在 `requireAuth` 里按账号的 `roles` + `teacherId`
+ * 算出范围，再由服务层过滤返回值。`check.mts` 会跑两遍（内存 + HTTP），但两遍手上
+ * 都只有**技术管理员**一个账号 —— 在 HTTP 那遍调 `api.setScope` 只影响那一次调用
+ * （服务端在调方法前会按会话再设一次），所以"教师到底看到几行"在那儿验不了。
+ * 判定与登记完整性放在 `check.mts`（纯函数，两端结论必须一样），**真实效果放在这里**：
+ * 真起两个服务端进程、真写一份数据、真用教师账号登录、真去读别人的数据。
+ *
+ * ## 为什么起两个服务端
+ *
+ * 教师账号必须带上**真实的教师档案 id**（`teacherId`），而档案 id 是建数据时生成的
+ * （`t_xxxxxx`），账号表又只在**服务端启动时**读一次。所以：
+ *   ① 第一个进程（默认账号＝技术管理员）建教师 / 学生 / 报课 / 排课，读出档案 id；
+ *   ② 停掉它，用**同一个库** + 一份写在环境变量里的账号表（`NEXGENEDU_ACCOUNTS_JSON`）
+ *      再起一个 —— 这才验到"机构真加一条教师账号"会发生什么。
+ * 顺便这条路径每次都把"账号表从环境变量来"这条路走一遍（与第 8 节同一套钩子）。
+ */
+console.log("\n[9] 行级范围：普通教师只看自己的课与自己学生的课时余额");
+try {
+  const scopeDir = mkdtempSync(path.join(tmpdir(), "nexgenedu-scope-"));
+  const scopeDbPath = path.join(scopeDir, "db-scope.sqlite");
+
+  /** 播种：失败就抛 —— 空库上跑后面那些断言会"全绿"，那是假证据。 */
+  const seed = async (
+    base: string,
+    token: string,
+    method: string,
+    args: unknown[],
+  ): Promise<unknown> => {
+    const response = await call(base, token, method, args);
+    if (response.status !== 200) {
+      throw new Error(`播种 ${method} 失败：HTTP ${response.status} ${JSON.stringify(response.body)}`);
+    }
+    return response.body.result;
+  };
+  /** 登录并带回 scopeWarning（行级范围的提示就靠它）。 */
+  const loginAs = async (
+    base: string,
+    username: string,
+    password: string,
+  ): Promise<{ token: string; roles: string[]; scopeWarning: string }> => {
+    const response = await raw(base, "/api/login", { method: "POST", body: { username, password } });
+    if (response.status !== 200) {
+      throw new Error(`登录失败（${username}）：HTTP ${response.status} ${JSON.stringify(response.body)}`);
+    }
+    return {
+      token: String(response.body.token ?? ""),
+      roles: (response.body.roles ?? []) as string[],
+      scopeWarning: String(response.body.scopeWarning ?? ""),
+    };
+  };
+  /** 读一次结果（断言里用得最多的一步）。 */
+  const read = async (base: string, token: string, method: string, args: unknown[] = []) => {
+    const response = await call(base, token, method, args);
+    return { status: response.status, result: response.body.result, error: response.body.error };
+  };
+
+  const SUBJECT = "初中数学";
+  const FORMS = "一对一定制课";
+  /** 今天的某个整点（`today` 的口径按本地日期分组，所以固定在今天）。 */
+  const todayAt = (hour: number): string => {
+    const date = new Date();
+    date.setHours(hour, 0, 0, 0);
+    return date.toISOString();
+  };
+
+  const teacherBody = (name: string, order: number) => ({
+    name, subjects: [SUBJECT], role: "", phone: "", active: true, years: "",
+    summary: "", bio: "", recommendation: "", order, siteVisible: false,
+    origin: "后台", kind: "教师",
+  });
+
+  let teacherAId = "";
+  let teacherBId = "";
+  let studentAId = "";
+  let studentBId = "";
+  let classroomId = "";
+  let lessonAId = "";
+  let lessonBId = "";
+  let cancelledLessonId = "";
+
+  /* ① 第一个进程：建数据（用它自己的默认账号＝技术管理员） */
+  const first = await startServer({ dbPath: scopeDbPath });
+  try {
+    const admin = await loginAs(first.base, first.credentials.username, first.credentials.password);
+    const teacherA = (await seed(first.base, admin.token, "teachers.create", [teacherBody("范围甲老师", 1)])) as { id: string };
+    const teacherB = (await seed(first.base, admin.token, "teachers.create", [teacherBody("范围乙老师", 2)])) as { id: string };
+    teacherAId = teacherA.id;
+    teacherBId = teacherB.id;
+    const classroom = (await seed(first.base, admin.token, "classrooms.create", [
+      { name: "范围测试教室", kind: "上课用教室", capacity: 8, availability: [], note: "" },
+    ])) as { id: string };
+    classroomId = classroom.id;
+
+    const studentA = (await seed(first.base, admin.token, "students.create", [
+      { name: "范围甲同学", grade: "初二", guardian: "138-0000-0001", status: "在读", note: "", profile: {} },
+    ])) as { id: string };
+    const studentB = (await seed(first.base, admin.token, "students.create", [
+      { name: "范围乙同学", grade: "初二", guardian: "138-0000-0002", status: "在读", note: "", profile: {} },
+    ])) as { id: string };
+    studentAId = studentA.id;
+    studentBId = studentB.id;
+
+    // 报课：**带上金额**（这样"教师那份金额被剥成 0"才是可验证的，而不是本来就没有钱）
+    for (const studentId of [studentAId, studentBId]) {
+      await seed(first.base, admin.token, "students.enroll", [
+        studentId,
+        {
+          subject: SUBJECT, form: FORMS, teacherId: studentId === studentAId ? teacherAId : teacherBId,
+          lessons: 10, startedAt: todayAt(0), note: "", unitPrice: 200, agreedAmount: 2000,
+          paidNow: 1000, method: "微信",
+        },
+      ]);
+    }
+
+    const lesson = (
+      teacherId: string, studentId: string, hour: number, status: string,
+    ) => ({
+      subject: SUBJECT, form: FORMS, teacherId, classroomId, studentIds: [studentId],
+      startsAt: todayAt(hour), durationMinutes: 60, status, note: "", makeupForLessonId: "",
+    });
+    lessonAId = ((await seed(first.base, admin.token, "lessons.create", [
+      lesson(teacherAId, studentAId, 9, "已排"),
+    ])) as { id: string }).id;
+    lessonBId = ((await seed(first.base, admin.token, "lessons.create", [
+      lesson(teacherBId, studentBId, 10, "已排"),
+    ])) as { id: string }).id;
+    /*
+     * 第三节课：**甲老师带、但已取消、学生是乙的学生**。
+     * 它专门验"自己的学生 = 我的课（排除已取消）里出现过的学生"：
+     * 这节课在 甲 的课表里（是他自己的课），但它上面的学生**不该**因此变成"他的学生"。
+     */
+    cancelledLessonId = ((await seed(first.base, admin.token, "lessons.create", [
+      lesson(teacherAId, studentBId, 11, "已取消"),
+    ])) as { id: string }).id;
+
+    equal("播种完成：技术管理员看到 2 位学生", ((await read(first.base, admin.token, "students.list")).result as unknown[]).length, 2);
+    equal("播种完成：技术管理员看到 3 节课", ((await read(first.base, admin.token, "lessons.list")).result as unknown[]).length, 3);
+  } finally {
+    await first.stop();
+  }
+
+  /* ② 第二个进程：同一个库 + 一份真实的账号表（含各种教师账号） */
+  const scopeAccounts = [
+    { username: "技术甲", password: "pw-admin", roles: ["技术管理员"] },
+    { username: "财务甲", password: "pw-cashier", roles: ["财务管理员"] },
+    { username: "招生甲", password: "pw-enroll", roles: ["招生老师"] },
+    { username: "教师甲", password: "pw-teacher-a", roles: ["普通教师"], teacherId: teacherAId },
+    { username: "教师乙", password: "pw-teacher-b", roles: ["普通教师"], teacherId: teacherBId },
+    // 机构确认④：一个账号可兼任多个角色 → 不受行级范围限制
+    { username: "兼任甲", password: "pw-teacher-cashier", roles: ["普通教师", "财务管理员"], teacherId: teacherAId },
+    // 没绑教师档案 → 登录成功但范围为空
+    { username: "没绑档", password: "pw-teacher-none", roles: ["普通教师"], teacherId: "" },
+    // 绑错了（填成不存在的 id）→ 同样是空范围，提示里带上那个 id
+    { username: "绑错档", password: "pw-teacher-bad", roles: ["普通教师"], teacherId: "t_不存在" },
+  ];
+
+  const second = await startServer({
+    dbPath: scopeDbPath,
+    env: { NEXGENEDU_ACCOUNTS_JSON: JSON.stringify(scopeAccounts) },
+  });
+  try {
+    const admin = await loginAs(second.base, "技术甲", "pw-admin");
+    const teacherA = await loginAs(second.base, "教师甲", "pw-teacher-a");
+    const teacherB = await loginAs(second.base, "教师乙", "pw-teacher-b");
+    const dual = await loginAs(second.base, "兼任甲", "pw-teacher-cashier");
+    const unbound = await loginAs(second.base, "没绑档", "pw-teacher-none");
+    const wrongId = await loginAs(second.base, "绑错档", "pw-teacher-bad");
+    const cashier = await loginAs(second.base, "财务甲", "pw-cashier");
+    const enroller = await loginAs(second.base, "招生甲", "pw-enroll");
+
+    console.log("\n[9.1] 登录与范围提示（scopeWarning）");
+    equal("教师账号有正确的 teacherId：登录成功且没有提示", teacherA.scopeWarning, "");
+    equal("技术管理员没有范围提示（不受限制）", admin.scopeWarning, "");
+    check("没绑 teacherId 的教师账号**照样登录成功**（不拒绝登录——那是数据配置问题，不是身份问题）",
+      unbound.token.length >= 32);
+    check("没绑 teacherId 的账号拿到一句说清原因的提示（提到 teacherId）",
+      unbound.scopeWarning.includes("teacherId"), unbound.scopeWarning);
+    check("teacherId 填错时提示里带上那个 id（人一眼能看出填错了什么）",
+      wrongId.scopeWarning.includes("t_不存在"), wrongId.scopeWarning);
+    const unboundSession = await raw(second.base, "/api/session", { token: unbound.token });
+    equal("会话接口也带同一句提示（界面靠它显示）",
+      String(unboundSession.body.scopeWarning ?? ""), unbound.scopeWarning);
+    const teacherSession = await raw(second.base, "/api/session", { token: teacherA.token });
+    equal("正常教师账号的会话提示为空", String(teacherSession.body.scopeWarning ?? ""), "");
+
+    console.log("\n[9.2] 教师只看得到自己课上的学生（且没有金额）");
+    const teacherStudents = (await read(second.base, teacherA.token, "students.list")).result as Array<{
+      id: string; name: string;
+      enrollments: Array<{ totalLessons: number; usedLessons: number; unitPrice: number; agreedAmount: number; paidAmount: number }>;
+    }>;
+    equal("学生列表只剩自己课上的那一位", teacherStudents.map((item) => item.id), [studentAId]);
+    check("别人的学生不在列表里（连名字都不出现）",
+      !JSON.stringify(teacherStudents).includes("范围乙同学"));
+    const enrollment = teacherStudents[0]?.enrollments[0];
+    check("**课时余额仍然看得到**（机构确认③：家长常问「还剩几节课」）",
+      enrollment !== undefined && enrollment.totalLessons - enrollment.usedLessons === 10,
+      JSON.stringify(enrollment));
+    check("金额字段被剥掉：单价 / 约定应缴 / 实收都是 0",
+      enrollment !== undefined &&
+        enrollment.unitPrice === 0 && enrollment.agreedAmount === 0 && enrollment.paidAmount === 0,
+      JSON.stringify(enrollment));
+    const adminStudents = (await read(second.base, admin.token, "students.list")).result as Array<{
+      id: string;
+      enrollments: Array<{ unitPrice: number; agreedAmount: number; paidAmount: number }>;
+    }>;
+    const adminView = adminStudents.find((item) => item.id === studentAId);
+    check("（对照）同一位学生在技术管理员那份里**有**金额 —— 说明 0 是剥出来的，不是本来没有钱",
+      adminView?.enrollments[0]?.unitPrice === 200 &&
+        adminView?.enrollments[0]?.agreedAmount === 2000 &&
+        adminView?.enrollments[0]?.paidAmount === 1000,
+      JSON.stringify(adminView?.enrollments[0]));
+
+    const foreignStudent = await read(second.base, teacherA.token, "students.get", [studentBId]);
+    equal("别人的学生：接口正常返回（200，不是 403）", foreignStudent.status, 200);
+    equal("别人的学生：**当作不存在**（返回 null，不报错、也不说「存在但不是你的」）",
+      foreignStudent.result, null);
+    equal("自己的学生：拿得到", ((await read(second.base, teacherA.token, "students.get", [studentAId])).result as { id: string }).id, studentAId);
+    const searched = (await read(second.base, teacherA.token, "students.search", ["范围"])).result as Array<{ id: string }>;
+    const searchedAdmin = (await read(second.base, admin.token, "students.search", ["范围"])).result as Array<{ id: string }>;
+    equal("搜索「范围」只搜到自己的学生", searched.map((item) => item.id), [studentAId]);
+    equal("（对照）技术管理员搜同一个词能搜到两位", searchedAdmin.length, 2);
+    equal("按学生导出（exportDataset）对教师仍然是 403（它属于运维，与今天一致）",
+      (await call(second.base, teacherA.token, "exportDataset", [{ dataset: "students", ids: [], format: "csv" }])).status, 403);
+
+    console.log("\n[9.3] 教师只看得到自己的课");
+    const teacherLessons = (await read(second.base, teacherA.token, "lessons.list")).result as Array<{ id: string }>;
+    const lessonIds = teacherLessons.map((item) => item.id).sort();
+    equal("课表只剩自己的课（含自己那节已取消的课）",
+      lessonIds, [cancelledLessonId, lessonAId].sort());
+    check("别人的课不在里面", !lessonIds.includes(lessonBId));
+    equal("别人的课：单条查不到（返回 null）",
+      (await read(second.base, teacherA.token, "lessons.get", [lessonBId])).result, null);
+    equal("别人的课表：`listByTeacher(别人)` 返回**空数组**（不是别人的课，也不是 403）",
+      (await read(second.base, teacherA.token, "lessons.listByTeacher", [teacherBId])).result, []);
+    equal("自己的课表：`listByTeacher(自己)` 拿得到",
+      ((await read(second.base, teacherA.token, "lessons.listByTeacher", [teacherAId])).result as unknown[]).length, 2);
+    equal("按学生查课：别人的学生 → 空数组",
+      (await read(second.base, teacherA.token, "lessons.listByStudent", [studentBId])).result, []);
+    equal("按日期查课：只算自己的",
+      ((await read(second.base, teacherA.token, "lessons.listByDate", [new Date()])).result as unknown[]).length, 2);
+    equal("按区间查课：只算自己的",
+      ((await read(second.base, teacherA.token, "lessons.listBetween", [new Date(), new Date()])).result as unknown[]).length, 2);
+    equal("（对照）技术管理员同一天看到 3 节",
+      ((await read(second.base, admin.token, "lessons.listByDate", [new Date()])).result as unknown[]).length, 3);
+
+    const markForeign = await read(second.base, teacherA.token, "lessons.markCompleted", [lessonBId]);
+    equal("给别人的课「标记已上」：**当作不存在**（result.lesson 为 null，不报错）",
+      (markForeign.result as { lesson: unknown }).lesson, null);
+    equal("而且没有扣任何课时：那节课仍然是「已排」",
+      ((await read(second.base, admin.token, "lessons.get", [lessonBId])).result as { status: string }).status, "已排");
+    const markOwn = await read(second.base, teacherA.token, "lessons.markCompleted", [lessonAId]);
+    equal("给自己课「标记已上」：正常执行",
+      (markOwn.result as { lesson: { id: string } | null }).lesson?.id, lessonAId);
+    equal("自己的课标完之后课时真的扣了 1 节（这条动作没被范围挡坏）",
+      (((await read(second.base, teacherA.token, "students.get", [studentAId])).result as {
+        enrollments: Array<{ usedLessons: number }>;
+      }).enrollments[0]?.usedLessons), 1);
+    equal("排课（批量排课）对教师是 403：那件事不归他",
+      (await call(second.base, teacherA.token, "lessons.createSeries", [{ subject: SUBJECT }])).status, 403);
+    equal("冲突检查对教师也是 403（结论里会点名别的教师与别的学生）",
+      (await call(second.base, teacherA.token, "lessons.findConflicts", [{}])).status, 403);
+
+    console.log("\n[9.4] 课时流水能看，钱看不到");
+    const ledger = (await read(second.base, teacherA.token, "transactions.listByStudent", [studentAId])).result as unknown[];
+    check("自己学生的课时流水看得到（报课那一条）", ledger.length >= 1, JSON.stringify(ledger).slice(0, 120));
+    equal("别人学生的课时流水：空数组",
+      (await read(second.base, teacherA.token, "transactions.listByStudent", [studentBId])).result, []);
+    equal("收款记录（自己学生的）：403 —— 钱不归教师，这是整块业务而不是某一行",
+      (await call(second.base, teacherA.token, "payments.listByStudent", [studentAId])).status, 403);
+    for (const method of ["payments.list", "finance", "outstandingByStudent", "followups"]) {
+      equal(`教师调 ${method} 一律 403`, (await call(second.base, teacherA.token, method)).status, 403);
+    }
+    equal("（对照）财务管理员看收款记录：正常",
+      (await read(second.base, cashier.token, "payments.list")).status, 200);
+
+    console.log("\n[9.5] 看板与搜索按我的口径重算");
+    const todayMine = (await read(second.base, teacherA.token, "today")).result as {
+      lessonCount: number; studentCount: number; teacherCount: number;
+      lowLessonStudents: Array<{ student: { id: string } }>;
+    };
+    const todayAdmin = (await read(second.base, admin.token, "today")).result as {
+      lessonCount: number; studentCount: number;
+    };
+    equal("今日概览的课次只算我的（含自己那节已取消的）", todayMine.lessonCount, 2);
+    equal("今日概览的学生数只算我的", todayMine.studentCount, 1);
+    equal("（对照）技术管理员的今日概览是全校口径", [todayAdmin.lessonCount, todayAdmin.studentCount], [3, 2]);
+    check("低课时预警里只有我的学生",
+      todayMine.lowLessonStudents.every((item) => item.student.id === studentAId));
+    const statsMine = (await read(second.base, teacherA.token, "stats")).result as {
+      teachers: Array<{ teacher: { id: string } }>;
+      churn: { refundedAmount: number };
+    };
+    const statsAdmin = (await read(second.base, admin.token, "stats")).result as {
+      teachers: Array<{ teacher: { id: string } }>;
+    };
+    equal("统计里的教师课时只算我自己那一条", statsMine.teachers.map((item) => item.teacher.id), [teacherAId]);
+    equal("（对照）技术管理员的统计是全校两位教师", statsAdmin.teachers.length, 2);
+    equal("退课金额（钱）对教师也是 0", statsMine.churn.refundedAmount, 0);
+    const searchMine = (await read(second.base, teacherA.token, "search", ["范围乙"])).result as Array<{ kind: string }>;
+    const searchAdmin = (await read(second.base, admin.token, "search", ["范围乙"])).result as Array<{ kind: string }>;
+    equal("全局搜索搜不到别人的学生", searchMine.filter((hit) => hit.kind === "学生").length, 0);
+    check("（对照）技术管理员搜同一个名字搜得到（搜索本身没坏）",
+      searchAdmin.some((hit) => hit.kind === "学生"));
+
+    console.log("\n[9.6] 兼任多角色不受限制；没绑 / 绑错 teacherId 是空范围");
+    equal("兼任财务的教师账号：学生列表是全校口径（不受行级范围限制）",
+      ((await read(second.base, dual.token, "students.list")).result as unknown[]).length, 2);
+    check("兼任账号能拿到别人的学生（机构确认④：给了更高角色就按更高角色看）",
+      (await read(second.base, dual.token, "students.get", [studentBId])).result !== null);
+    equal("兼任账号能看收款记录",
+      (await read(second.base, dual.token, "payments.list")).status, 200);
+    equal("没绑 teacherId：学生列表为空", (await read(second.base, unbound.token, "students.list")).result, []);
+    equal("没绑 teacherId：课表为空", (await read(second.base, unbound.token, "lessons.list")).result, []);
+    equal("没绑 teacherId：连学生单条也是 null（不是报错，而是「什么都看不到」）",
+      (await read(second.base, unbound.token, "students.get", [studentAId])).result, null);
+    equal("没绑 teacherId：今日概览的学生数是 0",
+      ((await read(second.base, unbound.token, "today")).result as { studentCount: number }).studentCount, 0);
+    equal("teacherId 不存在（填错了）：同样是空范围",
+      (await read(second.base, wrongId.token, "students.list")).result, []);
+    equal("（对照）另一位教师看到的是**他自己**的学生",
+      ((await read(second.base, teacherB.token, "students.list")).result as Array<{ id: string }>).map((item) => item.id),
+      [studentBId]);
+    check("而且那位教师的课表里没有甲老师的课（两位教师互不串号）",
+      ((await read(second.base, teacherB.token, "lessons.list")).result as Array<{ id: string }>)
+        .every((item) => item.id === lessonBId));
+
+    console.log("\n[9.7] 老 REST 接口对教师整条关闭（管理员不受影响）");
+    const teacherRest = await raw(second.base, "/api/students", { token: teacherA.token });
+    equal("教师走老接口读学生：403（那条路没有范围过滤，只能整条关门）", teacherRest.status, 403);
+    check("拒绝理由说清了「改走 /api/call」",
+      String(teacherRest.body.error ?? "").includes("/api/call"), String(teacherRest.body.error ?? ""));
+    equal("教师走老接口读排课：也 403", (await raw(second.base, "/api/lessons", { token: teacherA.token })).status, 403);
+    equal("（对照）技术管理员走老接口照旧能读 —— 与今天完全一样",
+      (await raw(second.base, "/api/students", { token: admin.token })).status, 200);
+    equal("（回归）技术管理员的 /api/call 不受这条门影响",
+      (await read(second.base, admin.token, "students.list")).status, 200);
+
+    console.log("\n[9.8] 回归：技术 / 财务 / 招生与今天完全一致");
+    equal("技术管理员看得到全部学生", ((await read(second.base, admin.token, "students.list")).result as unknown[]).length, 2);
+    equal("技术管理员看得到全部排课", ((await read(second.base, admin.token, "lessons.list")).result as unknown[]).length, 3);
+    equal("技术管理员能导出整库（运维权限没被范围层碰坏）",
+      (await call(second.base, admin.token, "exportDatabase")).status, 200);
+    equal("财务管理员看得到全部学生（钱的口径没被教师那层限制污染）",
+      ((await read(second.base, cashier.token, "students.list")).result as unknown[]).length, 2);
+    check("财务管理员的收款记录里**有金额**（没被剥字段）",
+      ((await read(second.base, cashier.token, "payments.list")).result as Array<{ amount: number }>)
+        .every((item) => item.amount > 0));
+    equal("招生老师看得到全部排课", ((await read(second.base, enroller.token, "lessons.list")).result as unknown[]).length, 3);
+    check("招生老师能报课（机构确认①的邻居：角色没变，仍然不是 403）",
+      (await call(second.base, enroller.token, "students.enroll")).status !== 403);
+
+    console.log("\n[9.9] 范围是「每请求重设」的：自己调 setScope 放不开，并发也不会串号");
+    /*
+     * 这两条守的是同一个机制的两面：
+     *   ① 前端调 `setScope` 不作数 —— 服务端在调业务方法**之前**会按会话再设一次
+     *      （`requireAuth` 里那次 + `/api/call` 调用前那次），所以"自己把范围改成 all"
+     *      对下一个请求毫无影响；
+     *   ② 交错请求不串号 —— 两位教师同时打请求时，A 的请求不会用上 B 的范围。
+     *
+     * 说清这两条断言的**强度**：它们是行为护栏（不会假报警：实现正确时永远成立），
+     * 不是"漏掉某一行就必红"的变异测试 —— 因为范围在两个地方都会按会话重设
+     * （闸门里一次、调用前一次），少一处时另一处仍然兜住。
+     * "范围真的生效了"这件事由上面那些**成对**的断言守住（教师那边必须收窄、
+     * 技术管理员那边必须照旧全量）：真把两处重设都去掉，红的就是那些对照断言
+     * （实测过一遍：去掉两处之后本节 4 条不成立、并且会在后面中断）。
+     */
+    await call(second.base, teacherA.token, "setScope", [{ kind: "all", teacherId: "", warning: "" }]);
+    equal("教师自己调 setScope(全放开) 之后，下一个请求仍然只看到自己的学生（前端说了不算）",
+      ((await read(second.base, teacherA.token, "students.list")).result as Array<{ id: string }>)
+        .map((item) => item.id), [studentAId]);
+    const concurrent = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        read(second.base, index % 2 === 0 ? teacherA.token : teacherB.token, "students.list").then(
+          (response) => ({
+            index,
+            expected: index % 2 === 0 ? studentAId : studentBId,
+            ids: (response.result as Array<{ id: string }> | undefined)?.map((item) => item.id) ?? null,
+          }),
+        ),
+      ),
+    );
+    equal("12 个并发请求交错：每一位教师拿到的都只有自己的学生（范围不串号）",
+      concurrent.filter((item) => JSON.stringify(item.ids) !== JSON.stringify([item.expected])), []);
+  } finally {
+    await second.stop();
+    rmSync(scopeDir, { recursive: true, force: true });
+  }
+} catch (cause) {
+  failures += 1;
+  console.error(`\n✗ 行级范围这一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
 }
 
 } catch (cause) {
