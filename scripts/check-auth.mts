@@ -26,7 +26,7 @@ import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { withTempServer } from "./temp-server.mts";
+import { run, withTempServer } from "./temp-server.mts";
 import { login, prepareCredential } from "../server/auth.mts";
 import { createMemoryStore } from "../lib/backend/storage.ts";
 import {
@@ -215,6 +215,35 @@ checkCredentialFile();
 try {
   await withTempServer(async (base, info) => {
     console.log(`服务端：${base}（临时库 ${info.dbPath}）\n`);
+
+    /*
+     * ── 单写者锁：同一个库不允许第二个后端进程 ──────────────────────────────
+     *
+     * 这条断言守的是**最坏的那种数据事故**：两个进程各持一份内存快照、各自整份落盘，
+     * 后落盘的整体覆盖前一份 —— 静默丢数据，不报错、不留痕。
+     * 所以第二个进程必须**启动就失败**，而不是"尽力兼容"。
+     * 真实踩到过的现象：第二个进程连读快照都会读到撕裂的 JSON，所有数据接口 500。
+     */
+    console.log("[0.8] 单写者锁（同库第二个进程必须起不来）");
+    const second = await run(
+      process.execPath,
+      ["--experimental-strip-types", "--import", "./server/loader.mjs", "server/index.mts"],
+      {
+        env: {
+          NEXGENEDU_DB: info.dbPath,
+          NEXGENEDU_NO_BACKUP: "1",
+          NEXGENEDU_ADMIN_PASSWORD: "pw-second",
+          PORT: String(info.port + 1),
+        },
+      },
+    );
+    equal("同一个库起第二个后端必须失败（退出码非 0）", second.code === 0, false);
+    check("失败原因说清是「库被另一个进程占着」",
+      second.output.includes("已经被另一个后端进程占着"), second.output.slice(-300));
+    check("失败原因给出 PID（人知道该停哪个进程）",
+      /PID \d+/.test(second.output), second.output.slice(-300));
+    equal("第二个进程没有对外提供服务",
+      (await fetch(`http://127.0.0.1:${info.port + 1}/health`).then(() => true).catch(() => false)), false);
 
     console.log("[1] 未登录");
     const anonymousCall = await call(base, null, "students.list");

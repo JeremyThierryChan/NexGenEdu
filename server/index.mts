@@ -14,6 +14,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type Database from "better-sqlite3";
 import { openDatabase, DB_PATH } from "./db.mts";
+import { acquireDbLock } from "./db-lock.mts";
 import { createSqliteStore, snapshotSize } from "./kv-store.mts";
 // 伪后端的**同一份实现**：服务端只是换了一个 KeyValueStore，业务口径一行都不用重写
 import { api, __useStoreForTesting } from "../lib/backend/api.ts";
@@ -1798,12 +1799,28 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
  */
 const HOST = process.env.NEXGENEDU_HOST ?? "127.0.0.1";
 
+/**
+ * ── 单写者锁：同一个库只允许一个后端进程 ────────────────────────────────────
+ *
+ * 放在 `listen` 之前：拿不到锁就**直接退出**，绝不让第二个进程开始对外服务 ——
+ * 一旦它开始接请求，两个进程就会各写一份快照，后落盘的整体覆盖前一份（静默丢数据）。
+ * 详细理由见 `server/db-lock.mts` 顶部。
+ */
+const dbLock = acquireDbLock(DB_PATH, `监听 ${HOST}:${PORT}`);
+if (!dbLock.ok) {
+  console.error(`\n[启动失败] ${dbLock.reason}\n`);
+  process.exit(1);
+}
+
 /** 准备登录凭证（口令从环境变量来，或首次启动时随机生成并落到 server/data/）。 */
 const credential = prepareCredential();
 
 server.listen(PORT, HOST, () => {
   console.log(`后端已启动：http://${HOST}:${PORT}/health（状态 /api/status 需登录）`);
   console.log(`数据库：${DB_PATH}（结构版本 v${currentVersion(db)}）`);
+  if (dbLock.file !== "") {
+    console.log(`[独占] 已持有单写者锁 ${dbLock.file.split("/").pop()}（同一个库不允许第二个后端进程）`);
+  }
   console.log(`只读接口：${Object.keys(ROUTES).join("、")}`);
   /*
    * 凭证的来历必须说清楚：口令是"新生成"的时候**只打印这一次**。
@@ -1886,12 +1903,19 @@ function scheduleBackups(): void {
   setInterval(() => backupRound("定时检查："), BACKUP_CHECK_INTERVAL_MS).unref();
 }
 
-/** Ctrl+C 时先关服务再关数据库，避免留下 -wal/-shm 的中间状态。 */
+/** Ctrl+C 时先关服务再关数据库，避免留下 -wal/-shm 的中间状态，并放开单写者锁。 */
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     server.close(() => {
       db.close();
+      dbLock.release();
       process.exit(0);
     });
   });
 }
+
+/*
+ * 其它退出路径也要放锁：不然每次异常退出都留一个陈旧锁，
+ * 下次启动虽然能靠"PID 已不存在"判废，但那要多绕一圈（而且日志会吓人一跳）。
+ */
+process.on("exit", () => dbLock.release());
