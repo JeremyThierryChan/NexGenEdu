@@ -23,6 +23,8 @@ import { api, type SiteContent } from "@/lib/backend/api";
  */
 export function SiteCourseContent() {
   const [content, setContent] = useState<SiteContent | null>(null);
+  /** 编辑器默认收起（21 个学科 / 61 个小节会把这页撑出好几屏，理由见下面的 render 注释）。 */
+  const [expanded, setExpanded] = useState(false);
   const [openSubject, setOpenSubject] = useState<string>("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -96,6 +98,15 @@ export function SiteCourseContent() {
   }
 
   const { coursePage } = content;
+  /*
+   * **默认收起**。
+   *
+   * 这块编辑器有 21 个学科、61 个小节，展开时能把「课程库」页撑出好几屏 ——
+   * 而日常最常做的是看课程清单、改价格状态，不是改课程正文（那是低频的文案工作）。
+   * 因此默认只留一行摘要（几个学科 / 几个小节 / 有没有未保存的改动）+ 保存按钮，
+   * 要看正文再点「展开编辑」。摘要行里保留保存按钮：改完不必滚回顶部去找它。
+   */
+  const bandCount = coursePage.subjects.reduce((sum, subject) => sum + subject.bands.length, 0);
 
   return (
     <Panel
@@ -103,7 +114,30 @@ export function SiteCourseContent() {
       title="网站课程正文"
       description="网站上课程页的正文：学科（语文 / 数学 / …）与它们的学段小节（小学语文 / 初中数学…）。卡片在下面「课程清单」里，标签指向这里的小节锚点。"
     >
-      <div className="grid gap-3 px-4 py-3 sm:grid-cols-3">
+      <div className="flex flex-wrap items-center gap-2 px-4 py-3">
+        <span className="text-xs text-ink-600">
+          {coursePage.subjects.length} 个学科 / {bandCount} 个小节
+          <span className="ml-2 text-ink-400">（网站上课程页的正文，低频修改）</span>
+        </span>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起编辑器" : "展开编辑"}
+        </Button>
+        <Button type="button" size="sm" onClick={() => void save()} disabled={pending || !dirty}>
+          {pending ? "保存中…" : dirty ? "保存网站内容" : "没有改动"}
+        </Button>
+        {dirty && <span className="text-xs text-warning-600">有未保存的改动</span>}
+        {message !== "" && <span className="text-xs text-success-600">{message}</span>}
+        {error !== "" && <span className="text-xs text-danger-600">{error}</span>}
+      </div>
+
+      {expanded && (
+        <>
+      <div className="grid gap-3 border-t border-ink-100 px-4 py-3 sm:grid-cols-3">
         <TextField
           label="课程页标题"
           value={coursePage.heading.title}
@@ -154,11 +188,7 @@ export function SiteCourseContent() {
           >
             新增学科
           </Button>
-          <Button type="button" size="sm" onClick={() => void save()} disabled={pending || !dirty}>
-            {pending ? "保存中…" : dirty ? "保存网站内容" : "没有改动"}
-          </Button>
-          {message !== "" && <span className="text-xs text-success-600">{message}</span>}
-          {error !== "" && <span className="text-xs text-danger-600">{error}</span>}
+          {/* 保存按钮与提示留在上面的摘要行里，这里不再重复一份 */}
         </div>
 
         <ul className="mt-3 divide-y divide-ink-100 rounded-md border border-ink-200">
@@ -281,7 +311,7 @@ export function SiteCourseContent() {
                             <div className="mt-2">
                               <TextAreaField
                                 label="正文"
-                                rows={6}
+                                rows={4}
                                 value={band.body}
                                 onChange={(event) =>
                                   edit((draft) => {
@@ -327,6 +357,8 @@ export function SiteCourseContent() {
             })}
         </ul>
       </div>
+        </>
+      )}
     </Panel>
   );
 }
