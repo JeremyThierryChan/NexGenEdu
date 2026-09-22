@@ -19,7 +19,12 @@ import {
 import { getCourseCategoryOptions, getFormOptions } from "@/lib/backend/options";
 import { canRemoveCourse } from "@/lib/backend/courses";
 import type { SiteContentImportReport } from "@/lib/backend/api";
-import { pricingStatusForCourses, type LibraryPricingStatus } from "@/lib/backend/pricing";
+import {
+  addLibraryCourseToPricing,
+  pricingStatusForCourses,
+  type LibraryPricingStatus,
+  type PricingConfig,
+} from "@/lib/backend/pricing";
 import { cn } from "@/lib/utils/cn";
 
 /**
@@ -77,6 +82,17 @@ export default function AdminCoursesPage() {
   const [order, setOrder] = useState("");
   const [intro, setIntro] = useState("");
   const [siteKind, setSiteKind] = useState<CourseSiteKind>("不展示");
+  /*
+   * 报价（元 / 节）：机构要的是"**一门课一张卡片里改完所有东西**" —— 卡片字段、网站正文、报价。
+   * 报价那侧的管线本来就有（纯函数 `addLibraryCourseToPricing` 做 upsert + `pricing.update` 落库，
+   * 报价页就是这么用的），因此这里只是把它接到卡片表单上：阶段 + 基础价 + 是否可报价。
+   * 留空基础价 = 不参与报价页（内部课程不需要它）。
+   */
+  const [priceStage, setPriceStage] = useState("");
+  const [priceValue, setPriceValue] = useState("");
+  const [priceAvailable, setPriceAvailable] = useState(true);
+  /** 当前报价配置（读一次用于下拉与回填；保存时在它基础上 upsert）。 */
+  const [pricingConfig, setPricingConfig] = useState<PricingConfig | null>(null);
   const [pending, setPending] = useState(false);
 
   const categoryOptions = useMemo(() => getCourseCategoryOptions(), []);
@@ -100,6 +116,7 @@ export default function AdminCoursesPage() {
     ]);
     setCourses(list);
     setSummary(stats);
+    setPricingConfig(config);
     setPricingStatus(pricingStatusForCourses(config, list));
     setLoading(false);
     setRefreshing(false);
@@ -123,6 +140,9 @@ export default function AdminCoursesPage() {
     setOrder("");
     setIntro("");
     setSiteKind("不展示");
+    setPriceStage("");
+    setPriceValue("");
+    setPriceAvailable(true);
   }
 
   function startEdit(course: Course) {
@@ -140,6 +160,14 @@ export default function AdminCoursesPage() {
     setOrder(course.order === 999 ? "" : String(course.order));
     setIntro(course.intro);
     setSiteKind(course.siteKind);
+    // 报价回填：从当前配置里找这门课（按 id 或名字），没配过就留空
+    const status = pricingStatus.find((item) => item.courseId === course.id);
+    setPriceStage(status?.stageName ?? "");
+    setPriceValue(status?.basePrice === null || status?.basePrice === undefined ? "" : String(status.basePrice));
+    const priced = pricingConfig?.stages
+      .flatMap((stage) => stage.courses)
+      .find((item) => item.courseId === course.id || item.name === course.name);
+    setPriceAvailable(priced?.available ?? true);
     setMessage("");
     setError("");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -197,6 +225,35 @@ export default function AdminCoursesPage() {
         await api.courses.update(editing.id, payload, { expectedVersion: editing.version });
         setMessage(`已保存「${payload.name}」。`);
       }
+      /*
+       * 报价与卡片**一起存**（机构要的是"一门课一个地方改完"）。
+       *
+       * 只在填了基础价时写报价：留空表示"这门课不参与报价页"（内部课程用不上），
+       * 而不是"把价格清成 0" —— 静默改价是账目类功能里最不该有的行为。
+       */
+      const price = Number(priceValue);
+      if (priceValue.trim() !== "" && Number.isFinite(price) && price >= 0) {
+        const config = pricingConfig ?? (await api.pricing.get());
+        const stageName = priceStage.trim() === "" ? (config.stages[0]?.name ?? "未分组") : priceStage.trim();
+        const courseName = name.trim();
+        const courseId = editing === null ? undefined : editing.id;
+        /*
+         * 新建时课程还没有 id，用名字关联（`pricingStatusForCourses` 与 `syncLibraryLinks`
+         * 都支持"按名字认领"），下一步保存后 `load()` 会重新读一次配置并把 courseId 补上。
+         */
+        const updated = addLibraryCourseToPricing(config, {
+          courseId: courseId ?? "",
+          name: courseName,
+          stageName,
+          basePrice: price,
+          available: priceAvailable,
+        });
+        await api.pricing.update(updated.config);
+        setMessage(
+          `已保存「${courseName}」：卡片 + 报价（${stageName} · ${price} 元/节${priceAvailable ? "" : " · 暂不可报价"}）。`,
+        );
+      }
+
       resetForm();
       await load({ quiet: true });
     } catch (cause) {
@@ -516,6 +573,50 @@ export default function AdminCoursesPage() {
                 value={intro}
                 onChange={(event) => setIntro(event.target.value)}
               />
+            </div>
+          </div>
+
+          {/*
+            报价与卡片放在同一个表单里（机构要的是"一门课一个地方改完所有东西"）：
+            改完点一次保存，卡片与价格一起落库。留空基础价 = 这门课不参与报价页。
+          */}
+          <div className="mt-3 rounded-md border border-ink-200 bg-ink-50/50 px-3 py-3">
+            <p className="text-xs font-medium text-ink-700">报价（元 / 节）</p>
+            <p className="mt-1 text-xs text-ink-500">
+              填写后这门课就会出现在家长的报价页上（与「报价」页改的是同一份配置）。
+              <strong className="font-medium text-ink-600">留空表示不参与报价页</strong> —— 内部课程不用填。
+            </p>
+            <div className="mt-2 grid gap-3 sm:grid-cols-3">
+              <TextField
+                label="学习阶段"
+                hint="报价页的第一步（小学 / 初中阶段 / 高中阶段 / 出国考试…）"
+                value={priceStage}
+                onChange={(event) => setPriceStage(event.target.value)}
+                list="course-price-stages"
+                placeholder="例如 初中阶段"
+              />
+              <datalist id="course-price-stages">
+                {(pricingConfig?.stages ?? []).map((stage) => (
+                  <option key={stage.name} value={stage.name} />
+                ))}
+              </datalist>
+              <TextField
+                label="基础价"
+                hint="元 / 节；填写即会写入报价配置"
+                type="number"
+                min={0}
+                value={priceValue}
+                onChange={(event) => setPriceValue(event.target.value)}
+                placeholder="例如 220"
+              />
+              <label className="flex items-end gap-2 pb-1 text-xs text-ink-600">
+                <input
+                  type="checkbox"
+                  checked={priceAvailable}
+                  onChange={(event) => setPriceAvailable(event.target.checked)}
+                />
+                可报价（取消勾选＝页面显示「暂未开放」）
+              </label>
             </div>
           </div>
 
