@@ -71,7 +71,9 @@ import {
   ROLES,
   STUDENT_ACTION_ACCESS,
   allowedGroups,
+  allowedRolesForMethod,
   canAccess,
+  groupOfMethod,
   visiblePages,
 } from "@/lib/auth/roles";
 import {
@@ -3221,6 +3223,40 @@ ok("每个分组都有方法", API_CONTRACT.every((group) => group.methods.lengt
       !canAccess(["普通教师"], GROUP_ACCESS.ops!));
   ok("每个角色都进得了今日概览（登录后不至于一片空白）",
     ROLES.every((role) => visiblePages([role]).includes("/admin")));
+
+  /*
+   * 方法级判定（`allowedRolesForMethod`）：分组只作兜底，特例写在 roles.ts。
+   * 这里钉三件事：**每个方法都解析得出归属**、**读宽写严**、以及**没登记就关门**。
+   */
+  const unresolved = realMethods.filter((method) => allowedRolesForMethod(method) === null);
+  eq("每个接口方法都解析得出权限归属（新增方法忘了定归属会被这条抓到）", unresolved, []);
+
+  ok("读宽写严：列表 / 单条 / 查询类方法四类角色都能用",
+    ["students.list", "students.get", "lessons.list", "lessons.findConflicts", "courses.list"].every(
+      (method) => canAccess(["普通教师"], allowedRolesForMethod(method) ?? []),
+    ));
+  ok("但写类方法普通教师不行（教师不该能改档案）",
+    ["students.create", "students.remove", "teachers.create", "courses.update"].every(
+      (method) => !canAccess(["普通教师"], allowedRolesForMethod(method) ?? []),
+    ));
+  ok("教学动作普通教师能做（标记已上 / 课堂记录 / 阶段测评 / 补课）",
+    ["lessons.markCompleted", "lessonRecords.save", "assessments.add", "lessons.createMakeup"].every(
+      (method) => canAccess(["普通教师"], allowedRolesForMethod(method) ?? []),
+    ));
+  ok("但报课 / 收款不是教师的活",
+    ["students.enroll", "payments.record", "students.refundEnrollment"].every(
+      (method) => !canAccess(["普通教师"], allowedRolesForMethod(method) ?? []),
+    ));
+  ok("运维与审计只有技术管理员（导出 / 导入 / 备份 / 日志）",
+    realMethods
+      .filter((method) => groupOfMethod(method) === "ops")
+      .every((method) => {
+        const allowed = allowedRolesForMethod(method) ?? [];
+        return canAccess(["技术管理员"], allowed) &&
+          !canAccess(["财务管理员", "招生老师", "普通教师"], allowed);
+      }));
+  ok("没登记归属的方法一律关门（返回 null 而不是「谁都行」）",
+    allowedRolesForMethod("不存在的.method") === null);
 }
 
 // 服务端必须复核的清单：这些是接服务端时的验收项，不能被悄悄删掉

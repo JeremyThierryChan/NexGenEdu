@@ -31,6 +31,8 @@
  */
 
 /** 四个角色。顺序即后台界面上的展示顺序（权限高→低）。 */
+import { API_CONTRACT } from "@/lib/backend/contract";
+
 export const ROLES = ["技术管理员", "财务管理员", "招生老师", "普通教师"] as const;
 export type Role = (typeof ROLES)[number];
 
@@ -111,6 +113,85 @@ export const GROUP_ACCESS: Record<string, Role[]> = {
   /** 七、运维与审计：导入导出、备份恢复、重置、日志。 */
   ops: ["技术管理员"],
 };
+
+/**
+ * 每个方法的归属解析：**分组只作兜底，特例写在这里**。
+ *
+ * ## 为什么分组不够
+ *
+ * `API_CONTRACT` 的分组是**接口分类**（一、通用 CRUD；三、业务动作…），它不总是权限边界：
+ *   - `crud` 里既有 `students.list`（读）也有 `students.remove`（删）—— 而
+ *     "普通教师能看自己学生的课时余额"意味着**读要宽、写要严**；
+ *   - `actions` 里既有 `students.enroll`（报课：招生 / 财务）也有 `lessons.markCompleted`
+ *     （标记已上：教师的核心动作）—— 同一组里归不同角色。
+ *
+ * 因此判定按下表逐层解析，**先特例、后分组**：
+ *   1. `METHOD_ACCESS` 里点了名的，就按它（下面那一小张表，一眼能看完）；
+ *   2. `crud` / `query` 里的**只读方法**对所有角色开放（见 `isReadMethod`）；
+ *   3. 其余按 `GROUP_ACCESS` 的分组默认；
+ *   4. 都没有（方法没登记归属）→ **返回 null，调用方必须关门**。
+ *
+ * 第 4 条是这个文件里最重要的一条：新增方法时忘了定归属，默认结果必须是"谁都进不来"，
+ * 而不是"谁都能进" —— 后者是最危险的那种默认值（新功能静默对所有人开放）。
+ */
+export const METHOD_ACCESS: Record<string, Role[]> = {
+  // 报课 / 改报课 / 续费 / 退课 / 调整课时：机构确认"财务也要能报课""招生也要能退课"
+  "students.enroll": ["技术管理员", "财务管理员", "招生老师"],
+  "students.updateEnrollment": ["技术管理员", "财务管理员", "招生老师"],
+  "students.renewEnrollment": ["技术管理员", "财务管理员", "招生老师"],
+  "students.refundEnrollment": ["技术管理员", "财务管理员", "招生老师"],
+  "students.adjustEnrollmentLessons": ["技术管理员", "财务管理员", "招生老师"],
+  "students.saveProfile": ["技术管理员", "财务管理员", "招生老师"],
+  // 记收款 / 退款：钱的事
+  "payments.record": ["技术管理员", "财务管理员", "招生老师"],
+  // 标记已上 / 课堂记录 / 阶段测评：教师的核心动作（财务不参与教学）
+  "lessons.markCompleted": ["技术管理员", "招生老师", "普通教师"],
+  "lessons.createMakeup": ["技术管理员", "招生老师", "普通教师"],
+  "lessonRecords.save": ["技术管理员", "招生老师", "普通教师"],
+  "assessments.add": ["技术管理员", "招生老师", "普通教师"],
+  // 咨询：招生的活
+  "inquiries.evaluate": ["技术管理员", "招生老师"],
+  "inquiries.accept": ["技术管理员", "招生老师"],
+  "inquiries.abandon": ["技术管理员", "招生老师"],
+  // 报价：看得到价才能给家长试算；**改价**仍是财务与技术（见 GROUP_ACCESS.pricing）
+  "pricing.get": ["技术管理员", "财务管理员", "招生老师"],
+  "pricing.quote": ["技术管理员", "财务管理员", "招生老师"],
+  // 网站内容：读是公开的（构站脚本也要读），写归技术管理员
+  "site.publicContent": [...ROLES],
+  "site.importFromContent": ["技术管理员"],
+  "site.saveContent": ["技术管理员"],
+};
+
+/** 只读方法的判据（`crud` / `query` 里"只是看一眼"的那些）。 */
+function isReadMethod(method: string): boolean {
+  const leaf = method.split(".").pop() ?? "";
+  return /^(list|get|find|search|options|summary|suggest|listBy|check)/.test(leaf);
+}
+
+/** 方法 → 分组 id（从 `API_CONTRACT` 推导，单一真源；找不到返回 null）。 */
+export function groupOfMethod(method: string): string | null {
+  for (const group of API_CONTRACT) {
+    if (group.methods.includes(method)) return group.id;
+  }
+  return null;
+}
+
+/**
+ * 这个方法的**允许角色**；返回 `null` 表示"没登记归属" ——
+ * 调用方（服务端闸门）必须按**关门**处理，并说清是哪个方法没登记。
+ */
+export function allowedRolesForMethod(method: string): Role[] | null {
+  const override = METHOD_ACCESS[method];
+  if (override !== undefined) return override;
+
+  const group = groupOfMethod(method);
+  if (group === null) return null;
+
+  // 读宽写严：查看看板、列表、单条，四类角色都要用（普通教师看自己的课，行级范围另做）
+  if ((group === "crud" || group === "query") && isReadMethod(method)) return [...ROLES];
+
+  return GROUP_ACCESS[group] ?? null;
+}
 
 /** 角色集合里只要有一个角色被允许，就允许（机构确认：一个账号可兼任多个角色）。 */
 export function canAccess(roles: readonly Role[], allowed: readonly Role[]): boolean {

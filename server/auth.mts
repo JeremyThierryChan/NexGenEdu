@@ -39,6 +39,17 @@ import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Role } from "../lib/auth/roles.ts";
+/*
+ * 账号表（第 7 步）。这里与 `accounts.mts` 是**互相引用**的关系：
+ * 本文件给它"凭证文件路径 + 哈希实现"，它给本文件"校验账号口令"。
+ *
+ * ESM 下循环引用是安全的**在这里**成立，因为两个模块的顶层都只有声明：
+ * 没有"导入时就要用对方"的代码，而函数声明在实例化阶段就已经就绪。
+ * 因此谁先被加载都不会读到未初始化的绑定（这也意味着：那两个文件里
+ * 别在顶层直接调用对方的东西，否则循环引用会变成真的问题）。
+ */
+import { loginAccount } from "./accounts.mts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
