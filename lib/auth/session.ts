@@ -3,6 +3,7 @@
 import { isRemoteMode } from "@/lib/backend/remote";
 import { backendBase } from "@/lib/backend/connection";
 import { clearToken, readToken, writeToken } from "@/lib/auth/token";
+import { ROLES, type Role } from "@/lib/auth/roles";
 
 /**
  * 登录与会话（第 6 步：改成**服务端**会话）。
@@ -33,6 +34,14 @@ import { clearToken, readToken, writeToken } from "@/lib/auth/token";
 
 export type Session = {
   username: string;
+  /**
+   * 这个账号的角色（可能多个：一个账号可兼任多个角色）。
+   *
+   * 用途只有一个：**决定界面显示哪些入口**（导航、以及"这一页你看不到"的提示）。
+   * 它**不是**权限本身 —— 权限由服务端按会话判定（见 `server/index.mts` 的闸门）。
+   * 前端藏起来只是体验：直接调接口一样会被服务端拒。
+   */
+  roles: Role[];
   /** 登录时间（ISO）。服务端目前只回账号，因此这里是空串。 */
   loginAt: string;
 };
@@ -111,11 +120,30 @@ export async function checkSession(): Promise<SessionCheck> {
     return { session: null, reason: "unreachable", detail: `HTTP ${response.status}（${base}/api/session）` };
   }
 
-  const payload = (await response.json().catch(() => ({}))) as { ok?: boolean; username?: string };
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    username?: string;
+    roles?: unknown;
+  };
   if (payload.ok !== true || typeof payload.username !== "string") {
     return { session: null, reason: "unreachable", detail: "服务端返回的会话格式不认识。" };
   }
-  return { session: { username: payload.username, loginAt: "" }, reason: "ok" };
+  return { session: { username: payload.username, roles: readRoles(payload.roles), loginAt: "" }, reason: "ok" };
+}
+
+/**
+ * 把服务端返回的角色转成可信的列表。
+ *
+ * 只认 `ROLES` 里有的名字：服务端将来加了新角色而前端还没更新时，
+ * 未知角色被忽略（界面少一个入口），而不是当成"什么都能做"。
+ * **认不出来时按"全角色"处理**：老服务端（还没有角色这个概念）返回空，
+ * 此时不该把管理员的导航全藏掉 —— 那种"升级服务端忘了升级前端"的场景，
+ * 表现应该是"和以前一样"，而不是"后台突然空了"。
+ */
+function readRoles(value: unknown): Role[] {
+  if (!Array.isArray(value)) return [...ROLES];
+  const known = value.filter((item): item is Role => ROLES.includes(item as Role));
+  return known.length > 0 ? known : [...ROLES];
 }
 
 /** 读取当前会话（只关心"有没有"时用它）。 */

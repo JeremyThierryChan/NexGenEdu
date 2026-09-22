@@ -1,6 +1,7 @@
 import { RequireAuth } from "@/components/admin/RequireAuth";
 import { AdminSidebar } from "@/components/layout/AdminSidebar";
 import { AdminTopBar } from "@/components/admin/AdminTopBar";
+import { RoleGuard } from "@/components/admin/RoleGuard";
 
 /**
  * 已登录后台的外壳：顶栏 + 侧边导航 + 内容区。
@@ -20,7 +21,10 @@ export default function AdminDashboardLayout({
         <AdminTopBar />
         <div className="flex flex-1 max-lg:flex-col">
           <AdminSidebar />
-          <main className="min-w-0 flex-1 p-4 sm:p-6">{children}</main>
+          <main className="min-w-0 flex-1 p-4 sm:p-6">
+            {/* 直接敲网址进来时给一句人话（导航里已经按角色藏掉了入口） */}
+            <RoleGuard>{children}</RoleGuard>
+          </main>
         </div>
       </div>
     </RequireAuth>

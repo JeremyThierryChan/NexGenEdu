@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { checkSession } from "@/lib/auth/session";
+import { AuthContext, type AuthState } from "@/components/admin/AuthContext";
 import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
 import { BackendStatus } from "@/components/admin/BackendStatus";
 
@@ -20,6 +21,8 @@ import { BackendStatus } from "@/components/admin/BackendStatus";
  */
 export function RequireAuth({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<"checking" | "authed" | "anonymous" | "offline" | "blocked">("checking");
+  /** 当前登录者与角色（问一次会话，供导航 / 守卫 / 顶栏共用）。 */
+  const [auth, setAuth] = useState<AuthState | null>(null);
   const [detail, setDetail] = useState("");
   const router = useRouter();
   const pathname = usePathname();
@@ -48,6 +51,8 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
       if (cancelled) return;
 
       if (check.session !== null) {
+        // 会话里带着角色（一个账号可能兼多个）：界面按它决定显示哪些入口
+        setAuth({ username: check.session.username, roles: check.session.roles });
         setState("authed");
         return;
       }
@@ -78,7 +83,9 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
     };
   }, [pathname, router]);
 
-  if (state === "authed") return <>{children}</>;
+  if (state === "authed") {
+    return <AuthContext.Provider value={auth}>{children}</AuthContext.Provider>;
+  }
 
   return (
     <div className="flex min-h-dvh items-center justify-center bg-ink-50 px-6">
