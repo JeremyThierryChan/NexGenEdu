@@ -243,6 +243,55 @@ await check("网站内容", "保存特色课程不会动学生案例", async () 
   return saved.casesPage.cases.length === before;
 });
 
+await check("网站内容", "常见问题读数（初始来自内容文件）", async () => {
+  const content = await api.site.publicContent();
+  const page = content.siteContent.faqPage;
+  return page.groups.reduce((sum, group) => sum + group.items.length, 0);
+}, (n: number) => n > 0);
+await check("网站内容", "加一条问答并保存", async () => {
+  const content = await api.site.publicContent();
+  const page = content.siteContent.faqPage;
+  const first = page.groups[0];
+  if (first === undefined) return "没有分组";
+  const saved = await api.site.saveBlocks({
+    faqPage: {
+      ...page,
+      groups: [
+        { ...first, items: [...first.items, { id: "", question: "验收用的一个问题？", answer: "验收用的答案。" }] },
+        ...page.groups.slice(1),
+      ],
+    },
+  });
+  return saved.faqPage.groups[0]?.items.some((item) => item.question === "验收用的一个问题？") ?? false;
+}, (ok: boolean) => ok === true);
+await check("网站内容", "删掉刚加的那条（收尾）", async () => {
+  const content = await api.site.publicContent();
+  const page = content.siteContent.faqPage;
+  const saved = await api.site.saveBlocks({
+    faqPage: {
+      ...page,
+      groups: page.groups.map((group) => ({
+        ...group,
+        items: group.items.filter((item) => item.question !== "验收用的一个问题？"),
+      })),
+    },
+  });
+  return saved.faqPage.groups.every((group) =>
+    group.items.every((item) => item.question !== "验收用的一个问题？"));
+});
+await check("网站内容", "答案为空被拒", async () => {
+  const content = await api.site.publicContent();
+  const page = content.siteContent.faqPage;
+  try {
+    await api.site.saveBlocks({
+      faqPage: { ...page, groups: [{ id: "", title: "验收", items: [{ id: "", question: "问？", answer: " " }] }] },
+    });
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("还没有答案") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+
 /* ── 2 教室 ── */
 let classroomId = "";
 await check("教室", "新建教室（含可用时段）", async () => {

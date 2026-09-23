@@ -139,6 +139,9 @@ import type {
   CoursePartition,
   SiteCase,
   SiteCasesPage,
+  SiteFaqGroup,
+  SiteFaqItem,
+  SiteFaqPage,
   SiteFeaturedCourse,
   SiteFeaturedPage,
   LessonTransaction,
@@ -877,6 +880,18 @@ function migrate(db: Database): Database | null {
     db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
     db.siteContent.featuredPage = siteContentFromContent().featuredPage;
     db.version = 20;
+  }
+
+  if (db.version === 20) {
+    /*
+     * v20 → v21：**常见问题进库**。
+     *
+     * 与 v19 / v20 同一个理由与做法：这是一块已经发布出去的对外文案（`/faq` 那一页），
+     * 空着等于升级完它整页没有问答 —— 因此迁移**从内容文件灌初值**，只写 `faqPage` 这一块。
+     */
+    db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
+    db.siteContent.faqPage = siteContentFromContent().faqPage;
+    db.version = 21;
   }
 
   /*
@@ -4487,6 +4502,8 @@ const localApi = {
         casesPage: db.siteContent.casesPage,
         // 特色课程同理：它由「网站内容」页维护，课程库页保存正文时不许把它冲回去
         featuredPage: db.siteContent.featuredPage,
+        // 常见问题同理
+        faqPage: db.siteContent.faqPage,
       };
 
       const after = db.siteContent.coursePage;
@@ -4528,7 +4545,7 @@ const localApi = {
      * 免得页面上留着一份"我自己的"旧值。
      */
     async saveBlocks(
-      blocks: Partial<Pick<SiteContent, "casesPage" | "featuredPage">>,
+      blocks: Partial<Pick<SiteContent, "casesPage" | "featuredPage" | "faqPage">>,
     ): Promise<SiteContent> {
       await delay();
       const db = load();
@@ -4584,6 +4601,27 @@ const localApi = {
         };
       }
 
+      /* 常见问题：整份分组一起保存（与案例 / 特色课程同理）。 */
+      if (blocks.faqPage !== undefined) {
+        const incoming = blocks.faqPage;
+        db.siteContent = {
+          ...db.siteContent,
+          faqPage: {
+            heading: { ...incoming.heading },
+            notice: incoming.notice.trim(),
+            groups: incoming.groups.map((group) => ({
+              id: group.id.trim() === "" ? nextId("faqg") : group.id.trim(),
+              title: group.title.trim(),
+              items: group.items.map((item) => ({
+                id: item.id.trim() === "" ? nextId("faq") : item.id.trim(),
+                question: item.question.trim(),
+                answer: item.answer.trim(),
+              })),
+            })),
+          },
+        };
+      }
+
       const after = db.siteContent.casesPage;
       const afterFeatured = db.siteContent.featuredPage;
       const featuredNodes = (() => {
@@ -4596,7 +4634,8 @@ const localApi = {
         action: "保存网站内容",
         targetId: "",
         summary:
-          `网站内容：学生案例 ${after.cases.length} 条 / 特色课程 ${featuredNodes} 门` +
+          `网站内容：学生案例 ${after.cases.length} 条 / 特色课程 ${featuredNodes} 门 / ` +
+          `常见问题 ${String(db.siteContent.faqPage.groups.reduce((sum, group) => sum + group.items.length, 0))} 条` +
           (beforeCases.cases.length === after.cases.length ? "（案例数量未变）" : `（案例原 ${beforeCases.cases.length} 条）`),
       });
       persist(db);
@@ -5206,6 +5245,9 @@ export type {
   SiteCasesPage,
   SiteFeaturedCourse,
   SiteFeaturedPage,
+  SiteFaqGroup,
+  SiteFaqItem,
+  SiteFaqPage,
   PublicSite,
   SiteContentImportReport,
   SiteContent,

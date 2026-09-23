@@ -1,5 +1,5 @@
 import { getPage, pageString, type PageBlock, type Section } from "@/lib/data/content";
-import { backendCasesContent, backendSnapshot, siteContentSource } from "@/lib/site/backend-source";
+import { backendCasesContent, backendFaqContent, backendSnapshot, siteContentSource } from "@/lib/site/backend-source";
 import type {
   CaseItem,
   CasesContent,
@@ -28,7 +28,36 @@ function toInfoGroups(page: PageBlock): InfoGroup[] {
 
 // ── 常见问题 ──────────────────────────────────────────────────────────────
 
+/**
+ * 常见问题（`/faq`）。
+ *
+ * 三态（口径见 `lib/data/site.ts` 文件头）：连上后端用库里的问答；
+ * **没连上（默认）= 模版骨架 + 空问答**（分组标题照常显示 —— 机构要求"得有分区标题"）；
+ * 显式 `SITE_CONTENT_SOURCE=template` 才整份用模版。
+ */
 export function getFaqContent(): FaqContent {
+  const snapshot = backendSnapshot();
+  if (siteContentSource() === "backend" && snapshot !== null) return backendFaqContent(snapshot);
+  const frame = getFaqContentFromTemplate();
+  if (siteContentSource() === "template") return frame;
+  return {
+    eyebrow: frame.eyebrow,
+    title: frame.title,
+    description: frame.description,
+    notice: frame.notice,
+    groups: frame.groups.map((group) => ({ title: group.title, items: [] })),
+    count: 0,
+  };
+}
+
+/**
+ * 常见问题（**只读模版**，不看后端快照）。
+ *
+ * 为什么单独留这个出口：`lib/backend/site-content.ts` 属于
+ * **「内容文件 → 数据库」**这个方向（空库初始化、老库迁移、从网站导入），
+ * 它必须读模版 —— 否则就是把库里的问答再导一遍，绕成一个圈。
+ */
+export function getFaqContentFromTemplate(): FaqContent {
   const page = getPage("faq", "常见问题");
   const groups: FaqGroup[] = page.groups.map((group) => ({
     title: group.name,
@@ -59,9 +88,14 @@ const CASE_FIELDS = ["年级", "科目", "入学水平", "当前水平", "辅导
 export function getCasesContent(): CasesContent {
   const snapshot = backendSnapshot();
   if (siteContentSource() === "backend" && snapshot !== null) return backendCasesContent(snapshot);
-  // 没连上后端 = 空白（机构口径：需要后端数据的地方就该是空的）；显式 template 才用模版
-  if (siteContentSource() === "template") return getCasesContentFromTemplate();
-  return { eyebrow: "", title: "", description: "", notice: "", cases: [] };
+  const frame = getCasesContentFromTemplate();
+  if (siteContentSource() === "template") return frame;
+  /*
+   * 没连上后端（默认）：**骨架用模版、案例为空**。
+   * 标题（「学生是怎么进步的」）与页脚那句提示是页面骨架，空着会让家长以为这一页坏了
+   * （机构反馈过"不能全空，得有分区标题"）；案例本身是**条目**，没连后端就没有。
+   */
+  return { eyebrow: frame.eyebrow, title: frame.title, description: frame.description, notice: frame.notice, cases: [] };
 }
 
 /**

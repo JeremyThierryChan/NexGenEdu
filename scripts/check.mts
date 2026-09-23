@@ -34,7 +34,13 @@ import {
   getTeachersPageFromTemplate,
 } from "@/lib/data/site";
 import { getPricingData, getPricingDataFromTemplate, parsePricingSource } from "@/lib/data/pricing";
-import { getCasesContent, getCasesContentFromTemplate, getFaqContent, getScheduleContent } from "@/lib/data/pages";
+import {
+  getCasesContent,
+  getCasesContentFromTemplate,
+  getFaqContent,
+  getFaqContentFromTemplate,
+  getScheduleContent,
+} from "@/lib/data/pages";
 import {
   findFeaturedCourse,
   getAllFeaturedCourses,
@@ -691,7 +697,7 @@ eq("联系方式条数", contact.methods.map((item) => item.title),
 // 卡片与标签的双向锚点校验已并入第 2 节（栏目结构同一处维护），此处不再重复。
 
 console.log("\n=== 3. 新增页面（案例 / 常见问题 / 时间安排）===");
-const faq = getFaqContent();
+const faq = getFaqContentFromTemplate();
 // 分组名是结构（家长按主题找答案），因此固定住；条数会随内容增长，只设下限
 eq("常见问题分组数", faq.groups.map((g) => g.title),
   ["试课与报名", "课时与收费", "班级与排课", "请假与补课", "老师与教学", "学习过程与反馈", "服务形式", "特殊情况"]);
@@ -3804,9 +3810,18 @@ eq("公开数据里没有任何敏感字段名",
 eq("公开数据里没有内部备注字段（note）", publicKeys.filter((key) => key === "note"), []);
 ok("公开数据的 JSON 里没有手机号样式的号码",
   !/1[3-9]\d{9}/.test(JSON.stringify(publicSite)));
-ok("教师课时费分成（内部成本口径）不在公开数据里",
-  !JSON.stringify(publicSite).includes("teacherShare") &&
-    !JSON.stringify(publicSite).includes("系数"));
+/*
+ * 教师课时费分成**不在公开数据里** —— 查的是**结构**（字段名），不是"文案里出现了某个词"。
+ *
+ * 第一版写的是 `!JSON.stringify(publicSite).includes("系数")`，那是个很粗的代理判据：
+ * 报价页本来就公开「科目系数 / 班级系数」这类**价格输入**，它们只是恰好用英文键名
+ * （`coefficient`）装，中文「系数」两字只出现在文案里。v21 把常见问题搬进公开数据之后，
+ * 问答里写着"基础价 × 科目系数 × 班级系数"，这条断言立刻误报 —— 而它报的不是泄漏，
+ * 是我的判据不成立。现在改成查三个只属于教师分成的字段名。
+ */
+eq("教师课时费分成（内部成本口径）不在公开数据里",
+  publicKeys.filter((key) => ["teachershare", "basepercent", "steppercent", "pricebasis"].includes(key)),
+  []);
 
 
 // 分组本身也要有内容与说明
@@ -7978,26 +7993,47 @@ console.log("\n=== 25. 网站内容来源：后端 / 空白 /（显式）模版 
     teachers: getTeachersPage(),
     cases: getCasesContent(),
     pricing: getPricingData(),
+    featured: getFeaturedContent(),
+    faq: getFaqContent(),
   });
 
   // ① blank：没连上后端 → 那五块空白
   __useBackendSnapshotForTesting(null);
   __useSiteContentSourceForTesting("blank");
   const blank = fiveBlocks();
-  eq("没连上后端：那五块**全是空的**（不回落到模版）",
+  eq("没连上后端：**条目全是空的**（不拿模版当数据）",
     [
       blank.columns.length,
       blank.courses.courses.length,
       blank.teachers.teachers.length,
       blank.cases.cases.length,
       blank.pricing.stages.length,
+      blank.featured.courses.length,
+      blank.faq.count,
     ],
-    [0, 0, 0, 0, 0]);
-  ok("空白时连标题也是空的（不是从模版抄一份标题）",
-    blank.courses.heading.title === "" &&
-    blank.teachers.heading.title === "" &&
-    blank.cases.title === "" &&
-    blank.pricing.labels.result === "");
+    [0, 0, 0, 0, 0, 0, 0]);
+  /*
+   * **骨架照常**：机构先后说了两句 —— 「需要用到后端数据的部分应该是空白的」与
+   * 「教师界面和学生案例不能全空，得有分区标题」。合起来才是完整口径：
+   * `blank` = 模版骨架（标题 / 说明 / 分区标题 / 页脚提示 / 报价页文案）+ 空条目。
+   * 只守住前一句会得到"整页空白"（机构会以为坏了），只守住后一句就退回"拿模版当数据"。
+   */
+  eq("空白时标题与说明照常（来自模版骨架），教师 / 案例 / 特色课程 / 报价页这几块都要有",
+    [
+      blank.teachers.heading.title === getTeachersPageFromTemplate().heading.title &&
+        blank.teachers.heading.title !== "",
+      blank.cases.title === getCasesContentFromTemplate().title && blank.cases.title !== "",
+      blank.featured.title === getFeaturedContentFromTemplate().title && blank.featured.title !== "",
+      blank.pricing.labels.result === getPricingDataFromTemplate().labels.result &&
+        blank.pricing.labels.result !== "",
+      // FAQ 的**分区标题**也要在（问答为空）
+      JSON.stringify(blank.faq.groups.map((group) => group.title)) ===
+        JSON.stringify(getFaqContentFromTemplate().groups.map((group) => group.title)),
+      // 课程页 / 课程总览的标题同样是骨架
+      blank.courses.heading.title === getCoursesPageFromTemplate().heading.title &&
+        blank.courses.heading.title !== "",
+    ],
+    [true, true, true, true, true, true]);
   ok("模版那一份确实有内容（否则上面那两条是空转的）",
     getCourseColumnsFromTemplate().length > 0 &&
     getTeachersPageFromTemplate().teachers.length > 0);
@@ -8491,7 +8527,136 @@ console.log("\n=== 27. 特色课程进库（v20：机构要求「特色课程也
     new URL("../app/admin/(dashboard)/content/page.tsx", import.meta.url), "utf8");
   ok("「网站内容」页挂了特色课程编辑器，并且与案例一起保存",
     contentPage.includes("FeaturedCoursesEditor") &&
-    /saveBlocks\(\{ casesPage, featuredPage \}\)/.test(contentPage));
+    /saveBlocks\(\{ casesPage, featuredPage, faqPage \}\)/.test(contentPage));
+}
+
+console.log("\n=== 28. 常见问题进库（v21）+ 空态口径：骨架在、条目空 ===");
+
+/*
+ * 机构两句要求合起来才是完整口径：
+ *   1. 「需要用到后端数据的部分应该是空白的」→ 不拿模版当数据；
+ *   2. 「教师界面和学生案例不能全空，得有分区标题」→ 骨架（标题 / 分区标题 / 页脚提示）
+ *      照常显示，只有条目为空。
+ * 因此第 25 节验的是"条目为空"，这一节补上"骨架必须在"，以及 FAQ 进库（v21）。
+ */
+{
+  __useStoreForTesting(memory);
+
+  // ① 迁移：v20 老库 → 问答从内容文件灌进来
+  const legacyFaqDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    siteContent: Record<string, unknown>;
+    version: number;
+  };
+  delete legacyFaqDb.siteContent.faqPage;
+  legacyFaqDb.version = 20;
+  eq("v20 老库（没有常见问题块）能升级导入",
+    (await api.importDatabase(JSON.stringify(legacyFaqDb))).ok, true);
+  const afterFaq = await api.exportDatabase();
+  eq("升级后版本号是当前版本", afterFaq.version, CURRENT_VERSION);
+  const templateFaq = getFaqContentFromTemplate();
+  const faqCount = (groups: readonly { items: unknown[] }[]): number =>
+    groups.reduce((sum, group) => sum + group.items.length, 0);
+  eq("迁移把内容文件里的分组搬进了库（组数一致）",
+    afterFaq.siteContent.faqPage.groups.length, templateFaq.groups.length);
+  eq("问题总数也一致（不是只搬了分组标题）",
+    faqCount(afterFaq.siteContent.faqPage.groups), templateFaq.count);
+  eq("分组标题与内容文件逐条一致（页面上的分区标题）",
+    afterFaq.siteContent.faqPage.groups.map((group) => group.title),
+    templateFaq.groups.map((group) => group.title));
+  ok("每一条问答都有自己的 id（增删 / 上下移按它认人）",
+    afterFaq.siteContent.faqPage.groups.every(
+      (group) => group.id !== "" && group.items.every((item) => item.id !== ""),
+    ));
+
+  // ② 保存：能改、能校验、只动自己那一块
+  const beforeFaq = await api.exportDatabase();
+  const savedFaq = await api.site.saveBlocks({
+    faqPage: {
+      heading: { eyebrow: "自检", title: "自检常见问题", description: "说明" },
+      notice: "自检用",
+      groups: [{ id: "", title: "自检分组", items: [{ id: "", question: "问题一？", answer: "答案一。" }] }],
+    },
+  });
+  eq("保存后分组与问答是刚才那一份",
+    [savedFaq.faqPage.groups.length, faqCount(savedFaq.faqPage.groups)], [1, 1]);
+  eq("新分组 / 新问答的 id 由服务端生成",
+    [savedFaq.faqPage.groups[0]?.id !== "", savedFaq.faqPage.groups[0]?.items[0]?.id !== ""], [true, true]);
+  eq("保存常见问题**不动**课程正文与案例",
+    [
+      JSON.stringify(savedFaq.coursePage) === JSON.stringify(beforeFaq.siteContent.coursePage),
+      JSON.stringify(savedFaq.casesPage) === JSON.stringify(beforeFaq.siteContent.casesPage),
+    ],
+    [true, true]);
+
+  const refusalFaq = async (page: unknown): Promise<string> => {
+    try {
+      await api.site.saveBlocks({ faqPage: page as never });
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+  const baseFaq = { heading: { eyebrow: "", title: "t", description: "" }, notice: "", groups: [] };
+  ok("分组标题为空被拒",
+    (await refusalFaq({ ...baseFaq, groups: [{ id: "", title: " ", items: [] }] })).includes("分组没有标题"));
+  ok("问题或答案为空被拒",
+    (await refusalFaq({
+      ...baseFaq,
+      groups: [{ id: "", title: "A", items: [{ id: "", question: "问？", answer: "" }] }],
+    })).includes("还没有答案"));
+  ok("分组重名被拒",
+    (await refusalFaq({
+      ...baseFaq,
+      groups: [
+        { id: "", title: "同名", items: [] },
+        { id: "", title: "同名", items: [] },
+      ],
+    })).includes("两次"));
+  await api.restoreBackup();
+
+  // ③ 骨架在、条目空（机构第 2 条要求）
+  __useBackendSnapshotForTesting(null);
+  __useSiteContentSourceForTesting("blank");
+  const blankFaq = getFaqContent();
+  const blankCases = getCasesContent();
+  const blankTeachers = getTeachersPage();
+  const blankFeatured = getFeaturedContent();
+  eq("没连后端：FAQ 的**分组标题**照常在，问答为空",
+    [blankFaq.groups.map((group) => group.title), blankFaq.count],
+    [templateFaq.groups.map((group) => group.title), 0]);
+  ok("FAQ 的标题 / 说明 / 页脚提示也照常",
+    blankFaq.title !== "" && blankFaq.description !== "" && blankFaq.notice !== "");
+  eq("案例页：标题在、案例为空",
+    [blankCases.title !== "", blankCases.cases.length],
+    [true, 0]);
+  eq("教师页：标题在、教师为空",
+    [blankTeachers.heading.title !== "", blankTeachers.teachers.length],
+    [true, 0]);
+  eq("特色课程：标题在、课程树为空",
+    [blankFeatured.title !== "", blankFeatured.courses.length], [true, 0]);
+  __useSiteContentSourceForTesting(undefined);
+  __useBackendSnapshotForTesting(null);
+
+  /*
+   * ④ 页面里那几句空状态（否则只有一行标题，机构会以为页面坏了）。
+   *    查的是**渲染分支存在**，不是文案好看。
+   */
+  const readSite = (file: string): string =>
+    readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  for (const [file, marker] of [
+    ["app/(site)/teachers/page.tsx", "暂无展示中的教师"],
+    ["app/(site)/cases/page.tsx", "案例整理中"],
+    ["app/(site)/faq/page.tsx", "暂无常见问题"],
+    ["app/(site)/courses/page.tsx", "特色课程整理中"],
+  ] as const) {
+    ok(`${file} 里有空状态说明（只有标题会让人以为坏了）`, readSite(file).includes(marker));
+  }
+
+  // ⑤ 后台「网站内容」页挂了常见问题编辑器
+  const contentPage = readSite("app/admin/(dashboard)/content/page.tsx");
+  ok("「网站内容」页有常见问题的编辑区（分组 + 问答 + 增删排序）",
+    contentPage.includes("常见问题") && contentPage.includes("新增分组") &&
+    contentPage.includes("在这一组加一条问答"));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

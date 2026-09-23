@@ -12,7 +12,14 @@ import { useActionNotice } from "@/components/admin/useActionNotice";
 import { rolesOrAll, useAuth } from "@/components/admin/AuthContext";
 import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
 import { api, type SiteContent } from "@/lib/backend/api";
-import type { SiteCase, SiteCasesPage, SiteFeaturedCourse, SiteFeaturedPage } from "@/lib/backend/api";
+import type {
+  SiteCase,
+  SiteCasesPage,
+  SiteFaqGroup,
+  SiteFaqPage,
+  SiteFeaturedCourse,
+  SiteFeaturedPage,
+} from "@/lib/backend/api";
 import { FeaturedCoursesEditor } from "@/components/admin/FeaturedCoursesEditor";
 
 /**
@@ -70,6 +77,7 @@ export default function AdminContentPage() {
 
   const casesPage: SiteCasesPage | null = content?.casesPage ?? null;
   const featuredPage: SiteFeaturedPage | null = content?.featuredPage ?? null;
+  const faqPage: SiteFaqPage | null = content?.faqPage ?? null;
 
   /**
    * 就地改草稿：`content` 是**整份** `siteContent`，保存时只把 `casesPage` 交上去
@@ -83,6 +91,17 @@ export default function AdminContentPage() {
   /** 特色课程树的节点总数（"共几门"那句话要的是这个数，不是一级课程数）。 */
   function countFeatured(courses: readonly SiteFeaturedCourse[]): number {
     return courses.reduce((sum, course) => sum + 1 + countFeatured(course.children), 0);
+  }
+
+  /** 常见问题的问答总数（"共几条"那句话用它）。 */
+  function countFaq(groups: readonly SiteFaqGroup[]): number {
+    return groups.reduce((sum, group) => sum + group.items.length, 0);
+  }
+
+  /** 改常见问题草稿（整份分组一起交，与案例 / 特色课程同一套做法）。 */
+  function editFaqPage(next: SiteFaqPage): void {
+    setContent((prev) => (prev === null ? prev : { ...prev, faqPage: next }));
+    notice.clear();
   }
 
   /** 改特色课程草稿（整棵树一起交，与案例同一套做法）。 */
@@ -146,13 +165,14 @@ export default function AdminContentPage() {
   }
 
   async function save(): Promise<void> {
-    if (casesPage === null || featuredPage === null) return;
+    if (casesPage === null || featuredPage === null || faqPage === null) return;
     notice.clear();
     try {
-      const saved = await notice.run(async () => await api.site.saveBlocks({ casesPage, featuredPage }));
+      const saved = await notice.run(async () => await api.site.saveBlocks({ casesPage, featuredPage, faqPage }));
       if (saved !== null) setContent(saved);
       notice.succeed(
-        `已保存学生案例 ${casesPage.cases.length} 条、特色课程 ${countFeatured(featuredPage.courses)} 门。` +
+        `已保存学生案例 ${casesPage.cases.length} 条、特色课程 ${countFeatured(featuredPage.courses)} 门、` +
+          `常见问题 ${countFaq(faqPage.groups)} 条。` +
           "下一次构站（npm run build，且那台机器连着后端）网站就会按这份内容出。",
       );
     } catch {
@@ -394,6 +414,277 @@ export default function AdminContentPage() {
             ，首页下方那块「学生案例」也取自同一份数据。**请勿编造**：写真实的过程与数字，
             姓名用「初二 李同学」这类称呼（页面底部会显示上面那句页脚提示）。
           </p>
+        </div>
+      </Panel>
+
+      {/*
+        常见问题（v21 起在库里）：分组 → 问答。分组标题就是网站上的**分区标题**，
+        机构要求"以后端内容为主，前端只根据后端"，因此它整份在库里维护。
+        保存按钮在第一块面板上 —— 三块内容一次交上去，服务端各写各的块（互不覆盖）。
+      */}
+      <Panel
+        className="mb-8"
+        title="常见问题"
+        description="分组标题是网站上的分区标题；每组下面是问答。网站 /faq 以后端这份内容为准。"
+        actions={
+          canWrite ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={faqPage === null}
+              onClick={() => {
+                if (faqPage === null) return;
+                editFaqPage({
+                  ...faqPage,
+                  groups: [
+                    ...faqPage.groups,
+                    { id: "", title: "", items: [{ id: "", question: "", answer: "" }] },
+                  ],
+                });
+              }}
+            >
+              新增分组
+            </Button>
+          ) : undefined
+        }
+      >
+        <div className="px-4 py-4">
+          {faqPage === null ? (
+            <p className="text-sm text-ink-500">读不到常见问题（后端版本可能太旧）。</p>
+          ) : (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <TextField
+                  label="页眉小字"
+                  value={faqPage.heading.eyebrow}
+                  onChange={(event) => editFaqPage({ ...faqPage, heading: { ...faqPage.heading, eyebrow: event.target.value } })}
+                  disabled={!canWrite}
+                />
+                <TextField
+                  label="页面标题"
+                  value={faqPage.heading.title}
+                  onChange={(event) => editFaqPage({ ...faqPage, heading: { ...faqPage.heading, title: event.target.value } })}
+                  disabled={!canWrite}
+                />
+                <TextField
+                  label="页脚提示"
+                  value={faqPage.notice}
+                  onChange={(event) => editFaqPage({ ...faqPage, notice: event.target.value })}
+                  disabled={!canWrite}
+                />
+              </div>
+              <div className="mt-3">
+                <TextAreaField
+                  label="页面说明"
+                  rows={2}
+                  value={faqPage.heading.description}
+                  onChange={(event) => editFaqPage({ ...faqPage, heading: { ...faqPage.heading, description: event.target.value } })}
+                  disabled={!canWrite}
+                />
+              </div>
+
+              <p className="mt-3 text-xs text-ink-500">
+                共 {countFaq(faqPage.groups)} 条问答、{faqPage.groups.length} 个分组。
+                答案里支持 **粗体** 与 - 列表（多行答案写在同一个框里，空行分段）。
+              </p>
+
+              {faqPage.groups.length === 0 ? (
+                <p className="mt-3 rounded-md border border-dashed border-ink-300 px-4 py-6 text-sm text-ink-500">
+                  还没有分组。点右上角「新增分组」开始（分组标题就是网站上的分区标题）。
+                </p>
+              ) : (
+                <ul className="mt-4 space-y-4">
+                  {faqPage.groups.map((group, groupIndex) => (
+                    <li key={group.id === "" ? `new-group-${String(groupIndex)}` : group.id} className="rounded-md border border-ink-200 bg-white px-3 py-3">
+                      <div className="flex flex-wrap items-end gap-2">
+                        <div className="min-w-56 flex-1">
+                          <TextField
+                            label={`分组 ${String(groupIndex + 1)} 标题`}
+                            hint="页面上的分区标题，例如「试课与报名」"
+                            value={group.title}
+                            onChange={(event) =>
+                              editFaqPage({
+                                ...faqPage,
+                                groups: faqPage.groups.map((item, i) =>
+                                  i === groupIndex ? { ...item, title: event.target.value } : item,
+                                ),
+                              })
+                            }
+                            disabled={!canWrite}
+                          />
+                        </div>
+                        {canWrite && (
+                          <span className="flex items-center gap-1 pb-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                editFaqPage({
+                                  ...faqPage,
+                                  groups: [
+                                    ...faqPage.groups,
+                                    { id: "", title: "（新分组）", items: [] },
+                                  ].map((item, i) =>
+                                    i === faqPage.groups.length && i !== groupIndex + 1 ? item : item,
+                                  ),
+                                })
+                              }
+                              className="rounded-sm border border-dashed border-ink-300 px-1.5 py-0.5 text-[11px] text-ink-500 hover:border-brand-400 hover:text-brand-700"
+                            >
+                              + 在末尾加分组
+                            </button>
+                            <button
+                              type="button"
+                              disabled={groupIndex === 0}
+                              onClick={() => {
+                                const next = [...faqPage.groups];
+                                const moved = next[groupIndex]!;
+                                next[groupIndex] = next[groupIndex - 1]!;
+                                next[groupIndex - 1] = moved;
+                                editFaqPage({ ...faqPage, groups: next });
+                              }}
+                              className="rounded-sm border border-ink-200 px-1.5 py-0.5 text-[11px] text-ink-500 hover:border-ink-300 disabled:opacity-40"
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              disabled={groupIndex === faqPage.groups.length - 1}
+                              onClick={() => {
+                                const next = [...faqPage.groups];
+                                const moved = next[groupIndex]!;
+                                next[groupIndex] = next[groupIndex + 1]!;
+                                next[groupIndex + 1] = moved;
+                                editFaqPage({ ...faqPage, groups: next });
+                              }}
+                              className="rounded-sm border border-ink-200 px-1.5 py-0.5 text-[11px] text-ink-500 hover:border-ink-300 disabled:opacity-40"
+                            >
+                              ↓
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const counted = group.items.length;
+                                if (!window.confirm(`删除分组「${group.title === "" ? "（未命名）" : group.title}」及其 ${String(counted)} 条问答？`)) return;
+                                editFaqPage({
+                                  ...faqPage,
+                                  groups: faqPage.groups.filter((_item, i) => i !== groupIndex),
+                                });
+                              }}
+                              className="rounded-sm border border-danger-100 px-1.5 py-0.5 text-[11px] text-danger-600 hover:border-danger-600"
+                            >
+                              删除分组
+                            </button>
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="mt-3 space-y-3">
+                        {group.items.map((item, itemIndex) => (
+                          <div key={item.id === "" ? `new-item-${String(itemIndex)}` : item.id} className="rounded-md border border-ink-100 bg-ink-50/60 px-3 py-3">
+                            <div className="flex items-end gap-2">
+                              <div className="min-w-56 flex-1">
+                                <TextField
+                                  label="问题"
+                                  value={item.question}
+                                  onChange={(event) =>
+                                    editFaqPage({
+                                      ...faqPage,
+                                      groups: faqPage.groups.map((g, i) =>
+                                        i === groupIndex
+                                          ? {
+                                              ...g,
+                                              items: g.items.map((q, j) =>
+                                                j === itemIndex ? { ...q, question: event.target.value } : q,
+                                              ),
+                                            }
+                                          : g,
+                                      ),
+                                    })
+                                  }
+                                  disabled={!canWrite}
+                                />
+                              </div>
+                              {canWrite && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    editFaqPage({
+                                      ...faqPage,
+                                      groups: faqPage.groups.map((g, i) =>
+                                        i === groupIndex
+                                          ? { ...g, items: g.items.filter((_q, j) => j !== itemIndex) }
+                                          : g,
+                                      ),
+                                    })
+                                  }
+                                  className="mb-1 rounded-sm border border-danger-100 px-1.5 py-0.5 text-[11px] text-danger-600 hover:border-danger-600"
+                                >
+                                  删除问答
+                                </button>
+                              )}
+                            </div>
+                            <div className="mt-2">
+                              <TextAreaField
+                                label="答案"
+                                hint="支持 **粗体** 与 - 列表；多行答案在同一框里，空行分段"
+                                rows={3}
+                                value={item.answer}
+                                onChange={(event) =>
+                                  editFaqPage({
+                                    ...faqPage,
+                                    groups: faqPage.groups.map((g, i) =>
+                                      i === groupIndex
+                                        ? {
+                                            ...g,
+                                            items: g.items.map((q, j) =>
+                                              j === itemIndex ? { ...q, answer: event.target.value } : q,
+                                            ),
+                                          }
+                                        : g,
+                                    ),
+                                  })
+                                }
+                                disabled={!canWrite}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                        {canWrite && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              editFaqPage({
+                                ...faqPage,
+                                groups: faqPage.groups.map((g, i) =>
+                                  i === groupIndex
+                                    ? { ...g, items: [...g.items, { id: "", question: "", answer: "" }] }
+                                    : g,
+                                ),
+                              })
+                            }
+                            className="rounded-sm border border-dashed border-ink-300 px-2 py-1 text-[11px] text-ink-500 hover:border-brand-400 hover:text-brand-700"
+                          >
+                            + 在这一组加一条问答
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+
+          {canWrite && (
+            <div className="mt-4 flex items-center gap-3 border-t border-ink-100 pt-4">
+              <Button disabled={notice.pending || faqPage === null} onClick={() => void save()}>
+                {notice.pending ? "保存中…" : "保存常见问题"}
+              </Button>
+              <span className="text-xs text-ink-500">
+                与上面的学生案例、特色课程**一起提交**（同一份「网站内容」草稿）。
+              </span>
+            </div>
+          )}
         </div>
       </Panel>
 

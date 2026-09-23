@@ -36,12 +36,22 @@ import type {
 /**
  * 数据访问层：页面获取内容的唯一入口。
  *
- * ## 那五块内容：连上后端就用库，连不上就**空白**
+ * ## 库里才有的那几块：连上后端就用库，连不上就**条目为空、骨架照常**
  *
- * "那五块" = **教师页 / 课程卡片 / 课程正文 / 报价 / 学生案例**（只有库里才有的内容）。
- * 机构确认的口径：**需要后端数据的地方，没连上后端就该是空的** —— 不是回落到模版，
- * 那样页面上看到的到底是库里的还是文件里的就说不清了。三个取值见 `siteContentSource()`：
- * `backend`（用库）/ `blank`（空白）/ `template`（显式要求模版，本地对照用）。
+ * 它们 = **教师 / 课程卡片 / 课程正文 / 报价 / 学生案例 / 特色课程 / 常见问题**
+ * （只有库里才有的内容）。三个取值见 `siteContentSource()`：
+ * `backend`（用库）/ `blank`（默认：没连上）/ `template`（显式要求模版，本地对照用）。
+ *
+ * **`blank` 到底空什么（机构先后给了两句，合起来才是完整口径）**：
+ *
+ *   1. 「需要用到后端数据的部分应该是空白的」→ **条目为空**，不拿模版顶上
+ *      （那样分不清页面上看到的到底是库里的还是文件里的）；
+ *   2. 「不能全空，得有分区标题」→ **骨架照常**：页面眉题 / 标题 / 说明、分区标题、
+ *      页脚提示、报价页那些按钮文案都属于"页面长什么样"，来自模版；
+ *      连不上后端时它们照常显示，只有底下的条目是空的（并在需要处显示一句空状态）。
+ *
+ * 一句话：**`blank` = 模版骨架 + 空条目**。两条边界都要守住 ——
+ * 只守住第 1 条会得到"整页空白"（机构会以为坏了），只守住第 2 条就退回"拿模版当数据"。
  *
  * 刻意不写 `backendX() ?? getXFromTemplate()`：那让每一块各自决定，
  * 于是同一页会一半来自库、一半来自文件，而页面上看不出来。
@@ -172,15 +182,17 @@ function courseSectionNames(): Set<string> {
  */
 export function getCourseColumns(): CourseColumn[] {
   /*
-   * 两条来源二选一（见本文件头的「两态取数」）。构站时连得上后端，
+   * 两条来源二选一（见本文件头的「三态取数」）。构站时连得上后端，
    * `data/site/.backend-snapshot.ts` 里就有库里的课程卡片，这里直接映射成同一套
-   * `CourseColumn` 结构；连不上（GitHub Pages 那种没有后端的环境）就解析 Markdown。
-   * **返回结构完全一样**，因此页面组件一行都不用改，全站的下游（栏目页、卡片页、
-   * 班型页）自动跟着切。
+   * `CourseColumn` 结构；连不上就**空数组**（机构口径）；显式
+   * `SITE_CONTENT_SOURCE=template` 才解析 Markdown。**返回结构完全一样**，
+   * 因此页面组件一行都不用改，全站的下游（栏目页、卡片页、班型页）自动跟着切。
+   *
+   * 「空」只表示**没有卡片**：栏目本身（标题、顺序）是**后端数据**，没连后端时也不存在，
+   * 因此这里返回空数组、由页面把「课程总览」那一块渲染成空状态（标题照常有，见 §空态口径）。
    */
   const snapshot = backendSnapshot();
   if (siteContentSource() === "backend" && snapshot !== null) return backendCourseColumns(snapshot);
-  // 没连上：**空白**（机构口径）；显式 `SITE_CONTENT_SOURCE=template` 时才用模版
   return siteContentSource() === "template" ? getCourseColumnsFromTemplate() : [];
 }
 
@@ -353,15 +365,20 @@ export function getCoursesPage(): {
   /** 选修课按栏目（外语 / 课外兴趣 / 成人课程）分组。 */
   electiveGroups: Array<{ title: string; items: ElectiveCourse[] }>;
 } {
-  // 同上：连上后端就用库里的学科正文与选修课；没连上 = 空白；显式 template 才解析 Markdown
+  /*
+   * 连上后端 → 库里的学科正文与选修课；显式 template → 模版那一份；
+   * **没连上（默认）→ 骨架用模版、条目为空**：标题与说明是"页面长什么样"，属于网站骨架，
+   * 空着会让人以为整页坏了（机构反馈过）；课程与栏目是**条目**，没连后端就没有。
+   */
   const snapshot = backendSnapshot();
   if (siteContentSource() === "backend" && snapshot !== null) return backendCoursesPage(snapshot);
-  if (siteContentSource() === "template") return getCoursesPageFromTemplate();
+  const frame = getCoursesPageFromTemplate();
+  if (siteContentSource() === "template") return frame;
   return {
-    heading: { eyebrow: "", title: "", description: "" },
+    heading: frame.heading,
     courses: [],
     columns: [],
-    electiveTitle: "",
+    electiveTitle: frame.electiveTitle,
     electiveGroups: [],
   };
 }
@@ -773,11 +790,16 @@ export function getTeachersPage(): {
   heading: SectionHeading;
   teachers: Teacher[];
 } {
-  // 同上：连上后端就用库里的教师档案（含"是否在网站展示"的过滤）；没连上 = 空白
+  /*
+   * 连上后端 → 库里的教师档案（含"是否在网站展示"的过滤）；显式 template → 模版那一份；
+   * **没连上（默认）→ 标题用模版、教师列表为空**：教师页的标题（「负责的教师团队」）
+   * 是页面骨架，空着会让家长以为这一页坏了（机构反馈过）。
+   */
   const snapshot = backendSnapshot();
   if (siteContentSource() === "backend" && snapshot !== null) return backendTeachersPage(snapshot);
-  if (siteContentSource() === "template") return getTeachersPageFromTemplate();
-  return { heading: { eyebrow: "", title: "", description: "" }, teachers: [] };
+  const frame = getTeachersPageFromTemplate();
+  if (siteContentSource() === "template") return frame;
+  return { heading: frame.heading, teachers: [] };
 }
 
 /** 教师页（**只读模版**，不看后端快照）—— 理由同 `getCourseColumnsFromTemplate`。 */

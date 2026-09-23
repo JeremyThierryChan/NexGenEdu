@@ -22,7 +22,7 @@
  */
 
 import { getCoursesPageFromTemplate, getTeachersPageFromTemplate } from "@/lib/data/site";
-import { getCasesContentFromTemplate } from "@/lib/data/pages";
+import { getCasesContentFromTemplate, getFaqContentFromTemplate } from "@/lib/data/pages";
 import { getFeaturedContentFromTemplate } from "@/lib/data/featured";
 import { getPricingData } from "@/lib/data/pricing";
 import { coursesReferencingAnchor } from "./site-bands";
@@ -32,6 +32,7 @@ import type {
   Course,
   SiteCase,
   SiteCasesPage,
+  SiteFaqPage,
   SiteFeaturedCourse,
   SiteFeaturedPage,
   SiteContent,
@@ -112,7 +113,40 @@ export function siteContentFromContent(): SiteContent {
     pricingPage: { labels },
     casesPage: casesFromContent(),
     featuredPage: featuredFromContent(),
+    faqPage: faqFromContent(),
   };
+}
+
+/**
+ * 常见问题（内容文件 → 库结构）。
+ *
+ * 分组与问答各有一个由服务生成的 id：它们只用来"认人"（日志、增删、上下移），
+ * 与页面上显示的文字无关，因此改标题不会影响任何引用。
+ */
+function faqFromContent(): SiteFaqPage {
+  try {
+    const page = getFaqContentFromTemplate();
+    return {
+      heading: { eyebrow: page.eyebrow, title: page.title, description: page.description },
+      notice: page.notice,
+      groups: page.groups.map((group) => ({
+        id: nextId("faqg"),
+        title: group.title,
+        items: group.items.map((item) => ({
+          id: nextId("faq"),
+          question: item.question,
+          answer: item.answer,
+        })),
+      })),
+    };
+  } catch {
+    return { heading: { eyebrow: "", title: "", description: "" }, notice: "", groups: [] };
+  }
+}
+
+/** 常见问题的空结构。 */
+function emptyFaqPage(): SiteFaqPage {
+  return { heading: { eyebrow: "", title: "", description: "" }, notice: "", groups: [] };
 }
 
 /**
@@ -240,6 +274,7 @@ export function emptySiteContent(): SiteContent {
     pricingPage: { labels: emptyPricingLabels() },
     casesPage: emptyCasesPage(),
     featuredPage: emptyFeaturedPage(),
+    faqPage: emptyFaqPage(),
   };
 }
 
@@ -288,10 +323,46 @@ export function validateCasesPage(page: SiteCasesPage): string[] {
 export function validateSiteBlocks(blocks: {
   casesPage?: SiteCasesPage;
   featuredPage?: SiteFeaturedPage;
+  faqPage?: SiteFaqPage;
 }): string[] {
   const problems: string[] = [];
   if (blocks.casesPage !== undefined) problems.push(...validateCasesPage(blocks.casesPage));
   if (blocks.featuredPage !== undefined) problems.push(...validateFeaturedPage(blocks.featuredPage));
+  if (blocks.faqPage !== undefined) problems.push(...validateFaqPage(blocks.faqPage));
+  return problems;
+}
+
+/**
+ * 常见问题的校验。
+ *
+ * 三条规则各自对应一次真实的误操作：
+ *   - **分组标题为空** → 页面上出现一节没有名字的问答（家长不知道这节在讲什么）；
+ *   - 同级分组重名 → 两节看起来一样，改哪一节都说不清；
+ *   - 问题或答案为空 → 一条问不出问题、或问了没有答案的条目（页面上就是一处断掉的地方）。
+ * 允许一个分组都没有（那与"暂时没有常见问题"是同一种状态，页面显示空状态）。
+ */
+export function validateFaqPage(page: SiteFaqPage): string[] {
+  const problems: string[] = [];
+  const titles = new Set<string>();
+  for (const group of page.groups) {
+    const title = group.title.trim();
+    if (title === "") problems.push("常见问题有一个分组没有标题。");
+    if (titles.has(title)) {
+      problems.push(`分组「${title}」出现了两次：分组标题要唯一（它是页面上的分区标题）。`);
+    }
+    titles.add(title);
+
+    const questions = new Set<string>();
+    for (const item of group.items) {
+      const question = item.question.trim();
+      if (question === "") problems.push(`分组「${title}」里有一条问题没有写出来。`);
+      if (item.answer.trim() === "") problems.push(`分组「${title}」的「${question}」还没有答案。`);
+      if (questions.has(question)) {
+        problems.push(`分组「${title}」里「${question}」出现了两次。`);
+      }
+      questions.add(question);
+    }
+  }
   return problems;
 }
 

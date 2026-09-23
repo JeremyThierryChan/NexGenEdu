@@ -102,8 +102,10 @@ function loadTemplate(): { content: FeaturedContent; all: CourseDetail[] } {
 export function getFeaturedContent(): FeaturedContent {
   const snapshot = backendSnapshot();
   if (siteContentSource() === "backend" && snapshot !== null) return backendFeaturedContent(snapshot);
-  if (siteContentSource() === "template") return loadTemplate().content;
-  return { eyebrow: "", title: "", description: "", notice: "", courses: [] };
+  const frame = loadTemplate().content;
+  if (siteContentSource() === "template") return frame;
+  // 没连上后端（默认）：骨架（标题 / 说明 / 页脚提示）用模版，课程树为空 —— 见 lib/data/site.ts 文件头
+  return { eyebrow: frame.eyebrow, title: frame.title, description: frame.description, notice: frame.notice, courses: [] };
 }
 
 /** 全部课程（含各级），用于静态路由生成 —— 与 `getFeaturedContent()` 同源。 */

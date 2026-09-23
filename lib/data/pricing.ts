@@ -412,8 +412,20 @@ export function getPricingData(): PricingData {
    */
   const snapshot = backendSnapshot();
   if (siteContentSource() === "backend" && snapshot !== null) return backendPricingData(snapshot);
-  if (siteContentSource() === "template") return getPricingDataFromTemplate();
-  return emptyPricingData();
+  const frame = getPricingDataFromTemplate();
+  if (siteContentSource() === "template") return frame;
+  /*
+   * 没连上后端（默认）：**文案用模版、价格数据为空**。
+   * `labels` 是按钮与标签的文字（"算一算""课单价"这类），属于页面骨架 ——
+   * 空着会得到一堆空按钮（那比空列表更像坏了）；阶段 / 科目 / 班级系数是**数据**，为空。
+   */
+  return {
+    ...emptyPricingData(),
+    labels: frame.labels,
+    // 计费规则不算"条目"：它决定页面上"怎么算"的说明文字，模版那一份是公开口径
+    rules: frame.rules,
+    trial: frame.trial,
+  };
 }
 
 /** 报价内容的空结构（没连后端时网站那一页就是空的，而不是拿模版顶上）。 */

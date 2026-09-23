@@ -29,10 +29,26 @@ export default function FaqPage() {
       />
 
       <Container>
+        {/*
+          没连后端时：**分组标题照常显示、问答为空**（机构口径：骨架在、条目空）——
+          这里给一句空状态，否则只有一行标题会让人以为页面坏了。
+        */}
+        {content.count === 0 && (
+          <Section className="pb-0">
+            <p className="rounded-lg border border-dashed border-ink-300 bg-ink-50 px-5 py-6 text-sm leading-relaxed text-ink-500">
+              暂无常见问题。以下分组标题是页面结构，问答内容由后台「网站内容」页维护 ——
+              构站时连上后端就会显示出来。
+            </p>
+          </Section>
+        )}
+
         <Section contentClassName="space-y-10">
           {content.groups.map((group) => (
             <div key={group.title}>
               <h2 className="text-base font-medium text-ink-900">{group.title}</h2>
+              {group.items.length === 0 ? (
+                <p className="mt-3 text-sm text-ink-400">这一组暂时没有问题。</p>
+              ) : (
               <div className="mt-4 divide-y divide-ink-100 overflow-hidden rounded-lg border border-ink-200 bg-white">
                 {group.items.map((item) => (
                   <details key={item.question} className="group px-5 py-4">
@@ -53,6 +69,7 @@ export default function FaqPage() {
                   </details>
                 ))}
               </div>
+              )}
             </div>
           ))}
         </Section>

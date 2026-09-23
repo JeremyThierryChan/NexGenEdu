@@ -30,6 +30,15 @@ export default function CasesPage() {
       />
 
       <Container>
+        {/* 没有案例时说话（标题区照常显示）：见教师页同一处说明 */}
+        {content.cases.length === 0 && (
+          <Section className="pb-0">
+            <p className="rounded-lg border border-dashed border-ink-300 bg-ink-50 px-5 py-6 text-sm leading-relaxed text-ink-500">
+              案例整理中。案例内容由后台「网站内容」页维护，构站时连上后端就会显示出来。
+            </p>
+          </Section>
+        )}
+
         <Section contentClassName="space-y-8">
           {content.cases.map((item) => {
             // 「入学水平 → 当前水平」单独做成对比块，家长最关心这两项

@@ -161,6 +161,14 @@ export type SiteContent = {
    */
   pricingPage: SitePricingPage;
   /**
+   * 常见问题（`/faq`）。
+   *
+   * 与案例同一个理由搬进库（v21）：问答是**要经常加、经常改**的对外文案
+   * （家长问什么就补什么），留在内容文件里改一次要动文件再构站。
+   */
+  faqPage: SiteFaqPage;
+
+  /**
    * 特色课程（`/courses` 底部那块 + `/courses/featured/**` 的课程页）。
    *
    * 与案例同一个理由搬进库（v20）：它是**对外文案**，机构会改（改文案、加班型、
@@ -218,6 +226,33 @@ export type SiteFeaturedPage = {
   /** 页面底部那条提示。允许空。 */
   notice: string;
   courses: SiteFeaturedCourse[];
+};
+
+/**
+ * 网站「常见问题」页：标题区 + 一条提示 + 分组（每组若干问答）。
+ *
+ * 分组标题是页面上的**分区标题**（「试课与报名」「收费与退费」…）：
+ * 没连后端时它们照常显示（来自模版骨架），只有底下的问答为空 —— 见 `lib/data/site.ts` 的口径。
+ */
+export type SiteFaqPage = {
+  heading: SiteHeading;
+  notice: string;
+  groups: SiteFaqGroup[];
+};
+
+/** 一组常见问题（有分组标题 = 页面上的一节）。 */
+export type SiteFaqGroup = {
+  /** id：由服务生成，稳定不变（日志、增删、上下移都按它认人）。 */
+  id: string;
+  title: string;
+  items: SiteFaqItem[];
+};
+
+/** 一问一答。 */
+export type SiteFaqItem = {
+  id: string;
+  question: string;
+  answer: string;
 };
 
 /** 一门特色课程（可含子课程）。 */

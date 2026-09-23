@@ -243,7 +243,6 @@ export default function HomePage() {
         后端没连上时它是空的（机构口径：需要后端数据的地方就该是空的）——
         那时渲染一个空标题加一个"查看全部"按钮，只会让人以为首页坏了。
       */}
-      {featured.courses.length > 0 && (
       <div className="border-y border-ink-200 bg-ink-50">
         <Container>
           <Section
@@ -251,6 +250,11 @@ export default function HomePage() {
             title={headings.courses.title}
             description={headings.courses.description}
           >
+            {featured.courses.length === 0 && (
+              <p className="text-sm text-ink-400">
+                特色课程整理中。它由后台「网站内容」页维护，构站时连上后端就会显示出来。
+              </p>
+            )}
             <CourseTree courses={featured.courses} level={3} />
           </Section>
 
@@ -261,7 +265,6 @@ export default function HomePage() {
           </Section>
         </Container>
       </div>
-      )}
 
         {/*
           教室环境：**有格位内容时才渲染**。

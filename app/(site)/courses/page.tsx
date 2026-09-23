@@ -36,8 +36,13 @@ export default function CoursesPage() {
           （机构口径：需要后端数据的地方就该是空的）—— 那时渲染一个「特色课程」空标题，
           只会让人以为这一块坏了。课程总览那块同理（见下面的 `columns.length > 0`）。
         */}
-        {featured.courses.length > 0 && (
+        {(
           <Section title="特色课程" description={featured.description}>
+            {featured.courses.length === 0 ? (
+              <p className="text-sm text-ink-400">
+                特色课程整理中。它由后台「网站内容」页维护，构站时连上后端就会显示出来。
+              </p>
+            ) : null}
             <CourseTree courses={featured.courses} level={3} />
             <p className="mt-6">
               <Link
@@ -58,15 +63,18 @@ export default function CoursesPage() {
           **没有栏目时整块不渲染**（卡片来自库，没连后端时是空的）：见上面那段说明。
           上边框只在"上面确实有内容"时才加，否则页面上会出现一条孤零零的横线。
         */}
-        {columns.length > 0 && (
-          <Section
-            title="课程总览"
-            description="点卡片进入这门课的页面；卡片里的标签是同一页面内的不同阶段。"
-            className={featured.courses.length > 0 ? "border-t border-ink-200 pb-0" : "pb-0"}
-          >
-            <CourseColumns columns={columns} />
-          </Section>
-        )}
+        <Section
+          title="课程总览"
+          description="点卡片进入这门课的页面；卡片里的标签是同一页面内的不同阶段。"
+          className="border-t border-ink-200 pb-0"
+        >
+          {columns.length === 0 && (
+            <p className="text-sm text-ink-400">
+              课程清单整理中。课程与分区由后台维护，构站时连上后端就会显示出来。
+            </p>
+          )}
+          <CourseColumns columns={columns} />
+        </Section>
 
         {/*
           课程详情已改为「一张卡片一个页面」：点课程总览里的卡片或标签，

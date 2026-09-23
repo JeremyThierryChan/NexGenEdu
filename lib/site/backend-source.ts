@@ -56,7 +56,14 @@ import type {
   PublicSite,
   PublicTeacher,
 } from "@/lib/backend/public-site";
-import type { SiteCase, SiteFeaturedCourse, SiteHeading, SiteSubject } from "@/lib/backend/types";
+import type {
+  SiteCase,
+  SiteFaqGroup,
+  SiteFaqItem,
+  SiteFeaturedCourse,
+  SiteHeading,
+  SiteSubject,
+} from "@/lib/backend/types";
 import type {
   ClassType,
   LessonDuration,
@@ -76,6 +83,8 @@ import type {
   Course,
   CourseColumn,
   CourseDetail,
+  FaqContent,
+  FaqGroup,
   FeaturedContent,
   CourseColumnCard,
   CourseColumnSubgroup,
@@ -508,6 +517,33 @@ export function backendCoursesPage(snapshot: PublicSite): {
     columns: backendCourseColumns(snapshot),
     electiveTitle,
     electiveGroups: toElectiveGroups(electives, electiveTitle, snapshotPartitions(snapshot)),
+  };
+}
+
+/* ── 常见问题（`/faq`） ─────────────────────────────────────────────────── */
+
+/**
+ * 常见问题（库里的 `siteContent.faqPage` → 网站视图模型）。
+ *
+ * `count` 是问题总数（页面上那句"共 N 个问题"用它）：它必须**由这里算**，
+ * 而不是让页面自己数 —— 数两遍就会出现"标题说 43、列出来 42"这种对不上的情况。
+ */
+export function backendFaqContent(snapshot: PublicSite): FaqContent {
+  const page = snapshot.siteContent?.faqPage;
+  const groups: FaqGroup[] = (page?.groups ?? []).map((group: SiteFaqGroup) => ({
+    title: text(group.title),
+    items: (group.items ?? []).map((item: SiteFaqItem) => ({
+      question: text(item.question),
+      answer: text(item.answer),
+    })),
+  }));
+  return {
+    eyebrow: text(page?.heading?.eyebrow),
+    title: text(page?.heading?.title),
+    description: text(page?.heading?.description),
+    notice: text(page?.notice),
+    groups,
+    count: groups.reduce((sum, group) => sum + group.items.length, 0),
   };
 }
 

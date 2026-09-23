@@ -30,6 +30,19 @@ export default function TeachersPage() {
       />
 
       <Container>
+        {/*
+          一位教师都没有（没连后端、或没人勾「在宣传网站展示」）时给一句空状态。
+          标题区**照常显示**（机构口径：骨架在、条目空）—— 页面上只剩一个标题
+          会让人以为这一页坏了，所以这里必须说话。
+        */}
+        {humans.length === 0 && (
+          <Section className="pb-0">
+            <p className="rounded-lg border border-dashed border-ink-300 bg-ink-50 px-5 py-6 text-sm leading-relaxed text-ink-500">
+              暂无展示中的教师。教师资料由后台维护，构站时连上后端就会显示出来。
+            </p>
+          </Section>
+        )}
+
         {/* 授课教师：可点击跳转到下方对应详情 */}
         <Section>
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">

@@ -169,6 +169,8 @@ export function publicSite(db: Database): PublicSite {
       casesPage: db.siteContent.casesPage,
       // 特色课程（v20）：同上 —— 网站那块与 /courses/featured/** 都由它生成
       featuredPage: db.siteContent.featuredPage,
+      // 常见问题（v21）：机构要求"以后端内容为主，前端只根据后端"
+      faqPage: db.siteContent.faqPage,
     },
     pricing: {
       rules: db.pricing.rules,
