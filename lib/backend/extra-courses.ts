@@ -82,9 +82,15 @@ const SPECS: readonly ExtraCourseSpec[] = [
     modules: [],
     status: "开放",
   },
-  // 专业英语（旧报价里的「专业英语」一组）：医学 / 机械 / 贸易，当时就是暂未开放
+  /*
+   * 专业英语（旧报价里的「专业英语」一组）：医学 / 机械 / 贸易，当时就是暂未开放。
+   *
+   * 「机械」在 2026-09 由机构在后台改名为「**机械行业英语**」（报价那一行也跟着改了）——
+   * 这里必须跟着改：报价的课程名与课程库的课程名是一一对应的（`npm run check` 第一节
+   * 与第 41 节都钉着这条），名字不跟就会出现"报价里有、课程库里没有"那套老毛病。
+   */
   { name: "医学", stage: "其他类型", subjects: ["专业外语"], modules: [], status: "暂未开放" },
-  { name: "机械", stage: "其他类型", subjects: ["专业外语"], modules: [], status: "暂未开放" },
+  { name: "机械行业英语", stage: "其他类型", subjects: ["专业外语"], modules: [], status: "暂未开放" },
   { name: "贸易", stage: "其他类型", subjects: ["专业外语"], modules: [], status: "暂未开放" },
   { name: "成人旅游、出行", stage: "其他类型", subjects: ["成人英语口语"], modules: [], status: "开放" },
   { name: "跨国交友", stage: "其他类型", subjects: ["成人英语口语"], modules: [], status: "暂未开放" },

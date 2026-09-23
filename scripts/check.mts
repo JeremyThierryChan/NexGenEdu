@@ -145,9 +145,23 @@ import type { PublicSite } from "@/lib/backend/public-site";
 import {
   __useBackendSnapshotForTesting,
   __useSiteContentSourceForTesting,
+  backendCasesContent,
+  backendCourseColumns,
+  backendCoursesPage,
+  backendFaqContent,
+  backendFeaturedContent,
+  backendPricingData,
   backendSnapshot,
+  backendTeachersPage,
   siteContentSource,
 } from "@/lib/site/backend-source";
+import {
+  SITE_EXPORT_FILES,
+  exportSiteMarkdown,
+  readSiteCore,
+  siteCoreFromViews,
+  type SiteExportFile,
+} from "@/lib/backend/site-export";
 import { coursesFromSite } from "@/lib/backend/courses";
 import { SITE_COPY_KEYS, validateCopy } from "@/lib/backend/site-copy-model";
 import { copyBlocksFromContent } from "@/lib/backend/site-copy";
@@ -702,15 +716,26 @@ ok("选修课程当前全部未开放", electives.every((e) => !e.available));
 ok("选修课程未混入学科列表", courses.every((c) => !electives.some((e) => e.name === c.nameZh)));
 ok("每门选修课都归类到栏目", electives.every((e) => e.group !== ""));
 
-// 「暂未开放」有两处来源：课程总览卡片行里的 `状态`，以及课程 / 选修课自己的 `状态`。
-// 两边必须一致，否则会出现「卡片标着暂未开放、点进去却没有标记」这种自相矛盾。
+/*
+ * 「暂未开放」有两处来源：课程总览卡片行里的 `状态`，以及课程 / 选修课自己的 `状态`。
+ *
+ * **只锁一个方向：正文标了「暂未开放」→ 卡片上也必须标。** 反方向不锁 ——
+ * 机构在后台把 8 门课（初中社会 / 高中政治·历史·地理·技术 / 日语 / 俄语 / 意大利语）的
+ * **卡片**设成了「暂未开放」（暂时不接报名），而课程页的学科正文照旧写着
+ * （那几段说明还想留着）。那是 2026-09 从后台导出（`npm run site:export`）如实带出来的
+ * 真实数据，不是导出写坏了：卡片的 `状态` 与学科正文的 `- · 状态:` 本来就是两个开关，
+ * 原先那条"两边必须一致"是把两个开关当成一个了。
+ *
+ * 保留下来的这个方向是**必须成立**的那个：正文说暂未开放、卡片上却看不出来，
+ * 家长从课程总览点进去才发现 —— 那才是自相矛盾。
+ */
 const availability = new Map<string, boolean>();
 for (const course of courses) availability.set(course.nameZh, course.unavailable);
 for (const item of electives) availability.set(item.name, !item.available);
-eq("卡片与课程/选修课的开放状态一致",
+eq("正文标了暂未开放的课，卡片上也标了（反方向不锁，见上面的说明）",
   allCards
-    .filter((card) => availability.has(card.title))
-    .filter((card) => card.unavailable !== availability.get(card.title))
+    .filter((card) => availability.get(card.title) === true)
+    .filter((card) => !card.unavailable)
     .map((card) => card.title),
   []);
 ok("有课程标注了暂未开放", [...availability.values()].some(Boolean));
@@ -722,19 +747,33 @@ const offDuty = (teachersPage?.groups ?? []).filter(
   (g) => g.items.find((i) => i.title === "状态")?.value.trim() === "离职",
 ).length;
 eq("在职角色数 = 分组数 − 离职数", teachers.length, (teachersPage?.groups.length ?? 0) - offDuty);
-ok("教师有科目与详细介绍", teachers.every((t) => t.subjects.length > 0 && t.bio.length > 30));
+/*
+ * 每位教师都必须有科目（没有科目 = 教师卡片上没有标签，课程页也匹配不到他）；
+ * 详细介绍改成**下限**：后台新加的老师可能还没写介绍（2026-09 从后台导出的
+ * 「曹轶豪」就只有职务 / 科目 / 教龄），不该让自检变红；但整批介绍被丢掉
+ * （解析坏了、导出把正文写没了）必须红，因此要求至少 4 位有详细介绍。
+ */
+ok("教师都有科目", teachers.every((t) => t.subjects.length > 0));
+ok("至少 4 位教师有详细介绍（下限，不阻止新增还没写介绍的教师）",
+  teachers.filter((t) => t.bio.length > 30).length >= 4);
 ok("教师按排序升序", teachers.every((t, i) => i === 0 || (teachers[i - 1]?.order ?? 0) <= t.order));
 ok("页面只展示在职教师", teachers.every((t) => t.active));
-ok("首位教师为陈老师", teachers[0]?.name === "陈老师");
-eq("陈老师职务为全科教师", teachers[0]?.role, "全科教师");
-ok("陈老师有推荐理由", (teachers[0]?.recommendation ?? "").length > 10);
+/*
+ * 姓名在 v39 跟着后台改过（陈老师 → 陈林维祎、林老师 → 林笑丹）：机构在后台把教师
+ * 改成了真名，`npm run site:export` 把它写回了 `data/site/content.md`。
+ * 这几条钉的还是**内容**（首位是全科教师且有推荐理由、第二位是晚辅导且带三个科目），
+ * 不是"某个名字"——名字改了要跟着改这里，但改的只是名字。
+ */
+ok("首位教师为陈林维祎", teachers[0]?.name === "陈林维祎");
+eq("首位教师职务为全科教师", teachers[0]?.role, "全科教师");
+ok("首位教师有推荐理由", (teachers[0]?.recommendation ?? "").length > 10);
 ok("其余教师未填推荐理由时为空", teachers.slice(1).every((t) => t.recommendation === ""));
-const lin = teachers.find((t) => t.name === "林老师");
-eq("林老师职务", lin?.role, "晚辅导老师");
-// 林老师除了晚辅导，还带小学语文与小学数学（机构确认并入的 —— 见 data/site/content.md 教师段）
-eq("林老师科目标签", lin?.subjects, ["晚辅导", "小学语文", "小学数学"]);
-eq("林老师教龄", lin?.years, "10 年");
-ok("林老师有详细介绍", (lin?.bio.length ?? 0) > 50);
+const lin = teachers.find((t) => t.name === "林笑丹");
+eq("第二位的职务是晚辅导老师", lin?.role, "晚辅导老师");
+// 除了晚辅导，还带小学语文与小学数学（机构确认并入的 —— 见 data/site/content.md 教师段）
+eq("晚辅导老师科目标签", lin?.subjects, ["晚辅导", "小学语文", "小学数学"]);
+eq("晚辅导老师教龄", lin?.years, "10 年");
+ok("晚辅导老师有详细介绍", (lin?.bio.length ?? 0) > 50);
 ok("排序无重复", new Set(teachers.map((t) => t.order)).size === teachers.length);
 // 首页教师区是三列布局，真人教师至少要 3 位；AI 智能体可以有 0 个或多个
 const realTeachers = teachers.filter((t) => t.kind === "teacher");
@@ -883,7 +922,7 @@ eq("其他类型的课程与价格",
   pricing.stages[3]?.courses.map(priceLabel),
   ["雅思=700", "意大利语=暂未开放", "3D建模 & 3D打印=暂未开放", "编程与信息素养=暂未开放",
     "成人英语口语=暂未开放", "成人零基础外语=暂未开放", "出国语言备考=暂未开放",
-    "职场与商务英语=暂未开放", "医学=暂未开放", "机械=暂未开放", "贸易=暂未开放",
+    "职场与商务英语=暂未开放", "医学=暂未开放", "机械行业英语=暂未开放", "贸易=暂未开放",
     "成人旅游、出行=100", "跨国交友=暂未开放"]);
 ok("每一组都有可报价的课（否则家长点进来是空的）",
   pricing.stages.every((stage) => stage.courses.some((course) => course.available)));
@@ -10769,6 +10808,241 @@ console.log("\n=== 42. 后台的卡片都能折叠（机构：「闲时可以占
   ok("默认展开（第一次见到一个面板时它不是收着的）",
     fields.includes("const [open, setOpen] = useState(!defaultCollapsed)") &&
       fields.includes("defaultCollapsed = false"));
+}
+
+console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run site:export）===");
+/*
+ * ## 这一节盯的是什么
+ *
+ * 线上（GitHub Actions → Pages）那台机器**连不上后端**，工作流设了
+ * `SITE_CONTENT_SOURCE=template` —— 也就是说**线上读的就是 `data/site/*.md`**。
+ * 而 `npm run site:export` 是反方向的那条通道（库 → 文件）。它出错的形态很难看：
+ * 写出来的文件**网站读不回来**（层级写错、字段名写错、正文被当成标题…），
+ * 而页面只是安静地少一块内容。
+ *
+ * 这里用内存夹具（`createSeedDatabase()`，不依赖真实后端）验三件事：
+ *
+ *   ① **回读的口径 = 网站现成那套解析口径**：拿真实的六个文件对一遍
+ *      （`readSiteCore` 是导出的回读，`lib/data/*` 是网站自己的读法，两者必须一致）；
+ *   ② **导出是导入的逆运算**：由这六个文件建起来的库导回去，六个文件**逐字节不变**；
+ *   ③ **库改过的内容一字不差地进文件、并被读回来**：把库戳一堆改动（每个文件都动到），
+ *      导出 → 回读，与库里那一份逐字段比。
+ */
+{
+  const exportFiles = {} as Record<SiteExportFile, string>;
+  for (const name of SITE_EXPORT_FILES) {
+    exportFiles[name] = readFileSync(new URL(`../data/site/${name}.md`, import.meta.url), "utf8");
+  }
+
+  /** 两份核心内容逐字段比，返回前 8 处不同（比 eq 的整段 JSON 好读得多）。 */
+  const coreDifferences = (expected: unknown, actual: unknown, limit = 8): string[] => {
+    const out: string[] = [];
+    const walk = (a: unknown, b: unknown, path: string): void => {
+      if (out.length >= limit) return;
+      if (JSON.stringify(a) === JSON.stringify(b)) return;
+      if (
+        a === null || b === null || typeof a !== "object" || typeof b !== "object" ||
+        Array.isArray(a) !== Array.isArray(b)
+      ) {
+        out.push(`${path}：期望 ${JSON.stringify(a)}，实际 ${JSON.stringify(b)}`);
+        return;
+      }
+      const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+      for (const key of keys) {
+        walk((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], `${path}.${key}`);
+        if (out.length >= limit) return;
+      }
+    };
+    walk(expected, actual, "核心");
+    return out;
+  };
+
+  /* ① 回读 == 网站现成的解析口径（真实的六个文件） */
+  eq(
+    "回读真实文件的结果与网站现成的解析口径完全一致",
+    coreDifferences(
+      siteCoreFromViews({
+        copy: copyBlocksFromContent(),
+        teachersPage: getTeachersPageFromTemplate(),
+        courseColumns: getCourseColumnsFromTemplate(),
+        coursesPage: getCoursesPageFromTemplate(),
+        pricing: getPricingDataFromTemplate(),
+        faq: getFaqContentFromTemplate(),
+        cases: getCasesContentFromTemplate(),
+        featured: getFeaturedContentFromTemplate(),
+      }),
+      readSiteCore(exportFiles),
+    ),
+    [],
+  );
+
+  /*
+   * ② 由这六个文件建起来的库导回去 == 这六个文件（逐字节）
+   *
+   * 教师这里要补两位 AI 智能体：夹具刻意不把它们放进教师档案（它们不参与排课），
+   * 而真实库里有（建库时从教师页导入的），不补上这条会假红。
+   */
+  const fileDb = createSeedDatabase();
+  fileDb.teachers = getTeachersPageFromTemplate().teachers.map((teacher, index) => ({
+    id: `t${index + 1}`,
+    version: 1,
+    name: teacher.name,
+    subjects: teacher.subjects,
+    role: teacher.role,
+    phone: "",
+    active: teacher.active,
+    years: teacher.years,
+    summary: teacher.summary,
+    bio: teacher.bio,
+    recommendation: teacher.recommendation,
+    order: teacher.order,
+    siteVisible: true,
+    origin: "网站" as const,
+    kind: teacher.kind === "ai" ? ("AI" as const) : ("教师" as const),
+  }));
+  const fileSite = buildPublicSite(fileDb);
+  const sameAgain = exportSiteMarkdown({ site: fileSite, existing: exportFiles });
+  eq("库（由这六个文件建起来）导回去，六个文件逐字节不变", sameAgain.changed, []);
+  eq("这一步没有「写不进文件」的东西", sameAgain.warnings, []);
+
+  /* ③ 库改过的内容，导出后回读必须与库里那一份一致 */
+  const mutated = JSON.parse(JSON.stringify(fileSite)) as PublicSite;
+  type CopyBlockFixture = {
+    fields: Array<{ key: string; value: string }>;
+    groups: Array<{ title: string; items: Array<{ title: string; value: string }> }>;
+  };
+  const copyBlock = (key: string): CopyBlockFixture => {
+    const blocks = mutated.siteContent.copy as unknown as Record<string, CopyBlockFixture>;
+    const block = blocks[key];
+    if (block === undefined) throw new Error(`夹具里没有文案块 ${key}`);
+    return block;
+  };
+  const setField = (key: string, fieldKey: string, value: string): void => {
+    const field = copyBlock(key).fields.find((item) => item.key === fieldKey);
+    if (field === undefined) throw new Error(`夹具里没有字段 ${key}.${fieldKey}`);
+    field.value = value;
+  };
+  const group = (key: string, title: string) => {
+    const found = copyBlock(key).groups.find((item) => item.title === title);
+    if (found === undefined) throw new Error(`夹具里没有分组 ${key}.${title}`);
+    return found;
+  };
+  const find = <T extends { name: string }>(list: T[], name: string): T => {
+    const found = list.find((item) => item.name === name);
+    if (found === undefined) throw new Error(`夹具里没有 ${name}`);
+    return found;
+  };
+
+  // content.md —— 品牌 / 首页 / 课程卡片 / 学科正文 / 选修课 / 教师
+  setField("brand", "phone", "+86 138-0000-0000（自检）");
+  copyBlock("brand").fields.push({ key: "brand_name_selfcheck", value: "自检字段" });
+  setField("home", "title", "让学习真正发生（自检）");
+  group("home", "首屏数据").items[0]!.value = "1-2 人";
+  group("home", "教学特色").items.push({ title: "自检特色", value: "这条是自检加上的" });
+
+  const xiaoxue = find(mutated.courses, "小学语文");
+  xiaoxue.status = "暂未开放";
+  xiaoxue.path = "primary-chinese-v2";
+  xiaoxue.forms = ["一对一定制课"];
+  xiaoxue.tags = [{ label: "基础", target: "小学语文" }];
+  const yuwen = find(mutated.siteContent.coursePage.subjects, "语文");
+  yuwen.unavailable = true;
+  yuwen.lead = "自检改过的学科导语。";
+  yuwen.bands[0]!.body = "自检改过的小节正文。";
+  const elective = find(mutated.courses, "成人英语口语");
+  elective.intro = "自检改过的选修课介绍。";
+  elective.status = "开放";
+  find(mutated.teachers, "陈林维祎").bio = "自检改过的介绍第一段。\n\n第二段。";
+  find(mutated.teachers, "林笑丹").active = false;
+  find(mutated.teachers, "曹轶豪").siteVisible = false;
+  mutated.teachers.find((teacher) => teacher.name.startsWith("采苓"))!.summary = "自检改过的一句话简介。";
+
+  // pricing.md
+  find(mutated.pricing.stages, "小学").courses[0]!.basePrice = 175;
+  find(mutated.pricing.stages, "小学").courses[1]!.available = false;
+  mutated.pricing.classTypes[1]!.coefficient = 0.75;
+  mutated.pricing.durations[1]!.multiplier = 1.75;
+  mutated.pricing.rules.singleLessonFeePercent = 15;
+  mutated.pricing.trial!.priceLabel = "第一节课免费";
+  find(mutated.pricing.otherItems, "课后晚辅导").details.push({ title: "高中", value: "9000 / 学期 / 人" });
+
+  // faq.md / cases.md / featured.md / schedule.md
+  mutated.siteContent.faqPage.groups[0]!.items[0]!.answer = "自检改过的答案。";
+  mutated.siteContent.faqPage.groups.push({
+    id: "faqg_selfcheck",
+    title: "自检分组",
+    items: [{ id: "faq_selfcheck", question: "自检问题？", answer: "自检答案。" }],
+  });
+  mutated.siteContent.casesPage.cases[0]!.story = "自检改过的过程描述第一段。\n\n第二段。";
+  mutated.siteContent.casesPage.cases.push({
+    id: "case_selfcheck",
+    title: "自检案例｜从 0 到 1",
+    fields: [{ title: "年级", value: "高二" }],
+    story: "自检用的案例过程。",
+  });
+  const featuredFirst = mutated.siteContent.featuredPage.courses[0]!;
+  featuredFirst.body = "自检改过的特色课程介绍。";
+  featuredFirst.fields[0]!.value = "自检改过的适合对象。";
+  featuredFirst.children[0]!.name = "一对一定制课（自检）";
+  mutated.siteContent.featuredPage.courses.push({
+    id: "feat_selfcheck",
+    name: "自检特色课",
+    slug: "self-check",
+    fields: [{ title: "课程定位", value: "自检课程定位" }],
+    body: "自检课程正文。",
+    children: [],
+  });
+  group("schedule", "工作日排课").items[0]!.value = "18:00–20:00";
+  copyBlock("schedule").groups.push({
+    title: "自检分组",
+    items: [{ title: "自检时段", value: "10:00–11:00" }],
+  });
+
+  const exported = exportSiteMarkdown({ site: mutated, existing: exportFiles });
+  ok("库改过之后导出确实改到了文件", exported.changed.length >= 5, `changed=${exported.changed.join(",")}`);
+  eq(
+    "库改过的内容导出后回读，与库里那一份逐字段一致",
+    coreDifferences(
+      siteCoreFromViews({
+        copy: mutated.siteContent.copy,
+        teachersPage: backendTeachersPage(mutated),
+        courseColumns: backendCourseColumns(mutated),
+        coursesPage: backendCoursesPage(mutated),
+        pricing: backendPricingData(mutated),
+        faq: backendFaqContent(mutated),
+        cases: backendCasesContent(mutated),
+        featured: backendFeaturedContent(mutated),
+      }),
+      readSiteCore(exported.files),
+    ),
+    [],
+  );
+  eq("改过之后导出也没有「写不进文件」的东西", exported.warnings, []);
+  ok(
+    "不展示的教师没有写进文件（`.md` 表达不了那个开关）",
+    exported.notes.some((note) => note.includes("曹轶豪")),
+  );
+
+  // 导出必须**收敛**：拿导出的结果再导一次，一个字节都不该变
+  const again = exportSiteMarkdown({ site: mutated, existing: exported.files });
+  eq("反复导出收敛（第二次导出不再改动任何文件）", again.changed, []);
+
+  /*
+   * 护栏：文件不见了 / 是空的 / 页面标记被改坏时**不许写**。
+   *
+   * 那几种情况下生成出来的是一份"没有页面"的残骸（可能只有两行），而写盘是静默的 ——
+   * 一次误操作就把机构那份内容文件抹掉。因此导出要能自己认出这种情况并停下来
+   * （`npm run site:export` 会连一个字都不写，退出码 2）。
+   */
+  const blanked = exportSiteMarkdown({
+    site: fileSite,
+    existing: { ...exportFiles, schedule: "" },
+  });
+  eq(
+    "文件不见了/是空的：导出拒绝它（不许写出一份残骸）",
+    blanked.unsafe.map((item) => item.file),
+    ["schedule"],
+  );
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

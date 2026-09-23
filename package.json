@@ -29,7 +29,8 @@
     "bench:capacity": "node --experimental-strip-types --import ./server/loader.mjs scripts/bench-capacity.mts",
     "sync-site-data": "node scripts/sync-site-data.mjs",
     "holidays:fetch": "node --experimental-strip-types --import ./server/loader.mjs scripts/fetch-holidays.mts",
-    "site:diff": "node --experimental-strip-types --import ./server/loader.mjs scripts/diff-site-content.mts"
+    "site:diff": "node --experimental-strip-types --import ./server/loader.mjs scripts/diff-site-content.mts",
+    "site:export": "node --experimental-strip-types --import ./server/loader.mjs scripts/export-site-content.mts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
