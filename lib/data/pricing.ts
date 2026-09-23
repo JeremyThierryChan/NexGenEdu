@@ -1,5 +1,5 @@
 import { pricingSource } from "@/data/site/pricing";
-import { backendPricingData, backendSnapshot } from "@/lib/site/backend-source";
+import { backendPricingData, backendSnapshot, siteContentSource } from "@/lib/site/backend-source";
 import { parseDocument, type PageBlock, type Section } from "@/lib/data/content";
 
 /**
@@ -406,10 +406,46 @@ export function parsePricingSource(source: string): PricingData {
  * `parsePricingSource` 仍然导出给自检用：等价性断言要能单独跑模版这一条路。
  */
 export function getPricingData(): PricingData {
-  // 两态取数：连上后端就用库里的报价配置，否则解析 data/site/pricing.md（见 lib/data/site.ts 文件头）
+  /*
+   * 三态取数（见 `lib/data/site.ts` 文件头的口径）：连上后端用库里的报价配置；
+   * 没连上 = **空白**；显式 `SITE_CONTENT_SOURCE=template` 才解析 data/site/pricing.md。
+   */
   const snapshot = backendSnapshot();
-  if (snapshot !== null) return backendPricingData(snapshot);
-  return getPricingDataFromTemplate();
+  if (siteContentSource() === "backend" && snapshot !== null) return backendPricingData(snapshot);
+  if (siteContentSource() === "template") return getPricingDataFromTemplate();
+  return emptyPricingData();
+}
+
+/** 报价内容的空结构（没连后端时网站那一页就是空的，而不是拿模版顶上）。 */
+function emptyPricingData(): PricingData {
+  return {
+    labels: {
+      result: "",
+      submit: "",
+      reset: "",
+      unitPriceLabel: "",
+      unit: "",
+      totalLabel: "",
+      formulaNote: "",
+      calculatorTitle: "",
+      calculatorHint: "",
+      otherTitle: "",
+      lessonsLabel: "",
+      lessonsHint: "",
+      durationLabel: "",
+      classSizeLabel: "",
+      classCostLabel: "",
+      classCostHint: "",
+    },
+    stages: [],
+    subjectGroups: [],
+    classTypes: [],
+    durations: [],
+    rules: { singleLessonFeePercent: 0, freeTrialMinLessons: 0, chargeTrialWhenNotFree: false },
+    teacherShare: DEFAULT_TEACHER_SHARE_RULES,
+    trial: null,
+    otherItems: [],
+  };
 }
 
 /**

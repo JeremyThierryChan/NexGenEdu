@@ -57,18 +57,31 @@ if (!["auto", "backend", "template"].includes(mode)) {
   process.exit(1);
 }
 
-/** 写快照并打印结果。`data` 为 null 表示用模版。 */
-function write(data, note) {
+/**
+ * 写快照并打印结果。
+ *
+ * `source` 是**这一份内容该怎么用**，三个取值（口径见文件头）：
+ *   - `backend`：连上了后端 → 那五块用库里的数据；
+ *   - `blank`：没连上 → 那五块**空白**（机构要求：需要后端数据的地方就该是空的）；
+ *   - `template`：显式要求用模版（`SITE_CONTENT_SOURCE=template`，本地对照用）。
+ */
+function write(data, note, source) {
   writeFileSync(
     target,
     `/**
  * 本文件由 scripts/sync-site-data.mjs 生成，请勿手工编辑，也未纳入版本库。
  *
- * 内容：构站那一刻从后端拿到的公开数据（教师 / 课程 / 课程正文 / 报价）；
- * \`null\` 表示这次构建没有连上后端 —— 网站会整体回落到 data/site/*.md 模版。
+ * 内容：构站那一刻从后端拿到的公开数据（教师 / 课程 / 课程正文 / 报价 / 学生案例），
+ * 以及这次构站**该怎么用**它们（\`backendSiteSource\`）：
+ *   - \`backend\` —— 连上了后端，那五块用库里的数据；
+ *   - \`blank\` —— 没连上，那五块**空白**（不是回落到模版：需要后端数据的部分就该是空的）；
+ *   - \`template\` —— 显式要求用 data/site/*.md 模版（SITE_CONTENT_SOURCE=template）。
  * 来源说明：${note}
  */
 export const backendSiteSnapshot = ${JSON.stringify(data, null, 2)};
+
+/** 这一份内容该怎么用（\`backend\` / \`blank\` / \`template\`）。 */
+export const backendSiteSource = ${JSON.stringify(source)};
 
 /** 这份快照是从哪来的（只用于构建日志与排查，页面不显示）。 */
 export const backendSiteNote = ${JSON.stringify(note)};
@@ -78,8 +91,8 @@ export const backendSiteNote = ${JSON.stringify(note)};
 }
 
 if (mode === "template") {
-  write(null, "按 SITE_CONTENT_SOURCE=template 强制使用模版");
-  console.log("[site-data] 本次网站数据来源：**模版**（SITE_CONTENT_SOURCE=template）");
+  write(null, "按 SITE_CONTENT_SOURCE=template 强制使用模版", "template");
+  console.log("[site-data] 本次网站数据来源：**模版**（SITE_CONTENT_SOURCE=template，显式指定）");
   process.exit(0);
 }
 
@@ -166,7 +179,7 @@ function reportBlocks(data) {
 }
 
 if (result.ok) {
-  write(result.data, `后端 ${base}（${new Date().toISOString()}）`);
+  write(result.data, `后端 ${base}（${new Date().toISOString()}）`, "backend");
   reportBlocks(result.data);
   process.exit(0);
 }
@@ -182,8 +195,17 @@ if (mode === "backend" || strict) {
 }
 
 /*
- * 连不上 → **整站模版**。没有第二层可回落（"仓库快照"那一层已删）：
- * 两态的意思就是"要么库、要么文件"，中间态会让人分不清页面上看到的到底是什么。
+ * 连不上 → 那五块**空白**（教师页 / 课程卡片 / 课程正文 / 报价 / 学生案例）。
+ *
+ * 这是机构确认的口径：**需要后端数据的地方，没连上后端就该是空的** ——
+ * 换成模版会让人分不清页面上看到的到底是库里的还是文件里的（而那正是要消灭的）。
+ * 其余页面（首页文案 / 关于 / 联系 / FAQ / 课表 / 特色课程 / 品牌与联系方式）本来就只在模版里，
+ * 它们照常显示。想让那五块也显示模版内容（本地对照、或确实要发一份模版站）：
+ * `SITE_CONTENT_SOURCE=template npm run build`。
  */
-write(null, `模版（${why}）`);
-console.log(`[site-data] 本次网站数据来源：**模版** —— ${why}`);
+write(null, `空白（${why}）`, "blank");
+console.log(`[site-data] 本次网站数据来源：**空白** —— ${why}`);
+console.log(
+  "[site-data] 那五块（教师页 / 课程卡片 / 课程正文 / 报价 / 学生案例）这一版**会是空的**；" +
+    "想改看模版：SITE_CONTENT_SOURCE=template npm run build（或 npm run dev）。",
+);

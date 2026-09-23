@@ -1,17 +1,23 @@
 /**
  * **后端公开数据 → 网站视图模型** 的唯一映射层。
  *
- * ## 两态：要么全用后端，要么全用模版（没有第三种状态）
+ * ## 那五块内容：连上后端就用库，连不上就**空白**（不回落到模版）
  *
- * 宣传网站的内容有两条来源，而且**只在这两条之间二选一**：
+ * "那五块"= **教师页 / 课程卡片 / 课程正文 / 报价 / 学生案例** —— 它们是库里才有的内容。
+ * 机构确认的口径是：**需要后端数据的地方，没连上后端就该是空的**
  *
- *   1. **后端**：构站那一刻 `scripts/sync-site-data.mjs` 取回来的公开数据
- *      （`data/site/.backend-snapshot.ts`，形状见 `lib/backend/public-site.ts`）；
- *   2. **模版**：`data/site/*.md`，由 `lib/data/site.ts` / `lib/data/pricing.ts` 解析。
+ *   - `backend`：构站那一刻 `scripts/sync-site-data.mjs` 从后端取回了公开数据
+ *     （`data/site/.backend-snapshot.ts`，形状见 `lib/backend/public-site.ts`）→ 那五块用库里的；
+ *   - `blank`：没连上 → **那五块空白**（不是回落到模版：那样页面上看到的到底是库里的
+ *     还是文件里的，谁也说不清 —— 而"分不清"正是这一版要消灭的东西）；
+ *   - `template`：显式 `SITE_CONTENT_SOURCE=template` → 那五块用 `data/site/*.md`（本地对照用）。
  *
- * 判据只有一条：**快照存不存在**（`backendSnapshot() !== null`）。存在就整站用后端，
- * 不存在就整站用模版 —— 判定发生在 `lib/data/*.ts` 的取数函数里，每个函数一个 `if`，
- * 没有 `?? 模版`。
+ * 判据只有一条：`siteContentSource()`。判定发生在 `lib/data/*.ts` 的取数函数里，
+ * 每个函数一次 `switch`，没有 `?? 模版` 那种"每块各自决定"的写法。
+ *
+ * ## 其余页面（首页文案 / 关于 / 联系 / FAQ / 课表 / 特色课程 / 品牌与联系方式）
+ *
+ * 它们**不在库里**，因此与后端连不连无关 —— 永远来自 `data/site/*.md`。
  *
  * ## 为什么把"逐块回落"删掉（这是 2026-10 那次重构的核心）
  *
@@ -40,7 +46,7 @@
  * 后端数据错了也测不出来（标题为空时宁可返回空标题，也不去模版里抄一份）。
  */
 
-import { backendSiteSnapshot } from "@/data/site/.backend-snapshot";
+import { backendSiteSnapshot, backendSiteSource } from "@/data/site/.backend-snapshot";
 import { groupByPartition, partitionPlace } from "@/lib/backend/course-partitions";
 import type { CoursePartition } from "@/lib/backend/types";
 import type {
@@ -101,9 +107,33 @@ type BackendPricingLabels = PublicSite["siteContent"]["pricingPage"]["labels"];
  */
 let injectedSnapshot: PublicSite | null | undefined;
 
-/** 仅供自检使用：换掉当前快照（传 `null` = 强制"没有后端"）。页面代码不应调用它。 */
-export function __useBackendSnapshotForTesting(snapshot: PublicSite | null): void {
+/**
+ * 仅供自检使用：换掉当前快照。页面代码不应调用它。
+ *
+ *   - `null` = 强制"这次没连上后端"（那五块空白）；
+ *   - `undefined` = **恢复"没注入过"**，也就是回到构建时生成的那一份真实取值 ——
+ *     自检里专门有一条要验"默认（连不上）就是空白，不许被悄悄改成模版"，
+ *     那条必须看真实取值，不能看注入值。
+ */
+export function __useBackendSnapshotForTesting(snapshot: PublicSite | null | undefined): void {
   injectedSnapshot = snapshot;
+}
+
+/**
+ * 测试注入的**来源模式**（`backend` / `blank` / `template`）。
+ *
+ * 为什么需要一个单独的注入点：注入 `null` 快照现在只表示"没连上后端"（那五块**空白**），
+ * 而自检里有**一大批**断言校验的是 `data/site/*.md` 的内容与结构（栏目、卡片、课程页、
+ * 教师页、报价…）。那些断言要的是"模版那一份"，与"这次构站连没连后端"无关 ——
+ * 让它们随构建环境（上一次同步时后端在不在）变红变绿，等于自检本身不可靠。
+ */
+let injectedSource: "backend" | "blank" | "template" | undefined;
+
+/** 仅供自检使用：强制这次取数的来源模式（传 `undefined` 恢复真实取值）。 */
+export function __useSiteContentSourceForTesting(
+  source: "backend" | "blank" | "template" | undefined,
+): void {
+  injectedSource = source;
 }
 
 /**
@@ -113,6 +143,26 @@ export function __useBackendSnapshotForTesting(snapshot: PublicSite | null): voi
  */
 export function backendSnapshot(): PublicSite | null {
   return injectedSnapshot === undefined ? backendSiteSnapshot : injectedSnapshot;
+}
+
+/**
+ * 这次构站"那五块内容"该怎么取。
+ *
+ *   - `backend` —— 连上了后端，用库里的数据；
+ *   - `blank` —— **没连上：那五块空白**（机构确认的口径：需要后端数据的地方没连上就该是空的，
+ *     而不是悄悄换成模版 —— 那样人分不清看到的到底是库里的还是文件里的）；
+ *   - `template` —— 显式要求用 `data/site/*.md`（`SITE_CONTENT_SOURCE=template`，本地对照用）。
+ *
+ * 测试注入（`__useBackendSnapshotForTesting`）时：注入快照 = `backend`，注入 `null` = `blank`
+ * —— 自检要构造的就是这两种情形。为什么不让"注入 null"表示 template：
+ * 那样自检就测不到 `blank` 这条真实存在的分支（而它正是机构要的那个行为）。
+ */
+export function siteContentSource(): "backend" | "blank" | "template" {
+  // 有快照就是 backend（快照就是后端的公开数据）
+  if (backendSnapshot() !== null) return "backend";
+  // 没快照：自检注入的模式优先，其次是构建时生成的那份；注入过快照（= null）时按"空白"
+  if (injectedSource !== undefined) return injectedSource;
+  return injectedSnapshot === undefined ? backendSiteSource : "blank";
 }
 
 /* ── 小工具 ─────────────────────────────────────────────────────────────── */

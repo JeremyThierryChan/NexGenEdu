@@ -52,8 +52,26 @@ const PROSE_CLASS =
   "[&_strong]:font-medium [&_strong]:text-ink-800 " +
   "[&_ul]:mt-3 [&_ul]:list-disc [&_ul]:pl-5";
 
+/**
+ * 静态导出的路径清单：栏目页（primary / junior / …）与课程卡片页各一条。
+ *
+ * ## 为什么一张卡片都没有时要给一个哨兵路径
+ *
+ * 卡片是**后端数据**（课程库）。后端没连上时那五块是**空白**（机构口径），
+ * 于是这里算出来是空数组 —— 而 `output: "export"` **不接受** `generateStaticParams()`
+ * 返回空数组（构建直接失败：`Page "/courses/[slug]" is missing "generateStaticParams()"`）。
+ *
+ * 空数组意味着"这个路由一个页面都没有"，而静态导出必须至少落一个文件，因此给一个
+ * **哨兵路径**：它取不到任何数据 → 页面里 `notFound()` → 导出的是一份 404 内容。
+ * 也就是说：没连后端时这些卡片页**不存在**（点进去是 404），而不是"存在但空白"。
+ */
+const EMPTY_SLUG_SENTINEL = "__empty__";
+
 export function generateStaticParams(): Array<{ slug: string }> {
-  return [...getAllCourseColumnSlugs(), ...getAllCoursePageSlugs()].map((slug) => ({ slug }));
+  const slugs = [...getAllCourseColumnSlugs(), ...getAllCoursePageSlugs()];
+  return slugs.length > 0
+    ? slugs.map((slug) => ({ slug }))
+    : [{ slug: EMPTY_SLUG_SENTINEL }];
 }
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {

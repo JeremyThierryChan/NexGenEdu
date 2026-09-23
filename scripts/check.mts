@@ -95,7 +95,12 @@ import {
 } from "@/lib/backend/site-bands";
 import { publicSite as buildPublicSite } from "@/lib/backend/public-site";
 import type { PublicSite } from "@/lib/backend/public-site";
-import { __useBackendSnapshotForTesting, backendSnapshot } from "@/lib/site/backend-source";
+import {
+  __useBackendSnapshotForTesting,
+  __useSiteContentSourceForTesting,
+  backendSnapshot,
+  siteContentSource,
+} from "@/lib/site/backend-source";
 import { siteTeachers as siteTeachersFromContent } from "@/lib/backend/site-import";
 import { coursesFromSite } from "@/lib/backend/courses";
 import {
@@ -176,7 +181,8 @@ import {
   PRICING_SOURCE_ADMIN,
   PRICING_SOURCE_CONTENT,
 } from "@/lib/backend/pricing";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { holidaysDir, holidayYearFile, refreshHolidayYear } from "../server/holidays.mts";
@@ -235,12 +241,18 @@ import { runTwoPhaseImport } from "@/lib/backend/import-flow";
 import { describeSeriesDate, generateSeriesDates } from "@/lib/backend/recurrence";
 
 /*
- * **先把后端快照关掉**：这份自检里的内容断言（卡片 / 学科 / 小节 / 教师 / 报价）
- * 测的是**模版那条路**，必须与"上次构站有没有连上后端"无关 ——
- * 否则本机开着后端跑 check 会红、CI 上跑会绿（或反过来），而且看起来像内容坏了。
- * 后端那条路由最后一段"两条来源产出同一份页面数据"用注入的快照单独验。
+ * **先把后端快照关掉、并把来源固定成「模版」**：这份自检里的内容断言
+ * （卡片 / 学科 / 小节 / 教师 / 案例 / 报价）测的是**模版那条路**，
+ * 必须与"上次构站有没有连上后端"无关 —— 否则本机开着后端跑 check 会红、CI 上跑会绿
+ * （或反过来），而且看起来像内容坏了。
+ *
+ * 为什么还要单独注入**来源模式**：注入 `null` 快照现在的含义是"没连上后端"，
+ * 而那五块在那时会**空白**（机构口径，见 `lib/site/backend-source.ts` 的文件头）——
+ * 只注入 `null` 的话，所有读那五块的内容断言都会看到空数据。
+ * 后端那条路用注入的快照单独验，"空白"那条分支由 §25 单独验。
  */
 __useBackendSnapshotForTesting(null);
+__useSiteContentSourceForTesting("template");
 
 const seedDb = createSeedDatabase();
 import {
@@ -364,7 +376,13 @@ ok("中文名非空", brand.brandNameZh === "新锐教培");
 ok("联系方式非空", brand.contact.phone !== "");
 
 const homeContent = getHomeContent();
-const { courses: allCourses, columns, electiveGroups: electiveGroupList } = getCoursesPage();
+/*
+ * 这一节以及下面几节校验的是 **data/site/*.md 的结构**（内容文件也是 Pages 那份的来源），
+ * 因此**显式读模版**（`*FromTemplate`）：那五个取数函数会随「这次构站连没连后端」而变
+ * —— 连不上时那五块是**空白**（机构口径）—— 拿它们校验内容文件，会让自检结果
+ * 随构建环境漂移（后端没起时一片报红，起了又全绿）。
+ */
+const { courses: allCourses, columns, electiveGroups: electiveGroupList } = getCoursesPageFromTemplate();
 
 /**
  * 课程栏目的自检原则：**只校验性质，不校验具体名单**。
@@ -382,7 +400,7 @@ const { courses: allCourses, columns, electiveGroups: electiveGroupList } = getC
 // 栏目结构只服务于课程页的「课程总览」（首页课程区改为按班型展示）
 eq("课程页栏目", columns.map((c) => c.title),
   ["小学课内", "初中课内", "高中课内", "外语", "课外兴趣", "成人课程"]);
-eq("栏目与全站段同源", columns, getCourseColumns());
+eq("栏目与全站段同源", columns, getCourseColumnsFromTemplate());
 
 // 首页课程区展示的是班型（一对一等），不是学科
 const classTypes = getFeaturedContent().courses.flatMap((c) =>
@@ -579,13 +597,13 @@ ok("试课要点含免费条件", homeContent.trial.points.some((p) => p.include
 eq("学生案例区块跳案例页", homeContent.cases.cta.href, "/cases");
 ok("首页案例区块有文案", homeContent.cases.title !== "" && homeContent.cases.description !== "");
 
-const { courses } = getCoursesPage();
+const { courses } = getCoursesPageFromTemplate();
 // 学科数量不写死：增删课程是正常编辑（当前含新增的 日语 / 俄语 / 3D建模 / 编程）
 ok("课程页学科数量合理", courses.length >= 15);
 ok("每门学科都有学段内容", courses.every((c) => c.bands.length > 0 && c.bands[0].content.length > 50));
 
 // 选修课程（成人 / 课外兴趣）：与学科分开返回，当前全部标注暂未开放
-const { electiveGroups, electiveTitle } = getCoursesPage();
+const { electiveGroups, electiveTitle } = getCoursesPageFromTemplate();
 const electives = electiveGroups.flatMap((g) => g.items);
 // 分组名由数据文件决定
 ok("选修课所在分组有名字", electiveTitle !== "");
@@ -612,7 +630,7 @@ eq("卡片与课程/选修课的开放状态一致",
 ok("有课程标注了暂未开放", [...availability.values()].some(Boolean));
 ok("数学含 3 个学段且带核心能力", (() => { const m = courses.find((c) => c.nameZh === "数学"); return m?.bands.length === 3 && m.bands.every((b) => b.content.includes("核心能力")); })());
 
-const { teachers } = getTeachersPage();
+const { teachers } = getTeachersPageFromTemplate();
 // 在职角色数应等于「教师页分组数 − 离职数」：漏解析或重复解析都会在这里露出来
 const offDuty = (teachersPage?.groups ?? []).filter(
   (g) => g.items.find((i) => i.title === "状态")?.value.trim() === "离职",
@@ -674,7 +692,7 @@ ok("答案不重复粘贴（每条问题独立）",
 ok("每个问题都有答案", faq.groups.every((g) => g.items.every((i) => i.question.length > 2 && i.answer.length > 10)));
 ok("试课规则答案与业务一致", faq.groups.some((g) => g.items.some((i) => i.answer.includes("满 10 节"))));
 
-const cases = getCasesContent();
+const cases = getCasesContentFromTemplate();
 eq("学生案例数", cases.cases.length, 3);
 ok("每个案例都有前后水平对比", cases.cases.every((c) => c.from !== "" && c.to !== ""));
 ok("每个案例都有过程描述", cases.cases.every((c) => c.story.length > 50));
@@ -744,7 +762,7 @@ const smallGroup = getAllFeaturedCourses().find((c) => c.name.includes("一对�
 eq("含斜杠的课程名映射到安全路径", smallGroup?.path, ["in-class", "small-group"]);
 
 console.log("\n=== 4. 报价数据 ===");
-const pricing = getPricingData();
+const pricing = getPricingDataFromTemplate();
 eq("阶段数", pricing.stages.length, 6);
 eq("小学课程", pricing.stages[0]?.courses.map((c) => `${c.name}=${c.price}`),
   ["小学课内=150", "小学奥数=260", "小学英语竞赛=260", "小升初=200"]);
@@ -7927,20 +7945,68 @@ console.log("\n=== 24. 后台外壳：滚动时顶栏与侧栏不动（且不破
     /max-lg:overflow-x-auto/.test(sidebar) && /max-lg:border-b/.test(sidebar));
 }
 
-console.log("\n=== 25. 网站内容两态：要么全用后端，要么全用模版 ===");
+console.log("\n=== 25. 网站内容来源：后端 / 空白 /（显式）模版 ===");
 
 /*
- * 机构的要求是「连上后端就全按库里的数据；没连上就只显示模版」——**两个状态，没有中间态**。
+ * 机构的要求分两步定下来的，两句话合起来才是现在的口径：
+ *   1. 「不连后端时不连接后端的部分只显示模版」→ 先收紧了"三层来源 + 逐块回落"那套混乱；
+ *   2. 「需要用到后端数据的部分应该是空白的」→ 再把"那五块"（教师页 / 课程卡片 /
+ *      课程正文 / 报价 / 学生案例）在**没连上后端**时改成**空白**，而不是拿模版顶上。
  *
- * 以前是三层来源（后端 → 仓库快照 → 模版）且**逐块回落**，于是有两个说不清的现象：
- *   1. 同一页一半来自库、一半来自文件（教师页是库里的、课程卡片却是文件里的）；
- *   2. 「数据不全」伪装成「没连上」：后端好好的，只因为课程正文还没导入，整站就换成了模版。
+ * 现在的取值只有三种，判据一处：`siteContentSource()`
+ *   - `backend`：连上了后端 → 那五块用库里的数据；
+ *   - `blank`：没连上 → 那五块**空白**（这是默认行为）；
+ *   - `template`：显式 `SITE_CONTENT_SOURCE=template` → 那五块用 data/site/*.md（本地对照用）。
  *
- * 这一节把两态钉死：**判据只有"快照在不在"**；快照在就四块全用后端（空就空着），
- * 不在就四块全用模版。四块 = 教师页 / 课程栏目卡片 / 课程正文 / 报价。
+ * 其余页面（首页文案 / 关于 / 联系 / FAQ / 课表 / 特色课程 / 品牌与联系方式）不在库里，
+ * 永远来自模版 —— 它们与后端连不连无关，本节不涉及。
  */
 {
-  /** 一份"结构合法但各块都是空的"快照：用来证明"空"不等于"回模版"。 */
+  const fiveBlocks = () => ({
+    columns: getCourseColumns(),
+    courses: getCoursesPage(),
+    teachers: getTeachersPage(),
+    cases: getCasesContent(),
+    pricing: getPricingData(),
+  });
+
+  // ① blank：没连上后端 → 那五块空白
+  __useBackendSnapshotForTesting(null);
+  __useSiteContentSourceForTesting("blank");
+  const blank = fiveBlocks();
+  eq("没连上后端：那五块**全是空的**（不回落到模版）",
+    [
+      blank.columns.length,
+      blank.courses.courses.length,
+      blank.teachers.teachers.length,
+      blank.cases.cases.length,
+      blank.pricing.stages.length,
+    ],
+    [0, 0, 0, 0, 0]);
+  ok("空白时连标题也是空的（不是从模版抄一份标题）",
+    blank.courses.heading.title === "" &&
+    blank.teachers.heading.title === "" &&
+    blank.cases.title === "" &&
+    blank.pricing.labels.result === "");
+  ok("模版那一份确实有内容（否则上面那两条是空转的）",
+    getCourseColumnsFromTemplate().length > 0 &&
+    getTeachersPageFromTemplate().teachers.length > 0);
+
+  // ② template：显式要求 → 那五块用模版（本地对照 / 需要一份模版站时）
+  __useSiteContentSourceForTesting("template");
+  const fromTemplate = fiveBlocks();
+  eq("显式 template：那五块与「只读模版」那几个出口逐项一致",
+    [
+      JSON.stringify(fromTemplate.columns) === JSON.stringify(getCourseColumnsFromTemplate()),
+      JSON.stringify(fromTemplate.courses) === JSON.stringify(getCoursesPageFromTemplate()),
+      JSON.stringify(fromTemplate.teachers) === JSON.stringify(getTeachersPageFromTemplate()),
+      JSON.stringify(fromTemplate.cases) === JSON.stringify(getCasesContentFromTemplate()),
+      JSON.stringify(fromTemplate.pricing) === JSON.stringify(getPricingDataFromTemplate()),
+    ],
+    [true, true, true, true, true]);
+  __useSiteContentSourceForTesting(undefined);
+
+  // ③ backend：连上了但库是空的 → 仍然是"用库"（空就是空），不回模版、也不是"没连上"
   const emptySnapshot = {
     version: CURRENT_VERSION,
     generatedAt: new Date().toISOString(),
@@ -7949,12 +8015,13 @@ console.log("\n=== 25. 网站内容两态：要么全用后端，要么全用模
     partitions: [],
     siteContent: {
       coursePage: {
-        heading: { eyebrow: "空的眉题", title: "空的课程页标题", description: "" },
+        heading: { eyebrow: "", title: "空的课程页标题", description: "" },
         subjects: [],
         electiveTitle: "",
       },
       teacherPage: { heading: { eyebrow: "", title: "空的教师页标题", description: "" } },
       pricingPage: { labels: { result: "空的报价结果" } },
+      casesPage: { heading: { eyebrow: "", title: "空的案例页标题", description: "" }, notice: "", cases: [] },
     },
     pricing: {
       rules: { singleLessonFeePercent: 0, freeTrialMinLessons: 0, chargeTrialWhenNotFree: false },
@@ -7966,93 +8033,139 @@ console.log("\n=== 25. 网站内容两态：要么全用后端，要么全用模
       otherItems: [],
     },
   } as unknown as PublicSite;
-
-  __useBackendSnapshotForTesting(null);
-  const noSnapshot = {
-    columns: getCourseColumns(),
-    courses: getCoursesPage(),
-    teachers: getTeachersPage(),
-    pricing: getPricingData(),
-  };
-  ok("没有快照时：四块全来自模版（有内容才算数）",
-    noSnapshot.columns.length > 0 &&
-    noSnapshot.courses.courses.length > 0 &&
-    noSnapshot.teachers.teachers.length > 0 &&
-    noSnapshot.pricing.stages.length > 0);
-  eq("没有快照时：与「只读模版」那几个出口逐项一致",
-    [
-      JSON.stringify(noSnapshot.columns) === JSON.stringify(getCourseColumnsFromTemplate()),
-      JSON.stringify(noSnapshot.courses) === JSON.stringify(getCoursesPageFromTemplate()),
-      JSON.stringify(noSnapshot.teachers) === JSON.stringify(getTeachersPageFromTemplate()),
-      JSON.stringify(noSnapshot.pricing) === JSON.stringify(getPricingDataFromTemplate()),
-    ],
-    [true, true, true, true]);
-
   __useBackendSnapshotForTesting(emptySnapshot);
-  const withEmptySnapshot = {
-    columns: getCourseColumns(),
-    courses: getCoursesPage(),
-    teachers: getTeachersPage(),
-    pricing: getPricingData(),
-  };
-  /*
-   * 关键一条：**空就空着**，不许回模版。
-   * 早先这四块会各自返回 null、由调用方回落到模版 —— 于是"库是空的"这件事
-   * 会被伪装成"这次没连上后端"，机构看到的是模版还以为在用库。
-   */
-  eq("快照在但四块都是空的：一律按后端（空），不回模版",
+  eq("取数来源：有快照就是 backend", siteContentSource(), "backend");
+  const withEmptySnapshot = fiveBlocks();
+  eq("连上了但库是空的：一律按后端（空），不回模版",
     [
       withEmptySnapshot.columns.length,
       withEmptySnapshot.courses.courses.length,
       withEmptySnapshot.teachers.teachers.length,
+      withEmptySnapshot.cases.cases.length,
       withEmptySnapshot.pricing.stages.length,
     ],
-    [0, 0, 0, 0]);
+    [0, 0, 0, 0, 0]);
   eq("空块里的**标题**也来自后端（不是模版抄一份）",
     [
       withEmptySnapshot.courses.heading.title,
       withEmptySnapshot.teachers.heading.title,
+      withEmptySnapshot.cases.title,
       withEmptySnapshot.pricing.labels.result,
     ],
-    ["空的课程页标题", "空的教师页标题", "空的报价结果"]);
-  ok("空块的标题确实与模版不同（否则上面那条是空转的）",
-    withEmptySnapshot.courses.heading.title !== getCoursesPageFromTemplate().heading.title);
+    ["空的课程页标题", "空的教师页标题", "空的案例页标题", "空的报价结果"]);
   __useBackendSnapshotForTesting(null);
 
   /*
-   * 源码级：不许再出现"逐块回落"的写法。
-   * `backendX() ?? getXFromTemplate()` 正是混合态的来路 —— 它让每一块各自决定来源。
+   * ④ 源码级三条：判据只有一处、不许"逐块回落"、生成器把三种取值都写出来。
+   *    `backendX() ?? getXFromTemplate()` 正是"半个页面来自文件"的来路。
    */
   const dataSource = (file: string): string =>
     readFileSync(new URL(`../${file}`, import.meta.url), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/^\s*\/\/.*$/gm, "");
   eq("取数层里没有 `?? 模版` 这种逐块回落",
-    ["lib/data/site.ts", "lib/data/pricing.ts"].filter((file) =>
+    ["lib/data/site.ts", "lib/data/pricing.ts", "lib/data/pages.ts"].filter((file) =>
       /backend[A-Za-z]*\([^)]*\)\s*\?\?/.test(dataSource(file))),
     []);
-  ok("判据只有一处（backendSnapshot()）",
-    /const snapshot = backendSnapshot\(\);/.test(dataSource("lib/data/site.ts")) &&
-    /const snapshot = backendSnapshot\(\);/.test(dataSource("lib/data/pricing.ts")));
+  ok("判据只有一处（siteContentSource()）",
+    (dataSource("lib/data/site.ts").match(/siteContentSource\(\)/g) ?? []).length >= 3 &&
+    dataSource("lib/data/pricing.ts").includes("siteContentSource()") &&
+    dataSource("lib/data/pages.ts").includes("siteContentSource()"));
 
-  /*
-   * 构站脚本那一侧：两态、且旧模式要**明确报错**（照着旧文档敲 `=snapshot` 的人
-   * 必须当场看到"这个模式已经删掉"，而不是悄悄走了模版还以为在用快照）。
-   */
   const syncScript = dataSource("scripts/sync-site-data.mjs");
-  ok("构站脚本：模式只剩 auto / backend / template",
+  ok("构站脚本：模式是 auto / backend / template（snapshot 已删）",
     /\["auto", "backend", "template"\]/.test(syncScript) && !/readRepoSnapshot/.test(syncScript));
   ok("构站脚本：旧模式 snapshot 会明确报错",
     /mode === "snapshot"/.test(syncScript) && /已经删掉/.test(syncScript));
-  ok("构站脚本：连不上时只剩「模版」一条出口（没有第二层可回落）",
-    /write\(null, `模版/.test(syncScript) && !/仓库快照/.test(syncScript));
-  ok("构站脚本：空块在日志里点名（两态之后这是唯一线索）",
-    /在库里是空的，网站会照空显示/.test(syncScript) && /reportBlocks/.test(syncScript));
+  ok("构站脚本：连不上时写的是**空白**这一态（不是模版）",
+    /write\(null, `空白/.test(syncScript) && /"blank"/.test(syncScript));
+  ok("构站脚本：模版那一态只能**显式**要（SITE_CONTENT_SOURCE=template）",
+    /mode === "template"/.test(syncScript) && /"template"\)/.test(syncScript));
+  ok("构站脚本：空块在日志里点名（连不上时那五块是空的，日志是唯一线索）",
+    /在库里是空的，网站会照空显示/.test(syncScript));
   eq("仓库里不再有 site-snapshot.json",
     existsSync(new URL("../data/site/site-snapshot.json", import.meta.url)), false);
   eq("package.json 里不再有 site:snapshot 脚本",
     JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts["site:snapshot"],
     undefined);
+  /*
+   * 生成文件与它的类型声明**必须同时有这三个导出**：TS 优先用 `types/backend-snapshot.d.ts`
+   * 那份 `declare module`，漏一个就会出现"明明生成了却说没有这个导出"
+   * （`backendSiteSource` 就是这么漏过一次的）。
+   */
+  /*
+   * ⑤ **不许把"没连上"偷偷当成模版** —— 这一条是**行为**验证：真跑一次构站脚本
+   * （指向一个空端口 = 连不上），看它写出来的来源是哪一态。
+   *
+   * 为什么不能只查"当前生成文件里的值"：那个值取决于**上一次构站**用的是哪一态
+   * （本机可能刚好是 template），拿它跟"默认值"比会时灵时不灵 ——
+   * 我第一版就是这么写的，把默认值改成 template 的变异照样全绿。
+   *
+   * 跑完**把原文件放回去**：那是个未纳入版本库的构建期产物，
+   * 但也不能就这么让它停在"测试用的那一份"上（本机正在 dev 的话，页面会跟着变）。
+   */
+  const snapshotPath = new URL("../data/site/.backend-snapshot.ts", import.meta.url);
+  const snapshotBefore = readFileSync(snapshotPath, "utf8");
+  const runSync = (env: Record<string, string>): { code: number | null; output: string } => {
+    const result = spawnSync(process.execPath, ["scripts/sync-site-data.mjs"], {
+      cwd: new URL("..", import.meta.url).pathname,
+      env: { ...process.env, ...env },
+      encoding: "utf8",
+    });
+    return { code: result.status, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
+  };
+  const sourceOfGenerated = (): string =>
+    /backendSiteSource = "([a-z]+)"/.exec(readFileSync(snapshotPath, "utf8"))?.[1] ?? "";
+  try {
+    const deadBase = { SITE_API_BASE: "http://127.0.0.1:45997", SITE_CONTENT_SOURCE: "" };
+    const autoRun = runSync(deadBase);
+    eq("构站脚本（auto + 连不上）：退出码 0", autoRun.code, 0);
+    eq("构站脚本（auto + 连不上）：**写的是「空白」**（不是偷偷用模版）",
+      sourceOfGenerated(), "blank");
+    ok("而且日志里说清了那五块会是空的",
+      autoRun.output.includes("空白") && autoRun.output.includes("会是空的"), autoRun.output.slice(0, 120));
+
+    const templateRun = runSync({ ...deadBase, SITE_CONTENT_SOURCE: "template" });
+    eq("构站脚本（显式 template）：退出码 0", templateRun.code, 0);
+    eq("构站脚本（显式 template）：写的是「模版」", sourceOfGenerated(), "template");
+
+    const legacyRun = runSync({ SITE_API_BASE: "http://127.0.0.1:45997", SITE_CONTENT_SOURCE: "snapshot" });
+    ok("构站脚本：已删掉的 `snapshot` 模式会**明确报错**（退出码非 0）",
+      legacyRun.code !== 0 && legacyRun.output.includes("已经删掉"), legacyRun.output.slice(-120));
+  } finally {
+    writeFileSync(snapshotPath, snapshotBefore, "utf8");
+  }
+  eq("跑完把生成文件放回原样（本机 dev 不受影响）",
+    readFileSync(snapshotPath, "utf8"), snapshotBefore);
+
+  const generated = sourceOfGenerated();
+  ok("生成文件里写了来源模式（三个取值之一）",
+    ["backend", "blank", "template"].includes(generated), generated);
+  __useBackendSnapshotForTesting(undefined);
+  __useSiteContentSourceForTesting(undefined);
+  eq("没注入时：来源就是生成文件里那一份（自检不改变真实取值）",
+    siteContentSource(), generated);
+  /*
+   * ⑥ **默认值必须"来自生成文件"**，不许在代码里写死某一态。
+   *
+   * 为什么只能查源码而不能纯靠行为：生成文件是**模块常量**，自检加载它时就定下来了 ——
+   * 无论之后怎么重跑生成脚本（上面那几条），模块里那个值都不会变，
+   * 因此"把默认值硬写成 template"这种改动，行为断言**抓不到**
+   * （我试了两轮：真正能抓住它的是这一条）。
+   * 判据：`siteContentSource()` 的函数体里必须引用 `backendSiteSource`。
+   */
+  const sourceBody =
+    /export function siteContentSource\(\)[\s\S]*?\n\}/.exec(dataSource("lib/site/backend-source.ts"))?.[0] ?? "";
+  ok("取到了 siteContentSource 的函数体（否则下面那条是空转的）", sourceBody.length > 50);
+  ok("默认那一路取自生成文件（backendSiteSource），不许在代码里写死某一态",
+    sourceBody.includes("backendSiteSource"));
+  __useBackendSnapshotForTesting(null);
+
+  const declared = readFileSync(new URL("../types/backend-snapshot.d.ts", import.meta.url), "utf8");
+  for (const name of ["backendSiteSnapshot", "backendSiteSource", "backendSiteNote"]) {
+    ok(`生成快照的三个导出在类型声明里都有（${name}）`,
+      declared.includes(`export const ${name}:`) && syncScript.includes(`export const ${name} =`));
+  }
 }
 
 console.log("\n=== 26. 学生案例进库（v19：机构要求「学生案例以后端为主」）===");
@@ -8101,9 +8214,14 @@ console.log("\n=== 26. 学生案例进库（v19：机构要求「学生案例以
 
   // ② 两态：有快照就用库里的案例；没有快照就用模版
   __useBackendSnapshotForTesting(null);
-  eq("没有快照时：案例来自模版",
+  __useSiteContentSourceForTesting("template");
+  eq("显式 template 时：案例来自模版",
     getCasesContent().cases.map((item) => item.title),
     templateCases.map((item) => item.title));
+  __useSiteContentSourceForTesting("blank");
+  eq("没连上后端（默认）时：案例块**空白**，不回落到模版",
+    getCasesContent().cases.length, 0);
+  __useSiteContentSourceForTesting(undefined);
   const emptyCasesSnapshot = buildPublicSite(seedDb);
   __useBackendSnapshotForTesting({
     ...emptyCasesSnapshot,

@@ -41,14 +41,20 @@ jobs:
       - name: Sync content modules
         run: npm run sync-content
 
-      # 决定「网站内容从哪来」：这一步会去问一次后端，问得到就用库里的数据，
-      # 问不到就用 data/site/*.md 模版。**GitHub Actions 上没有后端**，
-      # 因此 Pages 这条路必然是模版 —— 这正是我们要的（见 docs/技术架构.md §10.1）。
+      # 决定「网站内容从哪来」：这一步去问一次后端（见 docs/技术架构.md §5.1）。
+      #
+      # **GitHub Actions 上没有后端**，于是有两种选择，后果完全不同：
+      #   - 不设 SITE_CONTENT_SOURCE（默认 auto）→ 那五块（教师页 / 课程卡片 / 课程正文 /
+      #     报价 / 学生案例）**是空的**。这是本机口径的默认行为
+      #     （机构确认：需要后端数据的地方，没连上就该是空的）；
+      #   - 设成 template → 那五块用 data/site/*.md 的模版内容，Pages 上有一份完整可看的站。
+      #
+      # 现在是 **template**：Pages 是给家长看的公开门面，空着的教师页 / 课程页比"模版旧内容"糟糕。
+      # 想改成"与后端未连接时的口径完全一致"，把下面那行删掉即可。
       # 放在类型检查之前：它生成的 data/site/.backend-snapshot.ts 未纳入版本库。
       - name: Decide site data source
         run: npm run sync-site-data
         env:
-          # 显式写死：就算将来在这台机器上碰巧能连到什么，也只用模版构 Pages。
           SITE_CONTENT_SOURCE: template
 
       - name: Typecheck
@@ -65,6 +71,11 @@ jobs:
         run: npm run build
         env:
           NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
+          # **必须在这里也写一次**：`npm run build` 内部会再跑一遍 `sync-site-data`
+          # （见 package.json），而那个子进程**不继承**上一步的 env ——
+          # 只在上一步设的话，这里会用默认的 `auto` 重新判定一次，
+          # 在 Actions（没有后端）上就会写成「空白」，把上一步的 template 覆盖掉。
+          SITE_CONTENT_SOURCE: template
 
       - name: Disable Jekyll processing
         # GitHub Pages 默认用 Jekyll 处理静态文件，会忽略以 _ 开头的目录

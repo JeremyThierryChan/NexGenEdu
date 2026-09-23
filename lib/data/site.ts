@@ -13,6 +13,7 @@ import {
   backendCoursesPage,
   backendSnapshot,
   backendTeachersPage,
+  siteContentSource,
 } from "@/lib/site/backend-source";
 import type {
   AboutContent,
@@ -35,19 +36,17 @@ import type {
 /**
  * 数据访问层：页面获取内容的唯一入口。
  *
- * ## 两态取数：这里的每个函数只做一次选择
+ * ## 那五块内容：连上后端就用库，连不上就**空白**
  *
- * ```ts
- * const snapshot = backendSnapshot();
- * if (snapshot !== null) return backendX(snapshot);   // 连上后端了 → 这一块用库里的
- * return getXFromTemplate();                          // 没连上 → 这一块用模版
- * ```
+ * "那五块" = **教师页 / 课程卡片 / 课程正文 / 报价 / 学生案例**（只有库里才有的内容）。
+ * 机构确认的口径：**需要后端数据的地方，没连上后端就该是空的** —— 不是回落到模版，
+ * 那样页面上看到的到底是库里的还是文件里的就说不清了。三个取值见 `siteContentSource()`：
+ * `backend`（用库）/ `blank`（空白）/ `template`（显式要求模版，本地对照用）。
  *
- * **判据只有一个**：这次构站有没有拿到后端的公开数据（`backendSnapshot()`）。
- * 有就**整站**用后端（某一块为空就显示为空，不再回落）；没有就**整站**用模版。
- * 刻意不写 `backendX() ?? getXFromTemplate()`：那种写法让每一块各自决定，
- * 于是同一页会一半来自库、一半来自文件，而页面上看不出来
- * （详见 `lib/site/backend-source.ts` 的文件头）。
+ * 刻意不写 `backendX() ?? getXFromTemplate()`：那让每一块各自决定，
+ * 于是同一页会一半来自库、一半来自文件，而页面上看不出来。
+ * 其余页面（首页文案 / 关于 / 联系 / FAQ / 课表 / 特色课程 / 品牌与联系方式）不在库里，
+ * 永远来自 `data/site/*.md`，与后端连不连无关。
  *
  * 全部内容都来自单文件 data/site/content.md，按页面分段（见 lib/data/content.ts）。
  * 页面只能调用本文件的函数，不得直接读文件或解析 Markdown。
@@ -180,8 +179,9 @@ export function getCourseColumns(): CourseColumn[] {
    * 班型页）自动跟着切。
    */
   const snapshot = backendSnapshot();
-  if (snapshot !== null) return backendCourseColumns(snapshot);
-  return getCourseColumnsFromTemplate();
+  if (siteContentSource() === "backend" && snapshot !== null) return backendCourseColumns(snapshot);
+  // 没连上：**空白**（机构口径）；显式 `SITE_CONTENT_SOURCE=template` 时才用模版
+  return siteContentSource() === "template" ? getCourseColumnsFromTemplate() : [];
 }
 
 /**
@@ -353,10 +353,17 @@ export function getCoursesPage(): {
   /** 选修课按栏目（外语 / 课外兴趣 / 成人课程）分组。 */
   electiveGroups: Array<{ title: string; items: ElectiveCourse[] }>;
 } {
-  // 同上：连上后端就用库里的学科正文与选修课，否则解析 Markdown（同一次构建里全站同源）
+  // 同上：连上后端就用库里的学科正文与选修课；没连上 = 空白；显式 template 才解析 Markdown
   const snapshot = backendSnapshot();
-  if (snapshot !== null) return backendCoursesPage(snapshot);
-  return getCoursesPageFromTemplate();
+  if (siteContentSource() === "backend" && snapshot !== null) return backendCoursesPage(snapshot);
+  if (siteContentSource() === "template") return getCoursesPageFromTemplate();
+  return {
+    heading: { eyebrow: "", title: "", description: "" },
+    courses: [],
+    columns: [],
+    electiveTitle: "",
+    electiveGroups: [],
+  };
 }
 
 /** 课程页内容（**只读模版**，不看后端快照）—— 理由同 `getCourseColumnsFromTemplate`。 */
@@ -418,7 +425,13 @@ export function getCoursesPageFromTemplate(): {
   return {
     heading: pageHeading(page),
     courses,
-    columns: getCourseColumns(),
+    /*
+     * **必须显式读模版那一份**（`getCourseColumnsFromTemplate()`），不能写 `getCourseColumns()`：
+     * 后者是"按这次构站的来源取数"的入口 —— 后端没连上时它返回空数组（那五块空白），
+     * 于是"只读模版"这个出口会跟着变空，`lib/backend/site-content.ts` 那一批
+     * 「内容文件 → 库」的路径（初始化 / 迁移 / 从网站导入）就**导不到任何卡片**了。
+     */
+    columns: getCourseColumnsFromTemplate(),
     electiveTitle: electiveGroup?.name ?? "",
     electiveGroups,
   };
@@ -760,10 +773,11 @@ export function getTeachersPage(): {
   heading: SectionHeading;
   teachers: Teacher[];
 } {
-  // 同上：连上后端就用库里的教师档案（含"是否在网站展示"的过滤），否则解析 Markdown
+  // 同上：连上后端就用库里的教师档案（含"是否在网站展示"的过滤）；没连上 = 空白
   const snapshot = backendSnapshot();
-  if (snapshot !== null) return backendTeachersPage(snapshot);
-  return getTeachersPageFromTemplate();
+  if (siteContentSource() === "backend" && snapshot !== null) return backendTeachersPage(snapshot);
+  if (siteContentSource() === "template") return getTeachersPageFromTemplate();
+  return { heading: { eyebrow: "", title: "", description: "" }, teachers: [] };
 }
 
 /** 教师页（**只读模版**，不看后端快照）—— 理由同 `getCourseColumnsFromTemplate`。 */

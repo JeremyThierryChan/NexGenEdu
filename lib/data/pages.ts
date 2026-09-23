@@ -1,5 +1,5 @@
 import { getPage, pageString, type PageBlock, type Section } from "@/lib/data/content";
-import { backendCasesContent, backendSnapshot } from "@/lib/site/backend-source";
+import { backendCasesContent, backendSnapshot, siteContentSource } from "@/lib/site/backend-source";
 import type {
   CaseItem,
   CasesContent,
@@ -58,8 +58,10 @@ const CASE_FIELDS = ["年级", "科目", "入学水平", "当前水平", "辅导
  */
 export function getCasesContent(): CasesContent {
   const snapshot = backendSnapshot();
-  if (snapshot !== null) return backendCasesContent(snapshot);
-  return getCasesContentFromTemplate();
+  if (siteContentSource() === "backend" && snapshot !== null) return backendCasesContent(snapshot);
+  // 没连上后端 = 空白（机构口径：需要后端数据的地方就该是空的）；显式 template 才用模版
+  if (siteContentSource() === "template") return getCasesContentFromTemplate();
+  return { eyebrow: "", title: "", description: "", notice: "", cases: [] };
 }
 
 /**
