@@ -44,7 +44,6 @@ import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
 import { rolesOrAll, useAuth } from "@/components/admin/AuthContext";
 import { useActionNotice } from "@/components/admin/useActionNotice";
 import { ActionNoticeView } from "@/components/admin/ActionNotice";
-import type { SiteContentImportReport } from "@/lib/backend/api";
 import {
   addLibraryCourseToPricing,
   pricingStatusForCourses,
@@ -154,7 +153,6 @@ export function CoursesLedgerPanel() {
   const [originFilter, setOriginFilter] = useState("全部");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [syncing, setSyncing] = useState(false);
   /**
    * 正在切「开放 / 暂未开放」的那张卡片（防连点，也让"点了有反应"看得见）。
    *
@@ -223,15 +221,6 @@ export function CoursesLedgerPanel() {
    * 而这正是这次要消掉的东西（原来这里有一句 `window.scrollTo({ top: 0 })`）。
    */
   const [bandError, setBandError] = useState<{ key: string; text: string } | null>(null);
-  /*
-   * 「从网站导入内容」：两阶段（体检 → 确认写入）。
-   * 体检结果逐条列出来给人看 —— 一次导入会动到教师资料、课程字段与课程正文，
-   * 不列清楚就变成"点一下按钮，数据悄悄变了一片"。
-   */
-  const [siteCheck, setSiteCheck] = useState<SiteContentImportReport | null>(null);
-  const [siteOverwrite, setSiteOverwrite] = useState(false);
-  const [sitePending, setSitePending] = useState(false);
-
   // 表单（新建 / 编辑共用）
   const [editing, setEditing] = useState<Course | null>(null);
   const [name, setName] = useState("");
@@ -1232,57 +1221,6 @@ export function CoursesLedgerPanel() {
     }
   }
 
-  async function syncFromSite() {
-    setSyncing(true);
-    setError("");
-    setMessage("");
-    const result = await api.courses.syncFromSite();
-    setSyncing(false);
-    setMessage(
-      result.added.length === 0
-        ? `网站上的课程都已在课程库里（共 ${result.total} 门）。`
-        : `从网站同步了 ${result.added.length} 门课程：${result.added.join("、")}（现共 ${result.total} 门）。`,
-    );
-    await load({ quiet: true });
-  }
-
-  /** 体检：只算不写（服务端在深拷贝上算，库里一个字都不会变）。 */
-  async function checkSiteContent() {
-    setSitePending(true);
-    setError("");
-    setMessage("");
-    try {
-      setSiteCheck(await api.site.importFromContent({ write: false }));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "体检失败。");
-    } finally {
-      setSitePending(false);
-    }
-  }
-
-  /** 确认写入：默认只补空；勾了「用网站内容覆盖」才替换已有内容。 */
-  async function applySiteContent() {
-    setSitePending(true);
-    setError("");
-    setMessage("");
-    try {
-      const report = await api.site.importFromContent({ write: true, overwrite: siteOverwrite });
-      setSiteCheck(report);
-      const { counts } = report;
-      setMessage(
-        `已从网站内容导入：教师 新增 ${counts.teachersAdded} / 补资料 ${counts.teachersFilled}，` +
-          `课程 新增 ${counts.coursesAdded} / 补字段 ${counts.coursesFilled}，` +
-          `课程正文 ${counts.subjectsWritten} 个学科 / ${counts.bandsWritten} 个小节，` +
-          `报价文案 ${counts.labelsFilled} 项。`,
-      );
-      await load({ quiet: true });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "导入失败。");
-    } finally {
-      setSitePending(false);
-    }
-  }
-
   /**
    * 筛出来的课程。
    *
@@ -2100,8 +2038,9 @@ export function CoursesLedgerPanel() {
         网站上的卡片（填「不展示」表示它只在后台用于排课与记课时）。二是网站**构站时能不能
         连上后端**：连得上就用库里的数据生成页面，连不上（例如 GitHub Pages）就整体回落到
         模版文件 <code className="mx-1 rounded bg-white/70 px-1">data/site/*.md</code>
-        —— 口径见技术架构 §10.1。反过来，内容文件里新加了课程卡片后，点「从网站同步课程」
-        把它拉进课程库；老库升级上来时点「从网站导入内容」把卡片字段与课程正文一次性补齐。
+        —— 口径见技术架构 §10.1。
+        <strong className="font-medium">课程以库为准</strong>：新装系统时内容文件里的卡片作为
+        **初始数据**进库，之后都在这一页维护（v32 起「从网站同步课程 / 从网站导入内容」两个入口已删）。
         <br />
         <strong className="font-medium">与报价的关系：</strong>
         课程库决定「能排哪些课」，报价页决定「这门课多少钱」。每门课下面是它的报价状态；
@@ -2109,16 +2048,6 @@ export function CoursesLedgerPanel() {
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        <Button variant="outline" onClick={() => void syncFromSite()} disabled={syncing}>
-          {syncing ? "同步中…" : "从网站同步课程"}
-        </Button>
-        <Button
-          variant="outline"
-          onClick={() => void checkSiteContent()}
-          disabled={sitePending}
-        >
-          {sitePending ? "体检中…" : "从网站导入内容"}
-        </Button>
         <Button variant="outline" onClick={() => setImporting((value) => !value)}>
           {importing ? "收起导入" : "批量导入"}
         </Button>
@@ -2184,44 +2113,6 @@ export function CoursesLedgerPanel() {
               编辑器就在它自己的卡片下面展开。
             </p>
           )}
-        </Panel>
-      )}
-
-      {/*
-        体检 / 导入结果面板：逐条列出会动什么，确认后才写。
-        写成"列清单 + 两个按钮"，而不是"再点一次就写"—— 导入是不可撤销的动作。
-      */}
-      {siteCheck !== null && (
-        <Panel
-          className="mt-5"
-          title={siteCheck.written ? "已从网站内容导入" : "从网站导入 · 体检结果（尚未写入）"}
-          description="教师资料、课程卡片字段、课程正文、报价文案。默认**只补空**：机构在后台改过的内容不会被冲掉。"
-        >
-          <ul className="max-h-64 overflow-y-auto px-4 py-3 text-xs leading-relaxed text-ink-600">
-            {siteCheck.changes.map((item) => (
-              <li key={item} className="border-b border-ink-50 py-1 last:border-0">
-                {item}
-              </li>
-            ))}
-          </ul>
-          <label className="mx-4 mb-2 flex items-center gap-2 text-xs text-ink-600">
-            <input
-              type="checkbox"
-              checked={siteOverwrite}
-              onChange={(event) => setSiteOverwrite(event.target.checked)}
-            />
-            用网站内容**覆盖**已有内容（课程正文、课程字段、教师资料都会按内容文件重写）
-          </label>
-          <div className="flex items-center gap-2 px-4 pb-4">
-            {!siteCheck.written && (
-              <Button onClick={() => void applySiteContent()} disabled={sitePending}>
-                {sitePending ? "导入中…" : "确认导入"}
-              </Button>
-            )}
-            <Button variant="outline" onClick={() => setSiteCheck(null)}>
-              关闭
-            </Button>
-          </div>
         </Panel>
       )}
 

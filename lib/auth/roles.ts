@@ -260,7 +260,6 @@ export const METHOD_ACCESS: Record<string, Role[]> = {
   "pricing.quote": ["技术管理员", "财务管理员", "招生老师"],
   // 网站内容：读是公开的（构站脚本也要读），写归技术管理员
   "site.publicContent": [...ROLES],
-  "site.importFromContent": ["技术管理员"],
   "site.saveContent": ["技术管理员"],
   // 学生案例这类对外文案：招生老师也要能改（见 PAGE_ACCESS 里 /admin/content 的说明）
   "site.saveBlocks": ["技术管理员", "招生老师"],
@@ -501,9 +500,9 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
    *   - 排课（预检 / 批量 / 调课建议 / 冲突检查）：教师不带排课这件事（PAGE_ACCESS 里
    *     "课程安排"那几行的写动作归招生与技术），而且冲突结论里会点名**别的教师与别的学生**
    *     （"和 X 老师的那节课撞了"）—— 那正是行级范围要挡住的东西；
-   *   - 课程库写入：教师对课程库只读（使用手册的角色表），
-   *     这条在角色表里原先漏了（`courses.syncFromSite` 被归进了 actions 分组），
-   *     范围层按"默认关门"把它关掉。
+   *   - 课程库写入：教师对课程库只读（使用手册的角色表），范围层按"默认关门"把它关掉
+   *     （v18 前这里点名写过 `courses.syncFromSite`；那个"从网站同步课程"的入口已随
+   *     "以后端为主"整块删掉，这条口径仍适用于课程库的其余写方法）。
    */
   "payments.list": "hidden",
   "payments.listByStudent": "hidden",
@@ -514,7 +513,6 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
   "lessons.planSeries": "hidden",
   "lessons.createSeries": "hidden",
   "lessons.suggestMoves": "hidden",
-  "courses.syncFromSite": "hidden",
   /*
    * 课程分区的四个写方法与 `courses.setPartition` **刻意不在这里登记**：
    * 它们在角色层（`GROUP_ACCESS.crud`）就不给普通教师，登记成 `hidden` 是一条没人维护的

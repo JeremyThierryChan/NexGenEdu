@@ -150,8 +150,6 @@ await check("课程库", "空栏目可以删掉（护栏不误伤）", async () 
 }, (removed: boolean) => removed === true);
 await check("课程库", "课程列表与统计", async () => (await api.courses.list()).length > 0);
 await check("课程库", "修改课程", async () => (await api.courses.update(courseId, { note: "已改" })).note === "已改");
-await check("课程库", "从网站同步课程", async () => (await api.courses.syncFromSite()).total > 0);
-await check("课程库", "重复同步不重复添加", async () => (await api.courses.syncFromSite()).added.length === 0);
 
 /* ── 1.5 网站内容（学生案例）── */
 let casesPageId = "";

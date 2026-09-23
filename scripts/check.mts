@@ -2246,291 +2246,6 @@ ok("补字段不影响原有资料",
 await api.restoreBackup();
 
 /*
- * ── 把网站内容搬进库（`site.importFromContent`）─────────────────────────────
- *
- * 老库升级上来时：教师没有推荐理由与顺序、课程行没有卡片字段、课程正文是空的。
- * 网站那侧据此判定"后端没有内容"而回落到模版 —— 因此这条导入路径必须有，
- * 而且必须**两件事都成立**：
- *   1. 体检（`write: false`）一个字都不写；
- *   2. 默认**只补空、不覆盖**（机构在后台改过的内容不能被一次导入冲掉）。
- * 用一份"降级成 v14"的库来造这个场景：这是真实会遇到的形态（升级前就是这个样子）。
- */
-const v14Db = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
-  teachers: Array<Record<string, unknown>>;
-  courses: Array<Record<string, unknown>>;
-  version: number;
-  siteContent?: unknown;
-};
-v14Db.version = 14;
-v14Db.teachers = v14Db.teachers.map((teacher) => {
-  const copy = { ...teacher };
-  delete copy.recommendation;
-  delete copy.order;
-  return copy;
-});
-v14Db.courses = v14Db.courses.map((course) => {
-  const copy = { ...course };
-  for (const key of ["path", "subgroup", "tags", "target", "order", "intro", "siteKind"]) delete copy[key];
-  return copy;
-});
-delete v14Db.siteContent;
-eq("降级夹具：课程没有卡片字段（v14 的样子）",
-  v14Db.courses.every((course) => !("path" in course) && !("siteKind" in course)), true);
-
-// 升级进库（v14 → v15 迁移会补默认值），此时网站内容仍是空的
-eq("v14 文件可以升级导入", (await api.importDatabase(JSON.stringify(v14Db))).ok, true);
-const afterUpgrade = await api.exportDatabase();
-/*
- * 「课程正文有没有内容」的判据就写在断言里（原先它是 `site-content.ts` 的一个导出，
- * 唯一的读者是这里 —— 两态之后网站那一侧不再靠它决定"用不用后端"，
- * 一个只给自检用的导出就是死代码，删掉了）。
- */
-const hasBands = (content: { coursePage: { subjects: Array<{ bands: unknown[] }> } }): boolean =>
-  content.coursePage.subjects.some((subject) => subject.bands.length > 0);
-ok("老库升级后课程正文是空的（迁移不读外部文件，只补结构）",
-  !hasBands(afterUpgrade.siteContent));
-ok("老库升级后课程行有了卡片字段的默认值",
-  afterUpgrade.courses.every((course) => course.siteKind === "不展示" && course.path === ""));
-
-// ① 体检：必须一个字都不写
-const beforeDryRun = JSON.stringify(await api.exportDatabase());
-const dry = await api.site.importFromContent({ write: false });
-ok("体检报告列出了会补什么（不是空话）", dry.changes.length > 0, dry.changes.slice(0, 2).join("；"));
-eq("体检没有写库", JSON.stringify(await api.exportDatabase()), beforeDryRun);
-eq("体检报告标了「没写」", dry.written, false);
-
-// ② 写入：教师资料、课程卡片字段、课程正文都补上
-const written = await api.site.importFromContent({ write: true });
-eq("写入报告标了「已写」", written.written, true);
-ok("补上了教师资料（教龄 / 简介 / 推荐理由 / 顺序）",
-  written.counts.teachersFilled > 0 &&
-    (await api.teachers.list()).some(
-      (teacher) => teacher.recommendation !== "" && teacher.order !== 999 && teacher.years !== "",
-    ),
-  JSON.stringify({
-    counts: written.counts,
-    teachers: (await api.teachers.list()).map((t) => [t.name, t.years, t.summary.length, t.recommendation.length, t.order]),
-  }));
-ok("补上了课程卡片字段（路径 / 网站形态）",
-  written.counts.coursesFilled > 0 &&
-    (await api.courses.list()).some((course) => course.path !== "" && course.siteKind !== "不展示"));
-ok("写入了课程正文（学科与小节）",
-  written.counts.subjectsWritten > 0 && written.counts.bandsWritten > 0);
-ok("写入了教师页标题（否则教师页会没有标题）",
-  (await api.exportDatabase()).siteContent.teacherPage.heading.title !== "");
-const afterImport = await api.exportDatabase();
-ok("写完之后网站那侧能看到内容", hasBands(afterImport.siteContent));
-eq("小节数与网站的锚点数量一致",
-  afterImport.siteContent.coursePage.subjects.reduce((sum, item) => sum + item.bands.length, 0),
-  written.counts.bandsWritten);
-
-// ③ 再导一次（不覆盖）：课程正文必须原样保留，并说明"未覆盖"
-const secondImport = await api.site.importFromContent({ write: true });
-eq("再导一次不再改写课程正文", secondImport.counts.subjectsWritten, 0);
-ok("并明确说明为什么没覆盖",
-  secondImport.changes.some((item) => item.includes("已有课程正文") && item.includes("未覆盖")),
-  secondImport.changes.find((item) => item.includes("未覆盖")) ?? "（没有说明）");
-
-// ④ 覆盖模式：确实替换（这是"改了内容文件要推上去"的那条路）
-const replaced = await api.site.importFromContent({ write: true, overwrite: true });
-ok("勾选覆盖时课程正文被替换", replaced.counts.subjectsWritten > 0,
-  `subjectsWritten=${replaced.counts.subjectsWritten}`);
-
-/*
- * v15 → v16：教师补「是否在宣传网站展示」。
- *
- * 这条不变量很要紧：网站刚切到"以库为准"时，如果默认把**所有**教师都展示，
- * 机构内部老师的档案（真名、没有简介）会直接出现在宣传页上 —— 那是真实会发生的意外。
- * 因此默认口径按来源定：网站导进来的展示，机构手建的不展示。
- */
-const v15Db = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
-  teachers: Array<Record<string, unknown>>;
-  version: number;
-};
-v15Db.version = 15;
-v15Db.teachers = v15Db.teachers.map((teacher, index) => {
-  const copy = { ...teacher };
-  delete copy.siteVisible;
-  // 一半造"网站来源"、一半造"后台手建"，好验证两种默认口径
-  copy.origin = index === 0 ? "后台" : "网站";
-  return copy;
-});
-eq("v15 文件可以升级导入", (await api.importDatabase(JSON.stringify(v15Db))).ok, true);
-const migratedVisible = await api.teachers.list();
-eq("老库迁移后一律默认**不**展示（迁移猜不出机构想让谁上台）",
-  migratedVisible.every((teacher) => !teacher.siteVisible), true);
-// 紧接着的「从网站导入内容」会把内容文件里那几位标成展示，其余保持不展示
-await api.site.importFromContent({ write: true });
-const afterSiteImport = await api.teachers.list();
-const contentNames = new Set(siteTeachersFromContent().map((teacher) => teacher.name));
-ok("导入后：内容文件里有的教师标成展示、没有的仍不展示",
-  afterSiteImport.every((teacher) => teacher.siteVisible === contentNames.has(teacher.name)),
-  JSON.stringify(afterSiteImport.map((teacher) => [teacher.name, teacher.siteVisible, contentNames.has(teacher.name)])));
-
-/*
- * 而"机构明确关掉展示"的那一位，导入**不能**把它翻回来。
- *
- * 这条是踩出来的：导入侧当时读的是**快照**（而不是模版），于是它看到的"网站内容"
- * 其实是库自己 —— 连机构手动关掉展示的教师都被它按"内容里有他"重新标成展示。
- * 症状很隐蔽：日志上写着"按网站内容更新 网站上展示"，但内容文件里根本没有这个人。
- */
-const hiddenTeacher = afterSiteImport.find((teacher) => !teacher.siteVisible);
-if (hiddenTeacher !== undefined) {
-  await api.site.importFromContent({ write: true, overwrite: true });
-  eq("导入不会把机构关掉展示的教师翻回来（内容文件里没有他）",
-    (await api.teachers.list()).find((item) => item.id === hiddenTeacher.id)?.siteVisible,
-    false);
-} else {
-  // 夹具里没有"手建且已关掉展示"的教师：这一条改成自己造一位（放到最后，避免影响上面的断言）
-  const handmade = await api.teachers.create({
-    name: "自检·内部老师", subjects: [], role: "内部", phone: "", active: true,
-    years: "", summary: "", bio: "", recommendation: "", order: 999,
-    siteVisible: false, origin: "后台", kind: "教师",
-  });
-  await api.site.importFromContent({ write: true, overwrite: true });
-  eq("导入不会把机构关掉展示的教师翻回来（内容文件里没有他）",
-    (await api.teachers.get(handmade.id))?.siteVisible, false);
-  await dropFixture("teachers", handmade.id);
-}
-await api.restoreBackup();
-
-/*
- * v16 → v17：五个实体补**记录级版本号**（乐观锁）。
- *
- * ## 这一节真正在守的是什么
- *
- * 不是"迁移加了字段"，而是**补的那个值必须是 1**。
- *
- * 如果迁移去"猜"一个更高的数（比如按操作日志条数），机构手上那些升级前导出的 JSON
- * 在导入/恢复之后就会与库里的数字对不上 —— 于是**每次保存都报冲突**，
- * 人只能一遍遍刷新、永远保存不上。一个假冲突比没有锁糟得多：它把正常操作也挡了。
- * 因此下面除了"每条记录都有 version"，还专门验一条：
- * **升级之后第一次保存一定成功**（不传版本、以及带上 expectedVersion=1 都要成）。
- *
- * 夹具照旧用"示例数据降级"（v13/v14/v15 那几个用例的做法）：手写一份 v16 要凑齐
- * 全部的表，少一张就会在迁移链的下一次写入上崩掉。**五个实体都要删掉 version 字段**
- * 并把库版本改成 16 —— 漏删一个，"迁移补 1"这条就变成空转了。
- */
-{
-  const v16Db = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
-    students: Array<Record<string, unknown>>;
-    teachers: Array<Record<string, unknown>>;
-    classrooms: Array<Record<string, unknown>>;
-    lessons: Array<Record<string, unknown>>;
-    courses: Array<Record<string, unknown>>;
-    version: number;
-  };
-  v16Db.version = 16;
-  const versionedEntities = ["students", "teachers", "classrooms", "lessons", "courses"] as const;
-  for (const key of versionedEntities) {
-    v16Db[key] = v16Db[key].map((row) => {
-      const copy = { ...row };
-      delete copy.version;
-      return copy;
-    });
-  }
-  eq("降级夹具：五个实体都没有 version（确实是 v16 的样子）",
-    versionedEntities.every((key) => v16Db[key].every((row) => !("version" in row))), true);
-
-  eq("v16 文件可以升级导入", (await api.importDatabase(JSON.stringify(v16Db))).ok, true);
-
-  const upgradedTo17 = await api.exportDatabase();
-  const versionRows: Array<{ version: unknown }> = [
-    ...upgradedTo17.students, ...upgradedTo17.teachers, ...upgradedTo17.classrooms,
-    ...upgradedTo17.lessons, ...upgradedTo17.courses,
-  ];
-  ok("五个实体都还是「有内容」的（否则下面的断言等于在空数组上通过）",
-    versionedEntities.every((key) => v16Db[key].length > 0), String(versionedEntities.map((key) => v16Db[key].length)));
-  eq("每条记录都补上了 version", versionRows.every((row) => typeof row.version === "number"), true);
-  eq("补的默认值是 1（不是猜出来的更大的数）",
-    [...new Set(versionRows.map((row) => row.version))], [1]);
-
-  /*
-   * 默认值选 1 的**全部意义**就在这两条：升级之后第一次保存必须成功 ——
-   * 不带版本的老调用方要能写，带上"我读到第 1 版"的表单也要能写。
-   */
-  const upgradedTeacher = (await api.teachers.list())[0]!;
-  eq("升级后的记录读到的是第 1 版", upgradedTeacher.version, 1);
-  const legacySave = await api.teachers.update(upgradedTeacher.id, { role: "升级后第一次保存" });
-  eq("升级后：不传版本的保存成功（老调用方不受影响）", legacySave?.role, "升级后第一次保存");
-  const formSave = await api.teachers.update(
-    (await api.teachers.list())[1]!.id,
-    { role: "升级后表单保存" },
-    // 表单读到的是第 1 版 —— 必须对得上，否则升级当天所有人都会被假冲突挡住
-    { expectedVersion: 1 },
-  );
-  eq("升级后：带上「我读到第 1 版」的表单保存成功（不会出现假冲突）",
-    formSave?.role, "升级后表单保存");
-}
-await api.restoreBackup();
-
-// ⑤ 「只补空」的意义：机构在后台改过的内容，默认不会被一次导入冲掉
-const editedTeacher = (await api.teachers.list())[0]!;
-await api.teachers.update(editedTeacher.id, { summary: "机构自己写的简介" });
-await api.site.importFromContent({ write: true });
-eq("默认导入不动机构改过的教师简介",
-  (await api.teachers.list()).find((item) => item.id === editedTeacher.id)?.summary,
-  "机构自己写的简介");
-// 而 `overwrite` 是**明确动作**：它会把网站内容按原文写回去（体检里会列出来）
-await api.site.importFromContent({ write: true, overwrite: true });
-ok("覆盖模式下教师简介按网站内容写回（这是它字面上的意思）",
-  (await api.teachers.list()).find((item) => item.id === editedTeacher.id)?.summary !== "机构自己写的简介");
-await api.restoreBackup();
-
-/*
- * 保存网站正文（`site.saveContent`）：整份覆盖 + 校验拒收。
- *
- * 这条路径是"后台能改网站文案"的唯一入口，因此两件事都要钉住：
- * 保存后读回来一致（不然改完的正文会被下一次保存悄悄改回），
- * 以及**非法内容必须被拒**（自动纠正会给人一个"看起来存上了、页面上却是别的"的错觉）。
- */
-{
-  const current = (await api.site.publicContent()).siteContent;
-  const saved = await api.site.saveContent(current);
-  eq("保存网站正文后读回来一致", JSON.stringify(saved), JSON.stringify(current));
-
-  // 改一个字再存，确认真的写进去了
-  const edited: typeof current = JSON.parse(JSON.stringify(current));
-  const firstSubject = edited.coursePage.subjects[0]!;
-  firstSubject.bands[0]!.title = "自检改过的小节标题";
-  const afterEdit = await api.site.saveContent(edited);
-  eq("改动落库了", afterEdit.coursePage.subjects[0]?.bands[0]?.title, "自检改过的小节标题");
-  eq("其它内容没被顺手改掉",
-    afterEdit.coursePage.subjects.length, current.coursePage.subjects.length);
-
-  // 非法内容：空学科名 / 重复锚点 / 没有学科 —— 三种都要被拒
-  const cases: Array<[string, (draft: typeof current) => void]> = [
-    ["没有学科", (draft) => { draft.coursePage.subjects = []; }],
-    ["学科名为空", (draft) => { draft.coursePage.subjects[0]!.name = "  "; }],
-    ["小节锚点重复", (draft) => {
-      const subject = draft.coursePage.subjects[0]!;
-      subject.bands = [subject.bands[0]!, { ...subject.bands[0]! }];
-    }],
-  ];
-  for (const [label, mutate] of cases) {
-    const draft: typeof current = JSON.parse(JSON.stringify(afterEdit));
-    mutate(draft);
-    let message = "";
-    try {
-      await api.site.saveContent(draft);
-    } catch (cause) {
-      message = cause instanceof Error ? cause.message : String(cause);
-    }
-    ok(`保存网站正文「${label}」被拒并说明原因`, message !== "", message || "（没有被拒绝）");
-  }
-
-  // 被拒之后库里仍是上一次保存的内容（不能半途改掉一半）
-  eq("被拒时库里的内容没有被改动",
-    (await api.site.publicContent()).siteContent.coursePage.subjects[0]?.bands[0]?.title,
-    "自检改过的小节标题");
-
-  // 收尾：存回原样（后面的用例还要用这份内容）
-  await api.site.saveContent(current);
-  eq("内容已还原", (await api.site.publicContent()).siteContent.coursePage.subjects[0]?.bands[0]?.title,
-    current.coursePage.subjects[0]?.bands[0]?.title);
-}
-
-/*
  * ── 卡片 ↔ 正文小节：「一门课一张卡片里改完正文」的四条规则 ──────────────
  *
  * 这一组守的是课程表单里那块「网站正文（小节）」背后的规则。四条都写在**服务层**
@@ -4731,11 +4446,6 @@ eq("改回开放",
 eq("后台新增的课程可以删除", await api.courses.remove(pbWeiqi.id), true);
 ok("删除后不再出现在科目候选里",
   !(await api.courses.options()).some((option) => option.name === "围棋"));
-
-// 从网站同步：只增不改、可重复执行
-const pbSync = await api.courses.syncFromSite();
-eq("重复同步不会重复添加", pbSync.added, []);
-eq("同步后的总数与课程库一致", pbSync.total, (await api.courses.list()).length);
 
 // 教师可带科目直接存课程名（含后台新增的课）
 const pbTeacher = await api.teachers.create({
@@ -10171,15 +9881,45 @@ console.log("\n=== 38. 课程挂到维度上（v28：课程 ←→ 课程类型�
     eq("没给维度表就留空（判据只有一处：谁有维度表谁负责挂）",
       withoutCatalog.courses.filter((course) => (course.subjectIds ?? []).length > 0).length, 0);
 
-    // 「从网站同步」：把一门课从库里删掉，再同步回来 —— 回来的那门必须是挂好维度的
-    const target = afterLink.courses[0]!;
+    /*
+     * 后台新增的课**自己带维度**（表单里选的）—— 这是删掉「从网站同步」之后
+     * 新课程进入系统的唯一路径，因此也要能挂上。
+     */
     await api.importDatabase(JSON.stringify(afterLink));
-    await api.courses.remove(target.id).catch(() => null);
-    await api.courses.syncFromSite();
-    const afterSync = await api.exportDatabase();
-    const restored = afterSync.courses.find((course) => course.name === target.name);
-    ok("「从网站同步」补回来的课程也挂上了维度",
-      restored !== undefined && (restored.subjectIds ?? []).length > 0);
+    const created = await api.courses.create({
+      name: "自检·新加的课", partitionId: "", forms: [], status: "开放", note: "", path: "",
+      tags: [], target: "", order: 998, intro: "", siteKind: "不展示", origin: "后台", createdAt: "",
+      stageIds: [catalogId("st", "小学")], subjectIds: [catalogId("subj", "语文")], moduleIds: [],
+    });
+    eq("后台新增的课按表单挂上维度",
+      [created.stageIds.length, created.subjectIds.length], [1, 1]);
+    await api.courses.remove(created.id);
+  }
+
+  /*
+   * ⑧ 「从网站同步课程」「从网站导入内容」两个入口已经删掉（机构口径：现在都以后端为主）。
+   * 这一条钉住"删干净了"：契约里没有、服务层没有、页面上没有那两个按钮。
+   */
+  {
+    const methods = API_CONTRACT.flatMap((group) => group.methods);
+    eq("契约里不再有那两个方法",
+      methods.filter((method) => method === "courses.syncFromSite" || method === "site.importFromContent"),
+      []);
+    ok("服务层上也没有（不是「契约删了、实现还留着」）",
+      !("syncFromSite" in (api.courses as unknown as Record<string, unknown>)) &&
+        !("importFromContent" in (api.site as unknown as Record<string, unknown>)));
+    const ledger = readFileSync(new URL("../components/admin/CoursesLedgerPanel.tsx", import.meta.url), "utf8");
+    /*
+     * 断到"调用与处理函数"这一层，而不是断言页面上不出现那几个字：
+     * 页面顶部那段口径说明**应该**提到"那两个入口已删"（不然下一个人会以为丢了功能）。
+     */
+    ok("「课程」页上不再调那两个方法（也没有它们的处理函数）",
+      !ledger.includes("syncFromSite") && !ledger.includes("importFromContent") &&
+        !ledger.includes("checkSiteContent") && !ledger.includes("applySiteContent"));
+    ok("而页面顶部写明了那两个入口已经删掉（免得有人以为功能丢了）",
+      ledger.includes("两个入口已删"));
+    ok("而「批量导入」（从文件导入）仍然在（那是另一件事）",
+      ledger.includes("BulkImport"));
   }
 
   // ⑦ 页面接线

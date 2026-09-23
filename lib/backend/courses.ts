@@ -17,8 +17,9 @@
  * `data/site/content.md` 的课程栏目（见内容维护手册）。后台课程库解决的是
  * 「这门课要能排课、能记课时」，不是「这门课要在网站上展示」。
  *
- * 反向也成立：在内容文件里新增了课程卡片之后，到 `/admin/courses` 点一次
- * 「从网站同步」把它拉进课程库（`mergeSiteCourses`），否则它不会出现在科目候选里。
+ * 课程从哪来：**新装系统时**由 `materializeSiteCourses()` 把内容文件里的卡片作为
+ * **初始数据**落进库（`origin: "网站"`）；之后一切在「课程 → 课程台账」里维护 ——
+ * v32 起不再有"从网站同步课程"那个入口（机构口径：现在都以后端为主）。
  *
  * ## 课程与分区（v18 起）
  *
@@ -154,7 +155,7 @@ export function coursesFromSite(): SiteCourse[] {
  * 把「名字版」的网站课程落成库里的记录：**补齐分区 + 换成 id**。
  *
  * 这是"网站说名字、库里存 id"这个转换的**唯一实现**，三个入口共用：
- * 空库起步（`initial.ts`）、示例数据（`seed.ts`）、点「从网站同步」（`api.courses.syncFromSite`）。
+ * 空库起步（`initial.ts`）与示例数据（`seed.ts`）这两处（v32 起不再有「从网站同步」入口）。
  * 三处各写一遍的直接后果是"空库里点同步多出一批分区"这种重复。
  *
  * 分区只增不改（见 `ensurePartitions`）：机构已经把某个分区改过名、排过序时，
@@ -282,26 +283,6 @@ export function validateCourse(
     problems.push(`课程库里已经有「${name}」了：课程名不能重复（排课与教师科目都按名字引用它）。`);
   }
   return problems;
-}
-
-/**
- * 从网站同步：把内容里新增、课程库里还没有的课程卡片补进来。
- *
- * 只增不改：已存在的课程由机构在后台维护（改了状态、班型、备注都算机构的信息），
- * 同步不覆盖它们 —— 否则机构在后台改的东西会被一次同步冲掉。
- */
-export function mergeSiteCourses(
-  stored: Course[],
-  site: Course[],
-): { courses: Course[]; added: string[] } {
-  const existingNames = new Set(stored.map((course) => course.name.trim()));
-  const added: Course[] = [];
-  for (const course of site) {
-    if (existingNames.has(course.name.trim())) continue;
-    existingNames.add(course.name.trim());
-    added.push(course);
-  }
-  return { courses: [...stored, ...added], added: added.map((course) => course.name) };
 }
 
 /**

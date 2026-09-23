@@ -12,8 +12,6 @@ import {
   validateSiteBlocks,
   validateSiteContent,
 } from "./site-content";
-import { importSiteContent } from "./site-import";
-import type { SiteContentImportReport } from "./site-import";
 import type { SiteContent } from "./types";
 import { publicSite } from "./public-site";
 import type { PublicSite } from "./public-site";
@@ -124,8 +122,6 @@ import {
   canRemoveCourse,
   courseOptions,
   coursesFromSite,
-  materializeSiteCourses,
-  mergeSiteCourses,
   normalizeCourse,
   summarizeCourses,
   validateCourse,
@@ -3334,40 +3330,6 @@ const localApi = {
       return clone(courseOptions(db.courses, db.coursePartitions));
     },
 
-    /**
-     * 从网站内容同步新增的课程卡片（**只增不改**：不动机构在后台维护的信息）。
-     *
-     * 「只增不改」也包括**分区**：内容文件里那个栏目如果已经存在（同名同上级），
-     * 就用现有的那一条 —— 机构可能已经给它改过名、排过位置了。
-     */
-    async syncFromSite(): Promise<{ added: string[]; total: number }> {
-      await delay();
-      const db = load();
-      const materialized = materializeSiteCourses(db.coursePartitions, undefined, db.catalog);
-      const merged = mergeSiteCourses(db.courses, materialized.courses);
-      if (merged.added.length > 0) {
-        const before = new Set(db.coursePartitions.map((item) => item.id));
-        db.coursePartitions = materialized.partitions;
-        const newPartitions = db.coursePartitions.filter((item) => !before.has(item.id));
-        db.courses = merged.courses;
-        syncPricingWithCourses(db);
-        writeLog(db, {
-          entity: "课程",
-          action: "同步",
-          targetId: "",
-          summary:
-            `从网站同步了 ${String(merged.added.length)} 门课程：${merged.added.join("、")}` +
-            (newPartitions.length === 0
-              ? ""
-              : `（顺带新建了 ${String(newPartitions.length)} 个分区：${newPartitions
-                  .map((item) => item.name)
-                  .join("、")}）`),
-        });
-        persist(db);
-      }
-      return { added: merged.added, total: db.courses.length };
-    },
-
     /** 课程库统计（列表页顶部）。 */
     async summary(): Promise<CourseSummary> {
       await delay();
@@ -5183,38 +5145,6 @@ const localApi = {
       return clone(db.siteContent);
     },
 
-    /**
-     * **把网站内容搬进库**（教师资料 / 课程卡片字段 / 课程正文 / 报价文案）。
-     *
-     * `write: false` 是体检：逐条列出"会补什么、会新增什么、跳过了什么"，
-     * **一个字都不写**（在深拷贝上算，见 `lib/backend/site-import.ts`）。
-     * 界面上先给人看这份清单，再用 `write: true` 落库。
-     *
-     * 默认**只补空、不覆盖**：机构在后台改过的内容不能被一次导入冲掉；
-     * 确实要用内容文件整体替换时传 `overwrite: true`（课程正文那一段尤其要看清楚）。
-     */
-    async importFromContent(
-      options: { write?: boolean; overwrite?: boolean } = {},
-    ): Promise<SiteContentImportReport> {
-      await delay();
-      const db = load();
-      const report = importSiteContent(db, {
-        write: options.write === true,
-        overwrite: options.overwrite === true,
-      });
-      if (report.written) {
-        writeLog(db, {
-          entity: "数据",
-          action: "导入网站内容",
-          targetId: "",
-          summary: `从网站内容导入：${report.changes.slice(0, 3).join("；")}${
-            report.changes.length > 3 ? ` 等 ${report.changes.length} 项` : ""
-          }`,
-        });
-        persist(db);
-      }
-      return clone(report);
-    },
   },
 
   pricing: {
@@ -5833,7 +5763,6 @@ export type {
   SiteFaqItem,
   SiteFaqPage,
   PublicSite,
-  SiteContentImportReport,
   SiteContent,
 };
 export {

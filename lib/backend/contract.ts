@@ -130,8 +130,7 @@ export const API_CONTRACT: ContractGroup[] = [
       "lessonRecords.save",
       "assessments.add",
       "payments.record",
-      "courses.syncFromSite",
-    ],
+          ],
   },
   {
     id: "inquiries",
@@ -188,8 +187,7 @@ export const API_CONTRACT: ContractGroup[] = [
       // 字段白名单见 `lib/backend/public-site.ts`，加字段前先看那里的三条规矩。
       "site.publicContent",
       // 把网站内容搬进库（体检 / 写入两步；默认只补空、不覆盖）
-      "site.importFromContent",
-      // 保存网站正文（整份覆盖：课程页正文 / 教师页标题 / 报价页文案）
+            // 保存网站正文（整份覆盖：课程页正文 / 教师页标题 / 报价页文案）
       "site.saveContent",
       /*
        * 保存「课程正文以外」的网站内容块（目前是学生案例）。

@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 112 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 110 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -42,7 +42,7 @@ lib/backend/api.ts        服务层实现（当前 112 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 112 个方法）
+## 二、接口分组（当前 110 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -75,12 +75,12 @@ lib/backend/api.ts        服务层实现（当前 112 个方法）；数据一�
 | 作业记录 | `homework.create` · `homework.remove` · `homework.listByStudent` | 页面只看一个人的作业，不需要全表 `list` |
 | 阶段测评 | `assessments.add` · `assessments.remove` · `assessments.listByStudent` | `add` 会自动带出同科目上一次分数（`previousScore`） |
 | 收款记录 | `payments.list` · `payments.listByStudent` · `payments.listByEnrollment` | **没有通用写方法**：写入口只有 `payments.record`（见下面那条） |
-| 课程库 | `courses.list` · `courses.create` · `courses.update` · `courses.remove` · `courses.options` · `courses.summary` · `courses.syncFromSite` · `courses.setPartition` | 课程是几十条的量级，页面用 `list` + 前端筛选；`remove` 先过 `canRemoveCourse`；`setPartition` 是"把一批课移到另一个分区"（一次事务、一条日志） |
+| 课程库 | `courses.list` · `courses.create` · `courses.update` · `courses.remove` · `courses.options` · `courses.summary` · `courses.setPartition` | 课程是几十条的量级，页面用 `list` + 前端筛选；`remove` 先过 `canRemoveCourse`；`setPartition` 是"把一批课移到另一个分区"（一次事务、一条日志） |
 | 课程类型 | `catalog.list` · `catalog.save` · `catalog.resetToSeed` | 课程类型的**维度表**（学段 / 学科与项目 / 内容模块 / 班型）。只有「读整份 + 存整份 + 恢复种子」三个方法（不做 4 张表各一套 CRUD）；`validateCatalog` 拦悬空引用、重名、非法人数区间 |
 | 寒暑假段 | `vacations.list` · `vacations.save` | 机构每年手动录入的假期起止（按学段）。它决定「哪几天按假期作息」= 与周末同一组时段；判定在 `lib/backend/calendar-plan.ts`（优先级：寒暑假 > 调休上班日 > 法定假日 > 周末/工作日）。与维度表一样只做「读整份 + 存整份」 |
 | 开放矩阵 | `offers.list` · `offers.save` | 本机构开放的组合（学科 × 内容模块 × 班型）。**稀疏存储**：只有机构表过态的才有行，因此「开放 / 明确关闭 / 没设过」是三件事。批量勾选（整行 / 整列 / 整个学段）是页面上的纯函数 `applyDecision`，不另设接口 —— 否则「批量」的口径会散在服务端好几处 |
 | 课程分区 | `coursePartitions.list` · `coursePartitions.create` · `coursePartitions.update` · `coursePartitions.reorder` · `coursePartitions.remove` | 课程库的分组结构（栏目 → 子栏目，也是网站课程页的栏目）。删除**有课 / 有子栏目就拒绝**；`reorder` 一次交一组的完整顺序 |
-| 网站内容 | `site.publicContent` · `site.saveContent` · `site.saveBlocks` · `site.importFromContent` | `saveContent` 保存课程正文/教师页标题/报价文案（技术管理员）；`saveBlocks` 保存**课程正文以外**的块（目前是学生案例，招生老师也能改）—— 两个方法各写各的块，互不覆盖 |
+| 网站内容 | `site.publicContent` · `site.saveContent` · `site.saveBlocks` | `saveContent` 保存课程正文/教师页标题/报价文案（技术管理员）；`saveBlocks` 保存**课程正文以外**的块（目前是学生案例，招生老师也能改）—— 两个方法各写各的块，互不覆盖 |
 
 - 服务端用一套 REST 即可：`GET` 列表、`GET` 单项、`POST` 新建、`PATCH` 修改、`DELETE` 删除；
 - **id 由服务端生成**，前端只读；
@@ -105,7 +105,7 @@ lib/backend/api.ts        服务层实现（当前 112 个方法）；数据一�
 课程名是**引用键** —— 排课科目、教师可带科目、报课科目都按名字记它，因此服务端必须
 自己复核「课程名非空且唯一」，两门都叫「数学」的课会让课时扣到哪一门说不清。
 `courses.remove` 只允许删后台新增的课程；网站来源的课程跟着内容文件走，删了下次
-`courses.syncFromSite` 又会回来，不想再排应改成「暂未开放」。
+不想再排应改成「暂未开放」（网站来源的课仍然不能删：删了下次同步类操作还会回来）。
 
 **课程分区**（v18）：课程挂在**分区**上（`Course.partitionId`），分区是单独的记录集合，
 名字与层级只写在它一处 —— 于是改名是"一处改、处处变"，而不是逐门课去改分类字符串。
@@ -230,9 +230,6 @@ lib/backend/api.ts        服务层实现（当前 112 个方法）；数据一�
 服务端按配置算（教师工资同样不能由前端传数字）。后台报价页把这条规则翻译成人话、
 连同一张人数对照表展示，老师问「这个班多少钱」直接看表。
 
-`courses.syncFromSite` 是「把网站内容里新增的课程卡片拉进课程库」：**只增不改**
-（不动机构在后台维护的状态、班型、备注），并且必须可重复执行（第二次不产生新增）。
-
 ### 6. 看板与统计（只读）
 
 `today`、`stats`、`followups`、`finance`、`search`、
@@ -271,18 +268,10 @@ lib/backend/api.ts        服务层实现（当前 112 个方法）；数据一�
 `scripts/check.mts` 有两组断言盯着这条边界：字段名里出现敏感词要报错，
 返回的 JSON 文本里出现手机号样式也要报错。
 
-**反方向：`site.importFromContent`**（把网站内容搬进库）。
-
-| | |
-| --- | --- |
-| 方法 | `site.importFromContent({ write?, overwrite? })` |
-| `write: false` | **体检**：逐条列出会补什么、会新增什么、跳过了什么；在一个深拷贝上算，**一个字都不写** |
-| 默认语义 | **只补空、不覆盖**：机构在后台改过的教师资料与课程字段不会被一次导入冲掉 |
-| `overwrite: true` | 用内容文件整体替换（课程正文那一段尤其要先看清体检结果） |
-| 覆盖范围 | 教师（补教龄 / 简介 / 详细介绍 / 推荐理由 / 顺序）、课程卡片字段（路径 / 子栏目 / 标签 / 点进哪一节 / 顺序 / 网站形态）、课程正文、报价页文案 |
-
-它与 `imports.fromSite` 的分工：后者是**逐行**导入（名字清单，走 CSV 那套判重与冲突策略），
-处理不了"课程正文"这种一块一块的结构，也补不了**已有行**上缺的字段。
+**课程与内容文件的关系（v32 起）：**「从网站同步课程」与「从网站导入内容」两个入口
+**已经删掉**（机构口径：现在都以后端为主）。内容文件只在**新装系统**时作为**初始数据**
+进库（`initial.ts`），之后课程、教师、课程正文都在后台维护；老的库要用 JSON 导入/恢复那条路
+（「数据与备份」页），不再从 Markdown 反推。
 
 **改内容：`site.saveContent(content)`**（整份覆盖）—— 后台课程库页上有两条路用它：
 每门课卡片里的「网站正文（小节）」、以及页面下方的「学科级设置与未挂到卡片的正文」。
@@ -595,7 +584,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 2. 它会进入 `API_CONTRACT` —— 而自检要求"服务层每个方法都必须在契约里"，
    于是契约里出现一个"只有服务端才有意义"的方法，契约就不再是"页面对服务层的形状"了。
 
-**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 112 个方法，
+**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 110 个方法，
 这四条路由**刻意不登记**（它们不是服务层方法）；页面的客户端是 `lib/auth/accounts.ts`，
 与 `lib/auth/session.ts` 调 `/api/login`、`/api/session` 是同一个做法。
 自检里对它们的要求写在 `scripts/check-auth.mts` 的 [10] 节（真实 HTTP、真实写盘），
@@ -735,7 +724,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 | `aggregate` | `today`、`stats` | **按我的口径重算**：今日概览只算我的课、低课时预警只列我的学生；统计里教室利用率 / 时段分布 / 教师课时 / 退课流失都只算我的（因此"利用率"会明显偏低，这是"只算我的课"的直接结果） |
 | `search` | `search` | 学生与排课只搜我的；教师 / 教室 / 课程照旧（搜索框在每个页面都有，最容易顺手搜到别人班的学生） |
 | `teach` | `lessons.markCompleted`、`lessons.createMakeup`、`lessonRecords.save`、`assessments.add` | 目标必须在自己名下，否则按"记录不存在"处理或报错（这几条会**改课时账**，绝不能静默成功） |
-| `hidden`（→ 403） | `payments.list` / `get` / `listByStudent` / `listByEnrollment` / `listBetween`、`finance`、`followups`、`lessons.findConflicts` / `planSeries` / `createSeries` / `suggestMoves`、`courses.syncFromSite` | **看不到**：钱、待跟进、排课、课程库写入都不归教师 |
+| `hidden`（→ 403） | `payments.list` / `get` / `listByStudent` / `listByEnrollment` / `listBetween`、`finance`、`followups`、`lessons.findConflicts` / `planSeries` / `createSeries` / `suggestMoves` | **看不到**：钱、待跟进、排课、课程库写入都不归教师 |
 
 **没登记在这个表里的方法** → 对普通教师**一律拒绝**（默认关门）。
 这不是洁癖：角色表是"读宽写严"的（`crud` / `query` 里的只读方法默认四类角色都能用），
@@ -748,7 +737,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
   （"和 X 老师的那节课撞了"），把它当查询接口反复试就能把别人的课表问出来 ——
   那正是行级范围要挡住的东西。代价是教师在排课 / 补课表单里**看不到冲突提示**
   （界面把它当作"没有提示"，不会报错）；服务端本来就不拦补课的冲突，因此这只影响提示。
-- `courses.syncFromSite` 对教师是 403：使用手册的角色表写着教师对课程库**只读**，
+- 课程库的写方法对教师是 403：使用手册的角色表写着教师对课程库**只读**，
   而它被归进了 `actions` 分组（角色表的一处小疏漏），范围层按默认关门把它关掉。
 
 ### 金额字段被剥掉（不是拒绝接口）
