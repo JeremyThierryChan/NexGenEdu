@@ -4638,6 +4638,34 @@ function runImport(
  *
  * 删掉一条夹具**不写操作日志**：它不是一次业务动作。
  */
+/**
+ * **服务端自己的操作**也要写进同一份操作日志（2026-09 审计后补的）。
+ *
+ * ## 为什么需要它
+ *
+ * 服务端有几件事不经过服务层：**账号管理**（加人 / 改角色 / 重置口令 / 停用 / 删除）与
+ * **节假日抓取**。它们原先各自往 SQL 的 `logs` 表里写一条 —— 而界面上的「操作日志」
+ * 读的是快照里那份（`logs.list`）。于是同一个 `.db` 文件里又有两套日志：
+ * 账号操作在界面上**根本看不到**，而老 REST 的 `/api/logs`（唯一能读到它的入口）下线之后，
+ * 那些记录就彻底没人能看了。
+ *
+ * 现在统一走这里：账号与节假日的操作写进**同一份**日志，界面上的操作日志里能看到
+ * "谁在什么时候加了个账号 / 重置了谁的口令"。
+ *
+ * 操作人取当前请求会话设置的那一个（`setOperator`，每个请求开头由 `requireAuth` 设一次）——
+ * 与业务日志同一个来源。
+ */
+export function __appendSystemLog(entry: {
+  entity: string;
+  action: string;
+  targetId: string;
+  summary: string;
+}): void {
+  const db = load();
+  writeLog(db, entry);
+  persist(db);
+}
+
 export function __removeFixture(entity: string, id: string): boolean {
   const db = load() as unknown as Record<string, unknown>;
   const list = db[entity];

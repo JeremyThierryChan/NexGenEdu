@@ -431,42 +431,39 @@ try {
     equal("退出后同一个令牌立刻失效（401）", (await call(base, token, "students.list")).status, 401);
     equal("退出后 /api/session 也是 401", (await raw(base, "/api/session", { token })).status, 401);
 
-    console.log("\n[7] 老接口登录后可用，且操作人同样来自会话");
+    console.log("\n[7] 老 REST 接口：**已下线**（登录之后也是 410）");
     const fresh = await raw(base, "/api/login", {
       method: "POST", body: { username: info.username, password: info.password },
     });
     const freshToken = String(fresh.body.token ?? "");
-    equal("重新登录后老读接口可读", (await raw(base, "/api/students", { token: freshToken })).status, 200);
 
     /*
-     * 老接口写的是**它自己那套 SQL 表**（路线 A 的参考实现，不在页面用的数据通路上，
-     * 见 docs/后端开发方案.md §5.2.2），所以它的日志要去 `/api/logs`（读 SQL 的 logs 表）
-     * 里看，而不是 `logs.list`（读 kv 快照里的那份）。
+     * 这一段原先断言的是"老接口登录后可用、写入要带会话操作人"。
+     * 那些接口现在**整条下线**（2026-09 审计）：它们读写的是另一套规范化表，
+     * 与界面（`/api/call` → kv 快照）不是同一份存储 —— 于是会给出"写进去没人读"的假成功
+     * 与"读到空数据"的假失败。见 server/index.mts 里那段说明。
      *
-     * 这条断言守的是一个真 bug：`writeLog` 原来把操作人**写死成 "admin"**，
-     * 于是不管谁登录，走老接口的写入都记成 admin。
+     * 因此这里改成钉住"下线"本身，两个方向都要：
+     *   · 登录之后仍然是 410（不是 200、也不是含混的 403）；
+     *   · 而且**它真的什么都没写进去**（老写接口在这里必须无效）。
      */
-    /*
-     * 注意：老接口读写的是**它自己那套 SQL 表**，和 /api/call 走的 kv 快照不是同一份
-     * 存储（见 docs/后端开发方案.md §5.2.2）。所以这里的学生必须也用**老接口**创建 ——
-     * 拿 /api/call 建出来的 id 去喂老接口，只会得到 404（我第一版就是这么写的）。
-     */
-    const oldStudent = await raw(base, "/api/students", {
+    const beforeOldWrite = ((await call(base, freshToken, "students.list")).body.result as unknown[]).length;
+    const oldRead = await raw(base, "/api/students", { token: freshToken });
+    equal("老读接口已下线：登录后也是 410（不再是 200）", oldRead.status, 410);
+    check("410 的文案说清了下线原因与替代入口",
+      String((oldRead.body as { error?: string }).error ?? "").includes("/api/call"),
+      JSON.stringify(oldRead.body).slice(0, 160));
+
+    const oldWrite = await raw(base, "/api/students", {
       method: "POST",
       token: freshToken,
       body: { name: "老接口自检同学", grade: "初二", guardian: "", status: "在读", note: "" },
     });
-    equal("老接口能建学生", oldStudent.status, 201);
-    const oldStudentId = String((oldStudent.body as { id?: string }).id ?? "");
-    await raw(base, "/api/payments", {
-      method: "POST",
-      token: freshToken,
-      body: { studentId: oldStudentId, amount: 100, kind: "收款", method: "微信", note: "认证自检" },
-    });
-    const sqlLogs = await raw(base, "/api/logs?limit=20", { token: freshToken });
-    const paymentLog = (sqlLogs.body as unknown as Array<{ action?: string; operator?: string }>)
-      .find?.((row) => row.action === "收款");
-    equal("走老接口写入的日志也带会话操作人（不是写死的 admin）", paymentLog?.operator, info.username);
+    equal("老写接口已下线：不再返回 201", oldWrite.status, 410);
+    const afterOldWrite = ((await call(base, freshToken, "students.list")).body.result as unknown[]).length;
+    equal("而且它确实什么都没写进去（学生数不变）", afterOldWrite, beforeOldWrite);
+    equal("老日志接口也下线了（不该再有读那套表的入口）",
+      (await raw(base, "/api/logs?limit=20", { token: freshToken })).status, 410);
   });
 
 /*
@@ -912,14 +909,20 @@ try {
       ((await read(second.base, teacherB.token, "lessons.list")).result as Array<{ id: string }>)
         .every((item) => item.id === lessonBId));
 
-    console.log("\n[9.7] 老 REST 接口对教师整条关闭（管理员不受影响）");
+    console.log("\n[9.7] 老 REST 接口已下线：所有角色（含技术管理员）都拿到 410");
     const teacherRest = await raw(second.base, "/api/students", { token: teacherA.token });
-    equal("教师走老接口读学生：403（那条路没有范围过滤，只能整条关门）", teacherRest.status, 403);
-    check("拒绝理由说清了「改走 /api/call」",
+    /*
+     * 老 REST 已下线：教师的判定不再是"403 权限不足"，而是 **410 已下线** ——
+     * 因为那道题（"教师能不能走老接口"）随着那条路一起消失了。
+     * 仍要确认**所有角色**看到的是同一件事（含技术管理员），否则会出现
+     * "管理员以为还能用、别人拿到 410"这种说不清的差异。
+     */
+    equal("教师走老接口：410（已下线，而不是含混的 403）", teacherRest.status, 410);
+    check("410 的文案说清了「改用 /api/call」",
       String(teacherRest.body.error ?? "").includes("/api/call"), String(teacherRest.body.error ?? ""));
-    equal("教师走老接口读排课：也 403", (await raw(second.base, "/api/lessons", { token: teacherA.token })).status, 403);
-    equal("（对照）技术管理员走老接口照旧能读 —— 与今天完全一样",
-      (await raw(second.base, "/api/students", { token: admin.token })).status, 200);
+    equal("教师走老接口读排课：也 410", (await raw(second.base, "/api/lessons", { token: teacherA.token })).status, 410);
+    equal("（对照）技术管理员走老接口同样是 410 —— 那条路对谁都不存在了",
+      (await raw(second.base, "/api/students", { token: admin.token })).status, 410);
     equal("（回归）技术管理员的 /api/call 不受这条门影响",
       (await read(second.base, admin.token, "students.list")).status, 200);
 
@@ -1356,14 +1359,23 @@ try {
     equal("账号表回到只有 admin 一条（这一节没有留下测试账号）", readEntries().length, 1);
 
     /*
-     * 留痕：走的是**服务端自己那套**日志（`writeLog` 写的 SQL `logs` 表，与老 REST 接口
-     * 同一个通道），所以要去 `GET /api/logs` 看，而不是 `logs.list`（那个读的是 kv 快照里
-     * "页面自己"那份日志）。断言两件事：① 记了这些操作、操作人来自会话；② 摘要里**没有口令**。
+     * 留痕：账号操作现在写进**同一份**操作日志（`__appendSystemLog` → kv 快照），
+     * 因此用 `logs.list` 就能看到 —— 界面上的「操作日志」页读的就是它。
+     *
+     * 这正是 2026-09 审计改掉的一件事：早先账号操作往 SQL 的 `logs` 表里写，
+     * 而界面读的是快照里那份，两边都要靠 `GET /api/logs`（老 REST）才看得见 ——
+     * 老 REST 下线之后那些记录就彻底没人能看了。现在只有一份日志。
+     *
+     * 断言两件事：① 记了这些操作、操作人来自会话；② 摘要里**没有口令**。
      */
-    const logRows = (await raw(base, "/api/logs?entity=账号", { token: adminToken })).body as unknown as
-      Array<{ action?: string; operator?: string; summary?: string }>;
-    check("账号操作留下了日志（老 REST 的 /api/logs 里看得到）",
-      Array.isArray(logRows) && logRows.length >= 4, JSON.stringify(logRows).slice(0, 200));
+    const logRows = ((await call(base, adminToken, "logs.list")).body.result ?? []) as Array<{
+      action?: string;
+      operator?: string;
+      summary?: string;
+    }>;
+    check("账号操作留下了日志（界面「操作日志」里看得到）",
+      Array.isArray(logRows) && logRows.filter((row) => String(row.summary ?? "").includes("账号")).length >= 3,
+      JSON.stringify(logRows.map((row) => row.summary)).slice(0, 240));
     const createLog = logRows.find(
       (row) => row.action === "新建" && String(row.summary ?? "").includes("账号自检老师"),
     );

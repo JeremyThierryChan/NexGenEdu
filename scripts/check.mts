@@ -7396,7 +7396,64 @@ console.log("\n=== 19. P2：界面不能「点了没反应」 ===");
       read("app/admin/(dashboard)/classrooms/page.tsx").includes('get("classroomId")'));
 }
 
+console.log("\n=== 20. P3：老 REST 已下线、后端进入类型检查 ===");
+
+/*
+ * 这一节守两件"清理多余"的成果（都是源码级断言，与第 13/19 节同类）：
+ *
+ *   ① 老 REST 接口（`/api/students` 那套"参考实现"）**整条下线**：
+ *      它们读写的是另一套规范化表，与界面（`/api/call` → kv 快照）不是同一份存储 ——
+ *      会给出"写进去没人读"的假成功与"读到空数据"的假失败，而且老的删除护栏只挂在
+ *      那条路上（审计的第一条）。现在一律 410 + 指路，实现也删干净了。
+ *   ② **后端的 `.mts` 进入类型检查**：`tsconfig` 的 `**` + `/*.ts` 通配**不匹配** `.mts`，
+ *      于是补这一行之前 `npm run typecheck` 对服务端一行都没检查过（实测塞类型错误也 rc=0）。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+  const server = read("server/index.mts");
+
+  // ① 老 REST 的那套实现真的删干净了（而不是"关掉但留着"）
+  const legacyLeftovers = [
+    "REST_CONTRACT_METHODS",
+    "handleCrud",
+    "matchCrud",
+    "crudRow",
+    "buildColumns",
+    "REST_CRUD_RESOURCES",
+    "teacherRestDenial",
+    "loadStudent",
+  ].filter((name) => new RegExp(`\\b${name}\\b`).test(server));
+  eq("老 REST 的实现与权限表已整块删掉（不是「留着不用」）", legacyLeftovers, []);
+  ok("但保留了「这条路已下线」的判断（410 与指路，而不是悄悄 404）",
+    server.includes("LEGACY_REST_PATH") && server.includes("410"));
+  ok("410 的文案指路 POST /api/call",
+    /这个接口已经下线[\s\S]{0,200}\/api\/call/.test(server));
+
+  // ② 只有一份操作日志：服务端自己的操作也写进快照
+  ok("服务端自己的操作（账号 / 节假日）写进同一份日志（__appendSystemLog）",
+    server.includes("__appendSystemLog(") &&
+      read("lib/backend/api.ts").includes("export function __appendSystemLog"));
+  ok("不再有「另一套日志表」的服务端写入（SQL logs 表那条通道已删）",
+    !/INSERT INTO logs/.test(server));
+
+  // ③ /api/status 报的是真数据
+  ok("/api/status 的条数从 kv 快照里数（而不是那套空表）",
+    server.includes("SNAPSHOT_KEY") && server.includes("SNAPSHOT_FIELDS"));
+  ok("stage 不再写死 read-only（同一个进程明明接受写入）",
+    !server.includes('stage: "read-only"'));
+
+  // ④ 类型检查覆盖后端
+  const tsconfig = read("tsconfig.json");
+  ok("tsconfig 显式包含服务端的 .mts（TS 的 .ts 通配不匹配 .mts）",
+    tsconfig.includes("server/**/*.mts"));
+  ok("并且开了 allowImportingTsExtensions（服务端 import 必须带扩展名）",
+    tsconfig.includes("allowImportingTsExtensions"));
+}
+
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
+process.exit(failures === 0 ? 0 : 1);
+
 process.exit(failures === 0 ? 0 : 1);
 
 process.exit(failures === 0 ? 0 : 1);

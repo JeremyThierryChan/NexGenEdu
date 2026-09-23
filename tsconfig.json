@@ -15,6 +15,14 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    /*
+     * 服务端用 `node --experimental-strip-types` 直接跑 `.mts`/`.ts` 源码，
+     * 因此 import 里**必须**写扩展名（`./db.mts`、`../lib/backend/api.ts`）。
+     * 不打开这一项的话，`tsc` 会把这些 import 全判成错（TS5097），
+     * 于是"把 server/ 纳入类型检查"这件事就没法做 —— 而那一天之前，
+     * 后端（最需要类型保护的那一半）一行都没被检查过。
+     */
+    "allowImportingTsExtensions": true,
     "jsx": "preserve",
     "incremental": true,
     "plugins": [{ "name": "next" }],
@@ -22,6 +30,17 @@
       "@/*": ["./*"]
     }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+    /*
+     * 服务端的 .mts 必须显式包含：`**&#47;*.ts` 这类通配**不匹配** .mts（那一行只覆盖
+     * .ts 与 .tsx），而服务端全是 .mts。补这一行之前，`npm run typecheck` 对**后端一行都
+     * 没检查过** —— 实测：往 server/kv-store.mts 里塞一句「const x: number = "字符串"」，
+     * tsc --noEmit 照样 rc=0。而服务端正是最需要类型保护的那一半：它直接改数据。
+     *
+     * scripts 下的 .mts 暂时**没有**纳入：那里有 115 处历史类型债（check.mts 93 处、
+     * accept-check.mts 21 处，多是 strict 下的 null 收窄与宽松 cast），一次清完风险大于收益。
+     * 这是待办事项、不是"不需要"：自检脚本出错是**响亮**失败（断言报红、非 0 退出），
+     * 而后端出错是静默改数据，所以先保后端。
+     */
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", "server/**/*.mts", ".next/types/**/*.ts"],
   "exclude": ["node_modules"]
 }

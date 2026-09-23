@@ -11,24 +11,55 @@
  * 但映射逻辑会散在每条查询里，将来改字段名要找十几处；集中在这里改一次就够。
  */
 
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer,
+  IncomingMessage,
+  ServerResponse,
+} from "node:http";
 import type Database from "better-sqlite3";
-import { openDatabase, DB_PATH } from "./db.mts";
-import { acquireDbLock } from "./db-lock.mts";
-import { createSqliteStore, snapshotSize } from "./kv-store.mts";
+import {
+  openDatabase,
+  DB_PATH,
+} from "./db.mts";
+import {
+  acquireDbLock,
+} from "./db-lock.mts";
+import {
+  createSqliteStore,
+  snapshotSize,
+} from "./kv-store.mts";
 // 伪后端的**同一份实现**：服务端只是换了一个 KeyValueStore，业务口径一行都不用重写
-import { api, __removeFixture, __useStoreForTesting } from "../lib/backend/api.ts";
+import {
+  api,
+  __appendSystemLog,
+  __removeFixture,
+  __useStoreForTesting,
+} from "../lib/backend/api.ts";
 /*
  * 版本冲突的类型：接口层要靠**类型**把它翻成 409。
  * 不按错误文字匹配是有意的（见下面 /api/call 的错误分支）——
  * 那种做法改一个字就悄悄失效，而这正是"冲突被当成参数错误"的开始。
  */
-import { VersionConflictError } from "../lib/backend/concurrency.ts";
-import { createEmptyDatabase } from "../lib/backend/initial.ts";
-import { createSeedDatabase } from "../lib/backend/seed.ts";
-import { currentVersion, migrate } from "./migrate.mts";
+import {
+  VersionConflictError,
+} from "../lib/backend/concurrency.ts";
+import {
+  createEmptyDatabase,
+} from "../lib/backend/initial.ts";
+import {
+  createSeedDatabase,
+} from "../lib/backend/seed.ts";
+import {
+  currentVersion,
+  migrate,
+} from "./migrate.mts";
 // 备份策略（每天一份 + 保留份数）只在这一处实现，见 server/backup.mts
-import { backupDir, backupIfNotToday, backupsDisabled, latestBackup } from "./backup.mts";
+import {
+  backupDir,
+  backupIfNotToday,
+  backupsDisabled,
+  latestBackup,
+} from "./backup.mts";
 // 会话认证（第 6 步）：口令与令牌都在服务端，见 server/auth.mts
 import {
   activeSessionCount,
@@ -60,32 +91,23 @@ import {
   canAccess,
   groupOfMethod,
   HOLIDAY_ACTION_ACCESS,
-  isPlainTeacher,
   scopeForAccount,
   teacherScopeDenial,
   type Role,
   type SessionScope,
 } from "../lib/auth/roles.ts";
 // 接口契约：分组只用来写错误文案（"运维与审计"），判定不经过它
-import { API_CONTRACT } from "../lib/backend/contract.ts";
+import {
+  API_CONTRACT,
+} from "../lib/backend/contract.ts";
 // 复用伪后端阶段的纯函数：课时记账与剩余课时的口径只能有一份
-import { enrollmentForLesson, remainingTotal } from "../lib/backend/enrollment.ts";
 // 金额与退费口径、请假扣课时规则：同样只复用伪后端阶段的纯函数
-import { findRefundPolicy, round2 } from "../lib/backend/finance.ts";
-import { decideCharge } from "../lib/backend/attendance.ts";
+import {
+} from "../lib/backend/finance.ts";
 // 报价与课程库：口径同样只有一份（前台/后台/服务端共用）
 import {
-  pricingConfigFromContent,
-  pricingConfigToMarkdown,
-  quoteSelection,
-  teacherFeeForSelection,
-  validatePricingConfig,
-  PRICING_SOURCE_ADMIN,
-  PRICING_SOURCE_CONTENT,
-  type PricingConfig,
-} from "../lib/backend/pricing.ts";
-import { mergeSiteCourses, summarizeCourses } from "../lib/backend/courses.ts";
-import { holidayCoverage } from "../lib/backend/holidays.ts";
+  holidayCoverage,
+} from "../lib/backend/holidays.ts";
 import {
   defaultHolidayYears,
   holidaysDir,
@@ -99,294 +121,45 @@ import {
 const PORT = Number(process.env.PORT ?? 4000);
 
 /** health 里统计的表（加表时同步加进来）。 */
+/**
+ * 老 REST 接口的路径形状（**已下线**，见路由里那段说明）。
+ *
+ * 留着它只是为了给这些路径回一句清楚的 410 与指路 —— 而不是让它们"悄悄 404"：
+ * 有人（脚本、书签、旧文档）照着老路径调时，应该看到"这个接口下线了，请用 /api/call"。
+ */
+const LEGACY_REST_PATH =
+  /^\/api\/(students|teachers|classrooms|courses|lessons|inquiries|payments|transactions|homework|assessments|logs|today|lesson-records|pricing)(\/|$)/;
+
 const COUNTED_TABLES = [
   "students", "teachers", "classrooms", "lessons", "lesson_records", "homework_records",
   "assessments", "transactions", "payments", "courses", "logs", "inquiries", "site_content",
 ];
 
-/** JSON 列解析：失败返回兜底值，而不是让整个接口 500。 */
-function parseJson<T>(text: unknown, fallback: T): T {
-  if (typeof text !== "string" || text === "") return fallback;
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    return fallback;
-  }
-}
 
-type Row = Record<string, unknown>;
-const str = (value: unknown): string => (typeof value === "string" ? value : "");
-const num = (value: unknown): number => (typeof value === "number" ? value : Number(value ?? 0));
 
 /* ── 行 → 页面形状 ──────────────────────────────────────────────────── */
 
-const toStudent = (row: Row) => ({
-  id: str(row.id),
-  name: str(row.name),
-  grade: str(row.grade),
-  guardian: str(row.guardian),
-  status: str(row.status),
-  note: str(row.note),
-  createdAt: str(row.created_at),
-  enrollments: parseJson(row.enrollments, [] as unknown[]),
-  profile: parseJson(row.profile, {} as Record<string, unknown>),
-});
-
-const toTeacher = (row: Row) => ({
-  id: str(row.id),
-  name: str(row.name),
-  role: str(row.role),
-  subjects: parseJson(row.subjects, [] as string[]),
-  phone: str(row.phone),
-  active: num(row.active) === 1,
-});
-
-const toClassroom = (row: Row) => ({
-  id: str(row.id),
-  name: str(row.name),
-  capacity: num(row.capacity),
-  kind: str(row.kind),
-  availability: parseJson(row.availability, [] as unknown[]),
-  note: str(row.note),
-});
-
-const toLesson = (row: Row) => ({
-  id: str(row.id),
-  subject: str(row.subject),
-  form: str(row.form),
-  teacherId: str(row.teacher_id),
-  classroomId: str(row.classroom_id),
-  studentIds: parseJson(row.student_ids, [] as string[]),
-  startsAt: str(row.starts_at),
-  durationMinutes: num(row.duration_minutes),
-  status: str(row.status),
-  note: str(row.note),
-  makeupForLessonId: str(row.makeup_for_lesson_id),
-});
-
-const toCourse = (row: Row) => ({
-  id: str(row.id),
-  name: str(row.name),
-  category: str(row.category),
-  forms: parseJson(row.forms, [] as string[]),
-  origin: str(row.origin),
-  status: str(row.status),
-  note: str(row.note),
-  createdAt: str(row.created_at),
-});
 
 
-const toLessonRecord = (row: Row) => ({
-  id: str(row.id), lessonId: str(row.lesson_id), studentId: str(row.student_id),
-  attendance: str(row.attendance), leaveRequestedAt: str(row.leave_requested_at),
-  focus: str(row.focus), interaction: str(row.interaction), rating: num(row.rating),
-  note: str(row.note), recordedAt: str(row.recorded_at),
-});
 
-const toHomework = (row: Row) => ({
-  id: str(row.id), studentId: str(row.student_id), date: str(row.date), subject: str(row.subject),
-  submission: str(row.submission), accuracy: str(row.accuracy), weakPoints: str(row.weak_points),
-  note: str(row.note),
-});
 
-const toAssessment = (row: Row) => ({
-  id: str(row.id), studentId: str(row.student_id), subject: str(row.subject), date: str(row.date),
-  score: row.score === null ? null : num(row.score),
-  previousScore: row.previous_score === null ? null : num(row.previous_score),
-  weakPoints: str(row.weak_points), note: str(row.note),
-});
 
-const toPayment = (row: Row) => ({
-  id: str(row.id), studentId: str(row.student_id), enrollmentId: str(row.enrollment_id),
-  amount: num(row.amount), kind: str(row.kind), method: str(row.method), at: str(row.at),
-  note: str(row.note),
-});
 
-const toTransaction = (row: Row) => ({
-  id: str(row.id), studentId: str(row.student_id), enrollmentId: str(row.enrollment_id),
-  subject: str(row.subject), delta: num(row.delta), kind: str(row.kind),
-  lessonId: str(row.lesson_id), at: str(row.at), note: str(row.note),
-  reversedAt: str(row.reversed_at),
-});
 
-const toInquiry = (row: Row) => ({
-  id: str(row.id),
-  studentName: str(row.student_name),
-  grade: str(row.grade),
-  guardian: str(row.guardian),
-  subject: str(row.subject),
-  durationMinutes: num(row.duration_minutes),
-  intervalWeeks: num(row.interval_weeks),
-  plannedLessons: num(row.planned_lessons),
-  startsAt: str(row.starts_at),
-  candidates: parseJson(row.candidates, [] as unknown[]),
-  preferredTeacherId: str(row.preferred_teacher_id),
-  preferredClassroomId: str(row.preferred_classroom_id),
-  skipDates: parseJson(row.skip_dates, [] as string[]),
-  status: str(row.status),
-  note: str(row.note),
-  scheduledLessonIds: parseJson(row.scheduled_lesson_ids, [] as string[]),
-  createdAt: str(row.created_at),
-});
 
-const toLog = (row: Row) => ({
-  id: str(row.id), at: str(row.at), operator: str(row.operator), entity: str(row.entity),
-  action: str(row.action), targetId: str(row.target_id), summary: str(row.summary),
-});
+
+
+
+
 
 /* ── 小表的按视图取数（界面高频调用，做成查询参数而不是整表拉回前端过滤）── */
 
-type ReadSpec = {
-  path: string;
-  /** 真实表名（**不从路径推导**：`homework` 的表叫 `homework_records`，推导会写错） */
-  table: string;
-  to: (row: Row) => unknown;
-  /** 允许的过滤参数（camelCase）→ 列名。 */
-  filters: Record<string, string>;
-  order: string;
-  limitParam?: string;
-};
 
-const READS: ReadSpec[] = [
-  { path: "payments", table: "payments", to: toPayment, filters: { studentId: "student_id", enrollmentId: "enrollment_id" }, order: "at DESC" },
-  { path: "transactions", table: "transactions", to: toTransaction, filters: { studentId: "student_id", enrollmentId: "enrollment_id", lessonId: "lesson_id" }, order: "at DESC" },
-  { path: "lesson-records", table: "lesson_records", to: toLessonRecord, filters: { lessonId: "lesson_id", studentId: "student_id" }, order: "recorded_at DESC" },
-  { path: "homework", table: "homework_records", to: toHomework, filters: { studentId: "student_id" }, order: "date DESC" },
-  { path: "assessments", table: "assessments", to: toAssessment, filters: { studentId: "student_id" }, order: "date DESC" },
-  { path: "logs", table: "logs", to: toLog, filters: { entity: "entity" }, order: "at DESC", limitParam: "limit" },
-];
 
-/** 按过滤器拼 WHERE（只认白名单里的列，参数一律走占位符）。 */
-function readRows(db: Database.Database, spec: ReadSpec, url: URL): unknown[] {
-  const where: string[] = [];
-  const values: string[] = [];
-  for (const [param, column] of Object.entries(spec.filters)) {
-    const value = url.searchParams.get(param);
-    if (value !== null && value !== "") {
-      where.push(`${column} = ?`);
-      values.push(value);
-    }
-  }
-  const limit = spec.limitParam === undefined ? null : Number(url.searchParams.get(spec.limitParam) ?? 0);
-  const sql =
-    `SELECT * FROM ${spec.table}` +
-    (where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "") +
-    ` ORDER BY ${spec.order}` +
-    (limit !== null && Number.isFinite(limit) && limit > 0 ? ` LIMIT ${Math.floor(limit)}` : "");
-  return (db.prepare(sql).all(...values) as Row[]).map(spec.to);
-}
 
 /* ── 路由 ───────────────────────────────────────────────────────────── */
 
-type Handler = (db: Database.Database, url: URL) => unknown;
 
-/** 只读接口：路径 → 处理函数。加接口时在这里加一行。 */
-const ROUTES: Record<string, Handler> = {
-  "/api/students": (db) =>
-    (db.prepare("SELECT * FROM students ORDER BY created_at").all() as Row[]).map(toStudent),
-  "/api/teachers": (db) =>
-    (db.prepare("SELECT * FROM teachers ORDER BY name").all() as Row[]).map(toTeacher),
-  "/api/classrooms": (db) =>
-    (db.prepare("SELECT * FROM classrooms ORDER BY name").all() as Row[]).map(toClassroom),
-  "/api/courses": (db) =>
-    (db.prepare("SELECT * FROM courses ORDER BY category, name").all() as Row[]).map(toCourse),
-
-  /** 排课支持按区间过滤（`?from=ISO&to=ISO`），与页面的按天/按周口径一致。 */
-  "/api/lessons": (db, url) => {
-    const from = url.searchParams.get("from");
-    const to = url.searchParams.get("to");
-    const date = url.searchParams.get("date");
-    const studentId = url.searchParams.get("studentId");
-    const teacherId = url.searchParams.get("teacherId");
-    const classroomId = url.searchParams.get("classroomId");
-
-    const where: string[] = [];
-    const values: string[] = [];
-    if (date !== null && date !== "") {
-      // 单日：按本地日历日切，与「今日概览」同一口径
-      const start = new Date(`${date}T00:00:00`);
-      where.push("starts_at >= ? AND starts_at < ?");
-      values.push(start.toISOString(), new Date(start.getTime() + 86_400_000).toISOString());
-    } else if (from !== null && to !== null) {
-      where.push("starts_at >= ? AND starts_at < ?");
-      values.push(from, to);
-    }
-    if (teacherId !== null && teacherId !== "") {
-      where.push("teacher_id = ?");
-      values.push(teacherId);
-    }
-    if (classroomId !== null && classroomId !== "") {
-      where.push("classroom_id = ?");
-      values.push(classroomId);
-    }
-
-    let rows = db
-      .prepare(
-        `SELECT * FROM lessons${where.length > 0 ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY starts_at`,
-      )
-      .all(...values) as Row[];
-
-    // 学生筛选走 JSON 列：SQLite 的 json_each 比在 Node 里过滤更省事，也避免全表拉回
-    if (studentId !== null && studentId !== "") {
-      const ids = db
-        .prepare(
-          "SELECT DISTINCT l.id FROM lessons l, json_each(l.student_ids) je WHERE je.value = ?",
-        )
-        .all(studentId) as Array<{ id: string }>;
-      const wanted = new Set(ids.map((item) => item.id));
-      rows = rows.filter((row) => wanted.has(str(row.id)));
-    }
-    return rows.map(toLesson);
-  },
-
-  /** 单个学生（学生详情页）。 */
-  "/api/students/get": (db, url) => {
-    const id = url.searchParams.get("id") ?? "";
-    const row = db.prepare("SELECT * FROM students WHERE id = ?").get(id) as Row | undefined;
-    return row === undefined ? null : toStudent(row);
-  },
-
-  /** 咨询线索列表（按创建时间倒序，最近的在上）。 */
-  "/api/inquiries": (db) =>
-    (db.prepare("SELECT * FROM inquiries ORDER BY created_at DESC").all() as Row[]).map(toInquiry),
-
-  /** 在职教师（排课下拉用）。 */
-  "/api/teachers/active": (db) =>
-    (db.prepare("SELECT * FROM teachers WHERE active = 1 ORDER BY name").all() as Row[]).map(toTeacher),
-
-  /**
-   * 今日概览：今天的课 + 每间教室今天几节。
-   *
-   * 口径与伪后端一致：一天按**本地日历日**算，已取消的课不计入教室占用。
-   * 课时预警还没搬过来 —— 下一步接 `lib/backend/followup.ts` 的纯函数时会把阈值与理由一并带上，
-   * 现在先不在这里写一个"看起来差不多"的版本（两套口径比一套慢更危险）。
-   */
-  "/api/today": (db, url) => {
-    const day = url.searchParams.get("date") ?? new Date().toISOString().slice(0, 10);
-    const start = new Date(`${day}T00:00:00`);
-    const end = new Date(start.getTime() + 86_400_000);
-
-    const lessons = (
-      db
-        .prepare("SELECT * FROM lessons WHERE starts_at >= ? AND starts_at < ? ORDER BY starts_at")
-        .all(start.toISOString(), end.toISOString()) as Row[]
-    ).map(toLesson);
-
-    const classrooms = (db.prepare("SELECT * FROM classrooms ORDER BY name").all() as Row[]).map(
-      toClassroom,
-    );
-    const activeLessons = lessons.filter((lesson) => lesson.status !== "已取消");
-
-    return {
-      date: day,
-      lessons,
-      classroomUsage: classrooms.map((classroom) => ({
-        classroom,
-        lessonCount: activeLessons.filter((lesson) => lesson.classroomId === classroom.id).length,
-      })),
-    };
-  },
-};
 
 /** 读请求体（只接受 JSON，超过 1MB 直接拒绝）。 */
 async function readBody(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -402,7 +175,6 @@ async function readBody(request: IncomingMessage): Promise<Record<string, unknow
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
 
-const nextId = (prefix: string): string => `${prefix}${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
 
 /**
  * 当前请求的操作人（来自会话，见 `requireAuth`）。
@@ -415,653 +187,27 @@ const nextId = (prefix: string): string => `${prefix}${Date.now().toString(36)}$
  * 单用户本机使用，一个请求一个操作人足够。**多用户并发时要改成随请求一路传下去**
  * （那时它才会真的出错：A 的写入可能被记成 B 干的）。
  */
-let currentOperator = "admin";
 
-function writeLog(
-  db: Database.Database,
-  entry: { entity: string; action: string; targetId: string; summary: string },
-): void {
-  db.prepare(
-    "INSERT INTO logs (id, at, operator, entity, action, target_id, summary) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(nextId("log"), new Date().toISOString(), currentOperator, entry.entity, entry.action, entry.targetId, entry.summary);
-}
 
-/** 读一个学生（行 → 页面形状），找不到返回 null。 */
-function loadStudent(db: Database.Database, id: string): ReturnType<typeof toStudent> | null {
-  const row = db.prepare("SELECT * FROM students WHERE id = ?").get(id) as Row | undefined;
-  return row === undefined ? null : toStudent(row);
-}
 
-type WriteResult = { status: number; payload: unknown };
 
-/** 写接口：都要求 `一个请求 = 一个事务`，失败整批回滚。 */
-const WRITES: Array<{
-  method: string;
-  pattern: RegExp;
-  handle: (db: Database.Database, match: RegExpMatchArray, body: Record<string, unknown>) => WriteResult;
-}> = [
-  {
-    method: "POST",
-    pattern: /^\/api\/students$/,
-    handle: (db, _match, body) => {
-      const name = typeof body.name === "string" ? body.name.trim() : "";
-      if (name === "") return { status: 400, payload: { error: "学生姓名必填" } };
-      const id = nextId("s");
-      const run = db.transaction(() => {
-        db.prepare(
-          "INSERT INTO students (id, name, grade, guardian, status, note, created_at, enrollments, profile) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '{}')",
-        ).run(id, name, String(body.grade ?? ""), String(body.guardian ?? ""), String(body.status ?? "在读"), String(body.note ?? ""), new Date().toISOString());
-        writeLog(db, { entity: "学生", action: "新建", targetId: id, summary: `新建学生「${name}」` });
-      });
-      run();
-      return { status: 201, payload: loadStudent(db, id) };
-    },
-  },
-  {
-    /** 报课：报课记录 + 课时流水 + （可选）收款，必须是同一个事务。 */
-    method: "POST",
-    pattern: /^\/api\/students\/([^/]+)\/enroll$/,
-    handle: (db, match, body) => {
-      const student = loadStudent(db, match[1] ?? "");
-      if (student === null) return { status: 404, payload: { error: "没有这个学生" } };
 
-      const subject = typeof body.subject === "string" ? body.subject.trim() : "";
-      const totalLessons = Number(body.totalLessons ?? 0);
-      if (subject === "") return { status: 400, payload: { error: "报课科目必填（取自课程库）" } };
-      if (!Number.isFinite(totalLessons) || totalLessons < 1) {
-        return { status: 400, payload: { error: "报课节数至少 1 节" } };
-      }
-
-      const enrollment = {
-        id: nextId("e"),
-        subject,
-        form: String(body.form ?? ""),
-        teacherId: String(body.teacherId ?? ""),
-        totalLessons,
-        usedLessons: 0,
-        unitPrice: Number(body.unitPrice ?? 0),
-        agreedAmount: Number(body.agreedAmount ?? 0),
-        paidAmount: 0,
-        startedAt: new Date().toISOString(),
-        endedAt: "",
-        status: "在读",
-        note: String(body.note ?? ""),
-        history: [{ at: new Date().toISOString(), kind: "报课", lessons: totalLessons, note: "" }],
-      };
-      const paidNow = Number(body.paidNow ?? 0);
-
-      const run = db.transaction(() => {
-        const enrollments = [...(student.enrollments as typeof enrollment[]), enrollment];
-        db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(JSON.stringify(enrollments), student.id);
-
-        // 课时流水（账本）：正数表示加课时
-        db.prepare(
-          "INSERT INTO transactions (id, student_id, enrollment_id, subject, delta, kind, lesson_id, at, note, reversed_at) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, '')",
-        ).run(nextId("tx"), student.id, enrollment.id, subject, totalLessons, "报课", new Date().toISOString(), "报课");
-
-        if (paidNow > 0) {
-          enrollment.paidAmount = paidNow;
-          db.prepare(
-            "INSERT INTO payments (id, student_id, enrollment_id, amount, kind, method, at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-          ).run(nextId("p"), student.id, enrollment.id, paidNow, "收款", String(body.method ?? "微信"), new Date().toISOString(), "报课收款");
-          db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(JSON.stringify(enrollments), student.id);
-        }
-
-        writeLog(db, {
-          entity: "学生",
-          action: "报课",
-          targetId: student.id,
-          summary: `「${student.name}」报课：${subject} ${totalLessons} 节${paidNow > 0 ? `，收款 ${paidNow} 元` : ""}`,
-        });
-      });
-      run();
-
-      const updated = loadStudent(db, student.id)!;
-      return { status: 201, payload: updated };
-    },
-  },
-  {
-    /** 排课：建一节课。冲突检测还没搬过来（见文件顶部说明），先只做基本校验。 */
-    method: "POST",
-    pattern: /^\/api\/lessons$/,
-    handle: (db, _match, body) => {
-      const startsAt = typeof body.startsAt === "string" ? body.startsAt : "";
-      if (startsAt === "" || Number.isNaN(new Date(startsAt).getTime())) {
-        return { status: 400, payload: { error: "上课时间必填且必须是合法时间" } };
-      }
-      const id = nextId("l");
-      db.prepare(
-        "INSERT INTO lessons (id, subject, form, teacher_id, classroom_id, student_ids, starts_at, duration_minutes, status, note, makeup_for_lesson_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '已排', ?, '')",
-      ).run(id, String(body.subject ?? ""), String(body.form ?? ""), String(body.teacherId ?? ""), String(body.classroomId ?? ""), JSON.stringify(body.studentIds ?? []), startsAt, Number(body.durationMinutes ?? 60), String(body.note ?? ""));
-      writeLog(db, { entity: "排课", action: "新建", targetId: id, summary: `排课：${String(body.subject ?? "")}` });
-      const row = db.prepare("SELECT * FROM lessons WHERE id = ?").get(id) as Row;
-      return { status: 201, payload: toLesson(row) };
-    },
-  },
-  {
-    /** 标记已上：按出勤扣课时，**幂等**（重复点不重复扣），课时不足时报错而不是静默截断。 */
-    method: "POST",
-    pattern: /^\/api\/lessons\/([^/]+)\/complete$/,
-    handle: (db, match, body) => {
-      const row = db.prepare("SELECT * FROM lessons WHERE id = ?").get(match[1] ?? "") as Row | undefined;
-      if (row === undefined) return { status: 404, payload: { error: "没有这节课" } };
-      const lesson = toLesson(row);
-      if (lesson.status === "已上") return { status: 200, payload: { skipped: true, lesson, decisions: [] } };
-
-      // 考勤：请求体里可带每名学生的出勤与请假时间，由 decideCharge 决定扣不扣
-      const records = new Map<string, { attendance: string; leaveRequestedAt: string }>();
-      for (const raw of Array.isArray(body.records) ? body.records : []) {
-        const record = raw as Record<string, unknown>;
-        records.set(String(record.studentId ?? ""), {
-          attendance: String(record.attendance ?? "到课"),
-          leaveRequestedAt: String(record.leaveRequestedAt ?? ""),
-        });
-      }
-      const decisions: Array<{ studentId: string; charge: boolean; reason: string }> = [];
-
-      const run = db.transaction(() => {
-        for (const studentId of lesson.studentIds) {
-          const student = loadStudent(db, studentId);
-          if (student === null) continue;
-
-          // 复用请假规则：提前 24 小时请假不扣课时，临时缺课扣
-          const record = records.get(studentId);
-          const decision = decideCharge(
-            lesson,
-            record === undefined
-              ? undefined
-              : { attendance: record.attendance, leaveRequestedAt: record.leaveRequestedAt } as never,
-          );
-          decisions.push({ studentId, charge: decision.charge, reason: decision.reason });
-          if (!decision.charge) continue;
-          // 复用纯函数：这节课该扣哪一条报课记录（同科目在读、取剩余最多）
-          const enrollment = enrollmentForLesson(student.enrollments, lesson.subject);
-          if (enrollment === null) continue;
-          const remaining = remainingTotal(student.enrollments.filter((item) => item.id === enrollment.id));
-          if (remaining < 1) {
-            throw new Error(`「${student.name}」${lesson.subject} 课时不足（剩 ${remaining} 节），不能标记已上`);
-          }
-          db.prepare(
-            "INSERT INTO transactions (id, student_id, enrollment_id, subject, delta, kind, lesson_id, at, note, reversed_at) VALUES (?, ?, ?, ?, -1, '上课', ?, ?, '', '')",
-          ).run(nextId("tx"), studentId, enrollment.id, lesson.subject, lesson.id, new Date().toISOString());
-
-          /*
-           * 课时流水与报课记录必须一起改：`remainingOf` 读的是 enrollment.usedLessons
-           * （存字段），只写流水不增加 usedLessons 的话，剩余课时永远不减少 ——
-           * 扣课时会变成"记了账但没扣钱"，而且课时不足的拦截永远不会触发。
-           */
-          const nextEnrollments = student.enrollments.map((item) =>
-            item.id === enrollment.id ? { ...item, usedLessons: item.usedLessons + 1 } : item,
-          );
-          db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(
-            JSON.stringify(nextEnrollments),
-            studentId,
-          );
-        }
-        db.prepare("UPDATE lessons SET status = '已上' WHERE id = ?").run(lesson.id);
-        writeLog(db, { entity: "排课", action: "标记已上", targetId: lesson.id, summary: `标记已上：${lesson.subject}` });
-      });
-
-      try {
-        run();
-      } catch (cause) {
-        return { status: 400, payload: { error: cause instanceof Error ? cause.message : "扣课时失败" } };
-      }
-      const updated = db.prepare("SELECT * FROM lessons WHERE id = ?").get(lesson.id) as Row;
-      return { status: 200, payload: { skipped: false, lesson: toLesson(updated), decisions } };
-    },
-  },
-  {
-    /** 续费：课时累加到原报课记录 + 课时流水（+ 可选收款），同一事务。 */
-    method: "POST",
-    pattern: /^\/api\/students\/([^/]+)\/enrollments\/([^/]+)\/renew$/,
-    handle: (db, match, body) => {
-      const student = loadStudent(db, match[1] ?? "");
-      if (student === null) return { status: 404, payload: { error: "没有这个学生" } };
-      const target = (student.enrollments as Array<Record<string, unknown>>).find(
-        (item) => item.id === match[2],
-      );
-      if (target === undefined) return { status: 404, payload: { error: "没有这条报课记录" } };
-
-      const added = Number(body.added ?? 0);
-      if (!Number.isFinite(added) || added < 1) return { status: 400, payload: { error: "续费节数至少 1 节" } };
-      const paidNow = Number(body.paidNow ?? 0);
-      const at = new Date().toISOString();
-
-      const run = db.transaction(() => {
-        const enrollments = (student.enrollments as Array<Record<string, unknown>>).map((item) =>
-          item.id === target.id
-            ? {
-                ...item,
-                totalLessons: Number(item.totalLessons ?? 0) + added,
-                agreedAmount: Number(item.agreedAmount ?? 0) + Number(body.agreedAmount ?? 0),
-                paidAmount: Number(item.paidAmount ?? 0) + Math.max(0, paidNow),
-                history: [
-                  ...((item.history as unknown[]) ?? []),
-                  { at, kind: "续费", lessons: added, note: String(body.note ?? "") },
-                ],
-              }
-            : item,
-        );
-        db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(JSON.stringify(enrollments), student.id);
-        db.prepare(
-          "INSERT INTO transactions (id, student_id, enrollment_id, subject, delta, kind, lesson_id, at, note, reversed_at) VALUES (?, ?, ?, ?, ?, '续费', '', ?, ?, '')",
-        ).run(nextId("tx"), student.id, target.id, String(target.subject ?? ""), added, at, String(body.note ?? ""));
-        if (paidNow > 0) {
-          db.prepare(
-            "INSERT INTO payments (id, student_id, enrollment_id, amount, kind, method, at, note) VALUES (?, ?, ?, ?, '收款', ?, ?, ?)",
-          ).run(nextId("p"), student.id, target.id, paidNow, String(body.method ?? "微信"), at, "续费收款");
-        }
-        writeLog(db, { entity: "学生", action: "续费", targetId: student.id, summary: `「${student.name}」续费 ${added} 节（${String(target.subject ?? "")}）` });
-      });
-      run();
-      return { status: 200, payload: loadStudent(db, student.id) };
-    },
-  },
-  {
-    /** 独立收款 / 退款：写一条流水并同步报课记录的实收（退款为负数冲减）。 */
-    method: "POST",
-    pattern: /^\/api\/payments$/,
-    handle: (db, _match, body) => {
-      const studentId = String(body.studentId ?? "");
-      const student = loadStudent(db, studentId);
-      if (student === null) return { status: 404, payload: { error: "没有这个学生" } };
-      const amount = Number(body.amount ?? 0);
-      if (!Number.isFinite(amount) || amount <= 0) return { status: 400, payload: { error: "金额必须大于 0" } };
-      const kind = body.kind === "退款" ? "退款" : "收款";
-      const enrollmentId = String(body.enrollmentId ?? "");
-      const at = new Date().toISOString();
-      const id = nextId("p");
-
-      const run = db.transaction(() => {
-        db.prepare(
-          "INSERT INTO payments (id, student_id, enrollment_id, amount, kind, method, at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ).run(id, studentId, enrollmentId, amount, kind, String(body.method ?? "微信"), at, String(body.note ?? ""));
-        if (enrollmentId !== "") {
-          const enrollments = (student.enrollments as Array<Record<string, unknown>>).map((item) =>
-            item.id === enrollmentId
-              ? {
-                  ...item,
-                  // 实收 = 收款合计 − 退款合计（不变式：账实相符）
-                  paidAmount: round2(Number(item.paidAmount ?? 0) + (kind === "退款" ? -amount : amount)),
-                }
-              : item,
-          );
-          db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(JSON.stringify(enrollments), studentId);
-        }
-        writeLog(db, { entity: "收费", action: kind, targetId: studentId, summary: `「${student.name}」${kind} ${amount} 元` });
-      });
-      run();
-      return { status: 201, payload: { id, kind, amount } };
-    },
-  },
-  {
-    /**
-     * 退课：按选定口径算退费（复用 `finance.ts` 的 REFUND_POLICIES），
-     * 置报课记录为已退课并写退款流水。金额一律由服务端算，不接受前端传来的退款额。
-     */
-    method: "POST",
-    pattern: /^\/api\/students\/([^/]+)\/enrollments\/([^/]+)\/refund$/,
-    handle: (db, match, body) => {
-      const student = loadStudent(db, match[1] ?? "");
-      if (student === null) return { status: 404, payload: { error: "没有这个学生" } };
-      const target = (student.enrollments as Array<Record<string, unknown>>).find(
-        (item) => item.id === match[2],
-      );
-      if (target === undefined) return { status: 404, payload: { error: "没有这条报课记录" } };
-      if (String(target.endedAt ?? "") !== "") return { status: 400, payload: { error: "这条报课记录已经退课了" } };
-
-      const policy = findRefundPolicy(String(body.policy ?? ""));
-      const quote = policy.calculate({
-        totalLessons: Number(target.totalLessons ?? 0),
-        usedLessons: Number(target.usedLessons ?? 0),
-        agreedAmount: Number(target.agreedAmount ?? 0),
-        unitPrice: Number(target.unitPrice ?? 0),
-      });
-      const at = new Date().toISOString();
-
-      const run = db.transaction(() => {
-        const enrollments = (student.enrollments as Array<Record<string, unknown>>).map((item) =>
-          item.id === target.id
-            ? {
-                ...item,
-                endedAt: at,
-                status: "已退课",
-                history: [
-                  ...((item.history as unknown[]) ?? []),
-                  { at, kind: "退课", lessons: 0, note: `${policy.name}：${quote.formula}` },
-                ],
-              }
-            : item,
-        );
-        db.prepare("UPDATE students SET enrollments = ? WHERE id = ?").run(JSON.stringify(enrollments), student.id);
-        if (quote.refund > 0) {
-          db.prepare(
-            "INSERT INTO payments (id, student_id, enrollment_id, amount, kind, method, at, note) VALUES (?, ?, ?, ?, '退款', ?, ?, ?)",
-          ).run(nextId("p"), student.id, target.id, quote.refund, String(body.method ?? "原路退回"), at, `退课退款（${policy.name}）`);
-        }
-        writeLog(db, {
-          entity: "学生",
-          action: "退课",
-          targetId: student.id,
-          summary: `「${student.name}」退课（${String(target.subject ?? "")}），按「${policy.name}」退 ${quote.refund} 元：${quote.formula}`,
-        });
-      });
-      run();
-      return { status: 200, payload: { refund: quote.refund, formula: quote.formula, policy: policy.id, student: loadStudent(db, student.id) } };
-    },
-  },
-];
 
 
 /* ── 报价配置（界面调 6 个方法：读取 / 保存 / 试算 / 教师课时费 / 导出 / 恢复）── */
 
-function loadPricing(db: Database.Database): PricingConfig {
-  const row = db.prepare("SELECT config FROM pricing WHERE id = 1").get() as { config: string } | undefined;
-  return row === undefined
-    ? pricingConfigFromContent()
-    : (JSON.parse(row.config) as PricingConfig);
-}
-
-/** 报价相关：路径 → 处理函数（读与写都在这里，口径全部来自 lib/backend/pricing.ts）。 */
-const PRICING_ROUTES: Record<string, { method: string; handle: (db: Database.Database, body: Record<string, unknown>, url: URL) => WriteResult }> = {
-  "/api/pricing": {
-    method: "GET",
-    handle: (db) => ({ status: 200, payload: loadPricing(db) }),
-  },
-  "/api/pricing/save": {
-    method: "POST",
-    handle: (db, body) => {
-      const config = body as unknown as PricingConfig;
-      // 服务端必须自己复核配置合法性：系数写成 0 会让所有报价变 0
-      const problems = validatePricingConfig(config);
-      if (problems.length > 0) return { status: 400, payload: { error: problems.join("；") } };
-      db.prepare("INSERT OR REPLACE INTO pricing (id, config, source, updated_at) VALUES (1, ?, ?, ?)").run(
-        JSON.stringify({ ...config, source: PRICING_SOURCE_ADMIN, updatedAt: new Date().toISOString() }),
-        PRICING_SOURCE_ADMIN,
-        new Date().toISOString(),
-      );
-      writeLog(db, { entity: "报价", action: "修改配置", targetId: "pricing", summary: "修改了报价配置" });
-      return { status: 200, payload: loadPricing(db) };
-    },
-  },
-  "/api/pricing/reset": {
-    method: "POST",
-    handle: (db) => {
-      const config = pricingConfigFromContent();
-      db.prepare("INSERT OR REPLACE INTO pricing (id, config, source, updated_at) VALUES (1, ?, ?, ?)").run(
-        JSON.stringify(config), PRICING_SOURCE_CONTENT, "",
-      );
-      writeLog(db, { entity: "报价", action: "恢复默认", targetId: "pricing", summary: "报价配置恢复为站点内容" });
-      return { status: 200, payload: loadPricing(db) };
-    },
-  },
-  "/api/pricing/quote": {
-    method: "POST",
-    handle: (db, body) => ({
-      status: 200,
-      payload: quoteSelection(loadPricing(db), body as never),
-    }),
-  },
-  "/api/pricing/teacher-fee": {
-    method: "POST",
-    handle: (db, body) => ({
-      status: 200,
-      payload: teacherFeeForSelection(loadPricing(db), body as never),
-    }),
-  },
-  "/api/pricing/export-markdown": {
-    method: "GET",
-    handle: (db) => ({ status: 200, payload: { markdown: pricingConfigToMarkdown(loadPricing(db)) } }),
-  },
-  "/api/courses/summary": {
-    method: "GET",
-    handle: (db) => ({ status: 200, payload: summarizeCourses(courseRows(db)) }),
-  },
-  "/api/courses/sync-from-site": {
-    method: "POST",
-    handle: (db) => {
-      const stored = courseRows(db);
-      const merged = mergeSiteCourses(stored);
-      /*
-       * 注意：`merged.added` 是**课程名数组**（纯函数的契约就是返回名字，便于页面提示
-       * "同步了哪几门"），不是课程对象 —— 这里要插入的是 `merged.courses` 里新增的那些。
-       * 我第一版把它当对象用，结果插进去的是字符串，报 NOT NULL constraint failed: courses.name。
-       */
-      const storedIds = new Set(stored.map((course) => course.id));
-      const toInsert = merged.courses.filter((course) => !storedIds.has(course.id));
-      if (toInsert.length > 0) {
-        const insert = db.prepare(
-          "INSERT OR REPLACE INTO courses (id, name, category, forms, origin, status, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        );
-        const run = db.transaction(() => {
-          for (const course of toInsert) {
-            insert.run(course.id, course.name, course.category, JSON.stringify(course.forms), course.origin, course.status, course.note, course.createdAt);
-          }
-          writeLog(db, { entity: "课程", action: "同步", targetId: "", summary: `从网站同步了 ${toInsert.length} 门课程：${merged.added.join("、")}` });
-        });
-        run();
-      }
-      return { status: 200, payload: { added: merged.added, total: courseRows(db).length } };
-    },
-  },
-};
-
-/** 数据库里的课程行 → 课程库纯函数要的形状。 */
-function courseRows(db: Database.Database): ReturnType<typeof toCourse>[] {
-  return (db.prepare("SELECT * FROM courses ORDER BY category, name").all() as Row[]).map(toCourse);
-}
 
 
-  /** 作业与阶段测评：只记录，不动课时与钱（课堂记录会动课时，另行处理）。 */
-  const recordRoutes: Record<string, { method: string; handle: (db: Database.Database, body: Record<string, unknown>) => WriteResult }> = {
-    "/api/homework/create": {
-      method: "POST",
-      handle: (db, body) => {
-        const id = nextId("hw");
-        db.prepare(
-          "INSERT INTO homework_records (id, student_id, date, subject, submission, accuracy, weak_points, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ).run(id, String(body.studentId ?? ""), String(body.date ?? ""), String(body.subject ?? ""), String(body.submission ?? ""), String(body.accuracy ?? ""), String(body.weakPoints ?? ""), String(body.note ?? ""));
-        writeLog(db, { entity: "作业", action: "新建", targetId: id, summary: `记录作业：${String(body.subject ?? "")}` });
-        return { status: 201, payload: toHomework(db.prepare("SELECT * FROM homework_records WHERE id = ?").get(id) as Row) };
-      },
-    },
-    "/api/assessments/add": {
-      method: "POST",
-      handle: (db, body) => {
-        const id = nextId("as");
-        db.prepare(
-          "INSERT INTO assessments (id, student_id, subject, date, score, previous_score, weak_points, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ).run(id, String(body.studentId ?? ""), String(body.subject ?? ""), String(body.date ?? ""), body.score === undefined || body.score === null ? null : Number(body.score), body.previousScore === undefined || body.previousScore === null ? null : Number(body.previousScore), String(body.weakPoints ?? ""), String(body.note ?? ""));
-        writeLog(db, { entity: "测评", action: "新建", targetId: id, summary: `阶段测评：${String(body.subject ?? "")}` });
-        return { status: 201, payload: toAssessment(db.prepare("SELECT * FROM assessments WHERE id = ?").get(id) as Row) };
-      },
-    },
-    "/api/logs/clear": {
-      method: "POST",
-      handle: (db) => {
-        const before = (db.prepare("SELECT COUNT(*) AS n FROM logs").get() as { n: number }).n;
-        const run = db.transaction(() => {
-          db.prepare("DELETE FROM logs").run();
-          writeLog(db, { entity: "数据", action: "清空日志", targetId: "", summary: `清空了 ${before} 条操作日志` });
-        });
-        run();
-        return { status: 200, payload: { cleared: before } };
-      },
-    },
-  };
+
+
 
 /* ── 通用增删改（教师 / 教室 / 课程 / 学生 / 排课）────────────────────── */
 
-type CrudSpec = {
-  path: string;
-  table: string;
-  /** 页面字段（camelCase）→ 数据库列（snake_case）。 */
-  columns: Record<string, string>;
-  /** 这些字段在数据库里是 JSON 文本。 */
-  json: string[];
-  /** 这些字段在数据库里是 0/1。 */
-  bool: string[];
-  to: (row: Row) => unknown;
-  label: string;
-  /** 删除前的护栏（返回 null 表示允许删）。 */
-  guardDelete?: (db: Database.Database, id: string) => string | null;
-};
 
-const CRUD: CrudSpec[] = [
-  {
-    path: "teachers", table: "teachers", label: "教师",
-    columns: { name: "name", role: "role", subjects: "subjects", phone: "phone", active: "active" },
-    json: ["subjects"], bool: ["active"], to: toTeacher,
-  },
-  {
-    path: "classrooms", table: "classrooms", label: "教室",
-    columns: { name: "name", capacity: "capacity", kind: "kind", availability: "availability", note: "note" },
-    json: ["availability"], bool: [], to: toClassroom,
-  },
-  {
-    path: "courses", table: "courses", label: "课程",
-    columns: { name: "name", category: "category", forms: "forms", origin: "origin", status: "status", note: "note", createdAt: "created_at" },
-    json: ["forms"], bool: [], to: toCourse,
-    // 网站来源的课程跟着内容文件走：删了下次同步又会回来，改成「暂未开放」才对
-    guardDelete: (db, id) => {
-      const row = db.prepare("SELECT name, origin FROM courses WHERE id = ?").get(id) as
-        | { name: string; origin: string }
-        | undefined;
-      if (row === undefined) return null;
-      return row.origin === "网站"
-        ? `「${row.name}」是网站上的课程，跟着内容文件走：删了下次同步还会回来，请改成「暂未开放」。`
-        : null;
-    },
-  },
-  {
-    path: "students", table: "students", label: "学生",
-    columns: { name: "name", grade: "grade", guardian: "guardian", status: "status", note: "note", createdAt: "created_at", enrollments: "enrollments", profile: "profile" },
-    json: ["enrollments", "profile"], bool: [], to: toStudent,
-    /*
-     * 护栏：**有账的学生不能直接删**。
-     * 之前就是因为删档案不连带清账，留下了 18 条"没有主人"的收费记录。
-     * 这里宁可拒绝删除并要求先处理账目 —— 账本不该被档案操作牵连。
-     */
-    guardDelete: (db, id) => {
-      const payments = (db.prepare("SELECT COUNT(*) AS n FROM payments WHERE student_id = ?").get(id) as { n: number }).n;
-      const txs = (db.prepare("SELECT COUNT(*) AS n FROM transactions WHERE student_id = ?").get(id) as { n: number }).n;
-      if (payments === 0 && txs === 0) return null;
-      return `这位学生还有 ${payments} 条收款记录、${txs} 条课时流水，不能直接删除。请先处理他的收款与课时（退课 / 退款会留痕），再删档案。`;
-    },
-  },
-  {
-    path: "inquiries", table: "inquiries", label: "咨询",
-    columns: {
-      studentName: "student_name", grade: "grade", guardian: "guardian", subject: "subject",
-      durationMinutes: "duration_minutes", intervalWeeks: "interval_weeks",
-      plannedLessons: "planned_lessons", startsAt: "starts_at", candidates: "candidates",
-      preferredTeacherId: "preferred_teacher_id", preferredClassroomId: "preferred_classroom_id",
-      skipDates: "skip_dates", status: "status", note: "note",
-      scheduledLessonIds: "scheduled_lesson_ids", createdAt: "created_at",
-    },
-    json: ["candidates", "skipDates", "scheduledLessonIds"], bool: [], to: toInquiry,
-  },
-  {
-    path: "lessons", table: "lessons", label: "排课",
-    columns: { subject: "subject", form: "form", teacherId: "teacher_id", classroomId: "classroom_id", studentIds: "student_ids", startsAt: "starts_at", durationMinutes: "duration_minutes", status: "status", note: "note", makeupForLessonId: "makeup_for_lesson_id" },
-    json: ["studentIds"], bool: [], to: toLesson,
-    // 已上过的课课时已经扣了：删掉会让流水指向一节不存在的课，只能先撤销
-    guardDelete: (db, id) => {
-      const used = (db.prepare("SELECT COUNT(*) AS n FROM transactions WHERE lesson_id = ?").get(id) as { n: number }).n;
-      return used === 0 ? null : "这节课已经记过课时流水（扣过课时），不能删除：请先撤销这节课的课时记录。";
-    },
-  },
-];
 
-/** 路径 → CRUD 规格；同时给出 id（列表接口没有 id）。 */
-function matchCrud(pathname: string): { spec: CrudSpec; id: string } | null {
-  const match = /^\/api\/([a-z]+)(?:\/([^/]+))?$/.exec(pathname);
-  if (match === null) return null;
-  const spec = CRUD.find((item) => item.path === match[1]);
-  return spec === undefined ? null : { spec, id: match[2] ?? "" };
-}
 
-function crudRow(db: Database.Database, spec: CrudSpec, id: string): Row | undefined {
-  return db.prepare(`SELECT * FROM ${spec.table} WHERE id = ?`).get(id) as Row | undefined;
-}
 
-/** 从请求体里挑出允许改的字段（只认表里有的列，避免脏字段直接进 SQL）。 */
-function buildColumns(spec: CrudSpec, body: Record<string, unknown>): { columns: string[]; values: unknown[] } {
-  const columns: string[] = [];
-  const values: unknown[] = [];
-  for (const [field, column] of Object.entries(spec.columns)) {
-    if (!(field in body)) continue;
-    const value = body[field];
-    columns.push(column);
-    if (spec.json.includes(field)) values.push(JSON.stringify(value ?? []));
-    else if (spec.bool.includes(field)) values.push(value === true || value === 1 ? 1 : 0);
-    else values.push(value as string | number);
-  }
-  return { columns, values };
-}
 
-function handleCrud(
-  db: Database.Database,
-  method: string,
-  pathname: string,
-  body: Record<string, unknown>,
-): WriteResult | null {
-  const matched = matchCrud(pathname);
-  if (matched === null) return null;
-  const { spec, id } = matched;
-
-  if (method === "POST" && id === "") {
-    // 学生与排课有专用接口（校验更严：姓名必填、时间必须合法），不要被通用新增抢走
-    if (spec.path === "students" || spec.path === "lessons") return null;
-    const { columns, values } = buildColumns(spec, body);
-    if (columns.length === 0) return { status: 400, payload: { error: "没有可写入的字段" } };
-    const newId = nextId(spec.path.slice(0, 2));
-    const all = ["id", ...columns];
-    const run = db.transaction(() => {
-      db.prepare(`INSERT INTO ${spec.table} (${all.join(", ")}) VALUES (${all.map(() => "?").join(", ")})`).run(newId, ...values);
-      writeLog(db, { entity: spec.label, action: "新建", targetId: newId, summary: `新建${spec.label}「${String(body.name ?? "")}」` });
-    });
-    try {
-      run();
-    } catch (cause) {
-      return { status: 400, payload: { error: cause instanceof Error ? cause.message : "写入失败" } };
-    }
-    return { status: 201, payload: spec.to(crudRow(db, spec, newId)!) };
-  }
-
-  if (method === "PATCH" && id !== "") {
-    const row = crudRow(db, spec, id);
-    if (row === undefined) return { status: 404, payload: { error: `没有这条${spec.label}记录` } };
-    const { columns, values } = buildColumns(spec, body);
-    if (columns.length === 0) return { status: 400, payload: { error: "没有可更新的字段" } };
-    const run = db.transaction(() => {
-      db.prepare(`UPDATE ${spec.table} SET ${columns.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`).run(...values, id);
-      writeLog(db, { entity: spec.label, action: "修改", targetId: id, summary: `修改${spec.label}（${columns.join("、")}）` });
-    });
-    try {
-      run();
-    } catch (cause) {
-      return { status: 400, payload: { error: cause instanceof Error ? cause.message : "更新失败" } };
-    }
-    return { status: 200, payload: spec.to(crudRow(db, spec, id)!) };
-  }
-
-  if (method === "DELETE" && id !== "") {
-    const row = crudRow(db, spec, id);
-    if (row === undefined) return { status: 404, payload: { error: `没有这条${spec.label}记录` } };
-    const reason = spec.guardDelete?.(db, id) ?? null;
-    if (reason !== null) return { status: 400, payload: { error: reason } };
-    const run = db.transaction(() => {
-      db.prepare(`DELETE FROM ${spec.table} WHERE id = ?`).run(id);
-      writeLog(db, { entity: spec.label, action: "删除", targetId: id, summary: `删除${spec.label}` });
-    });
-    run();
-    return { status: 200, payload: { deleted: true, id } };
-  }
-
-  return null;
-}
 
 /**
  * 允许的来源：本机开发（localhost / 127.0.0.1 的任意端口）。
@@ -1101,16 +247,14 @@ function requireAuth(request: IncomingMessage, response: ServerResponse): Sessio
     return null;
   }
   /*
-   * 按会话记操作人，两套日志写入都要用它：
-   *   - `api.setOperator` 影响走 kv 快照的那一套（页面用的）；
-   *   - `currentOperator` 影响服务端自己写 SQL 的那一套（老 REST 接口用的）。
-   * 少设哪一个，都会让"谁改的"在其中一条路上变成默认值。
+   * 按会话记操作人：**每个请求都要重设一次**，这是"前端调 setOperator 也不能冒充别人"
+   * 这条性质成立的前提（见权限闸门那一节）。
    *
-   * 这两处确实是模块级状态（与 api.ts 的 operatorName 一致），因此**每个请求**都要重设一次：
-   * 这是"前端调 setOperator 也不能冒充别人"这条性质成立的前提（见权限闸门那一节）。
+   * 现在只有这一个通道：服务端自己的操作（账号管理、节假日抓取）也走
+   * `__appendSystemLog` → 同一份快照日志，因此"谁改的"只有一处来源。
+   * （早先还有第二个模块级变量 `currentOperator` 给 SQL 日志表用，随老 REST 一起删了。）
    */
   void api.setOperator(session.username);
-  currentOperator = session.username;
   /*
    * 行级范围（Phase B）也在这里按会话设一次 —— 与操作人是**同一套机制、同一处调用点**。
    *
@@ -1168,8 +312,8 @@ async function scopeWarningFor(scope: SessionScope): Promise<string> {
  *      "页面对服务层的形状"了。
  *
  * 所以这四条路由是**服务端自己的接口**（页面用 `lib/auth/accounts.ts` 直接 fetch），
- * 也因此在 `REST_CONTRACT_METHODS` 里是 `contract: null`（登录即可），
- * 角色判定由下面的 `accountsRouteDenial` 自己判一次。
+ * 统一闸门只管"登录"这一层，角色判定由下面的 `accountsRouteDenial` 自己判一次
+ * （判定数据仍然是 `lib/auth/roles.ts` 的 `canAccess`，不另写一套规则）。
  *
  * ## 口径与纪律
  *
@@ -1179,8 +323,8 @@ async function scopeWarningFor(scope: SessionScope): Promise<string> {
  *     （`listAccounts()` 给的是 `AccountSummary`），口令只在**写入时**收一次；
  *   - **参数错 400 / 没有这条 404 / 只读钩子 409 / 落盘失败 500**：判定在
  *     `server/accounts.mts` 里做，状态码跟着结果一起回来（不在这一层重新解释一遍）；
- *   - **留痕**：写成功之后用库里那条日志通道记一条（`writeLog`，与老 REST 接口同一个写法），
- *     操作人来自会话，**口令不进日志**；
+ *   - **留痕**：写成功之后记一条操作日志（`__appendSystemLog` → 与业务日志**同一份**，
+ *     界面上的「操作日志」页就能看到），操作人来自会话，**口令不进日志**；
  *   - 每条路由都要过统一闸门（未登录 401）—— 这一段在 `createServer` 里排在闸门**之后**。
  */
 
@@ -1352,7 +496,7 @@ async function handleAccountsRoute(
     }
     const warning = await accountScopeWarning(result.account.roles, result.account.teacherId);
     // 留痕：谁在什么时候开了哪个账号、什么角色。**口令不进日志**（日志会被导出、被人翻）
-    writeLog(db, {
+    __appendSystemLog({
       entity: "账号",
       action: "新建",
       targetId: result.account.username,
@@ -1437,7 +581,7 @@ async function handleAccountsRoute(
             ? "停用"
             : "启用"
           : "修改";
-    writeLog(db, {
+    __appendSystemLog({
       entity: "账号",
       action,
       targetId: result.account.username,
@@ -1460,7 +604,7 @@ async function handleAccountsRoute(
       send(response, removed.status, { ok: false, error: removed.error });
       return;
     }
-    writeLog(db, {
+    __appendSystemLog({
       entity: "账号",
       action: "删除",
       targetId: removed.username,
@@ -1701,10 +845,10 @@ async function handleHolidaysRoute(
   if (written.length > 0) {
     /*
      * 写一条操作日志：这张表会影响排课与家长沟通，事后要说得清"哪一年是什么时候导进来的"。
-     * 操作人由会话决定（`requireAuth` 每个请求开头设过 `currentOperator`），
+     * 操作人由会话决定（`requireAuth` 每个请求开头调过 `api.setOperator`），
      * 因此这里不传、也传不了 —— 与 `/api/call` 的纪律一致。
      */
-    writeLog(db, {
+    __appendSystemLog({
       entity: "holidays",
       action: "刷新",
       targetId: written.join(","),
@@ -1847,221 +991,12 @@ function permissionError(method: string, roles: readonly Role[]): string | null 
   return teacherScopeDenial(method, roles);
 }
 
-/**
- * 老 REST 接口 → **契约里的方法名**（拿到方法名后交给 `permissionError`，角色判定在 roles.ts）。
- *
- * 为什么要逐条列：这些路径**不是方法名**（`/api/today` 对应 `today`、
- * `/api/pricing/save` 对应 `pricing.update`、`/api/logs` 对应 `logs.list`…），
- * 没有"按规则推导"的可能，只能写下来。写在这里的好处是**看得完**：
- * 新增老接口时漏了一行，它会被下面的兜底拒绝掉，而不是悄悄对所有角色开放。
- * 顺序有讲究：**具体的在前、泛化的在后**（`/api/students/get` 必须排在 `/api/students` 前面）。
- */
-const REST_CONTRACT_METHODS: ReadonlyArray<{
-  http: string | "*";
-  pattern: RegExp;
-  /** 对应的契约方法名；null 表示"登录即可"的接口（见 note）。 */
-  contract: string | null;
-  note: string;
-}> = [
-  /*
-   * 这两个不是业务接口，刻意"只要登录就放行"：
-   *   - `/api/call` 是自己的一道门，它按**方法名**在 callApi 里判（见那里的闸门）；
-   *   - `/api/status` 是服务状态（库路径、表条数、备份状态），登录了就说明是自己人，
-   *     而且它不属于 `API_CONTRACT` 的任何分组（分组是按业务方法划的）。
-   *     把它按 ops 拦会让"连上后端了吗"这类探活在非技术管理员那里变成 403，
-   *     而那与权限无关 —— 会让排障时看到假故障。
-   */
-  { http: "POST", pattern: /^\/api\/call$/, contract: null, note: "统一调用入口：按方法名在 callApi 里判" },
-  { http: "*", pattern: /^\/api\/status$/, contract: null, note: "服务状态：登录即可（不属于任何业务分组）" },
 
-  /*
-   * 账号管理（`/api/accounts`）：**登录即可过这道闸门，角色判定在路由里自己那一节**。
-   *
-   * 为什么不给它一个契约方法名（像其它路由那样走 `permissionError`）：账号表是服务端进程里
-   * 的一个文件，服务层的 `api`（`lib/backend/api.ts`）在浏览器里也跑、没有文件访问，
-   * 因此账号管理**刻意不做成服务层方法**，也就不在 `API_CONTRACT` 里。
-   * 而 `permissionError` 的输入正是"契约方法名"（查不到归属就一律关门），
-   * 硬塞一个假方法名进去只会让"这个方法到底存不存在"变成一句假话。
-   *
-   * 于是它自己判一次（`accountsRouteDenial`，只有技术管理员），**仍然用同一个
-   * `canAccess` 与同一句文案形状** —— 判定数据只有 `lib/auth/roles.ts` 那一份。
-   * 这四条必须逐条列出来：漏一条会落到下面的兜底（"没有登记归属"）而被全拒，
-   * 那种 403 会让人以为是权限配错了，其实是路由表少了一行。
-   */
-  { http: "GET", pattern: /^\/api\/accounts$/, contract: null, note: "账号列表（技术管理员；路由内判定）" },
-  { http: "POST", pattern: /^\/api\/accounts$/, contract: null, note: "新建账号（技术管理员；路由内判定）" },
-  { http: "PATCH", pattern: /^\/api\/accounts$/, contract: null, note: "改账号（技术管理员；路由内判定）" },
-  { http: "DELETE", pattern: /^\/api\/accounts$/, contract: null, note: "删账号（技术管理员；路由内判定）" },
 
-  /*
-   * 节假日表（`/api/holidays`）：**登录即可过这道闸门**，抓取那条的角色判定在路由里
-   * （`holidaysRefreshDenial`，只有技术管理员）。不给契约方法名的理由与账号管理同一段
-   * （见上面）：它读写的是服务端机器上的文件 + 走外网，浏览器里那份 `api` 做不了。
-   *
-   * 与账号管理一样，**每条都得逐条列出来**：漏一条会落到下面的兜底（"没有登记归属"）
-   * 而被全拒 —— 那种 403 会让人以为是权限配错了，其实是路由表少了一行。
-   */
-  { http: "GET", pattern: /^\/api\/holidays$/, contract: null, note: "节假日表（登录即可；只读）" },
-  { http: "POST", pattern: /^\/api\/holidays$/, contract: null, note: "不存在的用法：路由内回 405 并说清该用哪个路径（登记它是为了别落进「没登记归属」的 403）" },
-  { http: "POST", pattern: /^\/api\/holidays\/refresh$/, contract: null, note: "抓取节假日（技术管理员；路由内判定）" },
 
-  /*
-   * 测试钩子（只有 `NEXGENEDU_TEST_HOOKS=1` 时才存在，否则 404）：
-   * 自检要在两种后端（内存 / 真实 HTTP）上都能收尾夹具，因此需要一条能到达服务端库的入口。
-   */
-  { http: "POST", pattern: /^\/api\/test-hooks\/remove-fixture$/, contract: null, note: "夹具收尾（默认关：路径存在但回 404）" },
 
-  /* 读接口（ROUTES / READS）：按它读的东西对应的方法名翻译 */
-  { http: "GET", pattern: /^\/api\/students$/, contract: "students.list", note: "学生列表" },
-  { http: "GET", pattern: /^\/api\/students\/get$/, contract: "students.get", note: "单个学生" },
-  { http: "GET", pattern: /^\/api\/teachers$/, contract: "teachers.list", note: "教师列表" },
-  { http: "GET", pattern: /^\/api\/teachers\/active$/, contract: "teachers.listActive", note: "在职教师（排课下拉）" },
-  { http: "GET", pattern: /^\/api\/classrooms$/, contract: "classrooms.list", note: "教室列表" },
-  { http: "GET", pattern: /^\/api\/courses$/, contract: "courses.list", note: "课程列表" },
-  { http: "GET", pattern: /^\/api\/lessons$/, contract: "lessons.list", note: "排课列表" },
-  { http: "GET", pattern: /^\/api\/inquiries$/, contract: "inquiries.list", note: "咨询列表" },
-  { http: "GET", pattern: /^\/api\/today$/, contract: "today", note: "今日概览" },
-  { http: "GET", pattern: /^\/api\/payments$/, contract: "payments.list", note: "收款记录" },
-  { http: "GET", pattern: /^\/api\/transactions$/, contract: "transactions.listByStudent", note: "课时流水（按学生查）" },
-  { http: "GET", pattern: /^\/api\/lesson-records$/, contract: "lessonRecords.list", note: "课堂记录" },
-  { http: "GET", pattern: /^\/api\/homework$/, contract: "homework.list", note: "作业记录" },
-  { http: "GET", pattern: /^\/api\/assessments$/, contract: "assessments.list", note: "阶段测评" },
-  { http: "GET", pattern: /^\/api\/logs$/, contract: "logs.list", note: "操作日志" },
 
-  /* 报价与课程库（PRICING_ROUTES）：读与写都在那一个表里，逐条对上方法名 */
-  { http: "GET", pattern: /^\/api\/pricing$/, contract: "pricing.get", note: "读报价配置" },
-  { http: "POST", pattern: /^\/api\/pricing\/save$/, contract: "pricing.update", note: "保存报价配置" },
-  { http: "POST", pattern: /^\/api\/pricing\/reset$/, contract: "pricing.reset", note: "恢复默认报价" },
-  { http: "POST", pattern: /^\/api\/pricing\/quote$/, contract: "pricing.quote", note: "试算报价" },
-  { http: "POST", pattern: /^\/api\/pricing\/teacher-fee$/, contract: "pricing.teacherFee", note: "教师课时费" },
-  { http: "GET", pattern: /^\/api\/pricing\/export-markdown$/, contract: "pricing.exportMarkdown", note: "导出报价 Markdown" },
-  { http: "GET", pattern: /^\/api\/courses\/summary$/, contract: "courses.summary", note: "课程库汇总" },
-  { http: "POST", pattern: /^\/api\/courses\/sync-from-site$/, contract: "courses.syncFromSite", note: "从网站同步课程" },
 
-  /* 作业 / 测评 / 日志的专用写接口 */
-  { http: "POST", pattern: /^\/api\/homework\/create$/, contract: "homework.create", note: "新建作业记录" },
-  { http: "POST", pattern: /^\/api\/assessments\/add$/, contract: "assessments.add", note: "新增阶段测评" },
-  { http: "POST", pattern: /^\/api\/logs\/clear$/, contract: "logs.clear", note: "清空操作日志" },
-  { http: "DELETE", pattern: /^\/api\/homework\/[^/]+$/, contract: "homework.remove", note: "删除作业记录" },
-  { http: "DELETE", pattern: /^\/api\/assessments\/[^/]+$/, contract: "assessments.remove", note: "删除阶段测评" },
-
-  /* 业务动作（WRITES）：一个请求 = 一个事务的那些 */
-  { http: "POST", pattern: /^\/api\/students\/[^/]+\/enroll$/, contract: "students.enroll", note: "报课" },
-  { http: "POST", pattern: /^\/api\/lessons\/[^/]+\/complete$/, contract: "lessons.markCompleted", note: "标记已上" },
-  { http: "POST", pattern: /^\/api\/students\/[^/]+\/enrollments\/[^/]+\/renew$/, contract: "students.renewEnrollment", note: "续费" },
-  { http: "POST", pattern: /^\/api\/students\/[^/]+\/enrollments\/[^/]+\/refund$/, contract: "students.refundEnrollment", note: "退课退款" },
-  { http: "GET", pattern: /^\/api\/students\/[^/]+\/enrollments\/[^/]+\/refund-quote$/, contract: "students.refundEnrollment", note: "退费试算（与退课同一件事的预览，不单独放宽）" },
-  { http: "POST", pattern: /^\/api\/payments$/, contract: "payments.record", note: "收款 / 退款" },
-];
-
-/**
- * 通用增删改（`/api/teachers`、`/api/students/<id>`…）的资源名。
- *
- * 这些路径的形状和契约里的方法前缀**同名**（`students` → `students.create`），
- * 所以能按"资源 + 请求方法"推出来，不用在表里写 6 × 3 行
- * （那种表没人会去核对，而漏一行就是"这个资源可以对所有人开放"）。
- */
-const REST_CRUD_RESOURCES = ["students", "teachers", "classrooms", "courses", "lessons", "inquiries"] as const;
-
-/** 老 REST 的写方法 → 契约里的动作名（与 `handleCrud` 的行为一致：POST 建、PATCH 改、DELETE 删）。 */
-const REST_CRUD_VERBS: Record<string, string> = { POST: "create", PATCH: "update", DELETE: "remove" };
-
-/**
- * 老 REST 请求该按哪个契约方法判权限。
- *
- * 顺序原则：**具体的表在前、泛化的规则在后**。`/api/students/get` 必须先匹配到
- * `students.get`；将来加规则时也要照这个顺序想一遍，别让泛化规则把具体接口吃掉。
- */
-type RestTarget =
-  /** 登录即可（`/api/call` 与 `/api/status`，见表里的说明）。 */
-  | { kind: "exempt" }
-  | { kind: "contract"; method: string }
-  /** 路径在这个文件里认不出来 —— 拒绝（理由见 `resolveRestContract` 末尾）。 */
-  | { kind: "unregistered" };
-
-function resolveRestContract(httpMethod: string, pathname: string): RestTarget {
-  for (const entry of REST_CONTRACT_METHODS) {
-    if (entry.http !== "*" && entry.http !== httpMethod) continue;
-    if (entry.pattern.test(pathname)) {
-      return entry.contract === null ? { kind: "exempt" } : { kind: "contract", method: entry.contract };
-    }
-  }
-  const crudPath = /^\/api\/([a-z]+)(?:\/[^/]+)?$/.exec(pathname);
-  const resource = crudPath?.[1] ?? "";
-  const verb = REST_CRUD_VERBS[httpMethod];
-  if (verb !== undefined && (REST_CRUD_RESOURCES as readonly string[]).includes(resource)) {
-    return { kind: "contract", method: `${resource}.${verb}` };
-  }
-  /*
-   * 认不出来的路径：**不是"放过去让它自己 404"**，而是拒掉。
-   *
-   * 理由与 `/api/call` 那边一样，但这里更隐蔽：老 REST 的路径表与处理分支是**两处**
-   * （表在上面、分支在下面），将来加一个分支忘了加一行，这条兜底就是唯一还在拦它的东西。
-   * 所以这里得出"没有归属"的结论，由调用方拒掉 —— 顺带把那句"请补一行"的提示带出去。
-   */
-  return { kind: "unregistered" };
-}
-
-/**
- * 老 REST 接口的**角色**闸门（登录闸门之后、任何处理之前跑一次）。
- *
- * 放在"一处"而不是每个分支里各写一遍：逐个分支加判断一定会漏，
- * 而漏掉的那一个就是"门锁了、窗户开着"。
- */
-function requireRestPermission(
-  httpMethod: string,
-  pathname: string,
-  session: Session,
-  response: ServerResponse,
-): boolean {
-  const target = resolveRestContract(httpMethod, pathname);
-  if (target.kind === "exempt") return true;
-  const denied =
-    target.kind === "unregistered"
-      ? `这个接口没有登记权限归属：${httpMethod} ${pathname}。` +
-        "如果是新加的老接口，请在 server/index.mts 的 REST_CONTRACT_METHODS 里补一行" +
-        "（路径 → 契约方法名），也顺便确认一下路径有没有写错；没登记的接口一律拒绝。"
-      : permissionError(target.method, session.roles);
-  if (denied === null) {
-    const restDenied = teacherRestDenial(session);
-    if (restDenied === null) return true;
-    send(response, 403, { ok: false, error: restDenied });
-    return false;
-  }
-  send(response, 403, { ok: false, error: denied });
-  return false;
-}
-
-/**
- * **老 REST 接口对普通教师整条关门**（Phase B 的一个刻意取舍）。
- *
- * ## 为什么
- *
- * 行级范围是在**服务层**（`lib/backend/api.ts`）按 `teacherId` 过滤实现的，
- * 而老 REST 接口（路线 A 留下的参考实现）**压根不走服务层**：它直接拿自己的 SQL 表
- * 拼结果（见 docs/后端开发方案.md §5.2.2）。于是 `GET /api/students` 会返回
- * **全校学生**，把范围整个绕过去 —— 而这两条路读写的是同一个库，只挡一条等于没挡
- * （第 6 步加登录时就踩过这个坑：`/api/students` 忘了挡，未登录也能读走学生数据）。
- *
- * 三个选择，选第三个：
- *   1. 在老 REST 里再实现一遍范围过滤 —— 等于把"谁该看到什么"写第二份，
- *      两份迟早分叉；而这条路本来就不再是页面的通路（页面只走 `/api/call`）；
- *   2. 装作没看见 —— 那就是留一个后门：教师带上自己的令牌 `curl /api/students`
- *      就能把全校学生读走；
- *   3. **对普通教师整条拒绝**（默认关门）：这条路没有范围过滤，那就别让它服务"有范围的人"。
- *
- * 影响面很小：页面（`lib/backend/remote.ts`）、自检、验收、演练用的都是 `/api/call`；
- * 技术管理员 / 财务管理员 / 招生老师**完全不受影响**（他们本来就没有行级范围）。
- * `/api/call` 与 `/api/status` 是"登录即可"的例外（`exempt`），保持原样。
- */
-function teacherRestDenial(session: Session): string | null {
-  if (!isPlainTeacher(session.roles)) return null;
-  return (
-    "普通教师不能用老 REST 接口（" +
-    "这条路直接读另一套表，没有行级范围过滤，所以对教师整条关闭）。" +
-    "后台页面走的是 /api/call，用页面就行；如果你是在调接口，请改用 POST /api/call。"
-  );
-}
 
 /** 还原远端代理显式标记的 Date（`{ __date: ISO }`），其余参数原样。 */
 function decodeArg(value: unknown): unknown {
@@ -2116,7 +1051,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
    * 这一条是踩出来的 —— 之前一个 SQL 表名写错，直接把整个服务打挂了（测试时报
    * ERR_EMPTY_RESPONSE / other side closed），那种故障在真机上就是"后台突然全打不开"。
    */
-  currentCors = (() => {
+  currentCors = ((): Record<string, string> => {
     const origin = allowedOrigin(request);
     return origin === ""
       ? {}
@@ -2305,7 +1240,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   if (url.pathname.startsWith("/api/")) {
     session = requireAuth(request, response);
     if (session === null) return;
-    if (!requireRestPermission(request.method ?? "GET", url.pathname, session, response)) return;
+
   }
 
   /*
@@ -2530,22 +1465,65 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
   }
 
   if (url.pathname === "/api/status") {
+    /*
+     * 条数从**真正的数据源**（kv 快照）里数，而不是从规范化表 ——
+     * 早先这里数的是那套空的规范化表：机构有 5 位教师，`/api/status` 报 `teachers: 0`，
+     * 而同一时刻界面里就有 5 位（数据在快照里）。运维照着它判断"库是不是空的"会走反方向。
+     *
+     * 键名保持不变（`students` / `lesson_records`…）：`lib/backend/connection.ts` 逐键比对
+     * 这份 counts 来决定"数据库细节有没有变"，改形状会牵动界面。
+     */
     const counts: Record<string, number> = {};
+    const snapshotText = serverStore.read(SNAPSHOT_KEY);
+    let snapshot: Record<string, unknown> = {};
+    try {
+      snapshot = snapshotText === null ? {} : (JSON.parse(snapshotText) as Record<string, unknown>);
+    } catch {
+      snapshot = {};
+    }
+    /** 表名 → 快照里的字段名（快照是 camelCase，表名是 snake_case）。 */
+    const SNAPSHOT_FIELDS: Record<string, string> = {
+      students: "students",
+      teachers: "teachers",
+      classrooms: "classrooms",
+      lessons: "lessons",
+      lesson_records: "lessonRecords",
+      homework_records: "homeworkRecords",
+      assessments: "assessments",
+      transactions: "transactions",
+      payments: "payments",
+      courses: "courses",
+      logs: "logs",
+      inquiries: "inquiries",
+      site_content: "siteContent",
+    };
     for (const table of COUNTED_TABLES) {
-      try {
-        counts[table] = (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
-      } catch {
-        counts[table] = -1; // -1 = 表还不存在（迁移没跑到那一步）
-      }
+      const value = snapshot[SNAPSHOT_FIELDS[table] ?? table];
+      counts[table] = Array.isArray(value) ? value.length : typeof value === "object" && value !== null ? 1 : 0;
     }
     send(response, 200, {
       ok: true,
       service: "nexgenedu-server",
-      stage: "read-only",
+      /*
+       * `stage` 原先写死成 `read-only` —— 而同一个进程的 `/api/call` 明明接受写入
+       * （审计指出：读这一行的人会以为服务是只读的）。现在如实写阶段名。
+       */
+      stage: "本机单用户（读写都开着）",
       db: DB_PATH,
       schemaVersion: currentVersion(db),
       migration: { from: migration.from, to: migration.to, applied: migration.applied },
-      routes: Object.keys(ROUTES),
+      /* 老 REST 已下线，这里列的是**当前真正存在的入口**。 */
+      routes: [
+        "POST /api/login",
+        "POST /api/logout",
+        "GET  /api/session",
+        "POST /api/call",
+        "GET  /api/status",
+        "GET  /api/public/site",
+        "GET|POST|PATCH|DELETE /api/accounts",
+        "GET /api/holidays",
+        "POST /api/holidays/refresh",
+      ],
       storage: "sqlite(kv)：与浏览器共用同一份 api.ts 实现",
       snapshotBytes: snapshotSize(db, "nexgenedu.admin.db.v1"),
       /*
@@ -2560,7 +1538,11 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
             latest: latestBackup()?.name ?? null,
             latestAt: latestBackup()?.at.toISOString() ?? null,
           },
-      writes: WRITES.map((route) => `${route.method} ${route.pattern.source.replaceAll("\\/", "/")}`),
+      /*
+       * 写入口只有两个：`/api/call`（方法级权限在 callApi 里判）与那几条独立路由。
+       * 老 REST 的写接口已下线（见路由里那段说明）。
+       */
+      writes: ["POST /api/call", "POST|PATCH|DELETE /api/accounts", "POST /api/holidays/refresh"],
       auth: { required: true, activeSessions: activeSessionCount() },
       counts,
       time: new Date().toISOString(),
@@ -2568,113 +1550,41 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
     return;
   }
 
-  // 写接口：方法 + 路径正则匹配；命中后在事务里执行
-  // 报价与课程库（读 + 写都在这里）
-  const pricingRoute = PRICING_ROUTES[url.pathname];
-  if (pricingRoute !== undefined && request.method === pricingRoute.method) {
-    void readBody(request)
-      .then((body) => {
-        const result = pricingRoute.handle(db, body, url);
-        send(response, result.status, result.payload);
-      })
-      .catch((cause: unknown) => send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" }));
-    return;
-  }
-
-  const deleteMatch = /^\/api\/(homework|assessments)\/([^/]+)$/.exec(url.pathname);
-  if (deleteMatch !== null && request.method === "DELETE") {
-    const table = deleteMatch[1] === "homework" ? "homework_records" : "assessments";
-    const id = deleteMatch[2] ?? "";
-    const info = db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
-    writeLog(db, { entity: deleteMatch[1] === "homework" ? "作业" : "测评", action: "删除", targetId: id, summary: "删除记录" });
-    send(response, info.changes > 0 ? 200 : 404, { deleted: info.changes > 0, id });
-    return;
-  }
-
-  const recordRoute = recordRoutes[url.pathname];
-  if (recordRoute !== undefined && request.method === recordRoute.method) {
-    void readBody(request)
-      .then((body) => {
-        const result = recordRoute.handle(db, body);
-        send(response, result.status, result.payload);
-      })
-      .catch((cause: unknown) => send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" }));
-    return;
-  }
-
-  if (request.method === "POST" || request.method === "PATCH" || request.method === "DELETE") {
-    // 先看通用增删改（教师/教室/课程/学生/排课），它带护栏
-    void readBody(request)
-      .then((body) => {
-        const result = handleCrud(db, request.method ?? "POST", url.pathname, body);
-        if (result === null) {
-          for (const route of WRITES) {
-            const match = route.pattern.exec(url.pathname);
-            if (match !== null && route.method === request.method) {
-              const written = route.handle(db, match, body);
-              send(response, written.status, written.payload);
-              return;
-            }
-          }
-          send(response, 404, { error: `还没有这个写接口：${request.method} ${url.pathname}` });
-          return;
-        }
-        send(response, result.status, result.payload);
-      })
-      .catch((cause: unknown) => {
-        send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" });
-      });
-    return;
-  }
-
-
-  /** 退费试算：只读，给出每种口径各退多少（页面在选择前要能看到差异）。 */
-  const refundQuote = /^\/api\/students\/([^/]+)\/enrollments\/([^/]+)\/refund-quote$/.exec(url.pathname);
-  if (refundQuote !== null) {
-    const student = loadStudent(db, refundQuote[1] ?? "");
-    const target = (student?.enrollments as Array<Record<string, unknown>> | undefined)?.find(
-      (item) => item.id === refundQuote[2],
-    );
-    if (student === null || target === undefined) {
-      send(response, 404, { error: "没有这条报课记录" });
-      return;
-    }
-    const requested = url.searchParams.get("policy");
-    const policies = (requested === null ? ["prorata", "list-clawback"] : [requested]).map((id) => {
-      const policy = findRefundPolicy(id);
-      const quote = policy.calculate({
-        totalLessons: Number(target.totalLessons ?? 0),
-        usedLessons: Number(target.usedLessons ?? 0),
-        agreedAmount: Number(target.agreedAmount ?? 0),
-        unitPrice: Number(target.unitPrice ?? 0),
-      });
-      return { id: policy.id, name: policy.name, refund: quote.refund, formula: quote.formula };
+  /*
+   * ── 老 REST 接口：**已下线**（2026-09 审计）─────────────────────────────────
+   *
+   * 它们（`/api/students`、`/api/payments`、`/api/pricing`…）是"路线 A"留下的参考实现：
+   * 读写的是**另一套规范化表**，而界面走 `/api/call` → `lib/backend/api.ts` → `kv` 快照。
+   * 于是同一个 `.db` 文件里有两套互相看不见的库，实测后果：
+   *
+   *   - `GET /api/students` 返回 `[]`（规范化表是空的），而界面里明明有学生；
+   *   - `POST /api/students` 返回 **201**，写进"界面永远不读的那套表"；
+   *   - 老的删除护栏（注释自陈"之前就是因为删档案不连带清账，留下了 18 条没有主人的收费记录"）
+   *     只挂在**这条路**上，而产品走的是另一条 ⇒ 那道护栏对机构而言是装饰；
+   *   - `/api/status` 报的也是这套空表的条数。
+   *
+   * 现在**一律 410 Gone** 并指路 `/api/call`：既不留"写进去没人读"的假成功，
+   * 也不留"读到空数据"的假失败。前端从第 5 步起就只走 `/api/call`，
+   * 因此对机构零影响；`scripts/check-auth.mts` 里有两个方向断言盯着它（未登录 401、登录 410）。
+   */
+  if (LEGACY_REST_PATH.test(url.pathname)) {
+    send(response, 410, {
+      ok: false,
+      error:
+        `这个接口已经下线：${request.method ?? "GET"} ${url.pathname}。` +
+        "它属于早期的参考实现（读写的是另一套表，与界面看到的数据不相通）。" +
+        "请改用统一入口 POST /api/call（{ method, args }），方法清单见 docs/后台API约定.md。",
     });
-    send(response, 200, { enrollmentId: target.id, policies });
     return;
   }
 
-  const readSpec = READS.find((item) => url.pathname === `/api/${item.path}`);
-  if (readSpec !== undefined) {
-    try {
-      send(response, 200, readRows(db, readSpec, url));
-    } catch (cause) {
-      send(response, 500, { error: cause instanceof Error ? cause.message : "查询失败" });
-    }
-    return;
-  }
-
-  const handler = ROUTES[url.pathname];
-  if (handler === undefined) {
-    send(response, 404, { error: `还没有这个接口：${url.pathname}` });
-    return;
-  }
-
-  try {
-    send(response, 200, handler(db, url));
-  } catch (cause) {
-    send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" });
-  }
+  /*
+   * 其余 `/api/` 路径：**明确 404**，而不是含混的 403。
+   *
+   * 早先这里回一句"这个接口没有登记权限归属：…请补一行"，把**路径写错**说成了权限问题 ——
+   * 排障的人会去翻权限表，而真正的原因是 URL 打错了（审计里那条）。
+   */
+  send(response, 404, { ok: false, error: `没有这个接口：${request.method ?? "GET"} ${url.pathname}` });
   } catch (cause) {
     send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" });
   }
@@ -2712,7 +1622,11 @@ server.listen(PORT, HOST, () => {
   if (dbLock.file !== "") {
     console.log(`[独占] 已持有单写者锁 ${dbLock.file.split("/").pop()}（同一个库不允许第二个后端进程）`);
   }
-  console.log(`只读接口：${Object.keys(ROUTES).join("、")}`);
+  console.log(
+    "接口：POST /api/call（统一入口，方法级权限在服务端判）、GET /api/status、" +
+      "GET|POST|DELETE /api/accounts、GET /api/holidays、POST /api/holidays/refresh" +
+      "（老 REST 接口已下线：调用它们会得到 410 与指路，见使用手册 §15.6）",
+  );
   /*
    * 凭证的来历必须说清楚：口令是"新生成"的时候**只打印这一次**。
    * 同时把文件位置说出来 —— 打印刷过去之后那里还能找回来（否则只能删库重来）。
