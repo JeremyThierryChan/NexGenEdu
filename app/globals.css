@@ -103,6 +103,28 @@
     outline-offset: 2px;
   }
 
+  /*
+   * 数字输入框**不要原生上下微调箭头**。
+   *
+   * 两个理由：
+   *   1. 它固定贴在输入框右缘，而我们的输入框右缘要放**单位文字**（「元 / 小时」「节」「分钟」）
+   *      —— 箭头与单位会叠在一起（机构反馈的"文字说明和上下微调冲突了"就是这个）；
+   *   2. 价格与课时这类数字**用键盘打更快**：点箭头要先把指针对准它、然后一格格调，
+   *      而这里填的是钱与课时，调错的代价比多打几个字高。
+   * 去掉的只是"微调控件"：输入框仍然是数字输入（手机上照样弹数字键盘、上下键也还能用）。
+   */
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    appearance: none;
+    margin: 0;
+  }
+
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
   /* 尊重用户的减少动效偏好 */
   @media (prefers-reduced-motion: reduce) {
     html {

@@ -10474,6 +10474,39 @@ console.log("\n=== 41. 报价与课程清单对齐（v37）===");
   // 报价页把"这个价折成课单价是多少"算给机构看（填 150 不会以为家长看到的也是 150）
   ok("报价页在基础价输入框下面列出了各时长的课单价",
     pricingPageSource.includes("元/小时 →") && pricingPageSource.includes("元/节"));
+
+  /*
+   * ⑤ 数字输入框的**原生上下微调箭头**不许回来，后缀也要按长度留够宽度。
+   *
+   * 机构反馈：「元/小时这个文字说明和输入框的上下微调价格的东西冲突了，把这个微调价格的
+   * 删掉，只接受文本输入」。两件事各自都会造成那种"叠在一起"：
+   *   1. 微调箭头固定贴在输入框右缘，而右缘放着单位文字；
+   *   2. 右侧留白原来固定 `pr-10`（40px）——「元 / 小时」有 4 个可见字（≈56px），会压住数字。
+   * 断言按"这两条路都堵上"来写（CSS 里去掉箭头 + 两个数字输入组件按后缀长度分档留白），
+   * 而不是"某个输入框现在写着 pr-16"—— 后者换个单位文字就又不对了。
+   */
+  const globalsCss = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  ok("原生微调箭头被全局去掉（它会和输入框右缘的单位文字叠在一起）",
+    globalsCss.includes('input[type="number"]::-webkit-inner-spin-button') &&
+      globalsCss.includes("-webkit-appearance: none"));
+  ok("Firefox 那条也写了（appearance: textfield）",
+    globalsCss.includes("appearance: textfield"));
+  const adminFields = readFileSync(
+    new URL("../components/admin/AdminFields.tsx", import.meta.url),
+    "utf8",
+  );
+  const siteNumberField = readFileSync(
+    new URL("../components/ui/NumberField.tsx", import.meta.url),
+    "utf8",
+  );
+  ok("两个数字输入框都按后缀长度留白（后台与网站各一份，不能只修一处）",
+    adminFields.includes("function suffixPadding(") && siteNumberField.includes("function suffixPadding("));
+  ok("而且旧写法（固定 `pr-10`）已经不存在",
+    !adminFields.includes('suffix !== undefined && "pr-10"') &&
+      !siteNumberField.includes('suffix !== undefined && "pr-10"'));
+  ok("报价页那个长后缀（元 / 小时）确实落在多留一档的写法上",
+    adminFields.includes('if (suffix.length <= 3) return "pr-10";') &&
+      adminFields.includes('if (suffix.length <= 5) return "pr-16";'));
   ok("报价页的「未导出上线」按内容文件比出来（不是看来源那一句话）",
     pricingPageSource.includes("publishedInSync") &&
       pricingPageSource.includes('"（未导出上线）"') &&

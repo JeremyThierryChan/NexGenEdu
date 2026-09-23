@@ -1,6 +1,19 @@
 import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils/cn";
 
+/**
+ * 后缀要占多宽，就给输入框留多宽（与后台的 `NumberInput` 同一套口径）。
+ *
+ * 固定 `pr-10` 只够放「元」「节」「人」；单位一变长（「元 / 小时」）就会压住数字。
+ * 原生上下微调箭头已经在 `app/globals.css` 里全局去掉了 —— 它与单位文字抢的是同一块地方。
+ */
+function suffixPadding(suffix: string | undefined): string {
+  if (suffix === undefined || suffix === "") return "";
+  if (suffix.length <= 3) return "pr-10";
+  if (suffix.length <= 5) return "pr-16";
+  return "pr-20";
+}
+
 type NumberFieldProps = {
   label: string;
   hint?: string;
@@ -31,7 +44,7 @@ export function NumberField({ label, hint, suffix, id, ...props }: NumberFieldPr
             "w-full rounded-md border border-ink-300 bg-white px-3 py-2.5 text-sm text-ink-800",
             "transition-colors hover:border-brand-400",
             "focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500",
-            suffix !== undefined && "pr-10",
+            suffixPadding(suffix),
           )}
           {...props}
         />

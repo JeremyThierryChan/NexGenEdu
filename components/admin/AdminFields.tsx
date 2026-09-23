@@ -72,6 +72,22 @@ export function TextAreaField({
   );
 }
 
+/**
+ * 后缀要占多宽，就得给输入框留多宽。
+ *
+ * 这里原先固定写 `pr-10`（40px）—— 够放「元」「节」「分钟」，但「**元 / 小时**」
+ * 有 4 个可见字（≈56px），后缀会压在输入的数字上；原生微调箭头又贴着右缘
+ * （已经在 `app/globals.css` 里全局去掉）。两处叠起来就是机构看到的那团混乱。
+ * 按后缀长度分档留白，比"再加一点"稳：换单位文字（例如「元 / 小时」→「元 / 课时」）
+ * 不用回来改这个文件。
+ */
+function suffixPadding(suffix: string | undefined): string {
+  if (suffix === undefined || suffix === "") return "";
+  if (suffix.length <= 3) return "pr-10";
+  if (suffix.length <= 5) return "pr-16";
+  return "pr-20";
+}
+
 export function NumberInput({
   label,
   hint,
@@ -85,7 +101,11 @@ export function NumberInput({
   return (
     <Field label={label} hint={hint}>
       <span className="relative block">
-        <input type="number" className={cn(CONTROL_CLASS, suffix !== undefined && "pr-10", className)} {...props} />
+        <input
+          type="number"
+          className={cn(CONTROL_CLASS, suffixPadding(suffix), className)}
+          {...props}
+        />
         {suffix !== undefined && (
           <span className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-xs text-ink-400">
             {suffix}
