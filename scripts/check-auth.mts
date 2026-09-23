@@ -1723,6 +1723,73 @@ try {
   console.error(`\n✗ 路由表那一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
 }
 
+/*
+ * ── 「业务拒绝」与「代码 bug」必须是两个不同的答复 ───────────────────────────────
+ *
+ * 起因是一段真实的误诊：`POST /api/call` 里所有异常都回了 400，而且把异常原文
+ * 直接回给浏览器。后果有两个，都很坏：
+ *
+ *   1. **代码 bug 被伪装成"你填错了"**：前端于是把「服务端崩了」当业务提示弹出来，
+ *      排障方向被带偏（看了半天表单校验，其实是后端读了个 undefined）。
+ *   2. **内部细节泄漏到浏览器**：异常消息里常有字段名、路径、堆栈上下文。
+ *
+ * 现在的口径：`api.ts` 里那些 `throw new Error("…")` 是**有意写给用户看的**业务拒绝
+ * （>400 且原文返回，前端直接展示），而 `TypeError` / `RangeError` / `ReferenceError`
+ * 这类是**代码写错了**（500 + 一个 `req_` 编号，原文只进服务端日志）。
+ *
+ * 为什么必须拿真实 HTTP 钉住：这条区分只在服务端那层存在 —— 内存模式下不经过
+ * `httpError`，跑得再绿也证明不了线上行为。
+ */
+console.log("\n[13] 业务拒绝 → 400 带原文；代码 bug → 500 带编号（两种答复不许混）");
+try {
+  await withTempServer(async (base, info) => {
+    const loginResponse = await raw(base, "/api/login", {
+      method: "POST",
+      body: { username: info.username, password: info.password },
+    });
+    const token = String(loginResponse.body.token ?? "");
+
+    const created = await call(base, token, "students.create", [
+      { name: "自检学员", phone: "13800000000", guardian: "家长", school: "自检中学", grade: "初二", subjects: [], note: "" },
+    ]);
+    const student = created.body.result as { id?: string } | null;
+    const sid = String(student?.id ?? "");
+    check("自检能造出一个学员（后面拿它触发业务拒绝）", sid !== "", JSON.stringify(created.body).slice(0, 200));
+
+    const emptyEnrollment = {
+      subject: "", lessons: 10, form: "1对1", teacherId: "", unitPrice: 0, agreedAmount: 0, startedAt: "", note: "",
+    };
+    const business = await call(base, token, "students.enroll", [sid, emptyEnrollment]);
+    equal("业务校验不通过 → 400（不是 500）", business.status, 400);
+    check("400 的文案就是 api.ts 里写给用户看的那句（前端可直接展示）",
+      String(business.body.error ?? "") === "报课科目不能为空。", JSON.stringify(business.body));
+    check("400 不带 req_ 编号（那不是「服务端出错了」）",
+      !String(business.body.error ?? "").includes("req_"), JSON.stringify(business.body));
+
+    // 参数类型写错 = 代码 bug：api.ts 里会 TypeError（读 undefined 的字段）
+    const bug = await call(base, token, "pricing.quote", []);
+    equal("代码 bug → 500（不是 400）", bug.status, 500);
+    const bugText = String(bug.body.error ?? "");
+    check("500 给出可上报的编号（req_xxxxxx）", /req_[a-z0-9]+/.test(bugText), bugText);
+    check("500 不泄漏内部细节（不出现 TypeError / undefined 这类字眼）",
+      !bugText.includes("TypeError") && !bugText.includes("undefined") && !bugText.includes("api.ts"), bugText);
+
+    /*
+     * 未登记权限归属的方法名：权限表先拒，根本走不到业务层。
+     *
+     * 这条钉的是**顺序**：如果哪天把权限检查挪到调用之后，一个拼错的方法名就会
+     * 变成"业务上的 400"，排障时又会被当成参数问题。
+     */
+    const unknown = await call(base, token, "students.someThingWrong", [sid]);
+    equal("没登记归属的方法名 → 403（权限表先拒，不是 400/500）", unknown.status, 403);
+    check("403 的文案指路到 lib/auth/roles.ts",
+      String(unknown.body.error ?? "").includes("roles.ts"), String(unknown.body.error ?? ""));
+  });
+} catch (cause) {
+  failures += 1;
+  console.error(`\n✗ 错误口径那一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
+}
+
 console.log(
   failures === 0
     ? "\n=== 服务端认证自检通过 ==="

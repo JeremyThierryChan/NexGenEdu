@@ -253,6 +253,28 @@ function httpError(cause: unknown, context: string): { status: number; payload: 
   if (cause instanceof VersionConflictError) {
     return { status: 409, payload: { ok: false, error: cause.message } };
   }
+  /*
+   * **业务拒绝**与**代码 bug** 怎么分（这一条是实测逼出来的）：
+   *
+   * `api.ts` 里所有"故意拒绝"都是 `throw new Error("中文说明…")` —— 例如
+   * "课时不足：某某还能排 3 节""这位学生还有 2 条收款记录…"。它们带的是
+   * **给操作人看的下一步**，必须原样回给界面（回 400：改一改就能成）。
+   *
+   * 而代码 bug 抛出来的是 `TypeError` / `RangeError` / `ReferenceError`
+   * （实测那次是 `Cannot read properties of undefined (reading 'courseName')`）——
+   * 那些**不是**"你参数改一改就行"，回 400 会把排障方向带偏，而且把内部原文
+   * 暴露给浏览器（局域网里任何设备都能调这个后端）。
+   *
+   * 因此按**错误类型**分，而不是按文案猜：这是稳定的判据。
+   */
+  const isBug =
+    !(cause instanceof Error) ||
+    cause instanceof TypeError ||
+    cause instanceof RangeError ||
+    cause instanceof ReferenceError;
+  if (!isBug) {
+    return { status: 400, payload: { ok: false, error: (cause as Error).message } };
+  }
   const id = `req_${Math.random().toString(36).slice(2, 8)}`;
   // 服务端日志里留下完整原因与堆栈 —— 排障靠它，界面靠那个编号对上
   console.error(`[请求失败 ${id}] ${context}`, cause);
@@ -1468,13 +1490,13 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
             return;
           }
           /*
-           * 这里剩下的都是**参数类**错误（`api.ts` 用 `throw new Error("课时不足：…")` 那种
-           * 业务拒绝）—— 它们都带着"该改什么"的信息，因此回 400 并把原文带出去。
-           * 但**不能**一律 400：`httpError` 会把"服务端自己的 bug"归到 500 并只回一个编号
-           * （见它的说明）。两类靠 `Error` 之外的类型区分不了，因此这里保持原样，
-           * 由下面的 `.catch`（读请求体/序列化失败）走 `httpError`。
+           * 剩下的交给 `httpError`：它按**错误类型**把"业务拒绝"（`Error`，回 400 并带原文）
+           * 与"代码 bug"（`TypeError` 之类，回 500 + 一个编号）分开 —— 见那里的说明。
+           * 早先这里一律 400 并把内部原文回给浏览器，实测过一次
+           * `Cannot read properties of undefined (reading 'courseName')` 就那样漏出去了。
            */
-          send(response, 400, { ok: false, error: cause instanceof Error ? cause.message : "调用失败" });
+          const { status, payload } = httpError(cause, `POST /api/call ${String(args[0] ?? "")}`);
+          send(response, status, payload);
         }
       })
       .catch((cause: unknown) => {

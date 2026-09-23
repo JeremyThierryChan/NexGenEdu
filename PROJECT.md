@@ -1425,6 +1425,16 @@ Student.profile                  键 → 值（文本 / 多选 / 表格）
 **四份审计的结论到此全部落地**：P0（数据与钱）、P1（账目与审计）、P2（界面坑）、P3（清理多余）
 各自独立提交，每阶段都跑全部门禁。
 
+**收尾时又自己抓出一处（审计没提到的）**：`/api/call` 把所有异常一律回 **400 + 异常原文**，
+于是"代码写错了"和"你参数填错了"在界面上长得一模一样。真实的坏结果是那次
+`pricing.quote` 读 `undefined` 字段（`Cannot read properties of undefined (reading 'courseName')`）：
+界面把它当业务提示弹出来，排障方向被引到表单校验上；而且这句内部原文回给了**局域网里任何
+设备**。现在按**异常类型**分（不猜文案）：业务拒绝（`api.ts` 里那些 `throw new Error("中文说明")`）
+→ 400 原文照回；`TypeError` / `RangeError` / `ReferenceError` / 非 `Error` → 500 + 一句人话 +
+`req_xxxxxx` 编号，完整堆栈只进服务端日志。`scripts/check-auth.mts` 的 `[13]` 节拿真实 HTTP
+钉住这两种答复（含"500 不许出现 `TypeError` 字样"与"400 不许带 `req_` 编号"），
+反向验证是把 `isBug` 改成恒 `false` → 三条断言报红。
+
 ### 节假日与调休（`/admin/holidays` + `data/holidays/<年>.json`，不占数据库版本）
 
 机构要"知道哪天是法定假日、哪天是调休上班日"（家长会问；假期是旺季、白天能排课，
