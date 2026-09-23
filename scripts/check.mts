@@ -54,6 +54,13 @@ import {
   noticeBranchOf,
   type NoticeBranch,
 } from "@/lib/admin/notice-layout";
+import {
+  clampScroll,
+  decodeScrollMemo,
+  encodeScrollMemo,
+  inPlaceScrollCorrection,
+  reloadRestoreTarget,
+} from "@/lib/admin/scroll-restore";
 import { dateKey } from "@/lib/backend/format";
 import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
@@ -5510,8 +5517,18 @@ console.log("\n=== 13. 界面稳定：就地动作不滚动、不塌页高 ===")
  *   A. **显式滚动**：`window.scrollTo` / `scrollIntoView` / `.scrollBy`。
  *      历史上课程库有两处：`startEdit` 里"把表单带到眼前"、`removeBand` 里
  *      "被拒时把人带到页顶那条原因跟前"。两处现在都不需要了 —— 编辑器就地展开、
- *      被拒的原因写在**被点的那个小节框里**。因此这条断言的口径是**一处都不允许**
- *      （白名单为空）。将来真要滚动，必须回来改这条断言并写清理由 ——
+ *      被拒的原因写在**被点的那个小节框里**。因此这条断言的口径是**除下面那个唯一
+ *      例外之外一处都不允许**（白名单是一个具体路径，不是"随便哪里都行"）。
+ *
+ *      **唯一的例外**：`components/admin/scroll-io.ts` 这一个文件可以写滚动，
+ *      而且只能写**恢复型**滚动 —— 它写进去的 `top` 必须是参数（源码级判据，见下面 A 组），
+ *      那个参数又只能来自纯函数 `inPlaceScrollCorrection` / `reloadRestoreTarget`
+ *      （判定表在 §15 穷举），两者的唯一出口都是"**记下来的那个位置**"。
+ *      为什么值得开这个口子：能把位置夹到 **0** 的只有整页重载（要夹到 0，文档必须塌到
+ *      不足一屏），而重载后 `RequireAuth` 先渲染一屏高的占位屏，把**浏览器本来就会做的**
+ *      那次恢复夹成了 0 —— 这一手补的是那个缺口，不是往页面里加"跳到哪里去"。
+ *
+ *      将来真要再加滚动，必须回来改这条断言并写清理由 ——
  *      那正是想要的效果：谁想再加一句"跳顶部"，得先过这一关。
  *
  *   B. **页高塌掉**：刷新时把列表换成一行"加载中…"、页面高度从很高塌成一行，
@@ -5564,11 +5581,60 @@ console.log("\n=== 13. 界面稳定：就地动作不滚动、不塌页高 ===")
   ok("源码扫描真的读到了文件（否则下面几条是空转的）", frontendSources.length > 100,
     `读到 ${frontendSources.length} 个文件`);
 
-  // ── A. 一处显式滚动都不许有 ────────────────────────────────────────────────
+  // ── A. 显式滚动：只允许"恢复型滚动"，而且只允许一个文件写 ──────────────────
   const scrollPattern = /window\.scrollTo\s*\(|scrollIntoView\s*\(|\.scrollTo\s*\(|\.scrollBy\s*\(/;
+  /*
+   * **白名单里只有一个文件**，判据也一起写死（不靠注释说好话）：
+   *
+   *   `components/admin/scroll-io.ts` 是全仓库唯一允许写滚动位置的地方，而且它写进去的
+   *   `top` 必须是**参数**、不许是字面量。
+   *
+   * 为什么允许这一处：机构反馈的"过一会儿跳到最顶部"里，唯一能把位置夹到 **0** 的机制是
+   * **整页重载**（要夹到 0，文档必须塌到不足一屏；页面上方少几十像素做不到）。
+   * 重载本身在页面里禁止不了，而**浏览器本来就会**在重载后把位置放回去 ——
+   * 只是后台外壳先渲染一屏高的"正在检查登录状态…"，那一刻恢复被夹成了 0。
+   * 所以补的这一手是"把浏览器本该做到的那一步做回来"：写回的是**记下来的位置**。
+   *
+   * 为什么这条断言**仍然防得住真正的乱滚动**：
+   *   1. 别处一句都不许有（白名单是一个具体路径，不是"随便哪里都行"）；
+   *   2. 那一个文件里也不许写常量 —— 下面第二条断言直接查
+   *      `scrollTo({ top: <标识符> })`：想写 `top: 0` 或 `top: document.body.scrollHeight`
+   *      都过不了；而只要 top 来自参数，它就只能写到调用方算出来的位置；
+   *   3. 调用方算出来的位置又由纯函数 `inPlaceScrollCorrection` /
+   *      `reloadRestoreTarget` 决定，那两个函数的判定表在第 14 节被穷举（都只有
+   *      "记下来的位置"这一种出口）。
+   */
+  const SCROLL_WRITE_WHITELIST = ["components/admin/scroll-io.ts"];
+  const filesWritingScroll = frontendSources
+    .filter((file) => scrollPattern.test(file.code))
+    .map((file) => file.path);
   eq(
-    "前端源码里一处显式滚动都没有（白名单为空；要加必须在此处写明理由）",
-    frontendSources.filter((file) => scrollPattern.test(file.code)).map((file) => file.path),
+    "前端源码里写滚动的只有 scroll-io.ts 一处（白名单就这一个文件；判据见上面的说明）",
+    filesWritingScroll,
+    SCROLL_WRITE_WHITELIST,
+  );
+  {
+    const scrollIo = frontendSources.find((file) => file.path === SCROLL_WRITE_WHITELIST[0]);
+    ok("找得到那个唯一允许写滚动的文件（否则下面那条是空转的）", scrollIo !== undefined);
+    /*
+     * top 必须是标识符：`scrollTo({ top: y, behavior: "instant" })`。
+     * 同时要求它是 `instant` —— `app/globals.css` 给 `html` 设了 `scroll-behavior: smooth`，
+     * 不写死 instant 的话"放回原位"会被动画执行，用户会看到一次可见的滑动。
+     */
+    const code = scrollIo?.code ?? "";
+    ok(
+      "那个文件里写进去的 top 必须是参数（不许写常量 0 / 「容器顶部」这类跳顶写法）",
+      /scrollTo\(\{\s*top:\s*[A-Za-z_$][\w$]*\s*,/.test(code),
+      "见 components/admin/scroll-io.ts 的 restoreScrollY",
+    );
+    ok(
+      "那个文件里的滚动必须是 instant（不受 html 的 scroll-behavior: smooth 影响）",
+      /behavior:\s*"instant"/.test(code),
+    );
+  }
+  eq(
+    "除了那一个文件以外，前端源码里没有别的显式滚动（scrollIntoView / scrollBy 一律不许）",
+    frontendSources.filter((file) => /scrollIntoView\s*\(|\.scrollBy\s*\(/.test(file.code)).map((f) => f.path),
     [],
   );
 
@@ -6012,6 +6078,97 @@ console.log("\n=== 14. 延迟型跳顶：点击之后就地的动作，过一会
       ? `链路：${snapshotLink.chain.join(" → ")}`
       : "后台模块图已经到不了 data/site/.backend-snapshot.ts（耦合已断开）",
   );
+}
+
+console.log("\n=== 15. 恢复型滚动：只许「把位置放回原处」，不许「跳到某个地方」 ===");
+
+/*
+ * 这一节守的是第 13 节白名单里那一个文件背后的**判定逻辑**，也是"过一会儿跳到最顶部"
+ * 的最后一道兜底。两条纪律，都穷举成判定表（纯函数，不需要浏览器）：
+ *
+ *   ① **写回去的永远是"记下来的位置"**（必要时夹进当前可滚动范围）——
+ *      没有任何一条路径能写出 0 或"某个固定位置"；
+ *   ② **只在该写的时候写**：文档高度没变而位置变了，那是**人自己在滚** → 一个字都不写
+ *      （这条最关键：兜底代码要是跟用户抢滚动条，比跳顶更让人恼火）。
+ *
+ * 另外几条"不是空转"的断言：兜底代码真的被接在了**被报告的那个动作**上
+ * （课程库的 `toggleStatus` 前后各用一次），以及整页重载的那一手真的挂在后台外壳里。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+
+  // ── A. 夹进可滚动范围：越界要夹到**最远处**，绝不夹到 0 ────────────────────
+  eq("负数位置夹到 0", clampScroll(-5, 1000), 0);
+  eq("范围内的位置原样保留", clampScroll(120, 1000), 120);
+  eq("超过上限时夹到**能滚到的最远处**（不是夹到顶部）", clampScroll(5000, 1000), 1000);
+  eq("上限为负（页面比一屏还矮）时只能到 0", clampScroll(10, -100), 0);
+  eq("非有限的位置退化成 0（不写入 NaN）", clampScroll(Number.NaN, 1000), 0);
+  eq("位置取整（浏览器读回来的是整数）", clampScroll(10.6, 100), 11);
+
+  // ── B. 就地动作期间：只在"高度变了、位置也被挪了"时才动手 ──────────────────
+  const inPlace = (over: Partial<Parameters<typeof inPlaceScrollCorrection>[0]> = {}) =>
+    inPlaceScrollCorrection({
+      recordedY: 2000,
+      recordedHeight: 8000,
+      currentY: 1800,
+      currentHeight: 7900,
+      maxScroll: 7000,
+      ...over,
+    });
+  eq("没有记录（动作没被守护）→ 一个字都不写", inPlace({ recordedY: null }), null);
+  eq("没有高度记录 → 一个字都不写", inPlace({ recordedHeight: null }), null);
+  eq("位置没变（重渲染没动滚动）→ 一个字都不写", inPlace({ currentY: 2000 }), null);
+  eq(
+    "文档高度没变、位置却变了 = 人自己在滚 → 一个字都不写（绝不跟用户抢滚动条）",
+    inPlace({ currentHeight: 8000, currentY: 1500 }),
+    null,
+  );
+  eq("文档高度变了、位置也被挪了 → 放回记下来的位置", inPlace(), 2000);
+  eq("位置被挪走且原来记的位置比现在还远的能滚范围更大 → 夹到最远处，而不是 0",
+    inPlace({ maxScroll: 1500 }), 1500);
+  eq("记录值非有限 → 一个字都不写", inPlace({ recordedY: Number.POSITIVE_INFINITY }), null);
+
+  // ── C. 整页重载的记忆：编码 / 解码 / 只在"重载 + 同址"时恢复 ──────────────
+  const href = "http://localhost:3000/admin/courses/";
+  const memo = { href, y: 3000 };
+  eq("记录能原样读回来", decodeScrollMemo(encodeScrollMemo(memo)), memo);
+  eq("小数位置按整数记（与浏览器读回来的一致）",
+    decodeScrollMemo(encodeScrollMemo({ href, y: 12.7 }))?.y, 13);
+  eq("没有记录 → null", decodeScrollMemo(null), null);
+  eq("空串 → null", decodeScrollMemo("   "), null);
+  eq("不是 JSON → null（不猜）", decodeScrollMemo("not json"), null);
+  eq("不是对象 → null", decodeScrollMemo("42"), null);
+  eq("缺 y → null", decodeScrollMemo(JSON.stringify({ href })), null);
+  eq("缺 href → null", decodeScrollMemo(JSON.stringify({ y: 10 })), null);
+  eq("href 为空 → null", decodeScrollMemo(JSON.stringify({ href: "", y: 10 })), null);
+  eq("负位置 → null", decodeScrollMemo(JSON.stringify({ href, y: -1 })), null);
+  eq("非数字位置 → null", decodeScrollMemo(JSON.stringify({ href, y: "10" })), null);
+
+  const reload = (over: Partial<Parameters<typeof reloadRestoreTarget>[0]> = {}) =>
+    reloadRestoreTarget({ memo, href, navigationType: "reload", maxScroll: 7000, ...over });
+  eq("普通跳转（navigate）不恢复", reload({ navigationType: "navigate" }), null);
+  eq("前进后退（back_forward）不恢复", reload({ navigationType: "back_forward" }), null);
+  eq("拿不到导航类型时不恢复", reload({ navigationType: "" }), null);
+  eq("地址换了不恢复（不是同一份页面）", reload({ href: "http://localhost:3000/admin/" }), null);
+  eq("没有记录（或记录坏了）不恢复", reload({ memo: null }), null);
+  eq("本来就停在顶部 → 没什么可放回的", reload({ memo: { href, y: 0 } }), null);
+  eq("整页重载 + 同址 → 放回记下来的位置", reload(), 3000);
+  eq("页面还没长到时先夹在当前能滚到的最远处（长高后由 ResizeObserver 再放一次）",
+    reload({ maxScroll: 0 }), 0);
+
+  // ── D. 不是空转：兜底真的接在"被报告的那个动作"与后台外壳上 ────────────────
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+  const coursesPageSource = read("app/admin/(dashboard)/courses/page.tsx");
+  const guardSource = read("components/admin/useScrollGuard.ts");
+  const memorySource = read("components/admin/ScrollMemory.tsx");
+  const layoutSource = read("app/admin/(dashboard)/layout.tsx");
+  ok("课程库：『设为暂未开放』前后真的用了滚动守护（arm + release）",
+    coursesPageSource.includes("scrollGuard.arm()") && coursesPageSource.includes("scrollGuard.release()"));
+  ok("就地守护用的是纯函数判定（不是自己拍脑袋写几何）",
+    guardSource.includes("inPlaceScrollCorrection(") && guardSource.includes("restoreScrollY("));
+  ok("整页重载的记忆用的是纯函数判定", memorySource.includes("reloadRestoreTarget(") && memorySource.includes("restoreScrollY("));
+  ok("后台外壳真的挂了 ScrollMemory（否则重载那一手没生效）",
+    layoutSource.includes("<ScrollMemory"));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

@@ -5,6 +5,7 @@ import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { BulkImport } from "@/components/admin/BulkImport";
+import { useScrollGuard } from "@/components/admin/useScrollGuard";
 import { MultiSelect } from "@/components/admin/MultiSelect";
 import { SiteCourseContent, focusSiteSubject } from "@/components/admin/SiteCourseContent";
 import { Panel, SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
@@ -240,6 +241,14 @@ export default function AdminCoursesPage() {
 
   const categoryOptions = useMemo(() => getCourseCategoryOptions(), []);
   const formOptions = useMemo(() => getFormOptions(), []);
+
+  /**
+   * 就地动作期间的滚动守护（见 `useScrollGuard`）：`toggleStatus` 前后各用一次。
+   *
+   * 为什么放在这里而不是每个页面各写一套：它是"就地动作"这一整类动作的共同纪律 ——
+   * 就地更新让文档高度变一下时，不许把用户的滚动位置带走。
+   */
+  const scrollGuard = useScrollGuard();
 
   /**
    * 读数据。
@@ -730,13 +739,25 @@ export default function AdminCoursesPage() {
    * 而且不往页顶放横幅（页顶横幅出现/消失＝页高变化，就在点击的同一瞬间）。
    */
   async function toggleStatus(course: Course) {
-    // 防连点：改用 aria-disabled 之后按钮仍可点，因此在这里挡住（见按钮上的注释）
-    if (togglingId === course.id) return;
-    // 只拦"同一张卡片被连点两下"：那会发出两条方向相反的写，而界面上哪个是最后状态看谁先回来。
-    // 不同卡片之间互不阻塞（各改各的一行，计数最后各读一次）。
+    /*
+     * 防连点：改用 aria-disabled 之后按钮仍可点，因此在这里挡住（见按钮上的注释）。
+     * 只拦"同一张卡片被连点两下"：那会发出两条方向相反的写，而界面上哪个是最后状态
+     * 看谁先回来。不同卡片之间互不阻塞（各改各的一行，计数最后各读一次）。
+     */
     if (togglingId === course.id) return;
     const next: Course["status"] = course.status === "开放" ? "暂未开放" : "开放";
     setTogglingId(course.id);
+    /*
+     * 就地动作期间守住滚动位置（`useScrollGuard`）。
+     *
+     * 为什么这一下要守：这一次点击会带出好几次就地更新（这条数据、卡片上的结果提示、
+     * 按钮上的"切换中…"、以及页顶那行计数），它们会让**文档高度**动一下 ——
+     * 浏览器在这种情况下可能顺手把你的滚动位置挪走。判据写死在纯函数
+     * `inPlaceScrollCorrection` 里：**只有"文档高度确实变了、位置也确实被挪了"**才把位置放回去；
+     * 高度没变而位置变了，那是人自己在滚，一个字都不写（绝不去跟用户抢滚动条）。
+     * 它写回的永远是**记下来的那个位置**，因此它没有能力制造"跳到最顶部"。
+     */
+    scrollGuard.arm();
     try {
       const updated = await api.courses.update(course.id, { status: next });
       if (updated !== null) {
@@ -761,6 +782,9 @@ export default function AdminCoursesPage() {
       setSummary(await api.courses.summary());
     } catch {
       // 读不到计数就算了：状态已落库，下次刷新会补上
+    } finally {
+      // 这一下动作带来的就地更新都提完了 → 解除守护（此后一个字都不再写）
+      scrollGuard.release();
     }
   }
 
