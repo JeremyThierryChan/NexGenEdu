@@ -27,6 +27,8 @@ import { coursesFromSite, materializeSiteCourses } from "./courses";
 import { bumpVersion } from "./concurrency";
 import { getTeachersPageFromTemplate } from "@/lib/data/site";
 import { siteContentFromContent } from "./site-content";
+import { copyBlocksFromContent } from "./site-copy";
+import { SITE_COPY_KEYS, SITE_COPY_LABELS } from "./site-copy-model";
 import type { Course, CourseTag, Database, SiteBand, SiteSubject, Teacher } from "./types";
 import type { SiteCourse } from "./courses";
 
@@ -84,6 +86,8 @@ export type SiteContentImportReport = {
     subjectsWritten: number;
     bandsWritten: number;
     labelsFilled: number;
+    /** 写入了几个**页面文案块**（v22：品牌 / 首页 / 关于 / 联系我们 / 时间安排）。 */
+    copyBlocksWritten: number;
   };
 };
 
@@ -126,6 +130,7 @@ export function importSiteContent(
     subjectsWritten: 0,
     bandsWritten: 0,
     labelsFilled: 0,
+    copyBlocksWritten: 0,
   };
 
   /* ── 教师：没有就新增；有就补空字段（推荐理由 / 顺序 / 资料）── */
@@ -261,6 +266,29 @@ export function importSiteContent(
     }
   }
   if (partitionsChanged) working.coursePartitions = materialized.partitions;
+
+  /*
+   * ── 页面文案块（v22）：**空的就补、`overwrite` 时整体替换** ──
+   *
+   * 与课程正文同一个取舍：内容文件是这些文案的**初值来源**，因此"库里那一块是空的"时补上它；
+   * 机构在后台改过之后（块里有内容）默认**不动**，要覆盖得显式传 `overwrite`。
+   * 这一条也是"迁移漏了一版"的补救路径：真实库升到 v22 之后如果发现某一块搬歪了，
+   * 跑一次 `overwrite: true` 就能按内容文件重铺（机构自己的改动会被覆盖，界面上会写清）。
+   */
+  const incomingCopy = copyBlocksFromContent();
+  for (const key of SITE_COPY_KEYS) {
+    const incoming = incomingCopy[key];
+    const existing = working.siteContent.copy[key];
+    const empty = existing.fields.length === 0 && existing.groups.length === 0;
+    if (!empty && !overwrite) continue;
+    if (JSON.stringify(existing) === JSON.stringify(incoming)) continue;
+    working.siteContent.copy = { ...working.siteContent.copy, [key]: incoming };
+    counts.copyBlocksWritten += 1;
+    changes.push(
+      `${existing.fields.length === 0 ? "写入" : "覆盖"}页面文案「${SITE_COPY_LABELS[key]}」：` +
+        `${String(incoming.fields.length)} 个字段 / ${String(incoming.groups.length)} 个分组`,
+    );
+  }
 
   /* ── 课程正文：库里没有就写入；已有则只在 `overwrite` 时替换 ── */
   const incoming = siteContentFromContent();

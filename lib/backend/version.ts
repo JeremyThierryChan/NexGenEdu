@@ -11,7 +11,7 @@
  *   2. 在 api.ts 的 migrate() 里补一段「上一版 → 这一版」的转换；
  *   3. 确认 seed.ts 用的是这个常量（它已经这么做了）。
  */
-export const CURRENT_VERSION = 21;
+export const CURRENT_VERSION = 22;
 
 /** 版本变更记录（给后来的人看，不用翻提交历史）。 */
 export const VERSION_NOTES: Record<number, string> = {
@@ -35,5 +35,6 @@ export const VERSION_NOTES: Record<number, string> = {
   18: "课程分区成为真实数据（新增 coursePartitions，课程用 partitionId 引用它）：分区可增删改名排序、可空着、能两级（栏目 → 子栏目），后台清单与网站课程页共用这一棵树 —— 原先分区是每门课各自的 category / subgroup 字符串聚合出来的，改名要逐门改、且不能排序",
   19: "学生案例进库（siteContent.casesPage）：案例从 data/site/cases.md 搬进数据库，后台新增「网站内容」页可增删改（标题 / 字段 / 过程描述），网站构站时以后端为主 —— 案例是要经常更新的内容，留在文件里改一次要动文件再重新构站",
   20: "特色课程进库（siteContent.featuredPage）：三级课程树从 data/site/featured.md 搬进数据库，后台「网站内容」页可增删改与调顺序，网站那块与 /courses/featured/** 都由库生成 —— 同时解开后台「可开班型」候选对网站内容文件的依赖",
-  21: "常见问题进库（siteContent.faqPage）：分组与问答从 data/site/faq.md 搬进数据库，后台「网站内容」页可增删改，网站 /faq 以后端内容为主（机构要求：前端只根据后端）"
+  21: "常见问题进库（siteContent.faqPage）：分组与问答从 data/site/faq.md 搬进数据库，后台「网站内容」页可增删改，网站 /faq 以后端内容为主（机构要求：前端只根据后端）",
+  22: "页面文案块进库（siteContent.copy）：品牌与联系方式 / 首页 / 关于 / 联系我们 / 时间安排的短字段与分组从 data/site/*.md 搬进数据库，后台「网站内容」页可改；两条来源（模版 / 库）共用一个读取接口，因此不可能各读一套"
 };

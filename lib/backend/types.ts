@@ -161,6 +161,16 @@ export type SiteContent = {
    */
   pricingPage: SitePricingPage;
   /**
+   * **页面文案块**（整站骨架那些文案：品牌与联系方式 / 首页 / 关于 / 联系我们 / 时间安排）。
+   *
+   * 五块形状一样，都是「短字段 + 若干分组（分组标题 + 条目）」，
+   * 因此共用一个模型与一个读取接口（见 `lib/backend/site-copy-model.ts`）。
+   * 搬进库（v22）的理由与案例 / 特色课程 / 常见问题同一条：这些文案机构要改，
+   * 而它们原先只在 `data/site/*.md` 里 —— 后台看不到、改一次要动文件再构站。
+   */
+  copy: Record<SiteCopyKey, SiteCopyBlock>;
+
+  /**
    * 常见问题（`/faq`）。
    *
    * 与案例同一个理由搬进库（v21）：问答是**要经常加、经常改**的对外文案
@@ -253,6 +263,51 @@ export type SiteFaqItem = {
   id: string;
   question: string;
   answer: string;
+};
+
+/* ── 页面文案块（五块共用一套模型） ──────────────────────────────────────── */
+
+/** 五块的键。 */
+export const SITE_COPY_KEYS = ["brand", "home", "about", "contact", "schedule"] as const;
+export type SiteCopyKey = (typeof SITE_COPY_KEYS)[number];
+
+/**
+ * 一个页面文案块：**短字段 + 若干分组**。
+ *
+ * 短字段的 `key` 就是内容文件里那一行的名字（`eyebrow` / `phone` / `trial_title`…）——
+ * 刻意不做成"具名字段"，因为五块加起来有六十来个字段，逐个建模的收益只有类型提示，
+ * 代价是每加一个字段就要改类型 + 迁移 + 后台表单三处。
+ * 读取统一走 `CopySource`（`lib/backend/site-copy-model.ts`），
+ * 字段名写错的表现是"那一处空着"，自检里由"两条来源产出同一份数据"的等价断言兜住。
+ */
+export type SiteCopyBlock = {
+  fields: Array<{ id: string; key: string; value: string }>;
+  groups: SiteCopyGroup[];
+};
+
+/** 一块里的一个分组（内容文件里的 `### 名称`）；它的标题就是页面上的分区标题。 */
+export type SiteCopyGroup = {
+  id: string;
+  title: string;
+  /**
+   * 分组下的说明（内容文件里分组标题下那段）；允许空。
+   *
+   * 刻意叫 `description` 而不是 `note`：**它是会渲染在页面上的公开文案**
+   * （时间安排页每个分组标题下那段），而公开数据里有一条断言"不许出现 `note` 这个键"
+   * —— 那个键名在本项目里专指**内部备注**（课程备注 / 教师备注）。同一个键名装两种东西，
+   * 迟早会有人把内部备注当成公开文案发出去。
+   */
+  description: string;
+  items: SiteCopyItem[];
+};
+
+/** 分组里的一条（内容文件里的 `#### 标题: 值`，可带一段正文）。 */
+export type SiteCopyItem = {
+  id: string;
+  title: string;
+  value: string;
+  /** 条目的正文（字段之后那段）；允许空。 */
+  body: string;
 };
 
 /** 一门特色课程（可含子课程）。 */

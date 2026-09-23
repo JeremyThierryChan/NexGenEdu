@@ -292,6 +292,73 @@ await check("网站内容", "答案为空被拒", async () => {
   }
 }, (text: string) => text === "已拒绝");
 
+await check("网站内容", "页面文案读数（品牌 / 首页 / 关于 / 联系 / 时间安排）", async () => {
+  const content = await api.site.publicContent();
+  const copy = content.siteContent.copy;
+  return [copy.brand.fields.length > 0, copy.home.fields.length > 0, copy.about.groups.length > 0,
+    copy.contact.groups.length > 0, copy.schedule.groups.length > 0];
+}, (value: boolean[]) => value.every((item) => item === true));
+await check("网站内容", "改一个短字段并保存（品牌电话）", async () => {
+  const content = await api.site.publicContent();
+  const brand = content.siteContent.copy.brand;
+  const phone = brand.fields.find((field) => field.key === "phone")?.value ?? "";
+  const saved = await api.site.saveBlocks({
+    copy: {
+      ...content.siteContent.copy,
+      brand: {
+        ...brand,
+        fields: brand.fields.map((field) =>
+          field.key === "phone" ? { ...field, value: `${phone}（验收）` } : field,
+        ),
+      },
+    },
+  });
+  return saved.copy.brand.fields.find((field) => field.key === "phone")?.value ?? "";
+}, (value: string) => value.endsWith("（验收）"));
+await check("网站内容", "改回原值（收尾）", async () => {
+  const content = await api.site.publicContent();
+  const brand = content.siteContent.copy.brand;
+  const saved = await api.site.saveBlocks({
+    copy: {
+      ...content.siteContent.copy,
+      brand: {
+        ...brand,
+        fields: brand.fields.map((field) =>
+          field.key === "phone" ? { ...field, value: field.value.replace("（验收）", "") } : field,
+        ),
+      },
+    },
+  });
+  return saved.copy.brand.fields.every((field) => !field.value.includes("（验收）"));
+});
+await check("网站内容", "改一份文案不会动案例与特色课程", async () => {
+  const content = await api.site.publicContent();
+  const before = [
+    JSON.stringify(content.siteContent.casesPage),
+    JSON.stringify(content.siteContent.featuredPage),
+  ];
+  const saved = await api.site.saveBlocks({ copy: content.siteContent.copy });
+  return [
+    JSON.stringify(saved.casesPage) === before[0],
+    JSON.stringify(saved.featuredPage) === before[1],
+  ];
+}, (value: boolean[]) => value.every((item) => item === true));
+await check("网站内容", "字段键重复被拒", async () => {
+  const content = await api.site.publicContent();
+  const brand = content.siteContent.copy.brand;
+  try {
+    await api.site.saveBlocks({
+      copy: {
+        ...content.siteContent.copy,
+        brand: { ...brand, fields: [...brand.fields, { id: "", key: "phone", value: "x" }] },
+      },
+    });
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("出现了两次") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+
 /* ── 2 教室 ── */
 let classroomId = "";
 await check("教室", "新建教室（含可用时段）", async () => {

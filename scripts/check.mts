@@ -17,6 +17,7 @@ import { pricingSource } from "@/data/site/pricing";
 import {
   getAboutContent,
   getContactContent,
+  getHomeSectionHeadings,
   COLUMN_PATHS,
   getAllCourseColumnSlugs,
   getAllCoursePageSlugs,
@@ -114,6 +115,8 @@ import {
 } from "@/lib/site/backend-source";
 import { siteTeachers as siteTeachersFromContent } from "@/lib/backend/site-import";
 import { coursesFromSite } from "@/lib/backend/courses";
+import { SITE_COPY_KEYS, validateCopy } from "@/lib/backend/site-copy-model";
+import { copyBlocksFromContent } from "@/lib/backend/site-copy";
 import {
   featuredDeleteRefusal,
   featuredFormOptions,
@@ -8527,7 +8530,7 @@ console.log("\n=== 27. 特色课程进库（v20：机构要求「特色课程也
     new URL("../app/admin/(dashboard)/content/page.tsx", import.meta.url), "utf8");
   ok("「网站内容」页挂了特色课程编辑器，并且与案例一起保存",
     contentPage.includes("FeaturedCoursesEditor") &&
-    /saveBlocks\(\{ casesPage, featuredPage, faqPage \}\)/.test(contentPage));
+    /saveBlocks\(\{ casesPage, featuredPage, faqPage, copy: content.copy \}\)/.test(contentPage));
 }
 
 console.log("\n=== 28. 常见问题进库（v21）+ 空态口径：骨架在、条目空 ===");
@@ -8657,6 +8660,159 @@ console.log("\n=== 28. 常见问题进库（v21）+ 空态口径：骨架在、�
   ok("「网站内容」页有常见问题的编辑区（分组 + 问答 + 增删排序）",
     contentPage.includes("常见问题") && contentPage.includes("新增分组") &&
     contentPage.includes("在这一组加一条问答"));
+}
+
+console.log("\n=== 29. 页面文案块进库（v22：品牌 / 首页 / 关于 / 联系我们 / 时间安排）===");
+
+/*
+ * 这五块是"整站骨架"那些文案。搬进库的目的与案例 / 特色课程 / 常见问题一样：机构要改它们，
+ * 而它们原先只在 `data/site/*.md` 里。这一节守四件事：
+ *
+ *   1. **迁移真的灌了初值**（五块都在、字段与分组数对得上内容文件）；
+ *   2. **两条来源产出同一份页面数据** —— 这是这次重构最核心的一条：
+ *      从"读 Markdown"换成"读库"，页面上的字**一个都不该变**。
+ *      为此把映射写成"只认 `CopySource`"（`lib/backend/site-copy-model.ts`），
+ *      两种来源共用同一份映射，等价性因此是结构上成立的 —— 这条断言是把它钉住；
+ *   3. **校验**：字段键重复 / 分组标题重复 / 空条目要拒；
+ *   4. **空态**：`blank` 时短字段与分组标题保留、组内条目清空（与其他块同一条口径）。
+ */
+{
+  __useStoreForTesting(memory);
+
+  // ① 迁移：v21 老库 → 五块文案从内容文件灌进来
+  const legacyCopyDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    siteContent: Record<string, unknown>;
+    version: number;
+  };
+  delete legacyCopyDb.siteContent.copy;
+  legacyCopyDb.version = 21;
+  eq("v21 老库（没有页面文案块）能升级导入",
+    (await api.importDatabase(JSON.stringify(legacyCopyDb))).ok, true);
+  const afterCopy = await api.exportDatabase();
+  eq("升级后版本号是当前版本", afterCopy.version, CURRENT_VERSION);
+  const copySummary = (blocks: Record<string, { fields: unknown[]; groups: { items: unknown[] }[] }>): string[] =>
+    SITE_COPY_KEYS.map((key) => {
+      const block = blocks[key];
+      if (block === undefined) return `${key}: 缺`;
+      const items = block.groups.reduce((sum, group) => sum + group.items.length, 0);
+      return `${key}: ${String(block.fields.length)}/${String(block.groups.length)}/${String(items)}`;
+    });
+  const imported = copySummary(afterCopy.siteContent.copy);
+  ok(`五块文案都进了库（${imported.join(" · ")}）`,
+    SITE_COPY_KEYS.every((key) => afterCopy.siteContent.copy[key] !== undefined));
+  eq("品牌那一块**没有分组**（「全站」页里的「课程栏目」属于课程库，不是品牌文案）",
+    afterCopy.siteContent.copy.brand.groups.length, 0);
+  eq("首页 / 关于 / 联系 / 时间安排的分组数与内容文件一致",
+    SITE_COPY_KEYS.filter((key) => key !== "brand").map(
+      (key) => afterCopy.siteContent.copy[key].groups.length,
+    ),
+    SITE_COPY_KEYS.filter((key) => key !== "brand").map((key) => {
+      const block = copyBlocksFromContent()[key];
+      return block.groups.length;
+    }));
+  ok("短字段搬全了（品牌 14 个字段里包含电话与地址）",
+    afterCopy.siteContent.copy.brand.fields.some((field) => field.key === "phone") &&
+    afterCopy.siteContent.copy.brand.fields.some((field) => field.key === "address"));
+  ok("每个字段 / 分组 / 条目都有自己的 id",
+    SITE_COPY_KEYS.every((key) => {
+      const block = afterCopy.siteContent.copy[key];
+      return block.fields.every((field) => field.id !== "") &&
+        block.groups.every((group) => group.id !== "" && group.items.every((item) => item.id !== ""));
+    }));
+
+  /*
+   * ② **两条来源产出同一份页面数据**（这次重构的核心断言）
+   *
+   * 用真实库（刚导入的那一份）造快照：模版态与库态下这六个取数函数必须逐字节相同。
+   * 这条能抓到的错包括"字段名写歪了""list() 的分隔符不对""分组白名单漏了一组"——
+   * 我在开发时就是被 `trial_points` 的分隔符坑过一次（页面上的 ✓ 位置变了），
+   * 而当时**只有逐页 diff 才看得出来**。现在它是断言。
+   */
+  const copySnapshot = buildPublicSite(await api.exportDatabase());
+  __useBackendSnapshotForTesting(null);
+  __useSiteContentSourceForTesting("template");
+  const copyTemplate = {
+    brand: getSiteBrand(),
+    home: getHomeContent(),
+    headings: getHomeSectionHeadings(),
+    about: getAboutContent(),
+    contact: getContactContent(),
+    schedule: getScheduleContent(),
+  };
+  __useBackendSnapshotForTesting(copySnapshot);
+  __useSiteContentSourceForTesting(undefined);
+  const copyBackend = {
+    brand: getSiteBrand(),
+    home: getHomeContent(),
+    headings: getHomeSectionHeadings(),
+    about: getAboutContent(),
+    contact: getContactContent(),
+    schedule: getScheduleContent(),
+  };
+  eq("模版与库**产出同一份**品牌与联系方式", JSON.stringify(copyBackend.brand), JSON.stringify(copyTemplate.brand));
+  eq("模版与库**产出同一份**首页文案", JSON.stringify(copyBackend.home), JSON.stringify(copyTemplate.home));
+  eq("模版与库**产出同一份**首页区块标题", JSON.stringify(copyBackend.headings), JSON.stringify(copyTemplate.headings));
+  eq("模版与库**产出同一份**关于我们", JSON.stringify(copyBackend.about), JSON.stringify(copyTemplate.about));
+  eq("模版与库**产出同一份**联系我们", JSON.stringify(copyBackend.contact), JSON.stringify(copyTemplate.contact));
+  eq("模版与库**产出同一份**课程时间安排", JSON.stringify(copyBackend.schedule), JSON.stringify(copyTemplate.schedule));
+  ok("而且这些取值**不是空的**（否则上面六条是空转的）",
+    copyBackend.brand.contact.phone !== "" &&
+    copyBackend.home.trial.points.length > 1 &&
+    copyBackend.schedule.groups.length > 0 &&
+    copyBackend.contact.methods.length > 0);
+
+  // ③ blank：短字段与分组标题保留、组内条目清空
+  __useBackendSnapshotForTesting(null);
+  __useSiteContentSourceForTesting("blank");
+  const blankAbout = getAboutContent();
+  const blankSchedule = getScheduleContent();
+  const blankContact = getContactContent();
+  eq("blank：关于我们的短字段照常、分组标题照常、组内条目清空",
+    [
+      blankAbout.title === copyTemplate.about.title && blankAbout.title !== "",
+      JSON.stringify(blankAbout.services) === "[]",
+      blankAbout.serviceTitle === copyTemplate.about.serviceTitle,
+    ],
+    [true, true, true]);
+  eq("blank：时间安排的分组标题在、时段为空",
+    [blankSchedule.groups.map((group) => group.title), blankSchedule.groups.every((g) => g.items.length === 0)],
+    [copyTemplate.schedule.groups.map((group) => group.title), true]);
+  eq("blank：联系方式的清单为空、但页面标题与说明在",
+    [blankContact.methods.length, blankContact.title !== ""], [0, true]);
+  ok("blank：品牌与联系方式**整份保留**（它是网站自己的身份，没有「条目」可分）",
+    JSON.stringify(getSiteBrand()) === JSON.stringify(copyTemplate.brand));
+  __useSiteContentSourceForTesting(undefined);
+  __useBackendSnapshotForTesting(null);
+
+  // ④ 校验
+  const block = (fields: [string, string][], groups: unknown[]): unknown => ({
+    fields: fields.map(([key, value], index) => ({ id: `f${String(index)}`, key, value })),
+    groups,
+  });
+  const refusalCopy = (page: unknown): string[] => validateCopy({ brand: page as never });
+  ok("字段键重复被拒",
+    refusalCopy(block([["phone", "1"], ["phone", "2"]], [])).some((t) => t.includes("出现了两次")));
+  ok("字段没有名字被拒", refusalCopy(block([["", "1"]], [])).some((t) => t.includes("没有名字")));
+  ok("分组标题重复被拒",
+    refusalCopy(block([], [
+      { id: "g1", title: "同名", description: "", items: [] },
+      { id: "g2", title: "同名", description: "", items: [] },
+    ])).some((t) => t.includes("出现了两次")));
+  ok("标题 / 值 / 正文都空的条目被拒",
+    refusalCopy(block([], [
+      { id: "g1", title: "组", description: "", items: [{ id: "i1", title: "", value: "", body: "" }] },
+    ])).some((t) => t.includes("空条目")));
+  eq("完整的块可以通过", refusalCopy(block([["phone", "1"]], [
+    { id: "g1", title: "组", description: "", items: [{ id: "i1", title: "a", value: "", body: "" }] },
+  ])), []);
+
+  // ⑤ 后台「网站内容」页挂了这五块的编辑器
+  const contentPage = readFileSync(
+    new URL("../app/admin/(dashboard)/content/page.tsx", import.meta.url), "utf8");
+  ok("「网站内容」页有页面文案的编辑区（五个页签 + 共用编辑器 + 保存）",
+    contentPage.includes("SITE_COPY_LABELS") &&
+    contentPage.includes("SITE_COPY_KEYS.map") &&
+    contentPage.includes("SiteCopyEditor"));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

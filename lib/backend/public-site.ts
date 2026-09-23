@@ -171,6 +171,8 @@ export function publicSite(db: Database): PublicSite {
       featuredPage: db.siteContent.featuredPage,
       // 常见问题（v21）：机构要求"以后端内容为主，前端只根据后端"
       faqPage: db.siteContent.faqPage,
+      // 页面文案块（v22）：品牌与联系方式 / 首页 / 关于 / 联系我们 / 时间安排
+      copy: db.siteContent.copy,
     },
     pricing: {
       rules: db.pricing.rules,

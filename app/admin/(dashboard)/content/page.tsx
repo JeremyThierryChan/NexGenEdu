@@ -12,9 +12,13 @@ import { useActionNotice } from "@/components/admin/useActionNotice";
 import { rolesOrAll, useAuth } from "@/components/admin/AuthContext";
 import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
 import { api, type SiteContent } from "@/lib/backend/api";
+import { SITE_COPY_KEYS, SITE_COPY_LABELS } from "@/lib/backend/site-copy-model";
+import { SiteCopyEditor } from "@/components/admin/SiteCopyEditor";
 import type {
   SiteCase,
   SiteCasesPage,
+  SiteCopyBlock,
+  SiteCopyKey,
   SiteFaqGroup,
   SiteFaqPage,
   SiteFeaturedCourse,
@@ -78,6 +82,9 @@ export default function AdminContentPage() {
   const casesPage: SiteCasesPage | null = content?.casesPage ?? null;
   const featuredPage: SiteFeaturedPage | null = content?.featuredPage ?? null;
   const faqPage: SiteFaqPage | null = content?.faqPage ?? null;
+  /** 正在编辑哪一块页面文案（五块共用一套编辑器，用页签切换）。 */
+  const [copyKey, setCopyKey] = useState<SiteCopyKey>("brand");
+  const copyBlock: SiteCopyBlock | null = content?.copy?.[copyKey] ?? null;
 
   /**
    * 就地改草稿：`content` 是**整份** `siteContent`，保存时只把 `casesPage` 交上去
@@ -96,6 +103,12 @@ export default function AdminContentPage() {
   /** 常见问题的问答总数（"共几条"那句话用它）。 */
   function countFaq(groups: readonly SiteFaqGroup[]): number {
     return groups.reduce((sum, group) => sum + group.items.length, 0);
+  }
+
+  /** 改某一块页面文案的草稿（整块一起交，与案例 / 特色课程 / 常见问题同一套做法）。 */
+  function editCopyBlock(key: SiteCopyKey, next: SiteCopyBlock): void {
+    setContent((prev) => (prev === null ? prev : { ...prev, copy: { ...prev.copy, [key]: next } }));
+    notice.clear();
   }
 
   /** 改常见问题草稿（整份分组一起交，与案例 / 特色课程同一套做法）。 */
@@ -165,10 +178,12 @@ export default function AdminContentPage() {
   }
 
   async function save(): Promise<void> {
-    if (casesPage === null || featuredPage === null || faqPage === null) return;
+    if (casesPage === null || featuredPage === null || faqPage === null || content === null) return;
     notice.clear();
     try {
-      const saved = await notice.run(async () => await api.site.saveBlocks({ casesPage, featuredPage, faqPage }));
+      const saved = await notice.run(async () =>
+        await api.site.saveBlocks({ casesPage, featuredPage, faqPage, copy: content.copy }),
+      );
       if (saved !== null) setContent(saved);
       notice.succeed(
         `已保存学生案例 ${casesPage.cases.length} 条、特色课程 ${countFeatured(featuredPage.courses)} 门、` +
@@ -711,6 +726,58 @@ export default function AdminContentPage() {
               </Button>
               <span className="text-xs text-ink-500">
                 与上面的学生案例**一起提交**（同一份「网站内容」草稿）：两块各写各的，谁也不覆盖谁。
+              </span>
+            </div>
+          )}
+        </div>
+      </Panel>
+
+      {/*
+        页面文案（v22 起在库里）：品牌与联系方式 / 首页 / 关于 / 联系我们 / 时间安排。
+        五块形状相同（短字段 + 分组），因此共用一套编辑器，用上面的页签切换；
+        保存按钮在最上面那块面板上 —— 四类内容一次交上去，服务端各写各的块。
+      */}
+      <Panel
+        className="mb-8"
+        title="页面文案"
+        description="整站骨架上的文案：品牌与联系方式（页头页脚）、首页、关于我们、联系我们、课程时间安排。网站只根据后端这一份出内容。"
+        actions={
+          <span className="flex flex-wrap items-center gap-1">
+            {SITE_COPY_KEYS.map((key) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setCopyKey(key)}
+                className={
+                  key === copyKey
+                    ? "rounded-md border border-brand-400 bg-brand-50 px-2.5 py-1 text-xs text-brand-700"
+                    : "rounded-md border border-ink-200 px-2.5 py-1 text-xs text-ink-600 hover:border-ink-300"
+                }
+              >
+                {SITE_COPY_LABELS[key]}
+              </button>
+            ))}
+          </span>
+        }
+      >
+        <div className="px-4 py-4">
+          {copyBlock === null ? (
+            <p className="text-sm text-ink-500">读不到这一块文案（后端版本可能太旧）。</p>
+          ) : (
+            <SiteCopyEditor
+              blockKey={copyKey}
+              block={copyBlock}
+              canWrite={canWrite}
+              onChange={(next) => editCopyBlock(copyKey, next)}
+            />
+          )}
+          {canWrite && (
+            <div className="mt-4 flex items-center gap-3 border-t border-ink-100 pt-4">
+              <Button disabled={notice.pending || copyBlock === null} onClick={() => void save()}>
+                {notice.pending ? "保存中…" : "保存页面文案"}
+              </Button>
+              <span className="text-xs text-ink-500">
+                与上面的学生案例、特色课程、常见问题**一起提交**（同一份「网站内容」草稿）。
               </span>
             </div>
           )}

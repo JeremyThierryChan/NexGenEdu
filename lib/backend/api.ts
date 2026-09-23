@@ -139,6 +139,10 @@ import type {
   CoursePartition,
   SiteCase,
   SiteCasesPage,
+  SiteCopyBlock,
+  SiteCopyGroup,
+  SiteCopyItem,
+  SiteCopyKey,
   SiteFaqGroup,
   SiteFaqItem,
   SiteFaqPage,
@@ -892,6 +896,19 @@ function migrate(db: Database): Database | null {
     db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
     db.siteContent.faqPage = siteContentFromContent().faqPage;
     db.version = 21;
+  }
+
+  if (db.version === 21) {
+    /*
+     * v21 → v22：**页面文案块进库**（品牌与联系方式 / 首页 / 关于 / 联系我们 / 时间安排）。
+     *
+     * 与 v19–v21 同一个理由与做法：这些是已经发布出去的文案，
+     * 空着等于升级完之后首页、关于、联系我们、时间安排整页没有文字（那比"空列表"严重得多）。
+     * 迁移从内容文件灌初值，只写 `copy` 这一块。
+     */
+    db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
+    db.siteContent.copy = siteContentFromContent().copy;
+    db.version = 22;
   }
 
   /*
@@ -4504,6 +4521,8 @@ const localApi = {
         featuredPage: db.siteContent.featuredPage,
         // 常见问题同理
         faqPage: db.siteContent.faqPage,
+        // 页面文案块同理（五个块都由「网站内容」页维护）
+        copy: db.siteContent.copy,
       };
 
       const after = db.siteContent.coursePage;
@@ -4545,7 +4564,7 @@ const localApi = {
      * 免得页面上留着一份"我自己的"旧值。
      */
     async saveBlocks(
-      blocks: Partial<Pick<SiteContent, "casesPage" | "featuredPage" | "faqPage">>,
+      blocks: Partial<Pick<SiteContent, "casesPage" | "featuredPage" | "faqPage" | "copy">>,
     ): Promise<SiteContent> {
       await delay();
       const db = load();
@@ -4622,6 +4641,33 @@ const localApi = {
         };
       }
 
+      /* 页面文案块：只写这次交上来的那几块（与案例 / 特色课程 / 常见问题同理）。 */
+      if (blocks.copy !== undefined) {
+        const next = { ...db.siteContent.copy };
+        for (const [key, block] of Object.entries(blocks.copy)) {
+          if (block === undefined) continue;
+          next[key as keyof typeof next] = {
+            fields: block.fields.map((field) => ({
+              id: field.id.trim() === "" ? nextId("copyf") : field.id.trim(),
+              key: field.key.trim(),
+              value: field.value,
+            })),
+            groups: block.groups.map((group) => ({
+              id: group.id.trim() === "" ? nextId("copyg") : group.id.trim(),
+              title: group.title.trim(),
+              description: group.description.trim(),
+              items: group.items.map((item) => ({
+                id: item.id.trim() === "" ? nextId("copyi") : item.id.trim(),
+                title: item.title.trim(),
+                value: item.value.trim(),
+                body: item.body.trim(),
+              })),
+            })),
+          };
+        }
+        db.siteContent = { ...db.siteContent, copy: next };
+      }
+
       const after = db.siteContent.casesPage;
       const afterFeatured = db.siteContent.featuredPage;
       const featuredNodes = (() => {
@@ -4635,7 +4681,8 @@ const localApi = {
         targetId: "",
         summary:
           `网站内容：学生案例 ${after.cases.length} 条 / 特色课程 ${featuredNodes} 门 / ` +
-          `常见问题 ${String(db.siteContent.faqPage.groups.reduce((sum, group) => sum + group.items.length, 0))} 条` +
+          `常见问题 ${String(db.siteContent.faqPage.groups.reduce((sum, group) => sum + group.items.length, 0))} 条 / ` +
+          `页面文案 ${String(Object.keys(blocks.copy ?? {}).length)} 块` +
           (beforeCases.cases.length === after.cases.length ? "（案例数量未变）" : `（案例原 ${beforeCases.cases.length} 条）`),
       });
       persist(db);
@@ -5245,6 +5292,10 @@ export type {
   SiteCasesPage,
   SiteFeaturedCourse,
   SiteFeaturedPage,
+  SiteCopyBlock,
+  SiteCopyGroup,
+  SiteCopyItem,
+  SiteCopyKey,
   SiteFaqGroup,
   SiteFaqItem,
   SiteFaqPage,

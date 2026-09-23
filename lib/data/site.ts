@@ -1,12 +1,13 @@
 import {
   getGroup,
   getPageBlock,
-  pageArray,
+  parseDocument,
   pageString,
   type Group,
   type PageBlock,
   type Section,
 } from "@/lib/data/content";
+import { scheduleSource } from "@/data/site/schedule";
 import { COURSES_HREF } from "@/lib/site/featured-routes";
 import {
   backendCourseColumns,
@@ -15,6 +16,14 @@ import {
   backendTeachersPage,
   siteContentSource,
 } from "@/lib/site/backend-source";
+import {
+  SITE_COPY_PAGES,
+  blankSource,
+  blockSource,
+  pageSource,
+  type CopySource,
+} from "@/lib/backend/site-copy-model";
+import type { SiteCopyKey } from "@/lib/backend/types";
 import type {
   AboutContent,
   ElectiveCourse,
@@ -28,6 +37,7 @@ import type {
   FormSubjectGroup,
   CourseTag,
   HomeContent,
+  LabeledItem,
   SectionHeading,
   SiteBrand,
   Teacher,
@@ -78,15 +88,6 @@ function slugifyFallback(title: string): string {
   return ascii !== "" ? ascii : `course-${Buffer.from(title).toString("hex").slice(0, 12)}`;
 }
 
-/** 页面短字段中拼出的区块标题。 */
-function heading(page: PageBlock, prefix: string): SectionHeading {
-  return {
-    eyebrow: pageString(page, `${prefix}_eyebrow`),
-    title: pageString(page, `${prefix}_title`),
-    description: pageString(page, `${prefix}_description`),
-  };
-}
-
 /** 不带前缀的页面标题（课程页 / 教师页直接用 eyebrow / title / description）。 */
 function pageHeading(page: PageBlock): SectionHeading {
   return {
@@ -123,26 +124,72 @@ function teacherBio(group: Group): string {
     .join("\n\n");
 }
 
+/*
+ * ── 页面文案块（品牌 / 首页 / 关于 / 联系我们 / 时间安排）────────────────────
+ *
+ * 这五块形状相同（短字段 + 分组），因此**只用一份读取接口** `CopySource`：
+ *
+ *   - 连上后端 → `blockSource(库里的那一块)`；
+ *   - 显式 template → `pageSource(模版那一页)`；
+ *   - 没连上（默认）→ `blankSource(模版那一份)`：**短字段与分组标题保留、组内条目清空**。
+ *
+ * 下面每个块的映射函数（`brandFrom` / `homeFrom` / …）只认 `CopySource`，
+ * 因此"两条来源产出同一份页面数据"是**结构上成立**的，而不是靠断言去追。
+ * 这也让"搬进库"这件事不会改变页面上的任何一个字 —— 映射只有一份。
+ */
+export function copySourceFor(key: SiteCopyKey): CopySource {
+  const snapshot = backendSnapshot();
+  if (siteContentSource() === "backend" && snapshot !== null) {
+    return blockSource(snapshot.siteContent?.copy?.[key]);
+  }
+  const templateSource = pageSource(templatePageFor(key));
+  return siteContentSource() === "template" ? templateSource : blankSource(templateSource);
+}
+
+/**
+ * 模版那一份在哪一页：`content.md` 里四块，**时间安排单独一个文件**（`schedule.md`）。
+ *
+ * 这一处曾经写错（把五块都当成 `content.md` 的页面去取），症状是"时间安排的分组全没了"，
+ * 而自检里那几条"分组数 / 分组名 / 每组的时段"当场报红 —— 因此那几条断言值钱，
+ * 它们盯的正是"块与文件对不对得上"。
+ */
+function templatePageFor(key: SiteCopyKey): PageBlock {
+  const name = SITE_COPY_PAGES[key];
+  if (key !== "schedule") return getPageBlock(name);
+  const document = parseDocument(scheduleSource);
+  const page = document.pages.get(name);
+  return page ?? { name, data: {}, groups: [] };
+}
+
 // ── 全站品牌与联系方式 ────────────────────────────────────────────────────
 
 export function getSiteBrand(): SiteBrand {
-  const page = getPageBlock("全站");
+  return brandFrom(copySourceFor("brand"));
+}
+
+/**
+ * 品牌与联系方式（**只认 `CopySource`**）：模版与库两处共用它。
+ *
+ * 这块**没有分组**（全是短字段），因此 `blank` 时它等于模版那一份 ——
+ * 机构的电话与地址是"网站自己的身份"，不是"后端才有的一条数据"，空着只会让页脚看起来坏了。
+ */
+function brandFrom(source: CopySource): SiteBrand {
   return {
-    brandName: pageString(page, "brand_name"),
-    brandNameZh: pageString(page, "brand_name_zh"),
-    tagline: pageString(page, "tagline"),
-    description: pageString(page, "description"),
-    copyrightHolder: pageString(page, "copyright_holder"),
-    keywords: pageArray(page, "keywords"),
-    homeTitle: pageString(page, "home_title"),
-    titleSuffix: pageString(page, "title_suffix"),
+    brandName: source.field("brand_name"),
+    brandNameZh: source.field("brand_name_zh"),
+    tagline: source.field("tagline"),
+    description: source.field("description"),
+    copyrightHolder: source.field("copyright_holder"),
+    keywords: source.list("keywords"),
+    homeTitle: source.field("home_title"),
+    titleSuffix: source.field("title_suffix"),
     contact: {
-      phone: pageString(page, "phone"),
-      wechat: pageString(page, "wechat"),
-      email: pageString(page, "email"),
-      address: pageString(page, "address"),
-      businessHours: pageString(page, "business_hours"),
-      classHours: pageString(page, "class_hours"),
+      phone: source.field("phone"),
+      wechat: source.field("wechat"),
+      email: source.field("email"),
+      address: source.field("address"),
+      businessHours: source.field("business_hours"),
+      classHours: source.field("class_hours"),
     },
   };
 }
@@ -270,50 +317,54 @@ export function getCourseColumnsFromTemplate(): CourseColumn[] {
 // ── 首页 ──────────────────────────────────────────────────────────────────
 
 export function getHomeContent(): HomeContent {
-  const page = getPageBlock("首页");
+  return homeFrom(copySourceFor("home"));
+}
+
+/** 首页文案（**只认 `CopySource`**）：模版与库两处共用它，见 `copySourceFor` 的说明。 */
+function homeFrom(source: CopySource): HomeContent {
+  const groupItems = (name: string): LabeledItem[] =>
+    source.group(name).items.map((item) => ({ title: item.title, value: item.value }));
   return {
-    eyebrow: pageString(page, "eyebrow"),
-    title: pageString(page, "title"),
-    subtitle: pageString(page, "subtitle"),
+    eyebrow: source.field("eyebrow"),
+    title: source.field("title"),
+    subtitle: source.field("subtitle"),
     primaryCta: {
-      label: pageString(page, "primary_cta_label"),
-      href: pageString(page, "primary_cta_href", "/courses"),
+      label: source.field("primary_cta_label"),
+      href: source.field("primary_cta_href", "/courses"),
     },
     secondaryCta: {
-      label: pageString(page, "secondary_cta_label"),
-      href: pageString(page, "secondary_cta_href", "/contact"),
+      label: source.field("secondary_cta_label"),
+      href: source.field("secondary_cta_href", "/contact"),
     },
-    stats: getGroup(page, "首屏数据").items,
-    features: getGroup(page, "教学特色").items,
+    stats: groupItems("首屏数据"),
+    features: groupItems("教学特色"),
     // 首页课程区按班型展示（页面直接读特色课程），这里不再返回学科栏目
-    classrooms: getGroup(page, "教室照片格位").items,
+    classrooms: groupItems("教室照片格位"),
     trial: {
-      eyebrow: pageString(page, "trial_eyebrow"),
-      title: pageString(page, "trial_title"),
-      description: pageString(page, "trial_description"),
-      points: pageString(page, "trial_points")
-        .split("|")
-        .map((item) => item.trim())
-        .filter((item) => item !== ""),
+      eyebrow: source.field("trial_eyebrow"),
+      title: source.field("trial_title"),
+      description: source.field("trial_description"),
+      // 内容文件里写成一串「用竖线分隔」，库里存多行文本 —— `list()` 两种都认
+      points: source.list("trial_points"),
       cta: {
-        label: pageString(page, "trial_cta_label"),
-        href: pageString(page, "trial_cta_href", "/quote"),
+        label: source.field("trial_cta_label"),
+        href: source.field("trial_cta_href", "/quote"),
       },
     },
     cases: {
-      eyebrow: pageString(page, "cases_eyebrow"),
-      title: pageString(page, "cases_title"),
-      description: pageString(page, "cases_description"),
+      eyebrow: source.field("cases_eyebrow"),
+      title: source.field("cases_title"),
+      description: source.field("cases_description"),
       cta: {
-        label: pageString(page, "cases_cta_label"),
-        href: pageString(page, "cases_cta_href", "/cases"),
+        label: source.field("cases_cta_label"),
+        href: source.field("cases_cta_href", "/cases"),
       },
     },
     cta: {
-      title: pageString(page, "cta_title"),
-      description: pageString(page, "cta_description"),
-      label: pageString(page, "cta_label"),
-      href: pageString(page, "cta_href", "/contact"),
+      title: source.field("cta_title"),
+      description: source.field("cta_description"),
+      label: source.field("cta_label"),
+      href: source.field("cta_href", "/contact"),
     },
   };
 }
@@ -327,19 +378,35 @@ export function getHomeSectionHeadings(): {
   coursesLink: { label: string; href: string };
   teachersLink: { label: string; href: string };
 } {
-  const page = getPageBlock("首页");
+  return homeHeadingsFrom(copySourceFor("home"));
+}
+
+/** 首页各区块的标题（**只认 `CopySource`**）：短字段是骨架，因此在三种来源下都在。 */
+function homeHeadingsFrom(source: CopySource): {
+  features: SectionHeading;
+  courses: SectionHeading;
+  teachers: SectionHeading;
+  classrooms: SectionHeading;
+  coursesLink: { label: string; href: string };
+  teachersLink: { label: string; href: string };
+} {
+  const section = (prefix: string): SectionHeading => ({
+    eyebrow: source.field(`${prefix}_eyebrow`),
+    title: source.field(`${prefix}_title`),
+    description: source.field(`${prefix}_description`),
+  });
   return {
-    features: heading(page, "features"),
-    courses: heading(page, "courses"),
-    teachers: heading(page, "teachers"),
-    classrooms: heading(page, "classrooms"),
+    features: section("features"),
+    courses: section("courses"),
+    teachers: section("teachers"),
+    classrooms: section("classrooms"),
     coursesLink: {
-      label: pageString(page, "courses_link_label"),
-      href: pageString(page, "courses_link_href", "/courses"),
+      label: source.field("courses_link_label"),
+      href: source.field("courses_link_href", "/courses"),
     },
     teachersLink: {
-      label: pageString(page, "teachers_link_label"),
-      href: pageString(page, "teachers_link_href", "/teachers"),
+      label: source.field("teachers_link_label"),
+      href: source.field("teachers_link_href", "/teachers"),
     },
   };
 }
@@ -827,38 +894,48 @@ export function getTeachersPageFromTemplate(): {
 // ── 关于我们 ──────────────────────────────────────────────────────────────
 
 export function getAboutContent(): AboutContent {
-  const page = getPageBlock("关于");
+  return aboutFrom(copySourceFor("about"));
+}
+
+/** 关于我们（**只认 `CopySource`**）：短字段与分组标题是骨架，分组条目是内容。 */
+function aboutFrom(source: CopySource): AboutContent {
+  const groupItems = (name: string): LabeledItem[] =>
+    source.group(name).items.map((item) => ({ title: item.title, value: item.value }));
   return {
-    eyebrow: pageString(page, "eyebrow"),
-    title: pageString(page, "title"),
-    description: pageString(page, "description"),
+    eyebrow: source.field("eyebrow"),
+    title: source.field("title"),
+    description: source.field("description"),
     philosophy: {
       eyebrow: "",
-      title: pageString(page, "philosophy_title"),
-      description: pageString(page, "philosophy_description"),
+      title: source.field("philosophy_title"),
+      description: source.field("philosophy_description"),
     },
-    serviceTitle: pageString(page, "service_title"),
-    services: getGroup(page, "服务形式").items,
-    campusTitle: pageString(page, "campus_title"),
-    principles: getGroup(page, "教学理念").items,
-    facts: getGroup(page, "校区数据").items,
+    serviceTitle: source.field("service_title"),
+    services: groupItems("服务形式"),
+    campusTitle: source.field("campus_title"),
+    principles: groupItems("教学理念"),
+    facts: groupItems("校区数据"),
     // 校区介绍：只显示每条的「值」，名称仅用于作者辨识。
-    campusParagraphs: getGroup(page, "校区介绍").items.map((item) => item.value),
+    campusParagraphs: source.group("校区介绍").items.map((item) => item.value),
   };
 }
 
 // ── 联系我们 ──────────────────────────────────────────────────────────────
 
 export function getContactContent(): ContactContent {
-  const page = getPageBlock("联系我们");
+  return contactFrom(copySourceFor("contact"));
+}
+
+/** 联系我们（**只认 `CopySource`**）。 */
+function contactFrom(source: CopySource): ContactContent {
   return {
-    eyebrow: pageString(page, "eyebrow"),
-    title: pageString(page, "title"),
-    description: pageString(page, "description"),
-    methods: getGroup(page, "联系方式清单").items,
-    routeTitle: pageString(page, "route_title"),
-    routeDescription: pageString(page, "route_description"),
-    routeParagraph: pageString(page, "route_paragraph"),
-    disabledActionLabel: pageString(page, "disabled_action_label"),
+    eyebrow: source.field("eyebrow"),
+    title: source.field("title"),
+    description: source.field("description"),
+    methods: source.group("联系方式清单").items.map((item) => ({ title: item.title, value: item.value })),
+    routeTitle: source.field("route_title"),
+    routeDescription: source.field("route_description"),
+    routeParagraph: source.field("route_paragraph"),
+    disabledActionLabel: source.field("disabled_action_label"),
   };
 }

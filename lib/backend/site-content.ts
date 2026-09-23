@@ -24,6 +24,8 @@
 import { getCoursesPageFromTemplate, getTeachersPageFromTemplate } from "@/lib/data/site";
 import { getCasesContentFromTemplate, getFaqContentFromTemplate } from "@/lib/data/pages";
 import { getFeaturedContentFromTemplate } from "@/lib/data/featured";
+import { copyBlocksFromContent } from "./site-copy";
+import { emptyCopyBlock, validateCopyBlock } from "./site-copy-model";
 import { getPricingData } from "@/lib/data/pricing";
 import { coursesReferencingAnchor } from "./site-bands";
 import { nextId } from "./ids";
@@ -32,6 +34,8 @@ import type {
   Course,
   SiteCase,
   SiteCasesPage,
+  SiteCopyBlock,
+  SiteCopyKey,
   SiteFaqPage,
   SiteFeaturedCourse,
   SiteFeaturedPage,
@@ -114,6 +118,7 @@ export function siteContentFromContent(): SiteContent {
     casesPage: casesFromContent(),
     featuredPage: featuredFromContent(),
     faqPage: faqFromContent(),
+    copy: copyBlocksFromContent(),
   };
 }
 
@@ -275,6 +280,18 @@ export function emptySiteContent(): SiteContent {
     casesPage: emptyCasesPage(),
     featuredPage: emptyFeaturedPage(),
     faqPage: emptyFaqPage(),
+    copy: emptyCopy(),
+  };
+}
+
+/** 五块页面文案的空结构（键齐全，免得读取时到处判 undefined）。 */
+function emptyCopy(): Record<SiteCopyKey, SiteCopyBlock> {
+  return {
+    brand: emptyCopyBlock(),
+    home: emptyCopyBlock(),
+    about: emptyCopyBlock(),
+    contact: emptyCopyBlock(),
+    schedule: emptyCopyBlock(),
   };
 }
 
@@ -324,11 +341,18 @@ export function validateSiteBlocks(blocks: {
   casesPage?: SiteCasesPage;
   featuredPage?: SiteFeaturedPage;
   faqPage?: SiteFaqPage;
+  copy?: Partial<Record<SiteCopyKey, SiteCopyBlock>>;
 }): string[] {
   const problems: string[] = [];
   if (blocks.casesPage !== undefined) problems.push(...validateCasesPage(blocks.casesPage));
   if (blocks.featuredPage !== undefined) problems.push(...validateFeaturedPage(blocks.featuredPage));
   if (blocks.faqPage !== undefined) problems.push(...validateFaqPage(blocks.faqPage));
+  if (blocks.copy !== undefined) {
+    for (const [key, block] of Object.entries(blocks.copy)) {
+      if (block === undefined) continue;
+      problems.push(...validateCopyBlock(block, `「${key}」`));
+    }
+  }
   return problems;
 }
 

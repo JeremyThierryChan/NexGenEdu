@@ -1,11 +1,12 @@
-import { getPage, pageString, type PageBlock, type Section } from "@/lib/data/content";
+import { getPage, pageString } from "@/lib/data/content";
 import { backendCasesContent, backendFaqContent, backendSnapshot, siteContentSource } from "@/lib/site/backend-source";
+import { copySourceFor } from "@/lib/data/site";
+import type { CopySource } from "@/lib/backend/site-copy-model";
 import type {
   CaseItem,
   CasesContent,
   FaqContent,
   FaqGroup,
-  InfoGroup,
   ScheduleContent,
 } from "@/lib/types/site";
 
@@ -16,15 +17,6 @@ import type {
  * 内容分别放在 data/site/cases.md、faq.md、schedule.md。
  * 页面只调用这里的函数，不直接解析 Markdown。
  */
-
-/** 把一个页面块的分组统一映射成「标题 + 条目」结构。 */
-function toInfoGroups(page: PageBlock): InfoGroup[] {
-  return page.groups.map((group: Section) => ({
-    title: group.name,
-    note: group.note,
-    items: group.items.map((item) => ({ title: item.title, value: item.value })),
-  }));
-}
 
 // ── 常见问题 ──────────────────────────────────────────────────────────────
 
@@ -144,13 +136,30 @@ export function getCasesContentFromTemplate(): CasesContent {
 
 // ── 课程时间安排 ──────────────────────────────────────────────────────────
 
+/**
+ * 课程时间安排（`/schedule`）。
+ *
+ * 三态（口径见 `lib/data/site.ts` 文件头）：连上后端用库里的那一块；
+ * **没连上（默认）= 短字段与分组标题来自模版、组内条目为空**；显式 template 才整份用模版。
+ * 与其余各块共用同一个读取接口（`CopySource`），因此"哪一块走哪条来源"只在这一处定。
+ */
 export function getScheduleContent(): ScheduleContent {
-  const page = getPage("schedule", "课程时间安排");
+  return scheduleFrom(copySourceFor("schedule"));
+}
+
+/** 时间安排（**只认 `CopySource`**）：模版（`schedule.md`）与库两处共用它。 */
+function scheduleFrom(source: CopySource): ScheduleContent {
   return {
-    eyebrow: pageString(page, "eyebrow"),
-    title: pageString(page, "title"),
-    description: pageString(page, "description"),
-    notice: pageString(page, "notice"),
-    groups: toInfoGroups(page),
+    eyebrow: source.field("eyebrow"),
+    title: source.field("title"),
+    description: source.field("description"),
+    notice: source.field("notice"),
+    // 「列举型」块：每一组都渲染（不按名字取），见 CopySource.groups 的说明
+    groups: source.groups().map((group) => ({
+      title: group.title,
+      // 站点视图里这个字段仍叫 note（页面组件按它渲染），库/模版那一侧叫 description
+      note: group.description,
+      items: group.items.map((item) => ({ title: item.title, value: item.value })),
+    })),
   };
 }
