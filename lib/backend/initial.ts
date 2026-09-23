@@ -43,20 +43,29 @@ export function createEmptyDatabase(now: Date = new Date()): Database {
    */
   const coursesFromContent = materializeSiteCourses([], undefined, catalogFromSeed());
   /*
-   * 课程库 = 网站卡片 + **报价里有、卡片上没有的那十二门课**。
+   * 课程库 = 网站卡片 + **报价里有、卡片上没有的那些课**。
    *
    * 只放网站卡片会留下一个自相矛盾的库：报价页上列着 44 门课（家长能选中、
-   * 能算出价），课程库里只有 32 门 —— 那 12 门"报价课"在台账里根本不存在，
+   * 能算出价），课程库里只有 32 门 —— 那些"报价课"在台账里根本不存在，
    * 报课时选不到、也排不了课。它们从哪来、为什么不上网，见 `extra-courses.ts`。
    */
+  const pricing = pricingConfigFromContent();
   /*
    * 去重后合并：那十二门课 2026-09 全部上网站了，因此它们已经由
    * `materializeSiteCourses()` 从网站卡片建出来（含分区、含维度）——
    * 再补一遍就是同名两条，而报价与台账都按名字认领，重名一定认错一门。
+   *
+   * ⚠️ **第二个入参不能省**（`extraCourses` 刻意不给默认值）：它传的是
+   * "报价配置里有哪些课"。不传的话，机构从课程库里删掉、报价里那一行也跟着删掉的课
+   * （例如 2026-09 的「高考冲刺」「特殊计划专项」）会在**新建的库**里被再造回来 ——
+   * 正是机构抱怨的"删掉的课还是会出现"。
    */
   const courses = [
     ...coursesFromContent.courses,
-    ...extraCourses(coursesFromContent.courses.map((course) => course.name)),
+    ...extraCourses(
+      coursesFromContent.courses.map((course) => course.name),
+      pricing.stages.flatMap((stage) => stage.courses.map((course) => course.name)),
+    ),
   ];
 
   return {
@@ -93,7 +102,8 @@ export function createEmptyDatabase(now: Date = new Date()): Database {
      * 拼一份"看起来很像"的日期，机构会以为那是系统算出来的。
      */
     vacations: [],
-    pricing: pricingConfigFromContent(),
+    // 报价配置（上面 `pricing` 已经算过一份：`extraCourses` 要用它的课程名）
+    pricing,
     siteContent: siteContentFromContent(),
     updatedAt: now.toISOString(),
   };

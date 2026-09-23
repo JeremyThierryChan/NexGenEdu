@@ -281,6 +281,7 @@ import {
 import {
   addLibraryCourseToPricing,
   pricingStatusForCourses,
+  prunePricingOrphans,
   syncLibraryLinks,
 } from "@/lib/backend/pricing";
 import { EXTRA_COURSE_NAMES, extraCourseDimensions, extraCourses } from "@/lib/backend/extra-courses";
@@ -1154,14 +1155,19 @@ eq("初中的课程与价格",
   pricing.stages[1]?.courses.map(priceLabel),
   ["初中语文=220", "初中数学=220", "初中英语=220", "初中科学=220", "初中社会=暂未开放",
     "小升初=200", "中考冲刺=350", "提前招专项=400"]);
-eq("高中的课程与价格（含五个语种与两个专项）",
+eq("高中的课程与价格（含五个语种）",
   pricing.stages[2]?.courses.map(priceLabel),
   ["高中语文=300", "高中数学=300", "高考外语=300", "高中物理=300", "高中化学=300", "高中生物=300",
     "高中政治=暂未开放", "高中历史=暂未开放", "高中地理=暂未开放", "高中技术=暂未开放",
-    "日语=暂未开放", "俄语=暂未开放", "法语=300", "德语=300", "西班牙语=300",
-    // 这两门课机构已从课程库删除 → 报价配置按既定口径把对应行**置成暂未开放、不删名字**
-    // （`syncLibraryLinks`："不静默删除，机构自己决定去留"）。要清掉就到报价页删那一行。
-    "高考冲刺=暂未开放", "特殊计划专项=暂未开放"]);
+    "日语=暂未开放", "俄语=暂未开放", "法语=300", "德语=300", "西班牙语=300"]);
+/*
+ * ⚠️ 高中这一组原先还有两行：「高考冲刺=暂未开放」「特殊计划专项=暂未开放」。
+ *
+ * 机构把这两门课从课程库里删掉之后，2026-09 的口径是**报价里那一行一起删掉**
+ * （原话：「课程报价里面删掉的课还是会出现」，见 `syncLibraryLinks` 第 4 件）——
+ * 因此它们现在**不在这一份里**，也不该再回到断言里：
+ * 报价页上出现的每一门课都必须能在课程库里找到。
+ */
 eq("其他类型的课程与价格",
   pricing.stages[3]?.courses.map(priceLabel),
   ["雅思=700", "意大利语=暂未开放", "3D建模 & 3D打印=暂未开放", "编程与信息素养=暂未开放",
@@ -4960,8 +4966,16 @@ eq("科目候选里没有重复名字",
 eq("科目候选里的网站课程都带分区名（下拉要按栏目分组）",
   pbOptions.filter((option) => option.category === "" && option.origin === "网站").map((option) => option.name),
   []);
-ok("后台课的科目候选确实在（排课与报课要选得到它们）",
-  EXTRA_COURSE_NAMES.every((name) => pbOptions.some((option) => option.name === name)));
+/*
+ * 科目候选 = 课程库（排课与报课都按名字选科目），因此判据是**课程库里的每一门课都在候选里**。
+ *
+ * 这里原先断的是"那十二门后台课都在候选里"（`EXTRA_COURSE_NAMES.every(...)`）——
+ * 机构 2026-09 删掉「高考冲刺」「特殊计划专项」之后那两门在库里已经不存在了
+ * （报价里那两行也跟着删了，见第 47 节），拿整份 `SPECS`（十二门）来断就成了假红。
+ * 改成断**课程库里确实有的那些课**，比原来那条更强（不限于是哪一类课）。
+ */
+ok(`课程库里的每一门课都在科目候选里（${String(pbLibrary.length)} 门，排课与报课要选得到）`,
+  pbLibrary.every((course) => pbOptions.some((option) => option.name === course.name)));
 
 // 机构自己加一门网站上还没有的课：围棋（分区里要有"兴趣才艺"，先建后挂）
 const pbHobby = await api.coursePartitions.create({ name: "兴趣才艺" });
@@ -5201,11 +5215,69 @@ eq("课程库里设为暂未开放后报价配置同步停用",
     .find((course) => course.courseId === pbGo.id)?.available,
   false);
 
-// 5) 删除后置为暂未开放（不静默消失，机构自己决定去留）
-await dropFixture("courses", pbGo.id);
-const pbAfterRemove = (await api.pricing.get()).stages.flatMap((stage) => stage.courses)
+/*
+ * 5) 删除跟随：**删掉课程之后，报价配置里那一行也要没了**。
+ *
+ * ## 这一条的口径在 2026-09 反过来了（机构原话）
+ *
+ * > 「**课程报价里面删掉的课还是会出现**，这部分也要根据后台数据实时更新」
+ *
+ * 原先定的是「不静默删除：置成暂未开放、名字留着让机构自己决定去留」，于是机构把
+ * 「高考冲刺」「特殊计划专项」从课程库里删掉之后，报价页上那两门课**仍然列着**
+ * （显示"暂未开放"，家长选中它只会得到一句"暂未开放"）—— 那就是他们看到的现象。
+ * 现在改成**删掉那一行**（连同空掉的阶段），判据只有一处实现
+ * （`prunePricingOrphans`，`syncLibraryLinks` 与迁移的收尾归一共用）。
+ *
+ * ⚠️ 走的是**服务层的删除**（`api.courses.remove`），不是 `dropFixture` ——
+ * 后者是自检直接改存储的兜底工具，它**不经过服务层**，因此恰好验不到
+ * "删除之后报价跟着走"这件事（上一版就是这么写的：断言看着在验，其实谁都没被调用）。
+ */
+const pbPricingBeforeRemove = (await api.pricing.get()).stages.flatMap((stage) => stage.courses).length;
+eq("删除课程（走服务层，机构在台账里点删除就是这条）", await api.courses.remove(pbGo.id), true);
+const pbAfterRemove = (await api.pricing.get()).stages
+  .flatMap((stage) => stage.courses)
   .find((course) => course.courseId === pbGo.id);
-eq("删除课程后报价配置里的这一项仍在（置为暂未开放）", pbAfterRemove?.available, false);
+eq("删掉的课在报价配置里那一行**没了**（不是置为暂未开放）", pbAfterRemove, undefined);
+eq("报价配置里的课程行数少了一条",
+  (await api.pricing.get()).stages.flatMap((stage) => stage.courses).length,
+  pbPricingBeforeRemove - 1);
+eq("它原来那一组（兴趣才艺）已经没有课程 → 整组一起删掉（否则下一次保存报价必被拒）",
+  (await api.pricing.get()).stages.map((stage) => stage.name).includes("兴趣才艺"), false);
+ok("操作日志写清了是哪一门被删的、为什么（不是「未改动价格」）",
+  (await api.logs.list(20)).some((log) =>
+    log.action === "跟随课程库" &&
+    log.summary.includes("围棋（入门）") &&
+    log.summary.includes("已不存在") &&
+    log.summary.includes("已删除这一行")));
+/*
+ * 三处"还找得到它吗"的口径各查一遍：导出的 Markdown（写回内容文件的那一份）、
+ * `pricingConfigCore`（"与内容文件一致吗"比的就是它）、以及试算器（家长那一侧）。
+ */
+ok("导出的 pricing.md 片段里没有这门课了",
+  !(await api.pricing.exportMarkdown()).includes("围棋（入门）"));
+ok("pricingConfigCore（与内容文件比对用的那一份）里也没有它了",
+  !JSON.stringify(pricingConfigCore(await api.pricing.get())).includes("围棋（入门）"));
+ok("试算这门课会失败（报价配置里已经没有它）",
+  (await api.pricing.quote({
+    courseName: "围棋（入门）", classTypeName: "一对一", durationName: "1 小时", lessons: 5,
+  })).ok === false);
+/*
+ * 反过来同等重要：**课程库里还在的课，一行都不许被误删**。
+ * 判据是"课程库里的每一门课在报价配置里都有行"（下面第 6 条接着断这个），
+ * 这里先断一次"删除只影响了那一门"：其余每一门都还在原来的位置上。
+ */
+const pbLibAfterRemove = await api.courses.list();
+const pbStatusAfterRemove = pricingStatusForCourses(await api.pricing.get(), pbLibAfterRemove);
+/*
+ * 反过来同等重要：**课程库里还在的课，一行都不许被误删**。
+ * 判据是"课程库里的每一门课在报价配置里都有行"（下面第 6 条接着断这个），
+ * 这里先断一次"删除只影响了那一门"：其余每一门都还在原来的位置上。
+ */
+eq("删掉一门课没有连带动别人的行（课程库里还在的课一门都不少）",
+  pbLibAfterRemove
+    .filter((course) => !pbStatusAfterRemove.some((item) => item.courseId === course.id && item.priced))
+    .map((course) => course.name),
+  []);
 
 // 6) 定价状态查询（课程库页面用它显示「已定价 / 未定价」）
 const pbStatus = pricingStatusForCourses(await api.pricing.get(), await api.courses.list());
@@ -10959,32 +11031,38 @@ console.log("\n=== 41. 报价与课程清单对齐（v37）===");
     []);
 
 /*
- * 去重后的合并：那十二门课（`extraCourses()` 的 `SPECS`）2026-09 **全部上过网站**，
- * 因此它们由网站卡片那条路建出来 —— `extraCourses(网站卡片名)` 只会返回**还没上网的**
- * 那几门，库里不会有同名两条（报价与台账都按名字认领，重名一定认错一门）。
- * 清单本身仍然有用：`extraCourseDimensions()` 是这十二门课的维度口径。
+ * 「只在后台用的课」这一份清单（`extraCourses()` 的 `SPECS`）与它的**判据**。
  *
- * ## ⚠️ 为什么这里不再断「十二门一门不少地上网」
+ * 判据就是这句话本身：**报价里有 ∩ 网站卡片上没有**（v37 起"以课程库为准"）。
  *
- * 机构随时可以把某门课从网站撤下来、甚至从课程库删掉 —— 那是正常的经营动作
- * （2026-09 他们就删了「高考冲刺」「特殊计划专项」，报价里那两行按既定口径留着并置成
- * 「暂未开放」）。旧的写法把"十二门全在卡片上"当成不变式，机构一整理课程清单，
- * 自检就红在**数据**上，而不是红在**代码**上 —— 那种红只会让人去改断言。
- * 现在守的是两件真正的不变式：
- *   ① `extraCourses(网站卡片名)` 不许**造新名字**（只从那十二门里挑没上网的）；
- *   ② 它挑出来的那几门确实不在网站卡片上（否则就是"同名两条"的那个老毛病）。
+ * ## ⚠️ 2026-09 第三个条件补上了：报价里**没有**的课不许再被造出来
+ *
+ * 机构删掉「高考冲刺」「特殊计划专项」之后，报价里那两行也跟着删了
+ * （`syncLibraryLinks` 第 4 件，原话：「课程报价里面删掉的课还是会出现」）。
+ * 而 `SPECS` 是人写的代码清单、跟不上 —— 只按"卡片上有没有"过滤的话，
+ * **新建一个库就会把那两门课再造回来**，机构看到的就是"删掉的课又出现了"。
+ * 因此 `extraCourses` 现在还要看 `pricedNames`（报价里的课程名），两个入参都必需。
+ *
+ * 这里守三件事：
+ *   ① 清单本身没被删空（`extraCourseDimensions()` 还靠它，它是十二门课的维度口径）；
+ *   ② **要补的课 = 空**：十二门现在全在网站卡片上，且报价里也已没有那两门 → 一门都不补；
+ *   ③ 库里**不会出现报价里没有的课**（逐门比名字，这条才是机构真正要的那条不变式）。
  */
-const extras = extraCourses();
-eq("完整清单仍然是十二门（`SPECS` 没被删空，维度口径还靠它）", extras.length, EXTRA_COURSE_NAMES.length);
-eq("它们的名字都在报价里（否则又是「报价有、库里没有」）",
-  EXTRA_COURSE_NAMES.filter((name) => !templateCourses.includes(name)), []);
-const extrasToBackfill = extraCourses(coursesFromSite().map((course) => course.name));
-eq("`extraCourses(网站卡片名)` 只从那十二门里挑，不造新名字",
-  extrasToBackfill.filter((course) => !EXTRA_COURSE_NAMES.includes(course.name)), []);
-ok(`它挑出来的那几门确实都不在网站卡片上（当前要补 ${String(extrasToBackfill.length)} 门：` +
-  `${extrasToBackfill.map((course) => course.name).join("、") || "无"}）`,
-  extrasToBackfill.every(
-    (course) => !coursesFromSite().some((card) => card.name === course.name)));
+eq("完整的口径清单仍然是十二门（`SPECS` 没被删空，维度口径还靠它）",
+  EXTRA_COURSE_NAMES.length, 12);
+/* 库里的课程名 = 网站卡片 + 报价里那几门 —— 判据与 `extraCourses` 用的完全一样。 */
+const pricedNamesInTemplate = templateCourses;
+const extraCourseNames = extraCourses(
+  coursesFromSite().map((course) => course.name),
+  pricedNamesInTemplate,
+);
+eq("报价里有、网站卡片上没有的课：一门都没有（因此建库一门都不补）", extraCourseNames, []);
+eq("库里没有「报价里有、卡片上没有」以外的课（机构删掉的课不会被造回来）",
+  seedDb.courses
+    .map((course) => course.name)
+    .filter((name) => !pricedNamesInTemplate.includes(name))
+    .filter((name) => !coursesFromSite().some((card) => card.name === name)),
+  []);
 const onSiteNames = EXTRA_COURSE_NAMES.filter(
   (name) => coursesFromSite().some((course) => course.name === name));
 ok(`那十二门里至少有一批仍挂在网站卡片上（当前 ${String(onSiteNames.length)} / ` +
@@ -10993,6 +11071,7 @@ ok("仍然挂在网站卡片上的那几门确实带着网站卡片字段（有 
   seedDb.courses
     .filter((course) => onSiteNames.includes(course.name))
     .every((course) => course.path !== "" && course.siteKind !== "不展示"));
+
 eq("库里没有同名两条（重名会让报价与台账认错课）",
   seedDb.courses.map((course) => course.name).filter((name, i, all) => all.indexOf(name) !== i), []);
 ok("它们的维度都挂好了（学段 + 学科，台账按维度分组时不会掉到「未挂」里）",
@@ -12534,6 +12613,138 @@ console.log("\n=== 46. 校区必填（v31 收紧 —— 机构原话「校区必
       classroomSource.includes("export function campusRequiredProblem"));
 
   __useStoreForTesting(memory);
+}
+
+console.log("\n=== 47. 报价跟着课程库走：删掉的课不该再出现（2026-09 口径）===");
+
+/*
+ * 机构原话：
+ *
+ * > 「**课程报价里面删掉的课还是会出现**，这部分也要根据后台数据实时更新」
+ *
+ * ## 病根是**旧口径**
+ *
+ * v25 那轮定的是「**不静默删除**：课程库里没有的课 → 报价里置成暂未开放、名字留着，
+ * 让机构自己决定去留」。机构把「高考冲刺」「特殊计划专项」从课程库删掉之后，
+ * 报价页上那两门课**仍然列着**（显示"暂未开放"，家长选中它只会得到一句"暂未开放"）
+ * —— 那就是他们看到的现象。机构的口径早就说清过两次：
+ * 「课程全都按照课程库里的来，课程库以外的全部都应该删掉」。因此改成**删掉那一行**。
+ *
+ * ## 判据只有一处，三个读者共用
+ *
+ * `prunePricingOrphans`（纯函数）：
+ *   1. 机构在台账里删课的那一刻（`syncLibraryLinks` → 见第 10 节那条端到端断言）；
+ *   2. 迁移链末尾的**收尾归一**（老库 / 导入进来的库里的残行 → 这一节）；
+ *   3. 判据本身（这一节的 ①）。
+ *
+ * 安全性来自另一道护栏：**真正还在被用的课本来就删不掉**（`courseDeleteRefusal`：
+ * 被报课 / 排课引用着 → 拒绝删除）。能删掉的课 = 没有被任何单据引用，
+ * 因此报价里那一行也可以安全移除。
+ */
+{
+  __useStoreForTesting(memory);
+
+  // ── ① 判据本身（纯函数，不经服务层、不读存储）────────────────────────────
+  const orphanConfig: PricingConfig = {
+    ...pricingConfigFromContent(),
+    stages: [
+      {
+        name: "甲阶段",
+        courses: [
+          { name: "还在的课", basePrice: 100, available: true, courseId: "course_ok" },
+          { name: "被删掉的课", basePrice: 200, available: false, courseId: "course_gone" },
+        ],
+      },
+      {
+        name: "只剩残行的一组",
+        courses: [
+          { name: "另一门被删掉的", basePrice: 300, available: true, courseId: "course_gone2" },
+        ],
+      },
+      {
+        name: "老课包（从没挂过课程 id）",
+        courses: [{ name: "九年级课本", basePrice: 260, available: true }],
+      },
+    ],
+  };
+  const pruned = prunePricingOrphans(orphanConfig, [{ id: "course_ok" }]);
+  eq("挂过课程 id、而那个 id 已经不在库里 → 那一行被删掉",
+    pruned.dropped.map((row) => row.name), ["被删掉的课", "另一门被删掉的"]);
+  eq("被删的行连**阶段名**一起报出来（日志要能说清是哪一组）",
+    pruned.dropped.map((row) => row.stage), ["甲阶段", "只剩残行的一组"]);
+  eq("课程库里还在的课一行不少（这一条与「删掉」同等重要）",
+    pruned.config.stages[0]?.courses.map((course) => course.name), ["还在的课"]);
+  eq("从没挂过课程 id 的老课包行**原样留着**（它不是「被删掉的课」）",
+    pruned.config.stages.map((stage) => stage.name).includes("老课包（从没挂过课程 id）"), true);
+  eq("一门课都不剩的阶段一起删掉（否则下一次保存报价必被拒：阶段下不能没有课程）",
+    pruned.config.stages.map((stage) => stage.name), ["甲阶段", "老课包（从没挂过课程 id）"]);
+  eq("删掉的阶段名也报出来了", pruned.droppedStages, ["只剩残行的一组"]);
+  eq("清完之后整份配置仍然是合法的（这条是「空阶段一起删」的理由）",
+    validatePricingConfig(pruned.config), []);
+  const cleanPrune = prunePricingOrphans(pricingConfigFromContent(), seedDb.courses);
+  eq("一份正常的配置：清残行时一行都不动（不误删）",
+    [cleanPrune.dropped, cleanPrune.droppedStages], [[], []]);
+
+  // ── ② 老库 / 导入：一份"自称当前版本、却还带着残行"的库 → 清掉并留痕 ─────
+  const staleDb = JSON.parse(JSON.stringify(seedDb)) as Database;
+  const goneCourse = staleDb.courses[0]!;
+  const keptCourse = staleDb.courses[1]!;
+  // 课程库里已经没有这一门了，但报价里那一行还在（旧口径留下的那种形状）
+  staleDb.courses = staleDb.courses.filter((course) => course.id !== goneCourse.id);
+  staleDb.pricing = {
+    ...pricingConfigFromContent(),
+    stages: [
+      {
+        name: "高中",
+        courses: [
+          { name: goneCourse.name, basePrice: 400, available: false, courseId: goneCourse.id },
+          { name: keptCourse.name, basePrice: 300, available: true, courseId: keptCourse.id },
+        ],
+      },
+      {
+        name: "只剩残行的一组",
+        courses: [{ name: "早就删掉的课", basePrice: 500, available: true, courseId: "course_不存在" }],
+      },
+    ],
+  };
+  /*
+   * 版本号故意写**当前版本**：要清的正是"自称最新、结构却还带着残行"的那种库
+   * （手改过的导出、只跑了一半的恢复、更早版本导出的 JSON）。若把这一步写成
+   * 迁移链上的一个版本步，这种库反而清不到 —— 这也是它放在**收尾归一**里的理由
+   * （同 `syncClassTypes` 那一步；见 PROJECT.md 的 E14）。
+   */
+  staleDb.version = CURRENT_VERSION;
+  const staleImport = await api.importDatabase(JSON.stringify(staleDb));
+  ok("这类库照样能导入（清掉残行，而不是拒绝导入）", staleImport.ok);
+  const afterStale = await api.pricing.get();
+  eq("导入后报价里只剩课程库里还有的那门课",
+    afterStale.stages.flatMap((stage) => stage.courses).map((course) => course.name),
+    [keptCourse.name]);
+  eq("那门课的价格一分没动（清残行不是「顺手改价」）",
+    afterStale.stages.flatMap((stage) => stage.courses)[0]?.basePrice, 300);
+  eq("空掉的那一组也一起没了", afterStale.stages.map((stage) => stage.name), ["高中"]);
+  const exportedPricing = JSON.stringify((await api.exportDatabase()).pricing);
+  ok("而且**当场就落盘了**（导入那条路紧接着 persist，下次打开不会再出现）",
+    exportedPricing.includes(keptCourse.name) && !exportedPricing.includes("早就删掉的课"));
+  const cleanLog = (await api.logs.list(50)).find((log) => log.action === "清理");
+  ok("操作日志里有「清理」那一条，并点名清了哪几行（机构能看到是谁清的）",
+    cleanLog !== undefined &&
+      cleanLog.summary.includes("早就删掉的课") &&
+      cleanLog.summary.includes(goneCourse.name),
+    cleanLog?.summary ?? "（没有「清理」这条日志）");
+  ok("日志里也写明了为什么（口径：课程全都按照课程库里的来）",
+    (cleanLog?.summary ?? "").includes("课程全都按照课程库里的来"));
+  ok("日志里点名了那个空掉的阶段",
+    (cleanLog?.summary ?? "").includes("只剩残行的一组"));
+  await api.restoreBackup();
+  eq("收尾：恢复到导入前的那份库", (await api.courses.list()).length, seedDb.courses.length);
+
+  // ── ③ 定价状态类型：那个恒等于「未定价」的字段已经删掉了 ────────────────
+  const statusRow = pricingStatusForCourses(await api.pricing.get(), await api.courses.list())[0]!;
+  ok("定价状态里不再有 `dangling`（它算出来恒等于「未定价」，且那种行现在不可能存在）",
+    !Object.keys(statusRow).includes("dangling"), JSON.stringify(Object.keys(statusRow)));
+  ok("「这门课还没定价」仍然由 `priced` 表达（课程库页面的「未定价 N 门」用它）",
+    typeof statusRow.priced === "boolean");
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

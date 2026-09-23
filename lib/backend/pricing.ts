@@ -865,7 +865,17 @@ export const FALLBACK_RULES: PricingRules = DEFAULT_PRICING_RULES;
 
 /* ── 六、课程库 ↔ 报价配置 的关联 ───────────────────────────────────── */
 
-/** 报价配置里一门课程的关联状态（课程库页面用来显示「已定价 / 未定价」）。 */
+/**
+ * 报价配置里一门课程的关联状态（课程库页面用来显示「已定价 / 未定价」）。
+ *
+ * ⚠️ 这里以前还有一个 `dangling`（注释写的是"关联已失效：课程库里没有这门课了，
+ * 但配置里还留着名字"）—— 它**从来没被任何界面读过**，而且算出来恒等于 `!priced`
+ * （"课程库里有这门课、但报价配置里没有它的行"）。2026-09 机构把口径改成
+ * **"课程库里没有的课，报价配置里那一行直接删掉"**（见 `syncLibraryLinks` 与
+ * `prunePricingOrphans`）之后，那个字段想表达的那种行**已经不可能存在**，
+ * 于是整个删掉 —— 而不是留一个永远 false 的字段让人猜它为什么没用。
+ * 要表达"这门课还没定价"，用 `priced`。
+ */
 export type LibraryPricingStatus = {
   courseId: string;
   name: string;
@@ -875,9 +885,58 @@ export type LibraryPricingStatus = {
   basePrice: number | null;
   /** 是否已经在报价配置里（含暂未开放）。 */
   priced: boolean;
-  /** 关联已失效：课程库里没有这门课了（但配置里还留着名字）。 */
-  dangling: boolean;
 };
+
+/**
+ * 报价配置里**课程库里已经不存在的行**（要删掉的那些）。
+ *
+ * ## 判据只有一条：这一行**挂过** `courseId`，而库里没有这个 id 了
+ *
+ * 刻意**不**按名字判：没挂过 id 的行（内容文件里手写的老课包名，例如早年的「九年级课本」）
+ * 既不是"被删掉的课"，也不该由一次同步来替机构决定删它 —— 那种行原样留着。
+ * 「挂过 id」才是"它确实对应过课程库里的一门课、而那门课现在没了"的证据。
+ *
+ * 为什么单独一个函数：它有两个调用者，判据必须只有一处 ——
+ *   1. `syncLibraryLinks`（机构在台账里删了一门课的那一刻）；
+ *   2. `api.ts` 迁移链末尾的**收尾归一**（老库 / 导入进来的库里的残行）。
+ *
+ * ## 为什么连"空掉的阶段"一起删
+ *
+ * 删掉一门课之后，它所在的阶段可能一门课都不剩（例如机构把某个学段下的课全删了）。
+ * 而 `validatePricingConfig` 有一条硬规则：「X」阶段下没有任何课程 → **非法**。
+ * 留着会把库带进一个"读得出来、但下一次保存报价必然被拒"的死角
+ * （机构打开报价页会看到"这个阶段下没有任何课程"，而那一页并没有删阶段的操作）。
+ * 因此空阶段跟着一起删，并把它写进变更说明。
+ */
+export function prunePricingOrphans(
+  config: PricingConfig,
+  courses: ReadonlyArray<{ id: string }>,
+): {
+  config: PricingConfig;
+  /** 被删掉的行（阶段名 + 课程名，按原顺序）。 */
+  dropped: Array<{ stage: string; name: string }>;
+  /** 删完之后一门课都不剩、因此一起删掉的阶段名。 */
+  droppedStages: string[];
+} {
+  const courseIds = new Set(courses.map((course) => course.id));
+  const next = JSON.parse(JSON.stringify(config)) as PricingConfig;
+  const dropped: Array<{ stage: string; name: string }> = [];
+  const droppedStages: string[] = [];
+
+  const stages: PricingStage[] = [];
+  for (const stage of next.stages) {
+    const kept = stage.courses.filter((course) => {
+      const linkedTo = course.courseId ?? "";
+      if (linkedTo === "" || courseIds.has(linkedTo)) return true;
+      dropped.push({ stage: stage.name, name: course.name });
+      return false;
+    });
+    if (kept.length === 0 && stage.courses.length > 0) droppedStages.push(stage.name);
+    stages.push({ ...stage, courses: kept });
+  }
+  next.stages = stages.filter((stage) => stage.courses.length > 0);
+  return { config: next, dropped, droppedStages };
+}
 
 /** 在配置里按 id 或名字找一门课程。 */
 function findPricingCourse(
@@ -900,9 +959,6 @@ export function pricingStatusForCourses(
   config: PricingConfig,
   courses: Array<{ id: string; name: string }>,
 ): LibraryPricingStatus[] {
-  const linkedIds = new Set(
-    config.stages.flatMap((stage) => stage.courses.map((course) => course.courseId ?? "")).filter((id) => id !== ""),
-  );
   return courses.map((course) => {
     const found = findPricingCourse(config, { courseId: course.id, name: course.name });
     return {
@@ -911,8 +967,6 @@ export function pricingStatusForCourses(
       stageName: found?.stage.name ?? "",
       basePrice: found?.course.basePrice ?? null,
       priced: found !== null,
-      // 课程库里的这门课存在 → 能通过 id 或名字对上；对不上才算失效
-      dangling: found === null && !linkedIds.has(course.id),
     };
   });
 }
@@ -956,7 +1010,21 @@ export function addLibraryCourseToPricing(
  *   1. **按名字认领**：配置里已经有一门同名课程（网站内容带过来的，没有 courseId）→ 补上关联；
  *   2. **改名跟随**：课程库改了名字，配置里也跟着改（否则家长看到的还是旧名字）；
  *   3. **停开跟随**：课程库里设为「暂未开放」→ 配置里也置为不可报价；重新开放则恢复；
- *   4. **失效标记**：课程库里没有这门课了 → 在配置里置为不可报价（不删名字，便于机构自己决定去留）。
+ *   4. **删掉跟随**：课程库里**没有这门课了** → 配置里那一行**删掉**（连同空掉的阶段）。
+ *
+ * ## 第 4 件改过一次口径（2026-09，机构原话）
+ *
+ * > 「**课程报价里面删掉的课还是会出现**，这部分也要根据后台数据实时更新」
+ *
+ * 原先定的是「**不静默删除**：置成暂未开放、名字留着，让机构自己决定去留」
+ * （当年 v25 那轮的口径，写进过不少断言与文档）。它的后果就是机构看到的那个：
+ * 他们把「高考冲刺」「特殊计划专项」从课程库里删了，报价页上那两门课**还列着**
+ * （显示"暂未开放"，家长选中它只会得到一句"暂未开放"）。而机构的口径早就说清了
+ * 两次：「课程全都按照课程库里的来，课程库以外的全部都应该删掉」。因此改成**删掉**。
+ *
+ * 安全性来自另一道护栏：**真正还在被用的课本来就删不掉**
+ * （`courseDeleteRefusal`：被报课 / 排课引用着 → 拒绝删除）。能删掉的课 =
+ * 没有被任何单据引用，因此报价那一行也可以安全移除。
  *
  * 返回变更说明（服务层拿去写操作日志），没有变更时是空数组。
  */
@@ -972,12 +1040,25 @@ export function syncLibraryLinks(
    * "这份配置来自站点内容"就变成了假话（自检里两条断言当场抓住了这件事：
    * 「种子报价配置来自站点内容」与「拒绝后库里的配置没被改动」）。
    * 关联本身仍然值得写日志（谁认领了谁），但它不该改变"这份价是谁定的"。
+   *
+   * ⚠️ 删掉残行**算**实质变更（`nonLinkChanges`）：那一行连同价格一起没了，
+   * 机构看到的报价表少了一门课，这必须改变"这份配置的来源与修改时间"。
    */
   let nonLinkChanges = 0;
   const byId = new Map(courses.map((course) => [course.id, course]));
   const byName = new Map(courses.map((course) => [course.name, course]));
-  const next = JSON.parse(JSON.stringify(config)) as PricingConfig;
   const changes: string[] = [];
+
+  /* ① 先删残行（课程库里已经没有的那些课）——判据见 `prunePricingOrphans`。 */
+  const pruned = prunePricingOrphans(config, courses);
+  const next = pruned.config;
+  for (const row of pruned.dropped) {
+    nonLinkChanges += 1;
+    changes.push(`「${row.name}」在课程库里已不存在 → 报价配置里已删除这一行`);
+  }
+  for (const stageName of pruned.droppedStages) {
+    changes.push(`「${stageName}」阶段下已经没有课程 → 一起删掉这一组`);
+  }
 
   for (const stage of next.stages) {
     for (const course of stage.courses) {
@@ -986,15 +1067,12 @@ export function syncLibraryLinks(
         : byName.get(course.name);
 
       if (linked === undefined) {
-        // 找不到对应课程：可能是课程库里删掉了，也可能本来就不是课程库的课程（例如「九年级课本」）
-        if (course.courseId !== undefined && course.courseId !== "") {
-          if (course.available) {
-            course.available = false;
-            course.basePrice = course.basePrice ?? null;
-            nonLinkChanges += 1;
-            changes.push(`「${course.name}」在课程库里已不存在 → 报价配置里置为暂未开放`);
-          }
-        }
+        /*
+         * 走到这里说明这一行**从来没挂过课程库的课**（`courseId` 是空的）、名字也对不上
+         * ——例如内容文件里手写的老课包名（早年的「九年级课本」）。
+         * 它不是"被删掉的课"，也不该由一次同步来替机构决定删它，因此原样留着；
+         * 真正要处理的那种（挂过 id、而 id 没了）已经在上面 `prunePricingOrphans` 里删掉了。
+         */
         continue;
       }
 

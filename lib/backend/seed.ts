@@ -299,10 +299,17 @@ export function createSeedDatabase(now: Date = new Date()): Database {
      * 去重后合并：那十二门课 2026-09 全部上网站了，因此它们已经由
      * `materializeSiteCourses()` 从网站卡片建出来 —— 这里再补一遍就是同名两条
      * （报价与台账都按名字认领，重名一定认错一门）。见 `extra-courses.ts`。
+     *
+     * ⚠️ **第二个入参不能省**（`extraCourses` 刻意不给默认值）：它传的是
+     * "报价配置里有哪些课"。机构从课程库里删掉、报价里那一行也跟着删掉的课
+     * 不该在建库时复活（机构原话：「删掉的课还是会出现」）。
      */
     courses: [
       ...siteCourses.courses,
-      ...extraCourses(siteCourses.courses.map((course) => course.name)),
+      ...extraCourses(
+        siteCourses.courses.map((course) => course.name),
+        pricingConfigFromContent().stages.flatMap((stage) => stage.courses.map((course) => course.name)),
+      ),
     ],
     coursePartitions: siteCourses.partitions,
     catalog: catalogFromSeed(),

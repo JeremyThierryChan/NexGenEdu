@@ -53,7 +53,7 @@ export default function AdminPricingPage() {
   const [quoteError, setQuoteError] = useState("");
   const [problems, setProblems] = useState<string[]>([]);
   const [exported, setExported] = useState("");
-  /** 课程库：报价要跟着它走（改名跟随、停开跟随）。 */
+  /** 课程库：报价要跟着它走（改名跟随、停开跟随、**删课跟随**）。 */
   const [libraryCourses, setLibraryCourses] = useState<Course[]>([]);
   /**
    * 课程类型的维度表：**班型的名称与人数区间以它为准**（v25）。
@@ -591,7 +591,9 @@ export default function AdminPricingPage() {
             课程库共 {libraryCourses.length} 门，已定价 {pricedCount} 门
             {unpricedCourses.length > 0 && `，还有 ${unpricedCourses.length} 门没价格`}。
             课程库决定了「能排哪些课」，这一页决定「这门课多少钱」；课程库里改了名字或设为
-            暂未开放，这里会跟着变（保存时会自动同步）。
+            暂未开放，这里会跟着变（保存时会自动同步）。**在课程库里删掉一门课，这里那一行
+            也会跟着删掉**（2026-09 口径：删掉的课不该再列出来）；只是想暂时不接单，
+            请在课程库里把它改成「暂未开放」——那与删除是两件事。
           </p>
 
           {unpricedCourses.length === 0 ? (

@@ -400,6 +400,7 @@ export function normalizeCourse(input: Omit<Course, "id" | "version"> | Course):
  *
  * **真正的护栏还在，而且是更要紧的那一条**：`courseDeleteRefusal`（api.ts）——
  * 被报课或排课引用着的课**不许删**（删了那些记录里的科目名就成了无主字符串）。
- * 删一门的正常后果：报价配置里那一行被置成「暂未开放」（`syncLibraryLinks`）、
+ * 删一门的正常后果：**报价配置里那一行也删掉**（`syncLibraryLinks`；2026-09 起，
+ * 旧口径是"置成暂未开放、名字留着"，那正是机构抱怨的"删掉的课还是会出现"）、
  * 导出时内容文件里那张卡片消失（`site:export`）—— 都是"跟着走"，不是"报错拦你"。
  */

@@ -32,9 +32,14 @@ import type { Course } from "./types";
  *
  * ## 为什么放在 `initial.ts` 与 `seed.ts` **共用**
  *
- * 空的库与示例库都要有这十二门课，否则新建一个库就会出现"报价里有 44 门课、
+ * 空的库与示例库都要有这几门课，否则新建一个库就会出现"报价里有 44 门课、
  * 课程库里只有 32 门"——正是这次要修掉的那个错位。两份各抄一遍必然会漂，
  * 所以只有这一处定义。
+ *
+ * ⚠️ 2026-09 起**判据是数据的、不是这份清单的**（见 `extraCourses` 的说明）：
+ * 「报价里有 ∩ 网站卡片上没有」—— 机构删掉一门课、报价里那一行也跟着删之后，
+ * 新建的库**不该把它再造回来**（机构原话：「课程报价里面删掉的课还是会出现」，
+ * PROJECT.md 的 E14）。
  */
 
 /** 一门"只在后台用"的课：名字、学段、学科、模块（`学科·模块名`）、状态。 */
@@ -158,26 +163,41 @@ function extraCourseOf(spec: ExtraCourseSpec, index: number): Course {
 }
 
 /**
- * 造出这十二门课里**网站卡片还没覆盖的那些**。
+ * 造出 `SPECS` 里**"报价里有、网站卡片上没有"的那些课**（建库 / 迁移用）。
  *
- * ## 2026-09：它们全部上网站了，这个函数因此变成"去重后的补漏"
+ * ## 判据就是这句话本身：`报价里有` ∩ `网站卡片上没有`
  *
- * 机构这一轮说的是「课程全都按照课程库里的来」，那十二门"只在后台用"的课要一起上网
- * （一门课一段正文，见 PROJECT.md 的 E12）。上网之后它们由
- * `materializeSiteCourses()` 从**网站卡片**这条路建出来 ——
- * 这里若再补一遍，就是**同名两条**：示例库 / 空库里会出现 56 门课
- * （44 门真实 + 12 门重名），而报价与台账都是**按名字认领**的，重名一定会认错一门。
+ * 原先只按"卡片上有没有"过滤，靠一条**手工约定**让 `SPECS` 与报价清单保持一致
+ * （文件头那段："这里必须跟着改……名字不跟就会出现「报价里有、课程库里没有」"）。
+ * 那份约定在 2026-09 破了：机构把「高考冲刺」「特殊计划专项」从课程库里删掉，
+ * 报价配置里那两行也跟着删了（`syncLibraryLinks` 的第 4 件），而 `SPECS` 是人写的、
+ * 跟不上 —— 于是**新建一个库就会把那两门课再造回来**，正是机构抱怨的
+ * 「删掉的课还是会出现」。因此第二个入参 `pricedNames` 是**必需**的：
+ * 让"哪些课该存在"由**数据**决定，而不是由一份手工维护的代码清单决定。
  *
- * 因此这里按名字去重：`coveredNames` 传"网站卡片已经有的那些名字"。
- * 现在 `SPECS` 里的十二个名字**全都**在网站上了，于是返回空数组。
- * 清单本身留着仍然有用：`extraCourseDimensions()` 是这十二门课的维度口径
- * （迁移与建库都查它）。
+ * ### 两个入参都必需，刻意不给默认值
  *
- * 不传 `coveredNames` 时返回全部十二门（自检与文档要看这份完整清单）。
+ * 默认值在这里是**危险的方便**：漏传一次，被删掉的课就会在一台新机器上复活，
+ * 而且没有任何报错（只会看到课程清单里多出两门"不该有的课"）。
+ * 要完整清单请直接用 `EXTRA_COURSE_NAMES`（`SPECS` 本身）。
+ *
+ * ## 去重：`coveredNames` 那一半
+ *
+ * 那十二门课 2026-09 全部上过网站（见 PROJECT.md 的 E12），上网之后它们由
+ * `materializeSiteCourses()` 从**网站卡片**这条路建出来 —— 这里若再补一遍就是
+ * **同名两条**（示例库 56 门课、其中 12 门重名），而报价与台账都是**按名字认领**的，
+ * 重名一定会认错一门。
+ *
+ * 清单本身仍然有用：`extraCourseDimensions()` 是这十二门课的维度口径
+ * （迁移与建库都查它），机构哪天把某门课重新加回报价，它也会带着正确维度回来。
  */
-export function extraCourses(coveredNames: readonly string[] = []): Course[] {
+export function extraCourses(
+  coveredNames: readonly string[],
+  pricedNames: readonly string[],
+): Course[] {
   const covered = new Set(coveredNames.map((name) => name.trim()).filter((name) => name !== ""));
+  const priced = new Set(pricedNames.map((name) => name.trim()).filter((name) => name !== ""));
   return SPECS.map((spec, index) => ({ spec, index }))
-    .filter(({ spec }) => !covered.has(spec.name))
+    .filter(({ spec }) => !covered.has(spec.name) && priced.has(spec.name))
     .map(({ spec, index }) => extraCourseOf(spec, index));
 }

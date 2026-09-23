@@ -78,6 +78,7 @@ import { DEFAULT_TEACHER_SHARE_RULES } from "@/lib/data/pricing";
 import {
   PRICING_SOURCE_ADMIN,
   pricingConfigFromContent,
+  prunePricingOrphans,
   syncLibraryLinks,
   teacherFeeForSelection,
   pricingConfigToMarkdown,
@@ -663,14 +664,19 @@ function migrate(db: Database): Database | null {
      * v11 → v12：新增课程库。老库没有课程表 → 用网站内容里的课程卡片灌入，
      * 与迁移前「科目候选来自网站内容」完全一致，因此升级不会让任何一节课的科目失效。
      *
-     * 还要补上**报价里有、卡片上没有的那几门后台课**（`extraCourses()`）：
+     * 还要补上**报价里有、卡片上没有的那些后台课**（`extraCourses()`）：
      * 升级上来的库如果只有网站卡片，报价页上那些课（中考冲刺 / 医学 / 成人旅游、出行…）
      * 在课程库里就不存在 —— 报课时选不到、也排不了课，与"以课程清单为准"正好相反。
      * 与空库起步、示例库用的是同一份定义。
+     *
+     * 判据是**这个库自己的报价配置**（下面那一行取的是 `db.pricing` 的课程名）：
+     * 机构删掉、报价里也跟着删掉的课不该被升级过程再造回来
+     * （2026-09 口径：「课程报价里面删掉的课还是会出现」—— 见 `extra-courses.ts`）。
      */
+    const pricedNames = db.pricing.stages.flatMap((stage) => stage.courses.map((course) => course.name));
     db.courses = db.courses ?? [
       ...coursesFromSite(),
-      ...extraCourses(coursesFromSite().map((course) => course.name)),
+      ...extraCourses(coursesFromSite().map((course) => course.name), pricedNames),
     ];
     db.version = 12;
   }
@@ -1301,6 +1307,47 @@ function migrate(db: Database): Database | null {
   };
 
   /*
+   * 收尾归一：报价里**不该再有"课程库里已经不存在的课"**（2026-09 机构口径改了这一条）。
+   *
+   * 机构原话：「**课程报价里面删掉的课还是会出现**，这部分也要根据后台数据实时更新」——
+   * 他们把「高考冲刺」「特殊计划专项」从课程库里删了，报价配置里那两行还留着
+   * （旧口径是"不静默删除：置成暂未开放、名字留着让机构自己决定去留"），
+   * 于是报价页上那两门课仍然列着。现在：**删掉**（判据与文案见 `prunePricingOrphans`）。
+   *
+   * ## 为什么不写成迁移链上的一个版本步（v31 → v32）
+   *
+   * 因为要清的正是"**自称当前版本、却还带着残行**"的那种库 —— 手改过的导出、
+   * 只跑了一半的恢复、更早版本导出的 JSON、以及**导入**都长这样，而版本步只对
+   * "版本号还没走到 v32"的库生效（同 `syncClassTypes` 那一步的理由）。
+   * 另外：这一层是读时归一，**repair 的是读出来的那份视图**，与上面几条同一套做法。
+   *
+   * ## 落盘与留痕
+   *
+   * 与其他收尾归一一样，改的是读时视图（`cache`），下一次写入时落盘
+   * —— 但**日志必须当场写**：机构看到"报价里那两门课怎么不见了"，得能查到是谁清的。
+   * 导入那条路会紧接着 `persist`（见 `importDatabase`），因此导入进来的残行是当场落盘的。
+   */
+  const prunedPricing = prunePricingOrphans(db.pricing, db.courses);
+  if (prunedPricing.dropped.length > 0) {
+    db.pricing = prunedPricing.config;
+    // `db.logs` 兜一次：手改过的文件缺 logs 时 `writeLog` 会抛，那会让整库读不出来
+    if (!Array.isArray(db.logs)) db.logs = [];
+    writeLog(db, {
+      entity: "报价",
+      action: "清理",
+      targetId: "pricing",
+      summary:
+        `报价配置里清掉 ${String(prunedPricing.dropped.length)} 行课程库里已不存在的课：` +
+        prunedPricing.dropped.map((row) => `「${row.name}」（${row.stage}）`).join("、") +
+        (prunedPricing.droppedStages.length > 0
+          ? `；另有 ${String(prunedPricing.droppedStages.length)} 个阶段已经没有课程，一并删掉：` +
+            prunedPricing.droppedStages.map((name) => `「${name}」`).join("、")
+          : "") +
+        " —— 口径：「课程全都按照课程库里的来」（机构 2026-09）",
+    });
+  }
+
+  /*
    * 收尾归一：教师与教室的内部字段（v30 的校区 / 全职兼职 / 来源，v31 起的「校区·教室名」拆分）。
    *
    * 为什么放在收尾而不是只留在 v29 → v30 / v30 → v31 那两步（与 `db.coursePartitions` 那种兜法
@@ -1869,6 +1916,21 @@ function describePricingChange(before: PricingConfig, after: PricingConfig): str
     }
   }
   /*
+   * **删掉的课也要说**（2026-09 补的那一段）。
+   *
+   * 原来这里只报"新增课程"与"价格变化"，于是"机构在台账里删掉一门课 → 报价里那一行
+   * 跟着消失"这件事在日志里写的是「未改动价格（课程 42 门）」——
+   * 一门课没了、日志却说没改动，正是"真出问题时回溯不出来"的样子
+   * （那段口径变更见 `syncLibraryLinks` 的第 4 件）。
+   */
+  for (const stage of before.stages) {
+    const kept = after.stages.find((item) => item.name === stage.name);
+    for (const course of stage.courses) {
+      if (kept?.courses.some((item) => item.name === course.name) === true) continue;
+      parts.push(`删除课程「${course.name}」`);
+    }
+  }
+  /*
    * 人数系数按**班型**比（`classType.coefficient` 就是人数系数）。
    * 这里曾经还有一段"科目系数 1.2 → 1.1"的日志 —— 科目那一维 v29 删掉了。
    */
@@ -1902,7 +1964,7 @@ function describePricingChange(before: PricingConfig, after: PricingConfig): str
 }
 
 /**
- * 课程库改了之后，让报价配置跟着走（改名跟随、停开跟随、删除后置为暂未开放）。
+ * 课程库改了之后，让报价配置跟着走（改名跟随、停开跟随、**删课跟随：那一行也删掉**）。
  *
  * 放在服务层而不是页面里：改名发生在编辑课程的那一刻，页面可能根本没打开报价页 ——
  * 依赖页面自觉调用一定会漏，然后两边就悄悄分叉了（家长看到旧课名、或者报了已停开的课）。
