@@ -371,6 +371,40 @@ import {
 } from "@/lib/auth/session";
 import { __useTokenStoreForTesting, clearToken, readToken, writeToken } from "@/lib/auth/token";
 
+/*
+ * ── 开跑之前先确认 3000 上没有 next dev ────────────────────────────────────
+ *
+ * 为什么必须挡：本文件里有一项会以 `SITE_CONTENT_SOURCE=template` 重跑
+ * `scripts/sync-site-data.mjs`，然后读它写出来的 `data/site/.backend-snapshot.ts` 断言"这次写的是模版"。
+ * 而**开着的 dev 会同时以 backend 模式重写同一个文件** —— 于是那条断言会**假红**
+ * （我 2026-09 就撞上一次：`构站脚本（显式 template）：写的是「模版」` 实际 "backend"，
+ * 停掉 dev 重跑立刻全绿）。
+ *
+ * 判据刻意不是"3000 上有东西在监听"：这台机器上常有**别的项目**占着 3000（部署文档里写着这件事），
+ * 那样报错就变成误伤。这里抓的是 next dev 的特征：首页 HTML 里的 chunk 带 `?v=<时间戳>`
+ * （开发模式的写法）。抓到了就直接停 —— 假红的断言比"跑不起来"更难查。
+ */
+function assertNoDevServer(): void {
+  const probe = spawnSync(
+    process.execPath,
+    [
+      "-e",
+      "fetch('http://127.0.0.1:3000/').then(r=>r.text()).then(t=>console.log(t.includes('webpack.js?v=')?'dev':'other')).catch(()=>console.log('none'))",
+    ],
+    { encoding: "utf8", timeout: 5000 },
+  );
+  const verdict = (probe.stdout ?? "").trim();
+  if (verdict !== "dev") return;
+  console.error(
+    "\n✗ 3000 端口上有一个 next dev 在跑 —— 请先停掉它再跑自检（Ctrl+C，或 `npm run check` 前先关掉那个终端）。\n" +
+      "  原因：自检里有一项会以 template 模式重跑 sync-site-data 并读生成文件，\n" +
+      "  开着的 dev 会在同一刻把它写回 backend 模式，那条断言就会**假红**（不是代码错了）。\n",
+  );
+  process.exit(1);
+}
+
+assertNoDevServer();
+
 let failures = 0;
 
 /** 断言相等。 */
