@@ -49,9 +49,8 @@ export const API_CONTRACT: ContractGroup[] = [
       "lessons.list", "lessons.get", "lessons.create", "lessons.update", "lessons.remove",
       /* 课堂记录同样只有读方法：写入口是 `lessonRecords.save`（它会按出勤事实重算课时）。
        * 删除记录会留下"没有任何依据的课时扣减"，因此 `create` / `update` / `remove` 已删。 */
-      "lessonRecords.list", "lessonRecords.get",
-      "homework.list", "homework.get", "homework.create", "homework.update", "homework.remove",
-      "assessments.list", "assessments.get", "assessments.create", "assessments.update", "assessments.remove",
+      "lessonRecords.list", "homework.create", "homework.remove",
+      "assessments.remove",
       /*
        * 收款**只有读的通用方法**：`create` / `update` / `remove` 已删除。
        *
@@ -60,8 +59,7 @@ export const API_CONTRACT: ContractGroup[] = [
        * （收款记录被塞进去时，报课记录上的实收累计并不会跟着变）。
        * 收款的唯一写入口是 `payments.record`（见「三、业务动作」）。
        */
-      "payments.list", "payments.get",
-      "courses.list", "courses.get", "courses.create", "courses.update", "courses.remove",
+      "payments.list", "courses.list", "courses.create", "courses.update", "courses.remove",
     ],
   },
   {
@@ -75,8 +73,7 @@ export const API_CONTRACT: ContractGroup[] = [
       "courses.options",
       "students.search",
       "teachers.listActive",
-      "payments.listByStudent", "payments.listByEnrollment", "payments.listBetween",
-      "transactions.listByStudent", "transactions.listByEnrollment",
+      "payments.listByStudent", "payments.listByEnrollment", "transactions.listByStudent", "transactions.listByEnrollment",
       "lessonRecords.listByLesson", "lessonRecords.listByStudent",
       "homework.listByStudent",
       "assessments.listByStudent",
@@ -145,7 +142,7 @@ export const API_CONTRACT: ContractGroup[] = [
       "`finance.ts`），服务端可以原样搬过去 —— 但**口径不要改**：利用率分母、退课按课时算、" +
       "预警阈值这些都在文件顶部写明了为什么这么定。",
     methods: [
-      "today", "stats", "followups", "finance", "outstandingByStudent", "search",
+      "today", "stats", "followups", "finance", "search",
       // 冲突检查是「只读查询」，但它返回的是**服务端必须复核的结论**，
       // 因此单独说明：服务端可以保留这个接口给前端做即时提示，
       // 但保存时仍要自己再判一次（前端结果不可信）

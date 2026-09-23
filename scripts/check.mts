@@ -7451,7 +7451,68 @@ console.log("\n=== 20. P3：老 REST 已下线、后端进入类型检查 ===");
     tsconfig.includes("allowImportingTsExtensions"));
 }
 
+console.log("\n=== 21. P3：契约里没有死方法 ===");
+
+/*
+ * **这条断言是为了防"只增不减"**（2026-09 审计后加的）。
+ *
+ * 审计当时发现契约里有 16 个方法**全仓库一处都没调用**（前端、后端、脚本都没有），
+ * 其中 8 个是写方法 —— 而它们同样是接口面（可以被 `/api/call` 调到），
+ * 有的还绕过了业务不变式（`payments.create` 就是那个能塞钱却不改"实收"的洞）。
+ * 死方法不是"没成本"，"留着以后可能用得上"是最贵的说法：
+ * 它要跟着迁移、跟着改类型、还要被人读懂。
+ *
+ * 因此这里直接扫源码：契约里的**每一个**方法都必须至少有一个调用点。
+ * 删掉某个方法时，这条会告诉你"还有谁在调"；而加方法时它不会拦你 ——
+ * 但如果加了却没人用，它就是一句提醒：先想清楚谁会用。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const collect = (dir: string, out: string[] = []): string[] => {
+    for (const entry of readdirSync(new URL(dir, rootUrl), { withFileTypes: true })) {
+      const next = `${dir}${entry.name}`;
+      if (entry.isDirectory()) {
+        if (!["node_modules", ".next", "out", ".git"].includes(entry.name)) collect(`${next}/`, out);
+        continue;
+      }
+      if (/\.(ts|tsx|mts|mjs)$/.test(entry.name) && entry.name !== "contract.ts") out.push(next);
+    }
+    return out;
+  };
+  const files = [...collect("app/"), ...collect("components/"), ...collect("lib/"), ...collect("server/"), ...collect("scripts/")];
+  const sources = files.map((file) => ({ file, code: readFileSync(new URL(file, rootUrl), "utf8") }));
+
+  const methods = API_CONTRACT.flatMap((group) => group.methods);
+  const uncalled = methods.filter((method) => {
+    const pattern = new RegExp("\\.\\s*" + method.replace(".", "\\.") + "\\s*\\(");
+    return !sources.some(({ code }) => pattern.test(code));
+  });
+  ok(`契约里的 ${methods.length} 个方法都至少有一个调用点（扫了 ${files.length} 个源码文件）`,
+    uncalled.length === 0, uncalled.join("、"));
+
+  /*
+   * 反向：不能有"api 上有、契约里没有"的方法（那说明契约漏登记了）。
+   * 与上面那条合起来 = 两边一一对应。
+   */
+  const inContract = new Set(methods);
+  const unregistered: string[] = [];
+  for (const [key, value] of Object.entries(api as unknown as Record<string, unknown>)) {
+    if (typeof value === "function") {
+      if (!inContract.has(key)) unregistered.push(key);
+      continue;
+    }
+    if (typeof value === "object" && value !== null) {
+      for (const [sub, fn] of Object.entries(value as Record<string, unknown>)) {
+        if (typeof fn === "function" && !inContract.has(`${key}.${sub}`)) unregistered.push(`${key}.${sub}`);
+      }
+    }
+  }
+  eq("服务层上也不存在没登记进契约的方法（两边一一对应）", unregistered, []);
+}
+
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
+process.exit(failures === 0 ? 0 : 1);
+
 process.exit(failures === 0 ? 0 : 1);
 
 process.exit(failures === 0 ? 0 : 1);

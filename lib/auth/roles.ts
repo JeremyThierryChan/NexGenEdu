@@ -369,7 +369,6 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
   "classrooms.list": "global",
   "classrooms.get": "global",
   "courses.list": "global",
-  "courses.get": "global",
   "courses.options": "global",
   "courses.summary": "global",
   "site.publicContent": "global",
@@ -384,7 +383,6 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
   "lessons.listByTeacher": "lessons",
   "lessons.pendingMakeups": "lessons",
   "lessonRecords.list": "lessons",
-  "lessonRecords.get": "lessons",
   "lessonRecords.listByLesson": "lessons",
   "lessonRecords.listByStudent": "students",
 
@@ -394,11 +392,7 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
   "students.search": "students",
   "transactions.listByStudent": "students",
   "transactions.listByEnrollment": "students",
-  "homework.list": "students",
-  "homework.get": "students",
   "homework.listByStudent": "students",
-  "assessments.list": "students",
-  "assessments.get": "students",
   "assessments.listByStudent": "students",
 
   /* 看板：按我的口径重算，而不是"过滤掉别人的行" */
@@ -426,12 +420,9 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
    *     范围层按"默认关门"把它关掉。
    */
   "payments.list": "hidden",
-  "payments.get": "hidden",
   "payments.listByStudent": "hidden",
   "payments.listByEnrollment": "hidden",
-  "payments.listBetween": "hidden",
   "finance": "hidden",
-  "outstandingByStudent": "hidden",
   "followups": "hidden",
   "lessons.findConflicts": "hidden",
   "lessons.planSeries": "hidden",

@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 110 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 98 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -42,7 +42,7 @@ lib/backend/api.ts        服务层实现（当前 110 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 110 个方法）
+## 二、接口分组（当前 98 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -58,26 +58,24 @@ lib/backend/api.ts        服务层实现（当前 110 个方法）；数据一�
 页面走的是路线 B —— 一个通用分发入口 `POST /api/call`，服务端复用整份 `api.ts`。
 两条路线都要登录；加接口时别把参考实现当成唯一标准。）
 
-### 1. 通用 CRUD（7 个资源 × 5 个方法）＋收款与课堂记录的读方法
+### 1. 通用 CRUD（**只留真正被调用的方法**）
 
-七个资源（学生 / 教师 / 教室 / 排课 / 作业记录 / 阶段测评 / 课程库），
-每个都有 `list` / `get` / `create` / `update` / `remove` 五个方法。
-**两个例外**（都是 2026-09 审计后收紧的）：
+2026-09 审计之后，这一组按一条纪律收过：**没有人调用的方法就删掉**。
+死方法不是"没成本"——它同样是接口面（可以被 `/api/call` 调到），也让人误以为
+"这份数据还有别的地方在改"。删掉的有：`assessments.create/get/list/update`、
+`homework.get/list/update`、`courses.get`、`lessonRecords.get`、`payments.get/listBetween`。
 
-- **收款记录**只有 `list` / `get` 两个读方法，写入口只有一个动作 `payments.record`；
-- **课堂记录**同样只有两个读方法，写入口是 `lessonRecords.save`（它会按出勤事实重算课时）。
-  删掉记录会留下"没有任何依据的课时扣减"——**纠错是改记录，不是删记录**。
-
-| 资源 | 方法 |
-| --- | --- |
-| 学生 | `students.list` · `students.get` · `students.create` · `students.update` · `students.remove` |
-| 教师 | `teachers.list` · `teachers.get` · `teachers.create` · `teachers.update` · `teachers.remove` |
-| 教室 | `classrooms.list` · `classrooms.get` · `classrooms.create` · `classrooms.update` · `classrooms.remove` |
-| 排课 | `lessons.list` · `lessons.get` · `lessons.create` · `lessons.update` · `lessons.remove` |
-| 课堂记录 | `lessonRecords.list` · `lessonRecords.get`（写入口是 `lessonRecords.save`，见下面那条） |
-| 作业记录 | `homework.list` · `homework.get` · `homework.create` · `homework.update` · `homework.remove` |
-| 阶段测评 | `assessments.list` · `assessments.get` · `assessments.create` · `assessments.update` · `assessments.remove` |
-| 收款记录 | `payments.list` · `payments.get`（**没有**通用写方法：见下面那条） |
+| 资源 | 方法 | 说明 |
+| --- | --- | --- |
+| 学生 | `students.list` · `students.get` · `students.create` · `students.update` · `students.remove` | 五个都有人在用（`get` 用于学生详情与行级范围的断言） |
+| 教师 | `teachers.list` · `teachers.get` · `teachers.create` · `teachers.update` · `teachers.remove` | `get` 由服务端校验 `teacherId` 与自检使用 |
+| 教室 | `classrooms.list` · `classrooms.get` · `classrooms.create` · `classrooms.update` · `classrooms.remove` | 同上 |
+| 排课 | `lessons.list` · `lessons.get` · `lessons.create` · `lessons.update` · `lessons.remove` | `get` 由自检使用 |
+| 课堂记录 | `lessonRecords.list` · `lessonRecords.listByLesson` · `lessonRecords.listByStudent` | 写入口是 `lessonRecords.save`：它会按出勤事实重算课时。删记录会留下"没有任何依据的课时扣减"——**纠错是改记录，不是删记录** |
+| 作业记录 | `homework.create` · `homework.remove` · `homework.listByStudent` | 页面只看一个人的作业，不需要全表 `list` |
+| 阶段测评 | `assessments.add` · `assessments.remove` · `assessments.listByStudent` | `add` 会自动带出同科目上一次分数（`previousScore`） |
+| 收款记录 | `payments.list` · `payments.listByStudent` · `payments.listByEnrollment` | **没有通用写方法**：写入口只有 `payments.record`（见下面那条） |
+| 课程库 | `courses.list` · `courses.create` · `courses.update` · `courses.remove` · `courses.options` · `courses.summary` · `courses.syncFromSite` | 课程是几十条的量级，页面用 `list` + 前端筛选；`remove` 先过 `canRemoveCourse` |
 
 - 服务端用一套 REST 即可：`GET` 列表、`GET` 单项、`POST` 新建、`PATCH` 修改、`DELETE` 删除；
 - **id 由服务端生成**，前端只读；
@@ -224,7 +222,7 @@ lib/backend/api.ts        服务层实现（当前 110 个方法）；数据一�
 
 ### 6. 看板与统计（只读）
 
-`today`、`stats`、`followups`、`finance`、`outstandingByStudent`、`search`、
+`today`、`stats`、`followups`、`finance`、`search`、
 `lessons.findConflicts`、`lessons.suggestMoves`。
 
 算法在 `lib/backend/followup.ts`、`stats.ts`、`finance.ts`、`search.ts` 里，
@@ -561,7 +559,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 2. 它会进入 `API_CONTRACT` —— 而自检要求"服务层每个方法都必须在契约里"，
    于是契约里出现一个"只有服务端才有意义"的方法，契约就不再是"页面对服务层的形状"了。
 
-**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 110 个方法，
+**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 98 个方法，
 这四条路由**刻意不登记**（它们不是服务层方法）；页面的客户端是 `lib/auth/accounts.ts`，
 与 `lib/auth/session.ts` 调 `/api/login`、`/api/session` 是同一个做法。
 自检里对它们的要求写在 `scripts/check-auth.mts` 的 [10] 节（真实 HTTP、真实写盘），
@@ -701,7 +699,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 | `aggregate` | `today`、`stats` | **按我的口径重算**：今日概览只算我的课、低课时预警只列我的学生；统计里教室利用率 / 时段分布 / 教师课时 / 退课流失都只算我的（因此"利用率"会明显偏低，这是"只算我的课"的直接结果） |
 | `search` | `search` | 学生与排课只搜我的；教师 / 教室 / 课程照旧（搜索框在每个页面都有，最容易顺手搜到别人班的学生） |
 | `teach` | `lessons.markCompleted`、`lessons.createMakeup`、`lessonRecords.save`、`assessments.add` | 目标必须在自己名下，否则按"记录不存在"处理或报错（这几条会**改课时账**，绝不能静默成功） |
-| `hidden`（→ 403） | `payments.list` / `get` / `listByStudent` / `listByEnrollment` / `listBetween`、`finance`、`outstandingByStudent`、`followups`、`lessons.findConflicts` / `planSeries` / `createSeries` / `suggestMoves`、`courses.syncFromSite` | **看不到**：钱、待跟进、排课、课程库写入都不归教师 |
+| `hidden`（→ 403） | `payments.list` / `get` / `listByStudent` / `listByEnrollment` / `listBetween`、`finance`、`followups`、`lessons.findConflicts` / `planSeries` / `createSeries` / `suggestMoves`、`courses.syncFromSite` | **看不到**：钱、待跟进、排课、课程库写入都不归教师 |
 
 **没登记在这个表里的方法** → 对普通教师**一律拒绝**（默认关门）。
 这不是洁癖：角色表是"读宽写严"的（`crud` / `query` 里的只读方法默认四类角色都能用），

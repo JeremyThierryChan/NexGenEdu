@@ -936,16 +936,6 @@ function scopeLessonRecords(
   return records.filter((record) => canSeeLessonId(view, db, record.lessonId));
 }
 
-/** 按范围过滤"挂在自己学生身上"的记录（作业 / 测评）。 */
-function scopeStudentRecords<T extends { studentId: string }>(
-  view: ScopeView,
-  db: Database,
-  records: T[],
-): T[] {
-  const ids = visibleStudentIds(view, db);
-  if (ids === null) return records;
-  return records.filter((record) => ids.has(record.studentId));
-}
 
 /**
  * 写动作碰到范围外的数据时抛的话。
@@ -2503,7 +2493,13 @@ const localApi = {
    * 注意边界：这里加课程**不会**让宣传网站上多出一张卡片 —— 网站是静态内容。
    */
   courses: {
-    ...versionedCollection<Course>((db) => db.courses, "course", "课程", courseDeleteRefusal),
+    /*
+     * 课程库：从带版本号的工厂里取需要的几个（`list` / `create` / `update` / `remove`）。
+     * `courses.get` 全仓库零调用 —— 页面靠 `courses.list()` + 前端筛选（课程是几十条的量级），
+     * 因此不再铺开（2026-09 审计后收的）。
+     */
+    list: versionedCollection<Course>((db) => db.courses, "course", "课程", courseDeleteRefusal).list,
+    // `remove` 在下面自己实现（要先过 `canRemoveCourse`：网站来源的课不让删）
 
     /**
      * 新建课程（先校验再落库）。
@@ -2687,10 +2683,6 @@ const localApi = {
       await delay();
       return clone(load().payments);
     },
-    async get(id: string): Promise<Payment | null> {
-      await delay();
-      return clone(load().payments.find((item) => item.id === id) ?? null);
-    },
     listByStudent: async (studentId: string): Promise<Payment[]> => {
       await delay();
       return clone(
@@ -2704,15 +2696,6 @@ const localApi = {
       return clone(
         load()
           .payments.filter((item) => item.enrollmentId === enrollmentId)
-          .sort((a, b) => b.at.localeCompare(a.at)),
-      );
-    },
-    /** 按时间区间取（本月收入用）。 */
-    listBetween: async (from: Date, to: Date): Promise<Payment[]> => {
-      await delay();
-      return clone(
-        load()
-          .payments.filter((item) => withinRange(item.at, from, to))
           .sort((a, b) => b.at.localeCompare(a.at)),
       );
     },
@@ -2866,23 +2849,6 @@ const localApi = {
     );
   },
 
-  /** 学生维度的欠费合计（列表里显示）。 */
-  async outstandingByStudent(): Promise<Array<{ studentId: string; amount: number }>> {
-    await delay();
-    const db = load();
-    return clone(
-      db.students
-        .map((student) => ({
-          studentId: student.id,
-          amount: round2(
-            student.enrollments
-              .filter((enrollment) => enrollment.status === "在读")
-              .reduce((sum, enrollment) => sum + outstandingAmount(enrollment), 0),
-          ),
-        }))
-        .filter((item) => item.amount > 0),
-    );
-  },
 
   /**
    * 课时流水（只读；写入由报课 / 续费 / 上课 / 撤销等业务动作负责）。
@@ -2954,16 +2920,6 @@ const localApi = {
       await delay();
       const db = load();
       return clone(scopeLessonRecords(view, db, db.lessonRecords));
-    },
-
-    /** 单条课堂记录：不在自己课上就当作不存在（`null`）。 */
-    async get(id: string): Promise<LessonRecord | null> {
-      const view = captureView();
-      await delay();
-      const db = load();
-      const record = db.lessonRecords.find((item) => item.id === id);
-      if (record === undefined) return null;
-      return canSeeLessonId(view, db, record.lessonId) ? clone(record) : null;
     },
 
     listByLesson: async (lessonId: string): Promise<LessonRecord[]> => {
@@ -3053,23 +3009,18 @@ const localApi = {
    * 普通教师只看得到自己学生的（作业是"某个学生的一次提交"，范围跟着学生走）。
    */
   homework: {
-    ...collection<HomeworkRecord>((db) => db.homeworkRecords, "hw", "作业记录"),
-
-    async list(): Promise<HomeworkRecord[]> {
-      const view = captureView();
-      await delay();
-      const db = load();
-      return clone(scopeStudentRecords(view, db, db.homeworkRecords));
-    },
-
-    async get(id: string): Promise<HomeworkRecord | null> {
-      const view = captureView();
-      await delay();
-      const db = load();
-      const record = db.homeworkRecords.find((item) => item.id === id);
-      if (record === undefined) return null;
-      return canSeeStudent(view, db, record.studentId) ? clone(record) : null;
-    },
+    /*
+     * **只留真正被调用的那几个**（2026-09 审计后收的）。
+     *
+     * 作业记录原先用 `...collection(...)` 一次铺开五个方法，其中
+     * `homework.list` / `homework.get` / `homework.update` 全仓库**一处都没调用**
+     * （页面用 `listByStudent` 看一个人的、`create` 记一次、`remove` 删一条）——
+     * 而死方法不是"没成本"：它们同样是接口面（可被 `/api/call` 调到），
+     * 也让人误以为"作业记录还有别的地方在改"。
+     * 这里改成从工厂里**只取需要的**（不重复实现）。
+     */
+    create: collection<HomeworkRecord>((db) => db.homeworkRecords, "hw", "作业记录").create,
+    remove: collection<HomeworkRecord>((db) => db.homeworkRecords, "hw", "作业记录").remove,
 
     listByStudent: async (studentId: string): Promise<HomeworkRecord[]> => {
       const view = captureView();
@@ -3092,24 +3043,8 @@ const localApi = {
    * 也让「补录旧数据」时前后顺序对不上。
    */
   assessments: {
-    ...collection<Assessment>((db) => db.assessments, "as", "测评"),
-
-    /** 阶段测评列表：普通教师只看得到自己学生的（范围跟着学生走）。 */
-    async list(): Promise<Assessment[]> {
-      const view = captureView();
-      await delay();
-      const db = load();
-      return clone(scopeStudentRecords(view, db, db.assessments));
-    },
-
-    async get(id: string): Promise<Assessment | null> {
-      const view = captureView();
-      await delay();
-      const db = load();
-      const record = db.assessments.find((item) => item.id === id);
-      if (record === undefined) return null;
-      return canSeeStudent(view, db, record.studentId) ? clone(record) : null;
-    },
+    /* 同上：只留被调用的（`add` 记一次测评、`remove` 删一条、`listByStudent` 看一个人的）。 */
+    remove: collection<Assessment>((db) => db.assessments, "as", "测评").remove,
 
     listByStudent: async (studentId: string): Promise<Assessment[]> => {
       const view = captureView();
