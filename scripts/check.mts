@@ -10768,6 +10768,41 @@ console.log("\n=== 41. 报价与课程清单对齐（v37）===");
    */
 }
 
+console.log("\n=== 41.5 网站页脚显示「这一份内容从哪来」===");
+
+/*
+ * 机构：「**再在网站的右下角教务后台旁边添加一个状态显示吧，显示现在的网站使用的是
+ * 模版数据还是根据后端显示的数据**」。
+ *
+ * 网站是静态产物，内容可能来自三处而长得一模一样：后端快照（`backend`）/
+ * 内容文件（`template`）/ 空（`blank`）。这个标存在的意义就是让机构一眼分清
+ * "看的那一份不对"还是"数据没重新取"——前几轮反复出现的
+ * 「我在后台改了课程名字，前台没变」正是这一类问题。
+ *
+ * 断言按"三种状态各自对应哪个标"来写（源码级），而不是"页脚里有某个字符串"：
+ * 后者在改了措辞之后会静默失效。
+ */
+{
+  const badge = readFileSync(
+    new URL("../components/layout/SiteDataSourceBadge.tsx", import.meta.url),
+    "utf8",
+  );
+  const footer = readFileSync(new URL("../components/layout/Footer.tsx", import.meta.url), "utf8");
+
+  ok("页脚里挂了这个标（就在「教务后台」旁边）",
+    footer.includes("SiteDataSourceBadge") && footer.includes("教务后台"));
+  ok("三种来源各有一句人话：后端数据 / 模版数据 / 空",
+    badge.includes("内容：后端数据") &&
+      badge.includes("内容：模版数据") &&
+      badge.includes("内容：空（没连上后端）"));
+  ok("判据用的是网站那唯一一处取数口径（不是另算一套）",
+    badge.includes("siteContentSource()"));
+  ok("标上了「构站取数时间」——后端数据是构站那一刻的快照，不是实时读库",
+    badge.includes("generatedAt") && badge.includes("UTC"));
+  ok("悬停给出完整来源说明（构站脚本写的那句：含后端地址与时间戳原文）",
+    badge.includes("backendSiteNote"));
+}
+
 console.log("\n=== 42. 后台的卡片都能折叠（机构：「闲时可以占用更少的空间」）===");
 
 /*
