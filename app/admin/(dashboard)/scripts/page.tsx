@@ -17,6 +17,7 @@ import {
   type Script,
 } from "@/lib/backend/scripts";
 import { cn } from "@/lib/utils/cn";
+import { activeEnrollments } from "@/lib/backend/enrollment";
 
 /**
  * 话术专区。
@@ -79,9 +80,15 @@ export default function AdminScriptsPage() {
     [studentId, students],
   );
 
-  /** 这名学生还在读的报课记录（切科目、算剩余课时都用它）。 */
-  const activeEnrollments = useMemo(
-    () => (student?.enrollments ?? []).filter((enrollment) => enrollment.endedAt === ""),
+  /**
+   * 这名学生还在读的报课记录（切科目、算剩余课时都用它）。
+   *
+   * 名字故意与 `lib/backend/enrollment.ts` 的 `activeEnrollments` 区分开：
+   * 那个是"哪些报课算在读"的**唯一判据**，这个是"当前这位学生的在读报课"。
+   * （重名的话里面那句调用会指向自己 —— 第一版就是这么写的，tsc 立刻报了出来。）
+   */
+  const studentActiveEnrollments = useMemo(
+    () => activeEnrollments(student?.enrollments ?? []),
     [student],
   );
 
@@ -96,11 +103,11 @@ export default function AdminScriptsPage() {
     if (student === null) return {} as Record<string, string>;
     const target =
       subject === ""
-        ? activeEnrollments[0]
-        : activeEnrollments.find((enrollment) => enrollment.subject === subject);
+        ? studentActiveEnrollments[0]
+        : studentActiveEnrollments.find((enrollment) => enrollment.subject === subject);
     const remaining =
       target === undefined
-        ? activeEnrollments.reduce(
+        ? studentActiveEnrollments.reduce(
             (sum, enrollment) => sum + Math.max(0, enrollment.totalLessons - enrollment.usedLessons),
             0,
           )
@@ -111,7 +118,7 @@ export default function AdminScriptsPage() {
       科目: target?.subject ?? "",
       剩余课时: String(remaining),
     };
-  }, [activeEnrollments, student, subject]);
+  }, [studentActiveEnrollments, student, subject]);
 
   async function copy(text: string, key: string) {
     try {
@@ -180,11 +187,11 @@ export default function AdminScriptsPage() {
             <select
               value={subject}
               onChange={(event) => setSubject(event.target.value)}
-              disabled={student === null || activeEnrollments.length === 0}
+              disabled={student === null || studentActiveEnrollments.length === 0}
               className="h-10 w-full rounded-md border border-ink-300 px-3 text-sm outline-none focus:border-brand-400 disabled:bg-ink-50 disabled:text-ink-400"
             >
               <option value="">（这名学生的第一个在读科目）</option>
-              {activeEnrollments.map((enrollment) => (
+              {studentActiveEnrollments.map((enrollment) => (
                 <option key={enrollment.id} value={enrollment.subject}>
                   {enrollment.subject}
                 </option>
@@ -197,7 +204,7 @@ export default function AdminScriptsPage() {
               "加载学生名单…"
             ) : student === null ? (
               "不选学生时复制的是原稿，占位符会原样留着（如 {学生}），发之前记得替换。"
-            ) : activeEnrollments.length === 0 ? (
+            ) : studentActiveEnrollments.length === 0 ? (
               <span className="text-warning-600">
                 {student.name} 没有在读的报课记录，剩余课时会按 0 算 —— 先去「学生」页确认报课情况。
               </span>

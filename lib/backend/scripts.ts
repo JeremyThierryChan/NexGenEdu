@@ -42,8 +42,6 @@ export const SCRIPT_VARS = [
   { key: "金额", hint: "金额（如「3000 元」）" },
 ] as const;
 
-/** 占位符名字。 */
-export type ScriptVar = (typeof SCRIPT_VARS)[number]["key"];
 
 /** 场景分组。 */
 export type ScriptGroup = {

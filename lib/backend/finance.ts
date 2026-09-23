@@ -30,10 +30,6 @@ export function outstandingAmount(enrollment: Enrollment): number {
   return round2(Math.max(0, enrollment.agreedAmount - enrollment.paidAmount));
 }
 
-/** 已上部分的标价（退费策略会用到）。 */
-export function usedListAmount(enrollment: Enrollment): number {
-  return round2(enrollment.usedLessons * enrollment.unitPrice);
-}
 
 /** 保留两位小数：金额一律按分收口，避免 0.1 + 0.2 这类浮点误差累积。 */
 export function round2(value: number): number {

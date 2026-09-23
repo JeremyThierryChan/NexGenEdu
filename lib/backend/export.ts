@@ -27,7 +27,7 @@ import {
   stampForFilename,
   type CalendarEvent,
 } from "./backup";
-import { remainingTotal } from "./enrollment";
+import { activeEnrollments, remainingTotal } from "./enrollment";
 
 /** 支持的格式。 */
 export const EXPORT_FORMATS = ["csv", "json", "ics", "md"] as const;
@@ -96,7 +96,11 @@ export const EXPORT_DATASETS: ExportDataset[] = [
       headers: ["姓名", "年级", "监护人", "状态", "剩余课时", "在读科目", "备注", "建档时间"],
       row: (item: never) => {
         const student = item as Database["students"][number];
-        const active = student.enrollments.filter((row) => row.endedAt === "");
+        /*
+         * 判据用 `activeEnrollments`（`status === "在读"`）而不是 `endedAt === ""`：
+         * 同一个仓库里两种写法迟早分叉（审计那条），而"哪些报课还在读"只有一个答案。
+         */
+        const active = activeEnrollments(student.enrollments);
         return [
           student.name,
           student.grade,

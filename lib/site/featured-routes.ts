@@ -8,15 +8,6 @@ export function courseHref(path: string[]): string {
   return `${FEATURED_BASE}/${path.map((segment) => encodeURIComponent(segment)).join("/")}`;
 }
 
-/**
- * 把课程页里的小节名转成锚点链接。
- *
- * 课程页的每个学段小节都以 `id` 暴露（如「小学语文」），
- * 首页卡片的标签借此跳到对应小节。
- */
-export function bandAnchorHref(sectionName: string): string {
-  return `${COURSES_HREF}#${encodeURIComponent(sectionName)}`;
-}
 
 /**
  * 课程卡片页路径：`/courses/<路径>`。

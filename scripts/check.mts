@@ -83,7 +83,7 @@ import {
   type HolidayDay,
 } from "@/lib/backend/holidays";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
-import { CURRENT_VERSION } from "@/lib/backend/version";
+import { CURRENT_VERSION, VERSION_NOTES } from "@/lib/backend/version";
 import { hasCoursePageContent } from "@/lib/backend/site-content";
 import {
   bandsForTargets,
@@ -7510,7 +7510,53 @@ console.log("\n=== 21. P3：契约里没有死方法 ===");
   eq("服务层上也不存在没登记进契约的方法（两边一一对应）", unregistered, []);
 }
 
+console.log("\n=== 22. P3：迁移说明表有读者、报课判据只有一处 ===");
+
+/*
+ * 两条都是审计里"多余 / 会漂移"的小事，但都值得钉住：
+ *
+ *   ① `VERSION_NOTES`（每个结构版本改了什么）原先**全仓库没有任何读者** ——
+ *      也就是说它和 `migrate()` 的分支对不对得上，没有任何机制会发现。
+ *      它是后人判断"这一版改了什么"的唯一线索，因此给它一个读者（这一节）。
+ *   ② "哪些报课算在读"原先有两种写法（`endedAt === ""` 与 `status === "在读"`），
+ *      分散在导出与话术页 —— 同一件事两个判据迟早分叉（审计那条）。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+
+  // ① VERSION_NOTES 与当前版本号对得上
+  const noteKeys = Object.keys(VERSION_NOTES).map(Number).sort((a, b) => a - b);
+  const expected = Array.from({ length: CURRENT_VERSION }, (_, index) => index + 1);
+  eq(`迁移说明表覆盖 v1–v${CURRENT_VERSION} 每一版`, noteKeys, expected);
+  const emptyNotes = noteKeys.filter((key) => (VERSION_NOTES[key] ?? "").trim().length < 8);
+  eq("每一版都写了说明（不是占位的空串）", emptyNotes, []);
+  /*
+   * 反向：`migrate()` 里每推进一版都要有说明。看源码里 `db.version = N` 的 N。
+   * （这一条是"说明表与迁移实现不许漂移"的自动化版本 —— 加了一版却忘了写说明就会红。）
+   */
+  const apiSource = read("lib/backend/api.ts");
+  const advanced = [...apiSource.matchAll(/db\.version = (\d+);/g)].map((m) => Number(m[1]));
+  const undocumented = [...new Set(advanced)].filter((version) => !noteKeys.includes(version));
+  eq("migrate() 里推进到的每一版都在说明表里", undocumented, []);
+
+  // ② "在读报课"只有一处判据
+  /*
+   * **去掉注释再查**：注释里正解释着"原先用的是 endedAt 判据"，直接子串匹配会把注释算进去
+   * （第一版就是这么写的，当场报红 —— 与 §19 那条同一个坑）。
+   */
+  const strip = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const offenders = ["lib/backend/export.ts", "app/admin/(dashboard)/scripts/page.tsx"]
+    .filter((file) => /endedAt === ""/.test(strip(read(file))));
+  eq("判断「报课还在读」只有一处实现（activeEnrollments），不许各写一个 endedAt 判据", offenders, []);
+  ok("那个判据本身在 enrollment.ts 里（唯一实现）",
+    read("lib/backend/enrollment.ts").includes("export function activeEnrollments"));
+}
+
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
+process.exit(failures === 0 ? 0 : 1);
+
 process.exit(failures === 0 ? 0 : 1);
 
 process.exit(failures === 0 ? 0 : 1);

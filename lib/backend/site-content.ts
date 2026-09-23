@@ -24,7 +24,6 @@ import { getPricingData } from "@/lib/data/pricing";
 import { coursesReferencingAnchor } from "./site-bands";
 import type {
   Course,
-  SiteBand,
   SiteContent,
   SiteCoursePage,
   SitePricingLabels,
@@ -147,10 +146,6 @@ export function hasCoursePageContent(content: SiteContent | undefined): boolean 
   return content.coursePage.subjects.some((subject: SiteSubject) => subject.bands.length > 0);
 }
 
-/** 小节锚点（导出 / 校验时用）。 */
-export function coursePageAnchors(content: SiteContent): string[] {
-  return content.coursePage.subjects.flatMap((subject) => subject.bands.map((band: SiteBand) => band.id));
-}
 
 /**
  * 删除护栏要看的两样东西（都不是"内容本身"，因此单独一个参数）。

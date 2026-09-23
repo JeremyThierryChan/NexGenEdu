@@ -110,9 +110,3 @@ export function isAbsent(record: LessonRecord | undefined): boolean {
   return attendance === "请假" || attendance === "旷课";
 }
 
-/** 补课课节的标题后缀（列表里一眼看出这是补课）。 */
-export function makeupLabel(original: Lesson | undefined): string {
-  if (original === undefined) return "补课";
-  const date = new Date(original.startsAt);
-  return `补课 · 原课 ${date.getMonth() + 1}月${date.getDate()}日`;
-}

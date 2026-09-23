@@ -72,10 +72,6 @@ export function sharePercentFor(students: number, rules: TeacherShareRules): num
   return round2(rules.basePercent + (count - 1) * rules.stepPercent);
 }
 
-/** 分成比例的小数形式（例如 0.4），用于展示原始公式的形态。 */
-export function shareFactorFor(students: number, rules: TeacherShareRules): number {
-  return round2(sharePercentFor(students, rules) / 100);
-}
 
 /**
  * 教师课时费。
@@ -93,30 +89,7 @@ export function teacherFeeFor(
   return round2(hours * price * (sharePercentFor(input.students, rules) / 100));
 }
 
-/** 分成对照表里的一行。 */
-export type TeacherShareRow = {
-  students: number;
-  /** 分成比例（百分比）。 */
-  percent: number;
-  /** 该人数下的教师课时费（按传入的课时单价与小时数）。 */
-  fee: number;
-};
 
-/** 人数对照表：1 人到上限（默认 8 人）。 */
-export function teacherShareTable(
-  rules: TeacherShareRules,
-  options: { hourlyPrice: number; hours: number },
-): TeacherShareRow[] {
-  const rows: TeacherShareRow[] = [];
-  for (let students = TEACHER_SHARE_MIN_STUDENTS; students <= TEACHER_SHARE_MAX_STUDENTS; students += 1) {
-    rows.push({
-      students,
-      percent: sharePercentFor(students, rules),
-      fee: teacherFeeFor({ hours: options.hours, hourlyPrice: options.hourlyPrice, students }, rules),
-    });
-  }
-  return rows;
-}
 
 /** 原始公式的形态（数字替换进去，便于与机构给的公式逐字对照）。 */
 export function teacherShareFormula(rules: TeacherShareRules): string {
@@ -153,7 +126,3 @@ export function describeTeacherShare(rules: TeacherShareRules): string[] {
   ];
 }
 
-/** 一句话摘要（列表、日志里用）。 */
-export function teacherShareSummary(rules: TeacherShareRules): string {
-  return `${rules.basePercent}% 起、每加一名学生 +${rules.stepPercent} 个百分点（${priceBasisText(rules.priceBasis)}）`;
-}

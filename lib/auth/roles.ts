@@ -36,13 +36,6 @@ import { API_CONTRACT } from "@/lib/backend/contract";
 export const ROLES = ["技术管理员", "财务管理员", "招生老师", "普通教师"] as const;
 export type Role = (typeof ROLES)[number];
 
-/** 角色什么时候能看到"自己的"数据（普通教师只看自己的课、自己学生的课时）。 */
-export const ROLE_SCOPE_NOTES: Record<Role, string> = {
-  技术管理员: "全部数据",
-  财务管理员: "全部学生的钱与账（以及建档 / 报课）",
-  招生老师: "全部学生与排课（含退课与收款）",
-  普通教师: "只看自己的课与自己学生的课时余额",
-};
 
 /**
  * 后台页面 → 允许的角色（键与 `lib/site/admin-nav.ts` 的 `href` 一致）。
@@ -134,7 +127,7 @@ export function methodOwnerText(method: string): string {
 /**
  * 接口分组（键与 `lib/backend/contract.ts` 的 `API_CONTRACT[].id` 一致）→ 允许的角色。
  *
- * 粒度刻意取"分组"而不是"逐个方法"：115 个方法逐个配一遍，改一次要动几十行、
+ * 粒度刻意取"分组"而不是"逐个方法"：98 个方法逐个配一遍，改一次要动几十行、
  * 而且没人会去核对；按分组配，一眼能看完，服务端闸门也正好是"按方法前缀/分组"一处。
  * 分组内部真的需要再分时（例如学生页的"读 / 写 / 钱"），用 `canCallMethod`（按具体方法名问同一个判定函数）。
  */
@@ -482,11 +475,3 @@ export function allowedGroups(roles: readonly Role[]): string[] {
     .map(([id]) => id);
 }
 
-/** 自检用：这份映射里每个角色分别能进多少页面 / 分组（"全权限"要被验证，而不只是写着）。 */
-export function permissionSummary(): Array<{ role: Role; pages: number; groups: number }> {
-  return ROLES.map((role) => ({
-    role,
-    pages: visiblePages([role]).length,
-    groups: allowedGroups([role]).length,
-  }));
-}

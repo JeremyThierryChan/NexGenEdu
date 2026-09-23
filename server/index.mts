@@ -222,6 +222,51 @@ function allowedOrigin(request: IncomingMessage): string {
 
 let currentCors: Record<string, string> = {};
 
+/**
+ * **异常 → HTTP 响应**：只有一处翻译规则（2026-09 审计后补的）。
+ *
+ * ## 为什么必须只有一处
+ *
+ * 审计里那三条问题是同一个病：同一类失败在三条路上给出三种答复。
+ *   - 坏 JSON：`/api/call` 回 **500**，`/api/accounts` 与 `/api/holidays` 回 **400**；
+ *   - **服务端自己的 bug**（例如 `Cannot read properties of undefined`）被答成 **400** ——
+ *     而 400 的意思是"你把参数改一改就行"，于是排障方向被带偏；
+ *   - SQLite 的原文（表名、列名）直接回给前端。
+ *
+ * 现在统一成：
+ *   - 请求体不是合法 JSON → **400**（那是客户端写错了，改一改就能成）；
+ *   - 权限不足 `PermissionDenied` → **403**、版本冲突 `VersionConflictError` → **409**
+ *     （这两类调用方**自己会处理**，文案原样带出去，见 `/api/call` 那一节）；
+ *   - 其余一律 **500**，而且**只回一句人话 + 一个编号**：真正的错误（含堆栈）写进服务端日志，
+ *     由那个编号对上。不把内部异常原文回给浏览器（局域网里任何设备都能调它）。
+ */
+function httpError(cause: unknown, context: string): { status: number; payload: { ok: false; error: string } } {
+  if (cause instanceof SyntaxError) {
+    return {
+      status: 400,
+      payload: { ok: false, error: `请求体不是合法 JSON：${cause.message}` },
+    };
+  }
+  if (cause instanceof PermissionDenied) {
+    return { status: 403, payload: { ok: false, error: cause.message } };
+  }
+  if (cause instanceof VersionConflictError) {
+    return { status: 409, payload: { ok: false, error: cause.message } };
+  }
+  const id = `req_${Math.random().toString(36).slice(2, 8)}`;
+  // 服务端日志里留下完整原因与堆栈 —— 排障靠它，界面靠那个编号对上
+  console.error(`[请求失败 ${id}] ${context}`, cause);
+  return {
+    status: 500,
+    payload: {
+      ok: false,
+      error:
+        `服务端处理这次请求时出错了（编号 ${id}）。请刷新这一页重试；` +
+        "仍然不行就把这个编号告诉开发 —— 完整原因在后端日志里。",
+    },
+  };
+}
+
 function send(response: ServerResponse, status: number, payload: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", ...currentCors });
   response.end(JSON.stringify(payload, null, 2));
@@ -621,7 +666,8 @@ const db = openDatabase();
 const migration = migrate(db);
 /*
  * 路线 B 的核心一步：把 api.ts 的存储换成 SQLite 支持的实现。
- * 之后 `api` 上的 106 个方法全部可用，且**与浏览器里跑的是同一套逻辑**。
+ * 之后 `api` 上的方法全部可用，且**与浏览器里跑的是同一套逻辑**。（数量以 `contract.ts` 为准，
+ * 不在这里写死 —— 写死的数字一定会过期。）
  */
 const SNAPSHOT_KEY = "nexgenedu.admin.db.v1";
 const serverStore = createSqliteStore(db);
@@ -1148,7 +1194,10 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
           scopeWarning,
         });
       })
-      .catch((cause: unknown) => send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" }));
+      .catch((cause: unknown) => {
+        const { status, payload } = httpError(cause, `POST ${url.pathname}`);
+        send(response, status, payload);
+      });
     return;
   }
 
@@ -1172,12 +1221,10 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
     void api.site
       .publicContent()
       .then((data) => send(response, 200, { ok: true, data }))
-      .catch((cause: unknown) =>
-        send(response, 500, {
-          ok: false,
-          error: cause instanceof Error ? cause.message : "服务器内部错误",
-        }),
-      );
+      .catch((cause: unknown) => {
+        const { status, payload } = httpError(cause, "GET /api/public/site");
+        send(response, status, payload);
+      });
     return;
   }
 
@@ -1215,10 +1262,8 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
           scopeWarning,
         });
       } catch (cause) {
-        send(response, 500, {
-          ok: false,
-          error: cause instanceof Error ? cause.message : "服务器内部错误",
-        });
+        const { status, payload } = httpError(cause, `POST ${url.pathname}`);
+        send(response, status, payload);
       }
     })();
     return;
@@ -1259,20 +1304,9 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
       return;
     }
     void handleAccountsRoute(db, request, response, session).catch((cause: unknown) => {
-      /*
-       * 请求体不是合法 JSON（或超过 1MB）是**客户端把请求写错了** → 400；
-       * 其余是服务端自己的问题 → 500。两者分开的理由与业务错误一样：
-       * 400 表示"改一改再提交就行"，500 表示"这不是你的错，去看后端日志"。
-       */
-      const syntax = cause instanceof SyntaxError;
-      send(response, syntax ? 400 : 500, {
-        ok: false,
-        error: syntax
-          ? `请求体不是合法 JSON：${cause instanceof Error ? cause.message : String(cause)}`
-          : cause instanceof Error
-            ? cause.message
-            : "服务器内部错误",
-      });
+      // 坏 JSON → 400、权限 → 403、冲突 → 409、其余 → 500 + 编号（规则只有一处：`httpError`）
+      const { status, payload } = httpError(cause, "accounts");
+      send(response, status, payload);
     });
     return;
   }
@@ -1319,7 +1353,8 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
         send(response, 200, { ok: true, removed });
       })
       .catch((cause: unknown) => {
-        send(response, 500, { ok: false, error: cause instanceof Error ? cause.message : String(cause) });
+        const { status, payload } = httpError(cause, "POST /api/test-hooks/remove-fixture");
+        send(response, status, payload);
       });
     return;
   }
@@ -1355,15 +1390,8 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
       return;
     }
     void handleHolidaysRoute(db, request, response, session, action).catch((cause: unknown) => {
-      const syntax = cause instanceof SyntaxError;
-      send(response, syntax ? 400 : 500, {
-        ok: false,
-        error: syntax
-          ? `请求体不是合法 JSON：${cause instanceof Error ? cause.message : String(cause)}`
-          : cause instanceof Error
-            ? cause.message
-            : "服务器内部错误",
-      });
+      const { status, payload } = httpError(cause, "POST /api/holidays/refresh");
+      send(response, status, payload);
     });
     return;
   }
@@ -1439,10 +1467,20 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
             send(response, 409, { ok: false, error: cause.message });
             return;
           }
+          /*
+           * 这里剩下的都是**参数类**错误（`api.ts` 用 `throw new Error("课时不足：…")` 那种
+           * 业务拒绝）—— 它们都带着"该改什么"的信息，因此回 400 并把原文带出去。
+           * 但**不能**一律 400：`httpError` 会把"服务端自己的 bug"归到 500 并只回一个编号
+           * （见它的说明）。两类靠 `Error` 之外的类型区分不了，因此这里保持原样，
+           * 由下面的 `.catch`（读请求体/序列化失败）走 `httpError`。
+           */
           send(response, 400, { ok: false, error: cause instanceof Error ? cause.message : "调用失败" });
         }
       })
-      .catch((cause: unknown) => send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" }));
+      .catch((cause: unknown) => {
+        const { status, payload } = httpError(cause, "POST /api/call");
+        send(response, status, payload);
+      });
     return;
   }
 
@@ -1464,7 +1502,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
     return;
   }
 
-  if (url.pathname === "/api/status") {
+  if (url.pathname === "/api/status" && request.method === "GET") {
     /*
      * 条数从**真正的数据源**（kv 快照）里数，而不是从规范化表 ——
      * 早先这里数的是那套空的规范化表：机构有 5 位教师，`/api/status` 报 `teachers: 0`，
@@ -1586,7 +1624,12 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
    */
   send(response, 404, { ok: false, error: `没有这个接口：${request.method ?? "GET"} ${url.pathname}` });
   } catch (cause) {
-    send(response, 500, { error: cause instanceof Error ? cause.message : "服务器内部错误" });
+    /*
+     * 最外层兜底：`url` 在这个作用域里拿不到（它在 try 里面构造），
+     * 因此只用 `request.url` 的原文当上下文 —— 日志里够定位了。
+     */
+    const { status, payload } = httpError(cause, `${request.method ?? "?"} ${request.url ?? ""}`);
+    send(response, status, payload);
   }
 });
 

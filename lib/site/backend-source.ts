@@ -644,34 +644,3 @@ export function backendPricingData(): PricingData | null {
 
 /* ── 一句话说明（构建日志 / 排查） ───────────────────────────────────────── */
 
-/**
- * 构建日志 / 排查用的一句话，例如「后端（5 位在职教师 / 32 张卡片 / 22 个学科）」。
- *
- * 为什么值得有：这类功能最容易出的隐形故障是"以为在用后端，其实是模版"
- * （`scripts/sync-site-data.mjs` 打印同形状的一行，本函数让页面侧的接线也能量同一把尺）。
- *
- * 刻意**不含 `backendSiteNote`**：那句话描述的是"生成快照时"的情况，
- * 自检注入快照后它会说谎；这里的数字全部按当前快照现算。
- *
- * 教师按**在职**口径统计（与 `scripts/sync-site-data.mjs` 打印的那行同一口径）；
- * 教师页还会再按 `siteVisible` 过滤，因此这里的数字可能比页面上多——
- * 排查"教师页怎么少了一位"时看的是后者（`backendTeachersPage()` 的结果）。
- */
-export function describeBackendContent(): string {
-  const snapshot = backendSnapshot();
-  if (snapshot === null) return "模版（没有后端快照，本次构站用 data/site/*.md）";
-
-  // 口径与教师页一致（`active && siteVisible`）：日志说 7 位、页面只显示 6 位这种不一致，
-  // 会让"日志明明说用了后端"变成一句无法核对的话
-  const teachers = (snapshot.teachers ?? []).filter(
-    (teacher) => teacher.active === true && teacher.siteVisible === true,
-  ).length;
-  const cards = (snapshot.courses ?? []).filter(isSiteCard).length;
-  const subjects = courseSubjects(snapshot);
-  const bands = subjects.reduce((sum, subject) => sum + (subject.bands?.length ?? 0), 0);
-
-  const summary = `后端（${teachers} 位在职教师 / ${cards} 张卡片 / ${subjects.length} 个学科）`;
-  // 有卡片但没有课程正文时，课程页那一块其实回落到了模版 —— 这行日志必须把话说全，
-  // 否则读日志的人会以为课程页用的是后端
-  return bands === 0 ? `${summary}；没有课程正文，课程页回落模版` : summary;
-}

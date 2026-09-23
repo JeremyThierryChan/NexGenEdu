@@ -1293,12 +1293,15 @@ function versionedCollection<T extends { id: string; version: number }>(
 }
 
 /** 日期键：YYYY-MM-DD（本地时区），用于按天分组。 */
-export function dateKey(value: string | Date): string {
-  const date = typeof value === "string" ? new Date(value) : value;
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
-}
+/*
+ * `dateKey` 从 `./format` 转发 —— 那里是它唯一的实现。
+ *
+ * 这里原先**逐字**又写了一份（`format.ts` 的注释甚至写着"与 api.ts 的 dateKey 口径一致"），
+ * 而"两处保持一致"是句空话：真正的保证是**只有一处**。审计之后改成转发，
+ * 因此 `api.ts` 与页面拿到的是同一个函数（对外形状没变，调用点一行都不用改）。
+ */
+export { dateKey } from "./format";
+import { dateKey } from "./format";
 
 /*
  * 学生与排课走**带乐观锁**的集合（v17 起）：信息采集表是整份覆盖 `profile`，
@@ -1440,20 +1443,6 @@ export type SeriesPlan = {
   shortageMessage: string;
 };
 
-/**
- * 某个学生在这节课上"超用"了课时（已用 > 购买）。
- *
- * 排课时已经按"课时够不够"拦了一道，但**仍可能发生**：
- * 排课时够、后来退课或手工调减课时、多人课里有学生中途退课…
- * 这时候必须**说出来**：静默超用等于白送课时，而"剩余课时显示 0"看不出欠了几节。
- */
-export type OverusedLesson = {
-  studentId: string;
-  name: string;
-  subject: string;
-  /** 超用节数（正数）。 */
-  over: number;
-};
 
 export type SeriesOutcome = {
   created: number;

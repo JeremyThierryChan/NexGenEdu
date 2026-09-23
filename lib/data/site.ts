@@ -767,9 +767,6 @@ export function getTeachersPageFromTemplate(): {
   return { heading: pageHeading(page), teachers };
 }
 
-export function getTeacherById(id: string): Teacher | null {
-  return getTeachersPage().teachers.find((teacher) => teacher.id === id) ?? null;
-}
 
 // ── 关于我们 ──────────────────────────────────────────────────────────────
 

@@ -492,7 +492,6 @@ export type Teacher = {
   kind: TeacherKind;
 };
 
-export const TEACHER_ORIGINS = ["网站", "后台"] as const;
 export const TEACHER_KINDS = ["教师", "AI"] as const;
 
 /** 教室用途。自习室也能被排课（学生来自习），因此两者都在同一个列表里，只是用途不同。 */

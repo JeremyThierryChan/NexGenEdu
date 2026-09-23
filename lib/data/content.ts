@@ -401,10 +401,6 @@ export function getPage(document: DocumentName, page: string): PageBlock {
   return { name: page, data: {}, groups: [] };
 }
 
-/** 页面是否存在（需要区分「空页面」与「页面为空的正常情况」时使用）。 */
-export function hasPage(document: DocumentName, page: string): boolean {
-  return getDocument(document).pages.has(page);
-}
 
 /** 取 content.md 里的页面（最常用，单独提供便捷函数）。 */
 export function getPageBlock(name: string): PageBlock {

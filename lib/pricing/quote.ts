@@ -51,11 +51,7 @@ function rules(): PricingRules {
   return cachedRules;
 }
 
-/** 报 1 节时加收的手续费百分比（来自内容配置，默认 10）。 */
-export const SINGLE_LESSON_FEE_PERCENT: number = rules().singleLessonFeePercent;
 
-/** 试课后报课达到该节数，试课免费（来自内容配置，默认 10）。 */
-export const FREE_TRIAL_MIN_LESSONS: number = rules().freeTrialMinLessons;
 
 /** 按节数判断手续费百分比：1 节加收，其余不加收。 */
 export function feePercentFor(lessons: number): number {

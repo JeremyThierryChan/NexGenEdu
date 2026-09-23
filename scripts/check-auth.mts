@@ -1667,6 +1667,62 @@ try {
   console.error(`\n✗ 测试钩子那一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
 }
 
+console.log("\n[12] 路由表与分支一一对应（不该出现「没登记归属」那种假故障）");
+try {
+  await withTempServer(async (base, info) => {
+    const loginResponse = await raw(base, "/api/login", {
+      method: "POST",
+      body: { username: info.username, password: info.password },
+    });
+    const token = String(loginResponse.body.token ?? "");
+    const probe = async (path: string, method = "GET"): Promise<{ status: number; error: string }> => {
+      const response = await raw(base, path, { method, token, body: method === "GET" ? undefined : {} });
+      return { status: response.status, error: String((response.body as { error?: string }).error ?? "") };
+    };
+
+    /*
+     * 存活入口**逐个点名**：它们都必须真的存在（不是 404/410）。
+     *
+     * 为什么值得一条一条列：审计里那种"页面进得去、每个请求都 403"的故障，
+     * 根子就是**路由表与处理分支两处**（表里登记了、分支忘了，或者反过来）——
+     * 中间的兜底会给出一个看起来像权限问题的答复，把排障方向带偏。
+     * 现在存活入口很少，正好逐个钉住。
+     */
+    const alive: Array<[string, string]> = [
+      ["/api/session", "GET"],
+      ["/api/public/site", "GET"],
+      ["/api/status", "GET"],
+      ["/api/accounts", "GET"],
+      ["/api/holidays", "GET"],
+    ];
+    for (const [path, method] of alive) {
+      const result = await probe(path, method);
+      equal(`${method} ${path} 真的存在（不是 404/410）`, result.status < 400, true);
+    }
+    const callProbe = await call(base, token, "students.list");
+    equal("POST /api/call 真的存在", callProbe.status, 200);
+
+    // 方法写错 → 405/404（而不是"没登记归属"的 403）
+    const wrongMethod = await probe("/api/status", "POST");
+    equal("POST /api/status → 404（它只看 GET）", wrongMethod.status, 404);
+    check("404 的文案是「没有这个接口」，不是权限问题",
+      wrongMethod.error.includes("没有这个接口"), wrongMethod.error);
+
+    // 路径写错 → 404
+    const unknown = await probe("/api/根本没有这个接口");
+    equal("不存在的 /api/ 路径 → 404", unknown.status, 404);
+    check("而且文案说清是路径问题（不再叫你去改权限表）",
+      unknown.error.includes("没有这个接口") && !unknown.error.includes("补一行"), unknown.error);
+
+    // 老 REST → 410（与 [7] 同一条口径，这里再点一次：它不该落进 404）
+    equal("老 REST 路径 → 410（不是 404 —— 那是「路径写错」的意思）",
+      (await probe("/api/students")).status, 410);
+  });
+} catch (cause) {
+  failures += 1;
+  console.error(`\n✗ 路由表那一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
+}
+
 console.log(
   failures === 0
     ? "\n=== 服务端认证自检通过 ==="

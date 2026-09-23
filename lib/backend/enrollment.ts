@@ -64,14 +64,6 @@ export function lessonBalance(enrollments: Enrollment[]): LessonBalance {
   };
 }
 
-export function remainingBySubject(enrollments: Enrollment[]): Array<{ subject: string; remaining: number }> {
-  const map = new Map<string, number>();
-  for (const item of activeEnrollments(enrollments)) {
-    const subject = item.subject.trim() === "" ? "未指定科目" : item.subject.trim();
-    map.set(subject, (map.get(subject) ?? 0) + remainingOf(item));
-  }
-  return [...map].map(([subject, remaining]) => ({ subject, remaining }));
-}
 
 /**
  * 找一节课应该扣哪条报课。
@@ -94,12 +86,3 @@ export function enrollmentForLesson(
   );
 }
 
-/** 报课记录的一行历史，用于「续费 / 退课」留痕。 */
-export function describeEnrollment(enrollment: Enrollment): string {
-  const parts = [
-    `${enrollment.totalLessons} 节`,
-    `已上 ${enrollment.usedLessons} 节`,
-    `剩 ${remainingOf(enrollment)} 节`,
-  ];
-  return parts.join(" · ");
-}
