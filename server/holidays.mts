@@ -55,8 +55,17 @@ export function holidaysDir(): string {
   return typeof override === "string" && override.trim() !== "" ? override : path.join(HERE, "..", "data", "holidays");
 }
 
-/** 某一年的文件路径。 */
+/**
+ * 某一年的文件路径。
+ *
+ * 年份在这里**自己校验一次**（非法直接抛）：`path.join(dir, `${year}.json`)` 对
+ * `"../../evil"` 这种输入是会真的走出目录的。今天唯一的 HTTP 入口逐个年份过了
+ * `holidayYearError`，所以打不进来 —— 但那是"靠调用方自觉"，
+ * 将来加一条"删掉某一年"的路由就会带着这个洞一起上线。
+ */
 export function holidayYearFile(year: number): string {
+  const problem = holidayYearError(year);
+  if (problem !== null) throw new Error(`不写 / 不读这个文件名：${problem}`);
   return path.join(holidaysDir(), `${year}.json`);
 }
 
@@ -125,25 +134,41 @@ type FetchOutcome =
   | { kind: "missing"; url: string }
   | { kind: "error"; error: string };
 
-async function fetchSource(urls: string[], label: string): Promise<FetchOutcome> {
+/**
+ * 这个模块用的 `fetch`（**可注入**）。
+ *
+ * 为什么要能注入：这个功能最核心的承诺是"两个来源逐日比对一致才写盘"，而那件事过去
+ * 在自检里**没有行为性覆盖** —— 真去连外网会让自检依赖网络、且只能测到"今天两个源恰好一致"
+ * 这一种情形。注入之后自检能确定性地造出"只有一个源有数据""调休日对不上""某个源 404"，
+ * 再去断言**盘上到底有没有多出文件**（见 `scripts/check.mts` 第 16 节）。
+ */
+export type HolidayFetch = (url: string) => Promise<Response>;
+
+async function fetchSource(urls: string[], label: string, doFetch: HolidayFetch): Promise<FetchOutcome> {
   const failures: string[] = [];
   for (const url of urls) {
     let response: Response;
+    let text: string;
     try {
-      response = await fetch(url, {
-        headers: { accept: "text/calendar, application/json, text/plain, */*", "user-agent": "NexGenEdu-holidays" },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      });
+      /*
+       * `text()` 必须**在 try 里**：`AbortSignal.timeout` 的计时覆盖整个响应体读取，
+       * 所以"响应头回来了、正文拖到超时"（或正文被中途掐断）是在 `text()` 上抛的。
+       * 早先它在那两行 try 之外 —— 于是最可能发生的那种失败（超时）会成为唯一
+       * **逃出** `refreshHolidayYear` 的异常：HTTP 回 500、命令行直接栈回溯，
+       * 与"抓取总是回 200、每年一个结局"的设计正好相反。
+       */
+      response = await doFetch(url);
+      if (response.status === 404) return { kind: "missing", url };
+      if (!response.ok) {
+        failures.push(`${url}：HTTP ${response.status}`);
+        continue;
+      }
+      text = await response.text();
     } catch (cause) {
       failures.push(`${url}：${cause instanceof Error ? cause.message : String(cause)}`);
       continue;
     }
-    if (response.status === 404) return { kind: "missing", url };
-    if (!response.ok) {
-      failures.push(`${url}：HTTP ${response.status}`);
-      continue;
-    }
-    return { kind: "ok", text: await response.text(), url };
+    return { kind: "ok", text, url };
   }
   return {
     kind: "error",
@@ -181,8 +206,22 @@ export type HolidayRefreshOutcome =
  *
  * `write: false` 是"只看结果不落盘"（CLI 的 `--dry-run`、以及想知道差异时用）。
  */
-export async function refreshHolidayYear(year: number, options: { write?: boolean } = {}): Promise<HolidayRefreshOutcome> {
+export async function refreshHolidayYear(
+  year: number,
+  options: { write?: boolean; fetchImpl?: HolidayFetch } = {},
+): Promise<HolidayRefreshOutcome> {
   const shouldWrite = options.write !== false;
+  /*
+   * 默认用全局 `fetch`，但包一层拿到超时信号 —— `AbortSignal.timeout` 只在这里建一次，
+   * 于是"注入的替身"也能被测到同一套超时语义。
+   */
+  const doFetch: HolidayFetch =
+    options.fetchImpl ??
+    ((url: string) =>
+      fetch(url, {
+        headers: { accept: "text/calendar, application/json, text/plain, */*", "user-agent": "NexGenEdu-holidays" },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      }));
   const yearError = holidayYearError(year);
   if (yearError !== null) {
     return { status: "rejected", year, error: yearError, verdict: null, sources: [] };
@@ -204,18 +243,27 @@ export async function refreshHolidayYear(year: number, options: { write?: boolea
       fingerprint: "",
       note: "",
     };
-    const fetched = await fetchSource(urls, source.label);
+    const fetched = await fetchSource(urls, source.label, doFetch);
     if (fetched.kind === "missing") {
       /*
-       * 文件不存在 = 这一年还没公布（未来的年份就是这样：实测 2027 年那份是 `"days": []`，
-       * 2028 年那份根本还没有文件）。**这不是失败**：把它记成 0 天，
-       * 由交叉校验与另一个源比对 —— 另一个源有数据时，这里会被判成"这个源坏了"。
+       * 404 的含义**按来源区分**，不能一律当成"这一年还没公布"：
+       *
+       *   - 国务院那份是**一年一个文件**（`…/<年>.json`），未来的年份本来就没有文件
+       *     → 这正是"还没公布"，记成 0 天，交给交叉校验与另一个源比对；
+       *   - Apple 那份是**一个不分年的文件**（`holidays/cn_zh.ics`）—— 它 404 只可能是
+       *     "地址变了 / 已下线"，与哪一年无关。若也记成"还没公布"，就会出现
+       *     "主源挂掉了，而命令行打印一句'国务院通常在上一年 11 月公布…'并退出码 0"，
+       *     把真问题说成正常状态。
        */
-      record.ok = true;
       record.url = fetched.url;
-      record.note = "这一年还没有文件（尚未公布）";
-      if (source.id === "apple") appleDays = [];
-      else govDays = [];
+      if (source.id === "apple") {
+        record.note = "404：Apple 那个日历地址可能已经变了（它是不分年的单一文件，与哪一年无关）";
+        parseErrors.push(`${source.label}：${record.note}`);
+      } else {
+        record.ok = true;
+        record.note = "这一年还没有文件（尚未公布）";
+        govDays = [];
+      }
       sources.push(record);
       continue;
     }

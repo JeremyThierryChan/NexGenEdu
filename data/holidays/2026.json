@@ -1,6 +1,6 @@
 {
   "year": 2026,
-  "fetchedAt": "2026-09-23T06:51:50.237Z",
+  "fetchedAt": "2026-09-23T07:06:31.870Z",
   "sources": [
     {
       "id": "apple",
@@ -14,7 +14,7 @@
     {
       "id": "gov",
       "label": "国务院公告口径（holiday-cn）",
-      "url": "https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/2026.json",
+      "url": "https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master/2026.json",
       "ok": true,
       "days": 39,
       "fingerprint": "sha256:0dcfd8004351",

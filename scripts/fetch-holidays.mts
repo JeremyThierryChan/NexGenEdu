@@ -39,7 +39,19 @@ for (const year of years) {
     failed += 1;
     continue;
   }
-  const outcome = await refreshHolidayYear(year, { write: !dryRun });
+  /*
+   * 每年一个 `try/catch`：抓取链路上的意外（例如响应体读到一半断了）不该让整轮
+   * **一个字都打不出来** —— 前面那些年份的结果同样重要，尤其是排障的时候。
+   */
+  let outcome;
+  try {
+    outcome = await refreshHolidayYear(year, { write: !dryRun });
+  } catch (cause) {
+    console.log(`✗ ${year}：抓取时出了意外：${cause instanceof Error ? cause.message : String(cause)}`);
+    console.log("");
+    failed += 1;
+    continue;
+  }
 
   const sources = outcome.status === "written" || outcome.status === "checked" ? outcome.value.sources : outcome.sources;
   for (const source of sources) {

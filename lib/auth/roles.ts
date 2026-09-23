@@ -125,7 +125,7 @@ export const STUDENT_ACTION_ACCESS: Record<string, Role[]> = {
 /**
  * 接口分组（键与 `lib/backend/contract.ts` 的 `API_CONTRACT[].id` 一致）→ 允许的角色。
  *
- * 粒度刻意取"分组"而不是"逐个方法"：114 个方法逐个配一遍，改一次要动几十行、
+ * 粒度刻意取"分组"而不是"逐个方法"：115 个方法逐个配一遍，改一次要动几十行、
  * 而且没人会去核对；按分组配，一眼能看完，服务端闸门也正好是"按方法前缀/分组"一处。
  * 分组内部真的需要再分时（例如学生页的"读 / 写 / 钱"），用 `STUDENT_ACTION_ACCESS` 那一层。
  */

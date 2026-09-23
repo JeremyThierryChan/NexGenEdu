@@ -296,7 +296,7 @@ export default function AdminHolidaysPage() {
             {results.map((item) => (
               <div key={item.year} className="rounded-md border border-ink-200 px-3 py-2">
                 <p className="text-sm font-medium text-ink-800">
-                  {item.year} 年：{STATUS_TEXT[item.status]}
+                  {item.year} 年：{STATUS_TEXT[item.status] ?? "未知结局（界面与服务端版本不一致？）"}
                   {item.status === "written" ? `（${item.dayCount} 天）` : ""}
                 </p>
                 {item.error !== "" && <p className="mt-1 text-xs leading-relaxed text-ink-600">{item.error}</p>}

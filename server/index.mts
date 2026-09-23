@@ -1640,10 +1640,10 @@ async function handleHolidaysRoute(
   request: IncomingMessage,
   response: ServerResponse,
   session: Session,
+  /** 这一支是干什么的：读表还是抓取。由调用方按**路径 + 方法**判定后传进来。 */
+  action: "read" | "refresh",
 ): Promise<void> {
-  const method = (request.method ?? "GET").toUpperCase();
-
-  if (method === "GET") {
+  if (action === "read") {
     send(response, 200, { ok: true, view: holidayTableView() });
     return;
   }
@@ -1902,6 +1902,7 @@ const REST_CONTRACT_METHODS: ReadonlyArray<{
    * 而被全拒 —— 那种 403 会让人以为是权限配错了，其实是路由表少了一行。
    */
   { http: "GET", pattern: /^\/api\/holidays$/, contract: null, note: "节假日表（登录即可；只读）" },
+  { http: "POST", pattern: /^\/api\/holidays$/, contract: null, note: "不存在的用法：路由内回 405 并说清该用哪个路径（登记它是为了别落进「没登记归属」的 403）" },
   { http: "POST", pattern: /^\/api\/holidays\/refresh$/, contract: null, note: "抓取节假日（技术管理员；路由内判定）" },
 
   /* 读接口（ROUTES / READS）：按它读的东西对应的方法名翻译 */
@@ -2348,7 +2349,32 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
       send(response, 401, { ok: false, error: "未登录或登录已过期，请先登录。" });
       return;
     }
-    void handleHolidaysRoute(db, request, response, session).catch((cause: unknown) => {
+    /*
+     * **路径与方法必须精确配对**：读表是 `GET /api/holidays`，抓取是
+     * `POST /api/holidays/refresh`。
+     *
+     * 早先这一支只按方法分流（非 GET 就当抓取），于是 `POST /api/holidays` 在代码本意上是
+     * 抄近路抓取 —— 但契约表里只登记了 `/api/holidays/refresh`，闸门先跑，它落到
+     * "这个接口没有登记权限归属"的兜底上：**403 的文案叫你去改内部路由表**，
+     * 而真实原因是"路径写错了"。那种误导最费时间，因此这里直接回 405 并说清该用哪个路径，
+     * 同时把契约表里那条 `POST /api/holidays` 也登记上（否则走不到这里）。
+     */
+    const action =
+      url.pathname === "/api/holidays" && request.method === "GET"
+        ? "read"
+        : url.pathname === "/api/holidays/refresh" && request.method === "POST"
+          ? "refresh"
+          : null;
+    if (action === null) {
+      send(response, 405, {
+        ok: false,
+        error:
+          `节假日表只有两个入口：读表用 GET /api/holidays，抓取用 POST /api/holidays/refresh。` +
+          `收到的是 ${request.method ?? "?"} ${url.pathname}。`,
+      });
+      return;
+    }
+    void handleHolidaysRoute(db, request, response, session, action).catch((cause: unknown) => {
       const syntax = cause instanceof SyntaxError;
       send(response, syntax ? 400 : 500, {
         ok: false,

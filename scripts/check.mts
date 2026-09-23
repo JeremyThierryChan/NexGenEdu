@@ -165,7 +165,10 @@ import {
   PRICING_SOURCE_ADMIN,
   PRICING_SOURCE_CONTENT,
 } from "@/lib/backend/pricing";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { holidaysDir, holidayYearFile, refreshHolidayYear } from "../server/holidays.mts";
 import { LEAVE_NOTICE_HOURS, decideCharge } from "@/lib/backend/attendance";
 import {
   CLASS_HOURS_PER_DAY,
@@ -6230,6 +6233,20 @@ console.log("\n=== 16. 节假日表：两个来源逐日比对一致才写入 ==
   eq("2026 年解析出 39 天（放假 + 调休，实测值）", a26.length, 39);
   eq("其中放假 33 天", a26.filter((day) => day.kind === "放假").length, 33);
   eq("其中调休上班 6 天", a26.filter((day) => day.kind === "调休上班").length, 6);
+  /*
+   * 这一条钉的是"**必须按标记过滤**"，而不是"按名字猜"。
+   * 只查"结果里没有小寒"是不够的 —— 实测把过滤条件放宽成"标记命中 **或** 名字带（休）/（班）"，
+   * 前面那些断言全部照样绿（fixture 里的节气、固定节日本来不带后缀）。
+   * 所以这里造一条**带（休）后缀、但没有标记**的事件：它必须被排除。
+   */
+  const suffixOnly =
+    "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nDTSTART;VALUE=DATE:20260308\r\nDTEND;VALUE=DATE:20260309\r\n" +
+    "SUMMARY;LANGUAGE=zh_CN:妇女节（休）\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+  eq(
+    "只有名字后缀、没有 X-APPLE-SPECIAL-DAY 标记的事件必须被排除（否则「按名字猜」也能过）",
+    parsed(parseAppleHolidays(suffixOnly, 2026)).length,
+    0,
+  );
   eq(
     "节气与固定节日的噪音一条都没混进来（小寒/立春/妇女节/儿童节/建党节/除夕）",
     a26
@@ -6238,9 +6255,9 @@ console.log("\n=== 16. 节假日表：两个来源逐日比对一致才写入 ==
     [],
   );
   ok(
-    "真实文件里有带 RRULE 的重复标记（噪音），而它们不会被当成放假",
-    appleIcs.includes("RRULE") && a26.length === 39,
-    "fixture 里必须留几条带 RRULE 的噪音事件，否则这条断言是空转的",
+    "fixture 里确实留着带 RRULE 的噪音事件（否则下面那条「RRULE 噪声没混进来」是空转的）",
+    appleIcs.includes("RRULE"),
+    "天数对不对由上面那条 39 管着，这条只保证装置没被简化掉",
   );
   eq(
     "DTEND 是排他的：春节那块 2/15–2/23 共 9 天（不含 2/24）",
@@ -6527,6 +6544,31 @@ console.log("\n=== 16. 节假日表：两个来源逐日比对一致才写入 ==
     !readHolidayYear({ ...stored2026, days: [{ date: "2026-13-01", name: "元旦", kind: "放假" }] }, 2026).ok,
   );
   ok("整个文件不是对象 → 拒绝", !readHolidayYear("2026", 2026).ok);
+  ok(
+    "日期不属于这一年 → 拒绝（手改文件最容易出的错：把别的年份那几天粘过来）",
+    !readHolidayYear({ ...stored2026, days: [{ date: "1999-01-01", name: "元旦", kind: "放假" }] }, 2026).ok,
+  );
+  /*
+   * `verdict` 整份会被界面拿去渲染（`current.verdict.notes.map(...)`），而"这份文件可以手工改"
+   * 是文档明确邀请的：`notes` 被删掉或写成字符串时不许让整页崩，也不许因为 `agree` 是
+   * 字符串 "yes"（truthy）就显示"两个来源一致"。
+   */
+  const messyVerdict = readHolidayYear({ ...stored2026, verdict: { agree: "yes", notes: "不是数组" } }, 2026);
+  ok("verdict 形状不对时仍然读得回来（页面不会崩）", messyVerdict.ok);
+  eq(
+    "而且被规范成安全的形状（agree 只认 true，notes 只认字符串数组）",
+    messyVerdict.ok ? [messyVerdict.value.verdict.agree, messyVerdict.value.verdict.notes] : null,
+    [false, []],
+  );
+  ok(
+    "verdict 整个被删掉也只是退化成「没有校验结论」，不是崩",
+    (() => {
+      const raw = { ...stored2026 } as Record<string, unknown>;
+      delete raw.verdict;
+      const read = readHolidayYear(raw, 2026);
+      return read.ok && read.value.verdict.agree === false && read.value.verdict.blocking.length > 0;
+    })(),
+  );
 
   // ── F. 接线：页面、权限、路由、外网只在一处 ──
   const rootUrl = new URL("../", import.meta.url);
@@ -6544,7 +6586,15 @@ console.log("\n=== 16. 节假日表：两个来源逐日比对一致才写入 ==
       read("docs/使用手册.md").includes("调休、节假日、寒暑假不自动跳过") &&
       read("docs/后台API约定.md").includes("不处理调休、节假日、寒暑假"),
   );
-  ok("页面读的是 roles.ts 那一份权限（前后端不会各说一套）", page.includes("HOLIDAY_ACTION_ACCESS"));
+  /*
+   * 这条早先只断言"页面里出现过 HOLIDAY_ACTION_ACCESS" —— 那连 import 那一行都满足，
+   * 有人把判定改成 `canAccess(roles, [])`（按钮永不显示、抓取功能对管理员彻底不可用）
+   * 它照样绿。改成断言**判定表达式**里同时出现 `canAccess` 与那份权限表。
+   */
+  ok(
+    "页面按 roles.ts 那一份权限算出「能不能抓」（而不是只 import 了没用）",
+    /canRefresh[\s\S]{0,200}canAccess\(roles,\s*HOLIDAY_ACTION_ACCESS\[/.test(page),
+  );
   ok(
     "服务端也读 roles.ts 那一份，而不是自己写死角色",
     read("server/index.mts").includes("HOLIDAY_ACTION_ACCESS"),
@@ -6554,7 +6604,11 @@ console.log("\n=== 16. 节假日表：两个来源逐日比对一致才写入 ==
   ok("导航里有入口（否则这一页只能靠手敲网址）", read("lib/site/admin-nav.ts").includes('"/admin/holidays"'));
 
   const serverHolidays = read("server/holidays.mts");
-  ok("抓外网确实发生在服务端的这一个文件里", serverHolidays.includes("await fetch("));
+  ok(
+    "抓外网确实发生在服务端的这一个文件里（真 `fetch` 只在这里出现一次）",
+    /\bfetch\(url,/.test(serverHolidays) && (serverHolidays.match(/\bfetch\(/g) ?? []).length <= 2,
+    `fetch( 出现 ${(serverHolidays.match(/\bfetch\(/g) ?? []).length} 次`,
+  );
   ok(
     "国务院那个源配了镜像链（raw.githubusercontent.com 实测 6 次里 4 次超时）",
     serverHolidays.includes("cdn.jsdelivr.net") && serverHolidays.includes("fastly.jsdelivr.net") &&
@@ -6586,6 +6640,155 @@ console.log("\n=== 16. 节假日表：两个来源逐日比对一致才写入 ==
     externalFetch,
     [],
   );
+
+  // ── G. 抓取链路：「一致才写盘」必须**有行为性覆盖** ────────────────────────
+  /*
+   * 这一组是第 16 节里最要紧的。这个功能的核心承诺是"两个来源逐日比对一致才写盘"，
+   * 而**只断言源码里有 `if (!verdict.agree)` 是挡不住"在闸门之前先写一次"的**
+   * （有人加一句 `if (process.env.XXX) writeHolidayYearFile(...)` 就绕过去了）。
+   *
+   * 所以这里用**注入的替身网络**（`refreshHolidayYear` 的 `fetchImpl`）驱动真的抓取逻辑，
+   * 每一种输入都去**看盘上到底有没有多出文件**。目录用 `NEXGENEDU_HOLIDAY_DIR` 指到临时目录，
+   * 自检绝不碰仓库里的 `data/holidays/`。
+   */
+  {
+    const dir = mkdtempSync(join(tmpdir(), "nexgenedu-holiday-check-"));
+    const savedDir = process.env.NEXGENEDU_HOLIDAY_DIR;
+    process.env.NEXGENEDU_HOLIDAY_DIR = dir;
+    try {
+      ok("（装置自证）节假日目录确实被指到了临时目录，否则下面几条会写进仓库",
+        holidaysDir() === dir, holidaysDir());
+
+      const files = (): string[] => (existsSync(dir) ? readdirSync(dir).sort() : []);
+      const clear = (): void => {
+        for (const name of files()) rmSync(join(dir, name), { force: true });
+      };
+      /** 替身网络：ics 走 Apple 那一支，其余按年份取。`null` = 这一支回 404。 */
+      const fakeFetch = (apple: string | null, gov: Record<number, string | null>) =>
+        async (url: string): Promise<Response> => {
+          if (url.includes("cn_zh.ics")) {
+            return apple === null ? new Response(null, { status: 404 }) : new Response(apple, { status: 200 });
+          }
+          const year = Number(/master\/(\d{4})\.json/.exec(url)?.[1] ?? 0);
+          const body = gov[year];
+          return body === null || body === undefined
+            ? new Response(null, { status: 404 })
+            : new Response(body, { status: 200 });
+        };
+
+      clear();
+      const written = await refreshHolidayYear(2026, { fetchImpl: fakeFetch(appleIcs, { 2026: gov2026Text }) });
+      eq("两源一致 → 结局是 written", written.status, "written");
+      eq("盘上真的写出了一个文件（只有这一种情形会写）", files(), ["2026.json"]);
+      const writtenRaw = JSON.parse(readFileSync(join(dir, "2026.json"), "utf8")) as unknown;
+      const writtenValue = readHolidayYear(writtenRaw, 2026);
+      ok("写下去的文件本身能通过读盘校验", writtenValue.ok, writtenValue.ok ? "" : writtenValue.error);
+      eq(
+        "写下去的逐日表 = 真实 Apple 解析结果与国务院口径合并后的结果",
+        writtenValue.ok ? writtenValue.value.days : null,
+        combineHolidaySources(a26, g26),
+      );
+
+      /** 每一种"不该写盘"的输入：结局、文件都不许有。 */
+      const rejectedCases: Array<{ label: string; apple: string | null; gov: Record<number, string | null>; expect: string }> = [
+        {
+          label: "国务院那份少列了 1 天法定假 → 拒绝写入",
+          apple: appleIcs,
+          gov: { 2026: JSON.stringify({ ...(JSON.parse(gov2026Text) as Record<string, unknown>), days: (JSON.parse(gov2026Text) as { days: Array<{ date: string }> }).days.filter((day) => day.date !== "2026-10-05") }) },
+          expect: "rejected",
+        },
+        {
+          label: "调休上班日两边对不上 → 拒绝写入",
+          apple: appleIcs,
+          gov: {
+            2026: JSON.stringify({
+              ...(JSON.parse(gov2026Text) as Record<string, unknown>),
+              days: (JSON.parse(gov2026Text) as { days: Array<{ date: string; isOffDay: boolean }> }).days.map((day) =>
+                day.date === "2026-05-09" ? { ...day, date: "2026-05-16" } : day,
+              ),
+            }),
+          },
+          expect: "rejected",
+        },
+        {
+          label: "只有一个源有数据（另一个 404）→ 拒绝写入",
+          apple: appleIcs,
+          gov: { 2026: null },
+          expect: "rejected",
+        },
+        {
+          label: "Apple 那个地址 404（它不分年，只可能是地址变了）→ 拒绝写入，不许说成「还没公布」",
+          apple: null,
+          gov: { 2026: gov2026Text },
+          expect: "rejected",
+        },
+        {
+          label: "这一年的安排还没公布（两源都没这一年的数据）→ not-published，同样不写",
+          apple: appleIcs,
+          gov: { 2027: null },
+          expect: "not-published",
+        },
+        {
+          /*
+           * 这一条专门钉"Apple 的 404 不许被当成未公布"：它那个文件**不分年**，
+           * 404 只可能是地址变了。若两种 404 混成一个结论，这里就会得出
+           * not-published（命令行还会退出码 0），主源下线被说成正常状态。
+           */
+          label: "Apple 与国务院那份都 404 → 必须是 rejected（主源坏了，不是「还没公布」）",
+          apple: null,
+          gov: { 2026: null },
+          expect: "rejected",
+        },
+      ];
+      for (const item of rejectedCases) {
+        clear();
+        const year = item.expect === "not-published" ? 2027 : 2026;
+        const outcome = await refreshHolidayYear(year, { fetchImpl: fakeFetch(item.apple, item.gov) });
+        eq(`${item.label}（结局）`, outcome.status, item.expect);
+        eq(`${item.label}（盘上不许有文件）`, files(), []);
+      }
+
+      /*
+       * 响应体读到一半断掉 / 超时：早先 `await response.text()` 在 try 之外，
+       * 于是这是唯一**逃出** `refreshHolidayYear` 的异常 —— HTTP 会回 500、
+       * 命令行直接栈回溯，而"抓取总是回 200、每年一个结局"是这一节的设计前提。
+       */
+      clear();
+      const broken = (async (url: string): Promise<Response> => {
+        if (url.includes("cn_zh.ics")) {
+          return { status: 200, ok: true, text: () => Promise.reject(new Error("terminated")) } as unknown as Response;
+        }
+        return new Response(gov2026Text, { status: 200 });
+      }) as (url: string) => Promise<Response>;
+      const brokenOutcome = await refreshHolidayYear(2026, { fetchImpl: broken });
+      eq("响应体读取失败**不再逃出**（收成一次可解释的结局）", brokenOutcome.status, "rejected");
+      ok(
+        "拒绝原因里带着那个错误（而不是一句「服务器内部错误」）",
+        brokenOutcome.status === "rejected" && brokenOutcome.error.includes("terminated"),
+        brokenOutcome.status === "rejected" ? brokenOutcome.error.slice(0, 120) : brokenOutcome.status,
+      );
+      eq("响应体读失败时也没有写盘", files(), []);
+
+      clear();
+      const dryRun = await refreshHolidayYear(2026, { write: false, fetchImpl: fakeFetch(appleIcs, { 2026: gov2026Text }) });
+      eq("--dry-run（write:false）校验通过但不写盘", [dryRun.status, files()], ["checked", []]);
+
+      clear();
+      ok("路径穿越的年份在建路径那一步就被挡下（而不是靠调用方记得校验）",
+        (() => {
+          try {
+            holidayYearFile("../../evil" as unknown as number);
+            return false;
+          } catch {
+            return true;
+          }
+        })());
+    } finally {
+      if (savedDir === undefined) delete process.env.NEXGENEDU_HOLIDAY_DIR;
+      else process.env.NEXGENEDU_HOLIDAY_DIR = savedDir;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

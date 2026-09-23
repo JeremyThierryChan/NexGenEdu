@@ -530,9 +530,16 @@ export function checkHolidaySources(apple: HolidayDay[], gov: HolidayDay[]): Hol
     );
   }
 
-  notes.push(
-    `放假日 ${appleOff.size} 天、调休上班日 ${appleWork.size} 天，两个来源一致。`,
-  );
+  /*
+   * 这句"两个来源一致"**只在真的没问题时**才说。
+   *
+   * 早先它是无条件 push 的，于是"拒绝写入"的结论里同时带着"两个来源一致" ——
+   * 命令行会把 notes 逐条打在"没有通过校验"下面，读起来自相矛盾，
+   * 而这恰好出现在"要人去查政府公告"的那个场景里，最不该含糊。
+   */
+  if (blocking.length === 0) {
+    notes.push(`放假日 ${appleOff.size} 天、调休上班日 ${appleWork.size} 天，两个来源一致。`);
+  }
   return { agree: blocking.length === 0, blocking, notes, notPublished: false };
 }
 
@@ -597,11 +604,18 @@ export type HolidaySummary = {
 };
 
 export function summarizeHolidayYear(days: HolidayDay[]): HolidaySummary {
-  const blocks = holidayBlocks(days);
+  /*
+   * 先归一化再用：`offDays` 若直接数原始数组，而 `holidayBlocks` 会先去重，
+   * 那么"块的天数之和 === 放假日数"这条不变式在输入没去重时就会破
+   * （同一天出现两条时：天数是 2、块只有 1 天）。今天所有调用方喂的都是归一化过的数组，
+   * 但这种"靠调用方自觉"的前提迟早会被下一个调用方踩到 —— 在这里自己收一遍最便宜。
+   */
+  const normalized = mergeHolidayDays(days);
+  const blocks = holidayBlocks(normalized);
   const offBlocks = blocks.filter((block) => block.kind === "放假");
   return {
-    offDays: days.filter((day) => day.kind === "放假").length,
-    workDays: days.filter((day) => day.kind === "调休上班").length,
+    offDays: normalized.filter((day) => day.kind === "放假").length,
+    workDays: normalized.filter((day) => day.kind === "调休上班").length,
     offBlocks,
     workBlocks: blocks.filter((block) => block.kind === "调休上班"),
     longestOff: offBlocks.reduce((max, block) => Math.max(max, block.days), 0),
@@ -642,6 +656,12 @@ export function holidayCoverage(available: number[], today: Date): HolidayCovera
 
 // ── 读盘校验 ───────────────────────────────────────────────────────────────────
 
+/** 任意值收成 `string[]`（只认非空字符串；坏形状不会被当成"有话说"）。 */
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim() !== "");
+}
+
 /** 读回来的文件校验结果（坏文件要说清坏在哪，不能装作"这一年没有数据"）。 */
 export type HolidayYearReadResult =
   | { ok: true; value: HolidayYear }
@@ -675,6 +695,16 @@ export function readHolidayYear(raw: unknown, expectedYear: number): HolidayYear
     if (typeof date !== "string" || parseDateKey(date) === null) {
       return { ok: false, error: `days 里有一个日期读不出来：${JSON.stringify(date)}` };
     }
+    /*
+     * 日期必须属于这一年：这是**手改文件**最容易出的错（把别的年份那几天粘过来），
+     * 而它的表现是"这一年多出几天假、那一年少几天假"，界面上完全看不出来。
+     */
+    if (!date.startsWith(`${expectedYear}-`)) {
+      return {
+        ok: false,
+        error: `${date} 不属于 ${expectedYear} 年（这个文件只放这一年的日子）。`,
+      };
+    }
     if (typeof name !== "string" || name.trim() === "") {
       return { ok: false, error: `${date} 没有节日名。` };
     }
@@ -699,16 +729,28 @@ export function readHolidayYear(raw: unknown, expectedYear: number): HolidayYear
       fingerprint: typeof item.fingerprint === "string" ? item.fingerprint : "",
       note: typeof item.note === "string" ? item.note : "",
     }));
+  /*
+   * `verdict` 也要收成规整形状：它整份会被界面拿去渲染
+   * （`current.verdict.notes.map(...)`），而"这份文件可以手工改"是被文档明确邀请的 ——
+   * `notes` 被删掉、写成字符串、或 `agree` 写成 `"yes"`，都会让整页崩或者显示一个假结论
+   * （truthy 的字符串会让界面说"两个来源一致"）。`days` / `sources` 都校验了，`verdict` 不能漏。
+   */
+  const readVerdict: HolidayVerdict =
+    typeof verdict === "object" && verdict !== null
+      ? {
+          agree: (verdict as Record<string, unknown>).agree === true,
+          blocking: readStringArray((verdict as Record<string, unknown>).blocking),
+          notes: readStringArray((verdict as Record<string, unknown>).notes),
+          notPublished: (verdict as Record<string, unknown>).notPublished === true,
+        }
+      : { agree: false, blocking: ["文件里没有校验结论"], notes: [], notPublished: false };
   return {
     ok: true,
     value: {
       year: expectedYear,
       fetchedAt,
       sources: readSources,
-      verdict:
-        typeof verdict === "object" && verdict !== null
-          ? (verdict as HolidayVerdict)
-          : { agree: false, blocking: ["文件里没有校验结论"], notes: [], notPublished: false },
+      verdict: readVerdict,
       days: normalizeDays(parsedDays),
     },
   };

@@ -337,6 +337,68 @@ await check("数据与备份", "批量导入：缺少必填列时拒绝且不写
   const outcome = await api.imports.apply({ entity: "classrooms", text: "房间名,容量\r\n漏了表头,6\r\n" });
   return { ok: outcome.ok, changed: (await api.classrooms.list()).length - before };
 }, (v: { ok: boolean; changed: number }) => v.ok === false && v.changed === 0);
+/*
+ * ── 节假日（后台「节假日」页）────────────────────────────────────────────────
+ *
+ * 这一页走的不是 `api.*`，而是服务端自己的两条路由（`GET /api/holidays`、
+ * `POST /api/holidays/refresh`）—— 与账号管理同一类，因此**必须单独验收**：
+ * 光验 `api.*` 永远碰不到它们。
+ *
+ * 令牌：这张表要登录，而验收脚本没有登录界面 —— 用运行器给的账号在**这一次**里
+ * 换一个令牌（与 `lib/backend/remote.ts` 的做法一致），不依赖任何浏览器存储。
+ *
+ * ⚠️ **这里只读**：临时后端没有设 `NEXGENEDU_HOLIDAY_DIR`，所以它读的就是仓库里那份
+ * `data/holidays/*.json`（顺带验收了"进仓库的那份数据本身是通过校验的"）。
+ * 因此**不要在这里调 `POST /api/holidays/refresh`** —— 那会把抓取结果写进仓库。
+ * 抓取链路的行为覆盖在 `scripts/check.mts` 第 16 节（用注入的替身网络 + 临时目录）。
+ */
+const holidayToken = await (async (): Promise<string> => {
+  const response = await fetch(`${remoteBase()}/api/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      username: process.env.NEXGENEDU_ADMIN_USER ?? "",
+      password: process.env.NEXGENEDU_ADMIN_PASSWORD ?? "",
+    }),
+  });
+  const body = (await response.json().catch(() => ({}))) as { token?: unknown };
+  return typeof body.token === "string" ? body.token : "";
+})();
+const holidayRoute = async (path: string, init: RequestInit = {}): Promise<{ status: number; body: Record<string, unknown> }> => {
+  const response = await fetch(`${remoteBase()}${path}`, {
+    ...init,
+    headers: { ...(init.headers ?? {}), authorization: `Bearer ${holidayToken}` },
+  });
+  const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  return { status: response.status, body };
+};
+
+await check("节假日", "换到令牌（否则下面几条验的是 401）", async () => holidayToken !== "");
+await check(
+  "节假日",
+  "读表：年份、逐日表、校验结论都在",
+  async () => {
+    const { status, body } = await holidayRoute("/api/holidays");
+    const view = (body.view ?? {}) as Record<string, unknown>;
+    const years = (view.years ?? []) as Array<{ year: number; days: unknown[]; verdict: { agree: boolean } }>;
+    return {
+      status,
+      ok: body.ok,
+      年份数: years.length,
+      每一天都有: years.every((item) => item.days.length > 0),
+      全部通过校验: years.every((item) => item.verdict.agree === true),
+      坏文件: (view.errors ?? []) as unknown[],
+    };
+  },
+  (v: { status: number; ok: unknown; 年份数: number; 每一天都有: boolean; 全部通过校验: boolean; 坏文件: unknown[] }) =>
+    v.status === 200 && v.ok === true && v.年份数 > 0 && v.每一天都有 && v.全部通过校验 && v.坏文件.length === 0,
+);
+await check(
+  "节假日",
+  "路径写错时给一句能照着改的话（而不是含混的 403）",
+  async () => (await holidayRoute("/api/holidays", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status,
+  (v: number) => v === 405,
+);
 await check("搜索", "全局搜索命中学生", async () => (await api.search("验收")).length > 0);
 await check("日志", "操作日志有记录", async () => (await api.logs.list(50)).length > 0);
 
