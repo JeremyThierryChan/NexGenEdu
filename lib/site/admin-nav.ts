@@ -65,7 +65,7 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
   {
     href: "/admin/pricing",
     label: "报价",
-    description: "基础价、科目 / 班级系数与计费规则，并可直接给家长试算",
+    description: "基础价、人数系数与计费规则，并可直接给家长试算",
   },
   {
     href: "/admin/data",

@@ -34,8 +34,13 @@ import {
   getTeachersPage,
   getTeachersPageFromTemplate,
 } from "@/lib/data/site";
-import { getPricingData, getPricingDataFromTemplate, parsePricingSource } from "@/lib/data/pricing";
-import type { PricingConfig } from "@/lib/backend/pricing";
+import {
+  getPricingData,
+  getPricingDataFromTemplate,
+  parsePricingSource,
+  type PricingData,
+} from "@/lib/data/pricing";
+import type { PricingConfig, QuoteInput, QuoteSelection } from "@/lib/backend/pricing";
 import { classTypeIssuesText, syncClassTypes } from "@/lib/backend/class-types";
 import {
   dayPlanFor,
@@ -884,30 +889,65 @@ ok("每一组都有可报价的课（否则家长点进来是空的）",
   pricing.stages.every((stage) => stage.courses.some((course) => course.available)));
 ok("「暂未开放」的课不许带价（导出时那个价会丢，回读就对不上了）",
   pricing.stages.every((stage) => stage.courses.every((course) => course.available || course.price === null)));
-eq("科目组数（只有按学段分的三组有科目）", pricing.subjectGroups.length, 3);
-eq("科目组的名字就是那三个学段",
-  pricing.subjectGroups.map((group) => group.name), ["小学", "初中", "高中"]);
-eq("小学科目", pricing.subjectGroups[0]?.subjects.map((s) => s.name), ["语文", "数学", "英语", "科学"]);
-eq("初中科目（含小升初预习班这个项目）",
-  pricing.subjectGroups[1]?.subjects.map((s) => s.name),
-  ["语文", "数学", "英语", "科学", "小升初预习班", "社会"]);
-eq("高中科目数（课程用到的那 15 个学科；「初升高预习班」还没有课用它）",
-  pricing.subjectGroups[2]?.subjects.length, 15);
 /*
- * 科目必须是**该学段真有的学科**：科目表是"哪个科目更贵"的系数表，
- * 挂一个课程类型里不存在的科目，家长在报价页能选中、却谁也对应不上。
+ * **没有「科目」这一维了**（机构口径：「科目系数可以删除」）。
+ *
+ * 这里把"它真的没了"钉三层，因为这一维以前在每个层面都留过痕迹
+ * （内容的 `#### 科目:` 行 → 解析出来的 `subjectGroups` → 配置里的 `subjects`）：
+ *   1. **解析结果里没有这个字段**：`PricingData` 上已经没有 `subjects` / `subjectGroups`
+ *      （类型层面少了字段，这条上面的代码在 `tsc --noEmit` 里就编译不过）；
+ *      这里再用运行时的方式钉一次，免得将来有人"顺手加回一个字段"而不改公式；
+ *   2. **内容文件里没有那一行**（下面那两条）。
+ *
+ * 以前这里是四条断言：三组科目、每组几个科目、以及"科目必须是该学段真有的学科"。
+ * 那些断言随科目表一起删掉 —— 不是放宽了标准，是那一维不存在了。
  */
-const catalogSubjects = catalogFromSeed().subjects;
-eq("科目表里的每一行都是该学段真有的学科",
-  pricing.subjectGroups.flatMap((group) =>
-    group.subjects
-      .filter((subject) => {
-        const row = catalogSubjects.find((item) => item.name === subject.name);
-        return row === undefined ||
-          !row.stageIds.includes(catalogId("st", group.name));
-      })
-      .map((subject) => `${group.name}/${subject.name}`)),
-  []);
+eq("站点内容的报价数据里没有 subjects / subjectGroups（v29 删掉的那一维）",
+  Object.keys(pricing).filter((key) => key === "subjects" || key === "subjectGroups"), []);
+eq("报价配置（库/内容那一份）里也没有 subjects 字段",
+  Object.keys(pricingConfigFromContent()).filter((key) => key === "subjects"), []);
+ok("内容文件里不再有「#### 科目:」这一行",
+  !pricingSource.includes("#### 科目"));
+/*
+ * 老内容里的那一行**不该让解析炸掉、也不该被读成别的东西**：
+ * 机构手上可能还留着一份旧 `pricing.md`（或者从旧后台导出的片段），
+ * 里面照样写着 `#### 科目: 语文、物理 ×1.1`。它现在只是一个**没人读的条目**
+ * —— 不报错、不参与计算、也不产出任何科目分组。
+ */
+const legacySubjectSource = parsePricingSource(`# NexGenEdu · 新锐教培 · 报价数据
+
+## 页面: 智能报价
+
+## 学习阶段
+
+### 小学
+
+#### 课程: 小学数学: 150
+
+#### 科目: 语文、物理 ×1.1
+`);
+eq("旧内容里残留的「#### 科目:」被忽略（不产出任何科目分组）",
+  Object.keys(legacySubjectSource).filter((key) => key.toLowerCase().includes("subject")), []);
+eq("而且那一行没把课程解析坏",
+  legacySubjectSource.stages[0]?.courses.map(priceLabel), ["小学数学=150"]);
+/*
+ * **类型层面**的那一条：上面这些运行时断言只能证明"现在这份数据里没有这个键"，
+ * 证明不了"将来也加不回来"。下面两个类型别名是**编译期**的：`PricingData` 上若又出现
+ * `subjects` / `subjectGroups`（或 `PricingConfig` 上出现 `subjects`），
+ * 条件类型会算成 `never`，赋值当场编译不过 —— 本文件在 `tsc --noEmit` 里（见 §38.5）。
+ */
+type NoSubjectFieldOnData = "subjects" | "subjectGroups" extends keyof PricingData ? never : true;
+type NoSubjectFieldOnConfig = "subjects" extends keyof PricingConfig ? never : true;
+type NoSubjectOnQuoteInput = "subject" extends keyof QuoteInput ? never : true;
+type NoSubjectOnSelection = "subjectName" extends keyof QuoteSelection ? never : true;
+const noSubjectTypes: [
+  NoSubjectFieldOnData,
+  NoSubjectFieldOnConfig,
+  NoSubjectOnQuoteInput,
+  NoSubjectOnSelection,
+] = [true, true, true, true];
+eq("类型上也删干净了（PricingData / PricingConfig / QuoteInput / QuoteSelection 都没有科目字段）",
+  noSubjectTypes, [true, true, true, true]);
 eq("班级类型", pricing.classTypes.map((c) => c.name),
   ["一对一", "一对二", "一对三", "一对多（4-8）", "班课（9-20）"]);
 eq("时长选项", pricing.durations.map((d) => `${d.name}×${d.multiplier}`),
@@ -918,19 +958,20 @@ eq("其他项目数", pricing.otherItems.length, 3);
 console.log("\n=== 5. 报价公式 ===");
 const stageOf = (courseName: string) =>
   pricing.stages.find((s) => s.courses.some((c) => c.name === courseName));
+/*
+ * 试算只发三样东西：选哪门课、选哪个班型（人数系数挂在这上面）、上多久与多少节。
+ * **没有科目**（v29 删掉的那一维）—— 这个函数的签名就是"参数里没有科目"最直接的证据。
+ */
 const quote = (
   courseName: string,
-  subjectName: string,
   classTypeName: string,
   durationName: string,
   lessons: number,
   extra: Record<string, number> = {},
 ) => {
   const stage = stageOf(courseName);
-  const group = pricing.subjectGroups.find((g) => g.name === stage?.name);
   return calculateQuote({
     course: stage?.courses.find((c) => c.name === courseName) ?? { name: courseName, price: null, available: false },
-    subject: group?.subjects.find((s) => s.name === subjectName) ?? null,
     classType: pricing.classTypes.find((c) => c.name === classTypeName) ?? pricing.classTypes[0]!,
     duration: pricing.durations.find((d) => d.name === durationName) ?? pricing.durations[0]!,
     lessons,
@@ -940,31 +981,31 @@ const quote = (
 
 // 初中数学 220 × 一对二 0.7 = 154；1.5 小时 ×1.5 = 231；5 节正课 1155
 // 未满 10 节，试课按原价 220 计 → 总价 1375
-const a = quote("初中数学", "数学", "一对二", "1.5 小时", 5);
+const a = quote("初中数学", "一对二", "1.5 小时", 5);
 eq("220×0.7×1.5×5 节", [a.unitPrice, a.lessonsPrice, a.trialFee, a.totalPrice], [231, 1155, 220, 1375]);
 ok("5 节不加手续费", a.unitPrice === 231);
 ok("9 节以下试课不免费", a.trialFree === false);
 
 // 1 节 +10% 手续费：220×1 = 220 → 242；正课 242 + 试课 220 = 462
-const b = quote("初中数学", "数学", "一对一", "1 小时", 1);
+const b = quote("初中数学", "一对一", "1 小时", 1);
 eq("1 节含 10% 手续费", [b.unitPrice, b.lessonsPrice, b.totalPrice], [242, 242, 462]);
 
 // 满 10 节：试课免费
-const c = quote("初中数学", "数学", "一对一", "1 小时", 10);
+const c = quote("初中数学", "一对一", "1 小时", 10);
 eq("10 节正课", c.lessonsPrice, 2200);
 eq("10 节试课免费", [c.trialFree, c.trialFee, c.totalPrice], [true, 0, 2200]);
 
 // 班课：教师费 2400 ÷ 12 人 = 200；×1.5 小时 = 300；×8 节 = 2400
 // 正课 2400 + 试课 220（初中英语原价）= 2620
-const d = quote("初中英语", "英语", "班课（9-20）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 });
+const d = quote("初中英语", "班课（9-20）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 });
 eq("班课按人数分摊", [d.unitPrice, d.lessonsPrice, d.totalPrice], [300, 2400, 2620]);
 
 // 班课缺参数应报错
-const e = quote("初中英语", "英语", "班课（9-20）", "1 小时", 5, { classCost: 2400 });
+const e = quote("初中英语", "班课（9-20）", "1 小时", 5, { classCost: 2400 });
 ok("班课缺人数时报错", e.ok === false);
 
 // 节数非法应报错
-const f = quote("初中数学", "数学", "一对一", "1 小时", 0);
+const f = quote("初中数学", "一对一", "1 小时", 0);
 ok("节数为 0 时报错", f.ok === false);
 
 // 试课规则边界
@@ -978,7 +1019,7 @@ eq("试课费", [trialFeeFor(9, 220), trialFeeFor(10, 220)], [220, 0]);
  * 这里钉两件事：① 乘数确实是"每节课几小时"这个乘数（1.5 小时 = 基础价 ×1.5）；
  * ② 明细里把这一步写出来（不写出来，"150 元的课怎么变成 225 元"只能靠猜）。
  */
-const hourlyQuote = quote("初中数学", "数学", "一对一", "1.5 小时", 5);
+const hourlyQuote = quote("初中数学", "一对一", "1.5 小时", 5);
 eq("基础价 220（元/小时）× 1.5 小时 = 课单价 330（元/节）",
   [hourlyQuote.unitPrice, hourlyQuote.lessonsPrice], [330, 1650]);
 ok("价格构成明细里写明了基础价是按小时算的",
@@ -986,7 +1027,7 @@ ok("价格构成明细里写明了基础价是按小时算的",
 ok("明细里列出了「每节课 1.5 小时 ×1.5」这一行",
   hourlyQuote.breakdown.some((item) => item.label === "每节课 1.5 小时" && item.value === "×1.5"));
 ok("1 小时的课不显示这一行（乘 1 不用解释）",
-  quote("初中数学", "数学", "一对一", "1 小时", 5).breakdown
+  quote("初中数学", "一对一", "1 小时", 5).breakdown
     .every((item) => !item.label.startsWith("每节课")));
 
 console.log("\n=== 6. 教务后台服务层（同一套断言对两种后端都要通过）===");
@@ -3684,9 +3725,9 @@ ok("公开数据的 JSON 里没有手机号样式的号码",
  * 教师课时费分成**不在公开数据里** —— 查的是**结构**（字段名），不是"文案里出现了某个词"。
  *
  * 第一版写的是 `!JSON.stringify(publicSite).includes("系数")`，那是个很粗的代理判据：
- * 报价页本来就公开「科目系数 / 班级系数」这类**价格输入**，它们只是恰好用英文键名
+ * 报价页本来就公开「人数系数」这类**价格输入**，它只是恰好用英文键名
  * （`coefficient`）装，中文「系数」两字只出现在文案里。v21 把常见问题搬进公开数据之后，
- * 问答里写着"基础价 × 科目系数 × 班级系数"，这条断言立刻误报 —— 而它报的不是泄漏，
+ * 问答里写着"基础价 × 人数系数"，这条断言立刻误报 —— 而它报的不是泄漏，
  * 是我的判据不成立。现在改成查三个只属于教师分成的字段名。
  */
 eq("教师课时费分成（内部成本口径）不在公开数据里",
@@ -4192,7 +4233,12 @@ eq("内容里的计费规则", [
 ], [10, 10, true]);
 eq("站点内容里的报价配置通过校验", validatePricingConfig(pricingConfigFromContent()), []);
 
-// 科目系数的写法：`物理 ×1.1`；省略即按 1 计（老内容不用改）
+/*
+ * 这份小内容文件是**最小的一份合法报价内容**（只有一个阶段、一门课、一行课）。
+ * 它以前还用来验"科目系数怎么写"（`物理 ×1.1` / `化学 x1.05`）—— 那一维 v29 删掉了，
+ * 于是这里只剩下一件事：老内容少写了「计费规则」那一组时，规则要落到默认值上
+ * （否则老库升级上来的报价页会因为没有手续费规则而算不出价）。
+ */
 const pbMini = parsePricingSource(`# NexGenEdu · 新锐教培 · 报价数据
 
 ## 页面: 智能报价
@@ -4202,14 +4248,7 @@ const pbMini = parsePricingSource(`# NexGenEdu · 新锐教培 · 报价数据
 ### 小学
 
 #### 课程: 小学数学: 150
-
-#### 科目: 语文、物理 ×1.1
-
-#### 科目: 化学 x1.05
 `);
-eq("科目系数：省略按 1、× 与 x 都能识别",
-  pbMini.subjectGroups[0]?.subjects.map((item) => `${item.name}=${item.coefficient}`),
-  ["语文=1", "物理=1.1", "化学=1.05"]);
 eq("没写「计费规则」分组时用默认规则",
   [pbMini.rules.singleLessonFeePercent, pbMini.rules.freeTrialMinLessons],
   [10, 10]);
@@ -4221,57 +4260,81 @@ eq("库里的基础价与宣传页完全一致",
   pbConfig.stages.map((stage) => stage.courses.map((course) => `${course.name}:${course.basePrice}`)),
   pricing.stages.map((stage) => stage.courses.map((course) => `${course.name}:${course.price}`)));
 
-/** 按名字向**后台服务**报价（页面只发选择，不发价格）。 */
+/**
+ * 按名字向**后台服务**报价（页面只发选择，不发价格）。
+ *
+ * 参数里**没有科目**（v29 删掉的那一维）—— 这也是「pricing.quote 不接受科目
+ * 也能算出价」最直接的证据：这个函数连传科目的地方都没有。
+ */
 const pbQuote = (
   courseName: string,
-  subjectName: string,
   classTypeName: string,
   durationName: string,
   lessons: number,
   extra: Record<string, number> = {},
 ) =>
-  api.pricing.quote({
-    courseName,
-    subjectName: subjectName === "" ? undefined : subjectName,
-    classTypeName,
-    durationName,
-    lessons,
-    ...extra,
-  });
+  api.pricing.quote({ courseName, classTypeName, durationName, lessons, ...extra });
 
 // 主线：同一方案，前台公式与后台服务必须一致
-const pbParityCases: Array<[string, string, string, string, number, Record<string, number>]> = [
-  ["初中数学", "数学", "一对二", "1.5 小时", 5, {}],
-  ["初中数学", "数学", "一对二", "1 小时", 1, {}],
-  ["初中数学", "数学", "一对一", "1 小时", 10, {}],
-  ["初中英语", "英语", "班课（9-20）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 }],
-  ["小学语文", "语文", "一对三", "2 小时", 20, {}],
-  ["医学", "", "一对一", "1 小时", 5, {}],
-  ["初中数学", "数学", "一对一", "1 小时", 0, {}],
+const pbParityCases: Array<[string, string, string, number, Record<string, number>]> = [
+  ["初中数学", "一对二", "1.5 小时", 5, {}],
+  ["初中数学", "一对二", "1 小时", 1, {}],
+  ["初中数学", "一对一", "1 小时", 10, {}],
+  ["初中英语", "班课（9-20）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 }],
+  ["小学语文", "一对三", "2 小时", 20, {}],
+  ["医学", "一对一", "1 小时", 5, {}],
+  ["初中数学", "一对一", "1 小时", 0, {}],
 ];
-for (const [course, subject, classType, duration, lessons, extra] of pbParityCases) {
-  const front = quote(course, subject, classType, duration, lessons, extra);
-  const back = await pbQuote(course, subject, classType, duration, lessons, extra);
+for (const [course, classType, duration, lessons, extra] of pbParityCases) {
+  const front = quote(course, classType, duration, lessons, extra);
+  const back = await pbQuote(course, classType, duration, lessons, extra);
   eq(
-    `前后台一致：${course} / ${subject || "不分科目"} / ${classType} / ${duration} / ${lessons} 节`,
+    `前后台一致：${course} / ${classType} / ${duration} / ${lessons} 节`,
     [back.ok, back.unitPrice, back.lessonsPrice, back.trialFee, back.totalPrice, back.reason ?? ""],
     [front.ok, front.unitPrice, front.lessonsPrice, front.trialFee, front.totalPrice, front.reason ?? ""],
   );
 }
 
 // 选择里有名字对不上时要说清是哪一项（而不是安静地按 0 元算）
-const pbUnknownCourse = await pbQuote("没有这门课", "数学", "一对一", "1 小时", 5);
+const pbUnknownCourse = await pbQuote("没有这门课", "一对一", "1 小时", 5);
 ok("未知课程会被指出", pbUnknownCourse.ok === false && (pbUnknownCourse.reason ?? "").includes("没有课程"));
-const pbUnknownClass = await pbQuote("初中数学", "数学", "没有这种班型", "1 小时", 5);
+const pbUnknownClass = await pbQuote("初中数学", "没有这种班型", "1 小时", 5);
 ok("未知班型会被指出", pbUnknownClass.ok === false && (pbUnknownClass.reason ?? "").includes("班型"));
-const pbUnknownSubject = await pbQuote("初中数学", "没有这个科目", "一对一", "1 小时", 5);
-ok("科目不属于该阶段会被指出",
-  pbUnknownSubject.ok === false && (pbUnknownSubject.reason ?? "").includes("科目"));
+/*
+ * **不接受科目也能算出价**：这是 v29 之后 `pricing.quote` 的主口径
+ * （页面根本不发科目），因此要当着面钉一次"它就是能算，而且算的是新公式的数"。
+ * 顺带钉住**老前端**：它还按老形状多发一个 `subjectName` 时，
+ * 那个字段被忽略、价格**一模一样** —— 否则升级当天就会出现"页面上的价突然变了"
+ * 这种没人能解释的现象。
+ */
+const pbNoSubject = await pbQuote("初中数学", "一对二", "1.5 小时", 5);
+eq("不带科目的报价算得出来，且就是新公式的数（220 × 0.7 × 1.5）",
+  [pbNoSubject.ok, pbNoSubject.unitPrice, pbNoSubject.totalPrice], [true, 231, 1375]);
+const pbLegacySelection = await api.pricing.quote({
+  courseName: "初中数学", classTypeName: "一对二", durationName: "1.5 小时", lessons: 5,
+  // 老前端多发的字段（v29 之后不该再有）—— 类型上不存在，因此这里用一层宽类型发出去
+  ...({ subjectName: "数学" } as Record<string, unknown>),
+} as Parameters<typeof api.pricing.quote>[0]);
+eq("老前端多发一个 subjectName 不影响价格（升级当天不许悄悄变价）",
+  [pbLegacySelection.ok, pbLegacySelection.unitPrice, pbLegacySelection.totalPrice],
+  [pbNoSubject.ok, pbNoSubject.unitPrice, pbNoSubject.totalPrice]);
 
 // 服务端必须自己复核配置：系数写 0 会让所有报价变 0，不能进库
 const pbBadConfig = JSON.parse(JSON.stringify(pbConfig));
-pbBadConfig.subjects[0].coefficient = 0;
-ok("系数为 0 的配置校验不通过", validatePricingConfig(pbBadConfig).length > 0);
+pbBadConfig.classTypes[0].coefficient = 0;
+ok("人数系数为 0 的配置校验不通过", validatePricingConfig(pbBadConfig).length > 0);
+/*
+ * **配置里不再有 subjects 字段**（v29 删掉的那一维），两条一起钉：
+ *   - 类型层面：上面那些代码（`pbBadConfig.classTypes` 之类）能通过 `tsc --noEmit`，
+ *     而 `PricingConfig` 上已经没有 `subjects` 这个键了；
+ *   - **真实库层面**：从服务端读回来的这一份（以及迁移后的老库）字段清单里也没有它。
+ *     只看类型是不够的 —— 老库升级上来的那份 JSON 里可能还残留着这个键，
+ *     而"库里到底还有没有这个字段"要按**实际读回来的对象**断，不能按类型断。
+ */
+eq("服务端读回来的报价配置里没有 subjects 键",
+  Object.keys(pbConfig).filter((key) => key === "subjects"), []);
+eq("校验函数也不再管科目（配置里多带一个 subjects 也不会被读）",
+  validatePricingConfig({ ...pbConfig, subjects: "手写的残留" } as unknown as typeof pbConfig), []);
 const pbBadFee = JSON.parse(JSON.stringify(pbConfig));
 pbBadFee.rules.singleLessonFeePercent = 120;
 ok("手续费超过 100% 校验不通过", validatePricingConfig(pbBadFee).length > 0);
@@ -4293,19 +4356,25 @@ ok("服务层拒绝保存不合法的配置", pbRejected);
 eq("拒绝后库里的配置没被改动", (await api.pricing.get()).source, PRICING_SOURCE_CONTENT);
 
 // 改价真的会影响报价，并且留下日志（价格变动必须可追溯）
+/*
+ * 只改**基础价**（330）—— 以前这里还顺手改一个科目的系数（1.2），用来验"科目那一维
+ * 真的进了公式"。科目 v29 删掉之后那个乘法不存在了，因此这一条断的就是新公式：
+ * `330 × 一对二 0.7 × 1.5 小时 = 346.5`。
+ *
+ * ⚠️ 这个数**和改动前不一样**（改动前是 415.8 = 330 × 1.2 × 0.7 × 1.5），
+ * 变的不是公式，是**夹具**：那条断言当初就是专门用来验科目系数的，现在没有那一维了。
+ * 其它几条"按内容里的价算出来的数"（231 / 242 / 2200 / 300 / 1375 / 1650 …）
+ * 一个都没动 —— 因为内容里所有科目的系数本来就都是 1。
+ */
 const pbRaised = JSON.parse(JSON.stringify(pbConfig));
 pbRaised.stages.forEach((stage: { courses: Array<{ name: string; basePrice: number | null }> }) => {
   for (const course of stage.courses) if (course.name === "初中数学") course.basePrice = 330;
 });
-pbRaised.subjects.forEach((subject: { name: string; stageName: string; coefficient: number }) => {
-  if (subject.name === "数学") subject.coefficient = 1.2;
-});
 const pbSaved = await api.pricing.update(pbRaised);
 eq("保存后标记为后台修改", pbSaved.source, PRICING_SOURCE_ADMIN);
-// 330 × 数学 1.2 × 一对二 0.7 × 1.5 小时 = 415.8；1 节另加 10% 手续费不是本例
-const pbRaisedQuote = await pbQuote("初中数学", "数学", "一对二", "1.5 小时", 5);
-eq("改价后后台按新价报", pbRaisedQuote.unitPrice, 415.8); // 330 × 1.2 × 0.7 × 1.5
-eq("试课费按课程原价收（不带科目与班级系数）", pbRaisedQuote.trialFee, 330);
+const pbRaisedQuote = await pbQuote("初中数学", "一对二", "1.5 小时", 5);
+eq("改价后后台按新价报", pbRaisedQuote.unitPrice, 346.5); // 330 × 0.7 × 1.5
+eq("试课费按课程原价收（不带人数系数与手续费）", pbRaisedQuote.trialFee, 330);
 const pbRaiseLogs = await api.logs.list(20);
 ok("改价留下操作日志",
   pbRaiseLogs.some((log) => log.entity === "报价" && log.action === "修改配置"));
@@ -4327,8 +4396,13 @@ result_title: 报价结果
 ${pbExported}`);
 eq("导出内容回读后与后台配置完全一致",
   pricingConfigCore(pbRoundTrip), pricingConfigCore(pbSaved));
-ok("导出内容带上了科目系数（1.2 能读回来）",
-  pbRoundTrip.subjects.some((subject) => subject.name === "数学" && subject.coefficient === 1.2));
+/*
+ * 导出的是**新口径**的内容片段：里面**不该**再有 `#### 科目:` 那一行
+ * （v29 删掉的那一维）—— 否则替换进 `data/site/pricing.md` 之后，
+ * 机构下次打开内容文件会看到一行没人读、也不知道该不该删的东西。
+ */
+ok("导出内容里不再有「#### 科目:」那一行",
+  !pbExported.includes("#### 科目") && pbRoundTrip.stages.length === pbSaved.stages.length);
 ok("导出内容带上了未开放课程",
   pbRoundTrip.stages.some((stage) => stage.courses.some((course) => course.basePrice === null)));
 
@@ -4338,8 +4412,8 @@ eq("恢复后来源回到站点内容", pbRestored.source, PRICING_SOURCE_CONTEN
 eq("恢复后的价格就是宣传页的价格",
   pbRestored.stages[0]?.courses.map((course) => course.basePrice),
   pricing.stages[0]?.courses.map((course) => course.price));
-const pbRestoredQuote = await pbQuote("初中数学", "数学", "一对二", "1.5 小时", 5);
-eq("恢复后报价回到原值", pbRestoredQuote, quote("初中数学", "数学", "一对二", "1.5 小时", 5));
+const pbRestoredQuote = await pbQuote("初中数学", "一对二", "1.5 小时", 5);
+eq("恢复后报价回到原值", pbRestoredQuote, quote("初中数学", "一对二", "1.5 小时", 5));
 
 /*
  * 老库升级：pbV9 没有报价配置，升级后要按站点内容补齐（不能是空的，也不能变价）。
@@ -4384,18 +4458,34 @@ ok("人话版写明了 40% 起与每人 +10", pbShareText.includes("40%") && pbS
 ok("人话版点明了 8 人时的比例", pbShareText.includes("110%"));
 ok("人话版说明了 9 人以上大班课不适用",
   pbShareText.includes("9 人以上大班课不适用") && pbShareText.includes("另议"));
-ok("人话版说明了课程单价的口径", pbShareText.includes("课程单价 = 基础价 × 科目系数"));
+/*
+ * 人话版里的「课程单价」口径（v29 之后）：标准单价**就是基础价**（不含人数折扣），
+ * 班型课时价才是「基础价 × 人数系数」。改这一条是因为文案本身变了 ——
+ * **算出来的课时费一分没变**（科目系数全是 1，那一步乘法本来就没起作用）。
+ */
+ok("人话版说明了课程单价的口径（标准单价 = 基础价本身）",
+  pbShareText.includes("课程单价 = 基础价（") && pbShareText.includes("人数系数"));
 ok("人话版说明了时长按小时算", pbShareText.includes("1.5 小时乘 1.5"));
 
-// 按名字算：一对一 1 人 1 小时（初中数学 220 / 小时）= 220 × 40% = 88
+/*
+ * 按名字算：一对一 1 人 1 小时（初中数学 220 / 小时）= 220 × 40% = 88。
+ *
+ * **`subjectName` 已经不发了**（v29）：教师课时费的「课程单价」= **基础价**
+ * —— 这两个数（88 与下面的 198）改动前后**一模一样**，因为以前那一步乘的是
+ * 科目系数 1。
+ */
 const pbTeacher1 = await api.pricing.teacherFee({
-  courseName: "初中数学", subjectName: "数学", classTypeName: "一对一",
+  courseName: "初中数学", classTypeName: "一对一",
   durationName: "1 小时", lessons: 1, students: 1,
 });
 eq("一对一 1 人 1 小时的教师课时费", [pbTeacher1.ok, pbTeacher1.percent, pbTeacher1.teacherFee], [true, 40, 88]);
+eq("教师课时费的「课程单价 / 小时」就是基础价（不再乘任何科目系数）",
+  pbTeacher1.hourlyPrice, 220);
+eq("明细里写明了那一档口径是课程标准单价",
+  pbTeacher1.breakdown.some((item) => item.label.includes("课程标准单价") && item.value === "¥220"), true);
 // 3 人 = 60%；1.5 小时 ×220 ×0.6 = 198
 const pbTeacher3 = await api.pricing.teacherFee({
-  courseName: "初中数学", subjectName: "数学", classTypeName: "一对三",
+  courseName: "初中数学", classTypeName: "一对三",
   durationName: "1.5 小时", lessons: 5, students: 3,
 });
 eq("一对三 3 人 1.5 小时的教师课时费", [pbTeacher3.percent, pbTeacher3.teacherFee], [60, 198]);
@@ -4407,7 +4497,7 @@ ok("教师课时费明细写清了比例怎么来的",
 
 // 大班课不适用：按人数分摊的那类按「教师费用 ÷ 人数」另议，不能硬套公式
 const pbTeacherBig = await api.pricing.teacherFee({
-  courseName: "初中英语", subjectName: "英语", classTypeName: "班课（9-20）",
+  courseName: "初中英语", classTypeName: "班课（9-20）",
   durationName: "1.5 小时", lessons: 5, students: 12,
 });
 ok("9 人以上大班课不适用分成规则",
@@ -4418,14 +4508,16 @@ const pbSeatConfig = JSON.parse(JSON.stringify(await api.pricing.get()));
 pbSeatConfig.teacherShare.priceBasis = "seat";
 await api.pricing.update(pbSeatConfig);
 const pbTeacherSeat = await api.pricing.teacherFee({
-  courseName: "初中数学", subjectName: "数学", classTypeName: "一对二",
+  courseName: "初中数学", classTypeName: "一对二",
   durationName: "1 小时", lessons: 1, students: 1,
 });
-// 班型课时价口径：220 ×0.7 = 154 → 40% = 61.6
+// 班型课时价口径：基础价 220 × 人数系数 0.7 = 154 → 40% = 61.6
 eq("切到班型课时价口径后的教师课时费", pbTeacherSeat.teacherFee, 61.6);
+eq("那档口径算的是「基础价 × 人数系数」",
+  pbTeacherSeat.hourlyPrice, 154);
 eq("口径切换不影响家长报价",
-  (await pbQuote("初中数学", "数学", "一对二", "1 小时", 5)).unitPrice,
-  quote("初中数学", "数学", "一对二", "1 小时", 5).unitPrice);
+  (await pbQuote("初中数学", "一对二", "1 小时", 5)).unitPrice,
+  quote("初中数学", "一对二", "1 小时", 5).unitPrice);
 
 // 导出 → 回读：教师分成规则也要能带走
 const pbShareExport = await api.pricing.exportMarkdown();
@@ -4465,6 +4557,45 @@ eq("v10 老库升级后补上了教师分成默认值",
   [40, 10, "course"]);
 eq("升级后版本号是当前版本",
   (await api.exportDatabase()).version, CURRENT_VERSION);
+await api.restoreBackup();
+
+/*
+ * v28 → v29：**删掉「科目系数」这一维**（机构口径：「科目系数可以删除」）。
+ *
+ * 走**导入**这条路（理由同上面 v9 那段：写本地存储对服务端后端是假通过），并且刻意
+ * 造一份"v28 的库"：`pricing.subjects` 里放着**系数不是 1** 的两行 —— 这样才能真的验到
+ * "删掉那一维不改变任何已算出的价"，而不是"因为全是 1 所以碰巧一样"。
+ *
+ * （顺带说明为什么这里敢造一个非 1 的系数：那是**老库夹具**，代表"以前真有人给物理加过价"。
+ * 删掉科目这一维之后它不再参与任何计算，因此价格仍然只由基础价 × 人数系数 × 时长决定。）
+ */
+const pbV28 = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+  version: number;
+  pricing: Record<string, unknown>;
+};
+pbV28.version = 28;
+pbV28.pricing.subjects = [
+  { name: "数学", stageName: "初中", coefficient: 1.3 },
+  { name: "语文", stageName: "小学", coefficient: 1 },
+];
+const pbV28Import = await api.importDatabase(JSON.stringify(pbV28));
+ok("v28 老库（报价里还带着科目表）能导入并升级", pbV28Import.ok);
+const pbV29Config = await api.pricing.get();
+eq("迁移后配置对象里没有 subjects 键（不留 undefined 占位）",
+  Object.keys(pbV29Config).filter((key) => key === "subjects"), []);
+const pbV29Exported = await api.exportDatabase();
+eq("落库的那一份里也没有这个键（不是只在读时视图上抹掉）",
+  Object.keys(pbV29Exported.pricing).filter((key) => key === "subjects"), []);
+eq("升级后版本号是当前版本", pbV29Exported.version, CURRENT_VERSION);
+/*
+ * **一分钱都没改**：与内容文件里那一份比「钱的部分」（`pricingConfigCore`）。
+ * 那条 1.3 的科目系数是刻意造的"非 1"值 —— 删掉它价格照样一样，
+ * 因为它从来就只乘在基础价后面，而基础价本身没动。
+ */
+eq("迁移只删字段、不改价（与内容文件那一份逐字段相同）",
+  pricingConfigCore(pbV29Config), pricingConfigCore(pricingConfigFromContent()));
+eq("迁移后按新口径算出来的价与迁移前一致（初中数学 220 × 一对二 0.7 × 1.5 小时）",
+  (await pbQuote("初中数学", "一对二", "1.5 小时", 5)).unitPrice, 231);
 await api.restoreBackup();
 
 // 收尾：切回主存储，并确保报价配置没有留下自检改动的痕迹
@@ -9319,10 +9450,9 @@ console.log("\n=== 32. 报价的班型挂到课程类型的维度表上（v25）
   // ③ 试算按新名字查得到（改名最容易漏的一处：页面发过来的是新名字）
   const pricedStage = afterRename.stages.find((stage) => stage.courses.some((course) => course.available));
   const pricedCourse = pricedStage?.courses.find((course) => course.available);
-  const pricedSubject = afterRename.subjects.find((row) => row.stageName === pricedStage?.name);
+  // 试算里**没有科目**（v29 删掉的那一维）：只发课程 / 班型 / 时长 / 节数
   const quoteAfterRename = await api.pricing.quote({
     courseName: pricedCourse?.name ?? "",
-    subjectName: pricedSubject?.name ?? "",
     classTypeName: "一对三（小组课）",
     durationName: afterRename.durations[0]?.name ?? "",
     lessons: 10,
@@ -9330,10 +9460,9 @@ console.log("\n=== 32. 报价的班型挂到课程类型的维度表上（v25）
     classCost: 0,
   });
   eq("改名之后按新名字试算算得出来（不是「报价配置里没有班型」）", quoteAfterRename.ok, true);
-  ok("而且算出来的是那个班型的系数（0.6 那一档，比一对一便宜）",
+  ok("而且算出来的是那个班型的人数系数（0.6 那一档，比一对一便宜）",
     (quoteAfterRename.unitPrice ?? 0) < ((await api.pricing.quote({
       courseName: pricedCourse?.name ?? "",
-      subjectName: pricedSubject?.name ?? "",
       classTypeName: "一对一",
       durationName: afterRename.durations[0]?.name ?? "",
       lessons: 10,
@@ -9392,8 +9521,8 @@ console.log("\n=== 32. 报价的班型挂到课程类型的维度表上（v25）
   const duplicated = clonePricingWith((config) => {
     config.classTypes[1]!.formatId = config.classTypes[0]!.formatId;
   }, afterRename);
-  ok("同一个班型挂两行系数被拒",
-    (await refusalOf(async () => await api.pricing.update(duplicated))).includes("只能有一行系数"));
+  ok("同一个班型挂两行人数系数被拒",
+    (await refusalOf(async () => await api.pricing.update(duplicated))).includes("只能有一行人数系数"));
 
   // ⑧ 收尾：把班型名改回种子那一份（验收库是机构自己的库）
   if (target !== undefined) {
@@ -10482,6 +10611,56 @@ console.log("\n=== 41. 报价与课程清单对齐（v37）===");
   ok("内容文件里也写明了基础价是元 / 小时",
     pricingSource.includes("基础价（**元 / 小时**"));
 
+  /*
+   * ⑦ 「科目系数」与「班级系数」这两个词，在**界面与内容里**都不许再出现。
+   *
+   * 机构口径：「科目系数可以删除，班级系数改成人数系数」。这条按**源码级扫描**来断，
+   * 而不是靠肉眼看页面 —— 这类"叫法漂回去"只发生在文案里，肉眼看不见，
+   * 但机构会因此以为系统还是以前那套口径（到底有几个系数、按什么算）。
+   * 扫四处：后台报价页（那一整块 UI 都在这个文件里）、网站报价器（家长看到的表单）、
+   * 内容文件 `data/site/pricing.md`，以及由它生成的那份 ts
+   * （后台「恢复为站点内容」与"没连后端"那一份读的正是后者）。
+   */
+  const estimateFormSource = readFileSync(
+    new URL("../components/pricing/EstimateForm.tsx", import.meta.url),
+    "utf8",
+  );
+  const pricingContentMd = readFileSync(
+    new URL("../data/site/pricing.md", import.meta.url),
+    "utf8",
+  );
+  const pricingContentTs = readFileSync(
+    new URL("../data/site/pricing.ts", import.meta.url),
+    "utf8",
+  );
+  const staleWordOffenders = ["科目系数", "班级系数"].flatMap((word) =>
+    ([
+      ["后台报价页", pricingPageSource],
+      ["网站报价器", estimateFormSource],
+      ["内容文件 pricing.md", pricingContentMd],
+      ["内容文件 pricing.ts", pricingContentTs],
+    ] as Array<[string, string]>)
+      .filter(([, source]) => source.includes(word))
+      .map(([where]) => `${where} 里还有「${word}」`));
+  eq("界面与内容里不再出现「科目系数」「班级系数」（统一的叫法是「人数系数」）",
+    staleWordOffenders, []);
+  /*
+   * 上面那条查的是**那两个确切的词**。这一条更狠一点：网站报价器里连"科目"两个字
+   * 都不该有 —— 因为那一页的步骤里已经没有它了（下拉、状态、联动全删了）。
+   * **查之前先去掉注释**（与 §19、§22 同一个坑）：注释里正解释着"以前有科目这一步"，
+   * 直接子串匹配会把注释算进去，而它不在界面上。
+   */
+  const stripComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const estimateFormCode = stripComments(estimateFormSource);
+  ok("网站报价器里连「科目」都没有了（下拉 / 状态 / 联动全删干净）",
+    !estimateFormCode.includes("科目") && !estimateFormCode.includes("subjectName") &&
+      !estimateFormCode.includes("subjectGroups"));
+  ok("那一页上这一步现在叫「人数（班型）」",
+    estimateFormCode.includes("人数（班型）"));
+  ok("后台报价页也没有「科目」这一步（试算器的科目下拉删了）",
+    !pricingPageSource.includes("subjectName") && !pricingPageSource.includes("draft.subjects"));
+
   // 报价页把"这个价折成课单价是多少"算给机构看（填 150 不会以为家长看到的也是 150）
   ok("报价页在基础价输入框下面列出了各时长的课单价",
     pricingPageSource.includes("元/小时 →") && pricingPageSource.includes("元/节"));
@@ -10535,6 +10714,48 @@ console.log("\n=== 41. 报价与课程清单对齐（v37）===");
    * 那不是错，是两条口径的正常落差：课开着、价还没定，台账里会把它标成「未定价」，
    * 那正是给机构看的待办清单。要守的是"课程库改了状态，报价跟着走"（第 10 节那几条）。
    */
+}
+
+console.log("\n=== 42. 后台的卡片都能折叠（机构：「闲时可以占用更少的空间」）===");
+
+/*
+ * 机构：「**后台的每个卡片都可以折叠，这样闲时可以占用更少的空间**」。
+ *
+ * 实现落在 `components/admin/AdminFields.tsx` 的 `Panel` 上（后台那 52 处卡片全是它渲染的），
+ * 因此这一节盯的是**三条会静默退化的规矩**：
+ *
+ *   1. **折叠不卸载内容**：收起来必须用 `hidden`，不能条件渲染 ——
+ *      面板里常有没保存的草稿（课程正文 / 报价草稿），卸载等于悄悄丢掉。
+ *      同一个教训在 /admin/courses 的页签上已经踩过一次（第 40 节），这里不许再犯；
+ *   2. **状态记得住、且按「页面路径 + 面板标题」记**：不带路径的话，
+ *      在课程页折叠「批量导入」，学生页那几个同名面板也会跟着折叠；用序号则会被新面板挤错位；
+ *   3. **动作按钮不跟着收起**：`actions`（保存 / 导出这类）在折叠时仍然可见 ——
+ *      把「保存」藏进收起来的面板里，人会以为按钮没了。
+ *
+ * 另外两条是"别退化成不能用"：箭头要带 `aria-expanded`（读屏能知道状态），
+ * 默认是展开的（藏起来的东西没人会去找）。
+ */
+{
+  const fields = readFileSync(new URL("../components/admin/AdminFields.tsx", import.meta.url), "utf8");
+  const panel = fields.slice(fields.indexOf("export function Panel("));
+
+  ok("卡片可以折叠（标题栏是一个按钮）",
+    panel.includes("onClick={toggle}") && panel.includes("collapsible"));
+  ok("折叠用的是 hidden，不是条件渲染（否则面板里没保存的草稿会被丢掉）",
+    panel.includes("hidden={!open}") && !/\{open &&/.test(panel));
+  ok("折叠状态按「页面路径 + 面板标题」记（不带路径会让同名面板一起折叠）",
+    fields.includes("PANEL_STATE_KEY") &&
+      fields.includes("window.location.pathname") &&
+      fields.includes("readPanelOpen") &&
+      fields.includes("writePanelOpen"));
+  ok("动作按钮在折叠时仍然可见（保存不该被藏起来）",
+    panel.indexOf("{actions !== undefined") > 0 &&
+      !panel.includes("open && actions"));
+  ok("箭头带 aria-expanded（读屏能知道当前是展开还是收起）",
+    panel.includes("aria-expanded={open}") && panel.includes("aria-controls={bodyId}"));
+  ok("默认展开（第一次见到一个面板时它不是收着的）",
+    fields.includes("const [open, setOpen] = useState(!defaultCollapsed)") &&
+      fields.includes("defaultCollapsed = false"));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

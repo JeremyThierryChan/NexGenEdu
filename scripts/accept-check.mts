@@ -850,6 +850,47 @@ await check("报价", "教师课时费", async () => (await api.pricing.teacherF
 })).ok);
 await check("报价", "导出 Markdown", async () => (await api.pricing.exportMarkdown()).includes("学习阶段"));
 /*
+ * v29 之后的三条新口径（对着**真实库**验，不看类型）：
+ *   1. 配置里不再有 `subjects` 这一维（迁移会把老库那个字段删掉）；
+ *   2. `pricing.quote` **不接受科目也能算出价** —— 参数里压根没有科目这一项；
+ *   3. 教师课时费的「课程单价」= **基础价**（不再乘任何系数）。
+ * 顺带验导出里不再写 `#### 科目:`：机构替换内容文件时不会带回去一行没人读的条目。
+ */
+await check("报价", "配置里没有 subjects（科目那一维已删）", async () =>
+  Object.keys(await api.pricing.get()).filter((key) => key === "subjects"), (keys: string[]) => keys.length === 0);
+await check("报价", "导出里不再有「#### 科目:」那一行", async () =>
+  (await api.pricing.exportMarkdown()).includes("#### 科目"), (found: boolean) => found === false);
+await check("报价", "不带科目也能算价（新公式：基础价 × 人数系数 × 时长）", async () => {
+  const pricing = await api.pricing.get();
+  const stage = pricing.stages.find((item) => item.courses.some((course) => course.available));
+  const course = stage?.courses.find((item) => item.available);
+  const oneToOne = pricing.classTypes.find((item) => item.name === "一对一");
+  const quote = await api.pricing.quote({
+    courseName: course?.name ?? "",
+    classTypeName: "一对一",
+    durationName: pricing.durations[0]?.name ?? "",
+    lessons: 5,
+  });
+  // 一对一的人数系数是 1，因此课单价应当**正好等于基础价 × 时长**（课上到几小时就乘几）
+  const hours = pricing.durations[0]?.hours ?? 1;
+  return [quote.ok, quote.unitPrice, (course?.basePrice ?? 0) * hours * (oneToOne?.coefficient ?? 1)];
+}, (value: [boolean, number, number]) =>
+  value[0] === true && Math.abs(value[1] - value[2]) < 0.01);
+await check("报价", "教师课时费的「课程单价」就是基础价", async () => {
+  const pricing = await api.pricing.get();
+  const stage = pricing.stages.find((item) => item.courses.some((course) => course.available));
+  const course = stage?.courses.find((item) => item.available);
+  const fee = await api.pricing.teacherFee({
+    courseName: course?.name ?? "",
+    classTypeName: "一对一",
+    durationName: pricing.durations[0]?.name ?? "",
+    lessons: 5,
+    students: 1,
+  });
+  return [fee.ok, fee.hourlyPrice, course?.basePrice ?? 0];
+}, (value: [boolean, number, number]) =>
+  value[0] === true && Math.abs(value[1] - value[2]) < 0.01);
+/*
  * 班型的名称只有一个真源（课程类型的维度表，v25）：
  * 在「课程类型」里改个名，报价读出来、按新名字试算、导出 Markdown 三处都要跟着变。
  * 收尾把名字改回去（这是机构自己的库）。
@@ -873,9 +914,9 @@ await check("报价", "按新名字试算算得出来（改名最容易漏的一
   const pricing = await api.pricing.get();
   const stage = pricing.stages.find((item) => item.courses.some((course) => course.available));
   const course = stage?.courses.find((item) => item.available);
+  // 试算只发课程 / 班型 / 时长 / 节数 —— 科目那一维 v29 删掉了，这里连传的地方都没有
   const quote = await api.pricing.quote({
     courseName: course?.name ?? "",
-    subjectName: pricing.subjects.find((item) => item.stageName === stage?.name)?.name ?? "",
     classTypeName: "一对三（验收改名）",
     durationName: pricing.durations[0]?.name ?? "",
     lessons: 10,

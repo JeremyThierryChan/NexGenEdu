@@ -150,7 +150,7 @@ export const API_CONTRACT: ContractGroup[] = [
     id: "pricing",
     title: "五、报价配置（价格是数据，不是代码）",
     note:
-      "基础价 / 科目系数 / 班级系数 / 时长乘数 / 计费规则。服务端实现时注意三点：" +
+      "基础价 / 人数系数 / 时长乘数 / 计费规则。服务端实现时注意三点：" +
       "1) **公式只有一份实现**（现在在 lib/backend/pricing.ts），服务端照它实现，" +
       "不要在前端再算一遍 —— 两边算出不同的价格是最不能接受的事故；" +
       "2) 报价请求只发「选了哪门课、哪个班型、多少节」，**不发价格**，" +
@@ -159,7 +159,10 @@ export const API_CONTRACT: ContractGroup[] = [
       "4) 报价配置里还包含**教师分成规则**（课内班型 40% 起、每加一名学生 +10%，" +
       "即 `小时数 × 课程单价/小时 × (0.4 + (人数−1) × 0.1)`；9 人以上大班课不适用）。" +
       "`pricing.teacherFee` 与 `pricing.quote` 一样只收「选择」不收金额 —— 教师工资" +
-      "同样不能让前端传数字进来。",
+      "同样不能让前端传数字进来。" +
+      "**没有「科目系数」这一维**（v29 删掉，机构口径「科目系数可以删除」）：" +
+      "`pricing.quote` / `pricing.teacherFee` 的选择里也没有科目这一项，" +
+      "公式是「基础价 × 人数系数 × 时长乘数（报 1 节再加手续费）」。",
     methods: [
       "pricing.get", "pricing.update", "pricing.reset", "pricing.quote", "pricing.teacherFee",
       "pricing.exportMarkdown",

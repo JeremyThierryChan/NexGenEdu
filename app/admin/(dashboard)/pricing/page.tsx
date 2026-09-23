@@ -35,7 +35,7 @@ import { cn } from "@/lib/utils/cn";
  * 报价原先只有宣传页上那个计算器，规则还写死在代码里：调价要改代码、重新构建，
  * 家长打电话来时也只能切到宣传页点一遍。这一页解决三件事：
  *
- *   1. **改价**：基础价、科目系数、班级系数、时长乘数、手续费与试课规则都是数据；
+ *   1. **改价**：基础价、人数系数、时长乘数、手续费与试课规则都是数据；
  *   2. **试算**：当场按家长说的方案算出课时价与总价（含试课怎么收）；
  *   3. **导出**：伪后端的数据只在这台电脑上，导出成与 `data/site/pricing.md`
  *      同构的片段替换进内容文件，价格才真正上线 —— 这一页顶部把这件事说清楚了。
@@ -71,7 +71,6 @@ export default function AdminPricingPage() {
 
   // 试算器
   const [courseName, setCourseName] = useState("");
-  const [subjectName, setSubjectName] = useState("");
   const [classTypeName, setClassTypeName] = useState("");
   const [durationName, setDurationName] = useState("");
   const [lessons, setLessons] = useState(10);
@@ -161,27 +160,7 @@ export default function AdminPricingPage() {
     [draft, catalog],
   );
 
-  const stageOfCourse = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const stage of draft?.stages ?? []) {
-      for (const course of stage.courses) map.set(course.name, stage.name);
-    }
-    return map;
-  }, [draft]);
-
-  const subjectsOfCourse = useMemo(() => {
-    const stageName = stageOfCourse.get(courseName);
-    return (draft?.subjects ?? []).filter((subject) => subject.stageName === stageName);
-  }, [courseName, draft, stageOfCourse]);
-
   const selectedClassType = draft?.classTypes.find((item) => item.name === classTypeName);
-
-  // 换课程时科目要跟着换（科目是分阶段的，小学的「英语」与高中的「英语」是两条）
-  useEffect(() => {
-    if (!subjectsOfCourse.some((subject) => subject.name === subjectName)) {
-      setSubjectName(subjectsOfCourse[0]?.name ?? "");
-    }
-  }, [subjectName, subjectsOfCourse]);
 
   /** 课程库里还没定价的课程（家长问价时答不上来的那些）。 */
   const unpricedCourses = useMemo(() => {
@@ -283,7 +262,6 @@ export default function AdminPricingPage() {
     setQuoteError("");
     const selection = {
       courseName,
-      subjectName,
       classTypeName,
       durationName,
       lessons,
@@ -457,20 +435,6 @@ export default function AdminPricingPage() {
                 }`,
               })),
             )}
-          />
-          <SelectInput
-            label="科目"
-            hint={subjectsOfCourse.length === 0 ? "该阶段不分科目，按系数 1 计" : undefined}
-            value={subjectName}
-            onChange={(event) => setSubjectName(event.target.value)}
-            options={
-              subjectsOfCourse.length === 0
-                ? [{ value: "", label: "（不分科目）" }]
-                : subjectsOfCourse.map((subject) => ({
-                    value: subject.name,
-                    label: `${subject.name}（×${subject.coefficient}）`,
-                  }))
-            }
           />
           <SelectInput
             label="班型"
@@ -772,48 +736,16 @@ export default function AdminPricingPage() {
         </div>
       </Panel>
 
-      {/* ── 系数 ── */}
+      {/* ── 人数系数 ── */}
       <Panel
-        title="科目系数与班级系数"
-        description="科目系数管「同一阶段里哪个科目更贵」，班级系数管「人越多每人越便宜」。系数 1 表示不加价。"
+        title="人数系数"
+        description="人数系数管「人越多每人越便宜」：一对一 1、一对二 0.7、一对三 0.6、一对多（4-8）0.5；班课（9-20）按人数分摊、不用系数。系数 1 表示不加价。"
         className="mt-5"
       >
         <div className="space-y-5 px-4 py-4">
-          {draft.stages.map((stage) => {
-            const subjects = draft.subjects.filter((subject) => subject.stageName === stage.name);
-            if (subjects.length === 0) return null;
-            return (
-              <div key={stage.name}>
-                <h3 className="mb-2 text-xs font-medium text-ink-500">
-                  {stage.name} · 科目系数
-                </h3>
-                <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
-                  {subjects.map((subject) => (
-                    <NumberInput
-                      key={`${stage.name}-${subject.name}`}
-                      label={subject.name}
-                      step={0.05}
-                      min={0.05}
-                      value={subject.coefficient}
-                      onChange={(event) =>
-                        edit((next) => {
-                          const target = next.subjects.find(
-                            (item) => item.name === subject.name && item.stageName === stage.name,
-                          );
-                          if (target === undefined) return;
-                          target.coefficient = Number(event.target.value);
-                        })
-                      }
-                    />
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-
           <div>
             <h3 className="mb-2 text-xs font-medium text-ink-500">
-              班级系数
+              人数系数
               <span className="ml-2 font-normal text-ink-400">
                 班型的名称与人数区间以「课程类型」页为准，这里只填「这个班型多少钱」
               </span>
@@ -939,7 +871,7 @@ export default function AdminPricingPage() {
       {/* ── 教师分成：公式翻成人话 + 人数对照表 ── */}
       <Panel
         title="教师分成规则（课内课时费）"
-        description="课内按系数计价的班型适用。规则只有这一份实现，后台与将来接的服务端共用同一个函数。"
+        description="课内按人数系数计价的班型适用。规则只有这一份实现，后台与将来接的服务端共用同一个函数。"
         className="mt-5"
       >
         <div className="space-y-5 px-4 py-4">
@@ -996,8 +928,8 @@ export default function AdminPricingPage() {
                 })
               }
               options={[
-                { value: "course", label: "课程标准单价（基础价 × 科目系数）" },
-                { value: "seat", label: "班型课时价（再乘班级系数）" },
+                { value: "course", label: "课程标准单价（基础价）" },
+                { value: "seat", label: "班型课时价（再乘人数系数）" },
               ]}
             />
           </div>
@@ -1113,7 +1045,7 @@ export default function AdminPricingPage() {
                 </Button>
                 <span className="text-xs text-ink-500">
                   包含 {draft.stages.reduce((sum, stage) => sum + stage.courses.length, 0)} 门课、
-                  {draft.subjects.length} 个科目系数、{draft.classTypes.length} 种班型与计费规则。
+                  {draft.classTypes.length} 种班型与计费规则。
                 </span>
               </div>
               <textarea

@@ -81,8 +81,6 @@ import type {
   PricingRules,
   PricingStage,
   StageCourse,
-  SubjectGroup,
-  SubjectOption,
   TeacherShareRules,
   TrialLesson,
 } from "@/lib/data/pricing";
@@ -110,7 +108,6 @@ import type {
 type BackendPricing = PublicSite["pricing"];
 type BackendPriceStage = BackendPricing["stages"][number];
 type BackendPriceCourse = BackendPriceStage["courses"][number];
-type BackendPriceSubject = BackendPricing["subjects"][number];
 type BackendPricingLabels = PublicSite["siteContent"]["pricingPage"]["labels"];
 
 /* ── 测试注入 ───────────────────────────────────────────────────────────── */
@@ -655,7 +652,7 @@ export function backendCasesContent(snapshot: PublicSite): CasesContent {
  *
  * 教师课时费是**内部成本口径**，后端公开数据故意不给（见 `lib/backend/public-site.ts`
  * 的 `PublicPricing` 注释）。宣传页的任何地方都不用 `teacherShare` —— 报价只用
- * 课程价 × 科目系数 × 班级系数 + 手续费，教师分成只在后台试算里出现 ——
+ * 基础价 × 人数系数 + 手续费，教师分成只在后台试算里出现 ——
  * 它在这里**只是因为 `PricingData` 的类型需要这个字段**。
  *
  * 取值与 `lib/data/pricing.ts` 的 `DEFAULT_TEACHER_SHARE_RULES` 一致
@@ -701,42 +698,6 @@ function toStage(stage: BackendPriceStage): PricingStage {
     available: courses.some((course) => course.available),
     courses,
   };
-}
-
-/**
- * 阶段 + 科目 → 站点需要的「阶段分组」。
- *
- * 后端是**扁平**的一份 `subjects`（每行带 `stageName`），站点那边是
- * 「阶段名 + 科目列表」，因此这里按 `stages` 的顺序把科目收拢回各阶段：
- *
- *   - 分组顺序 = 阶段在 `stages` 里的顺序。报价页是「先选阶段、再选科目」的联动，
- *     两组顺序必须同源，否则会出现"阶段下拉里的顺序"与"科目分组的顺序"两种说法；
- *   - 组内保持后端的顺序（后台就是按这个顺序维护的，别在这里重排）；
- *   - 某阶段一个科目都没有（「其他类型」那一组没有科目概念）→ 不产出这一组，
- *     模版路径同样是"没有 `#### 科目:` 就不产出分组"；
- *   - 挂在不存在的阶段上的科目会被丢掉：后端的 `validatePricingConfig` 不允许这种数据，
- *     真出现说明配置坏了，硬塞进某个阶段会把价格算错，不如不显示。
- */
-function toSubjectGroups(
-  stages: readonly PricingStage[],
-  subjects: readonly BackendPriceSubject[],
-): SubjectGroup[] {
-  const groups: SubjectGroup[] = [];
-  for (const stage of stages) {
-    const options: SubjectOption[] = subjects
-      .filter((subject) => text(subject.stageName) === stage.name)
-      .map((subject) => ({
-        name: text(subject.name),
-        // 后端公开数据里没有「科目暂未开放」这个概念（不可用的科目直接不进配置），
-        // 因此统一按可选处理；模版路径解析出来的科目也恒为 available: true
-        available: true,
-        // 系数缺失 / 非数字时按 1（不加价）：与模版 `parseSubject` 的兜底同一口径。
-        // 让 ¥NaN 出现在家长面前是最糟的失败方式
-        coefficient: Number.isFinite(subject.coefficient) ? subject.coefficient : 1,
-      }));
-    if (options.length > 0) groups.push({ name: stage.name, subjects: options });
-  }
-  return groups;
 }
 
 /**
@@ -804,7 +765,6 @@ export function backendPricingData(snapshot: PublicSite): PricingData {
   return {
     labels: toPricingLabels(snapshot.siteContent?.pricingPage?.labels),
     stages,
-    subjectGroups: toSubjectGroups(stages, pricing.subjects ?? []),
     classTypes: (pricing.classTypes ?? []).map((item) => ({
       name: text(item.name),
       // 后端配置里只有在用的班型（不可用的班型在模版路径里也是被 filter 掉的），

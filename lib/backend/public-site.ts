@@ -24,7 +24,6 @@ import type {
   PricingOtherItem,
   PricingRules,
   PricingStage,
-  PricingSubject,
   PricingTrial,
 } from "./pricing";
 import type { Course, CourseTag, Database, SiteContent, Teacher } from "./types";
@@ -88,11 +87,12 @@ export type PublicCoursePartition = {
  * 刻意**不含 `teacherShare`**：教师课时费是机构的成本口径，属于内部数据。
  * 宣传网站上没有任何地方需要它，因此这里不给 —— 后来的人想加，请先想清楚
  * "上网的人拿它做什么"。
+ *
+ * 也**不含科目**（v29 删掉的那一维）：报价不再有科目系数，网站报价器也不让家长选科目。
  */
 export type PublicPricing = {
   rules: PricingRules;
   stages: PricingStage[];
-  subjects: PricingSubject[];
   classTypes: PricingClassType[];
   durations: PricingDuration[];
   trial: PricingTrial | null;
@@ -178,10 +178,10 @@ export function publicSite(db: Database): PublicSite {
     pricing: {
       rules: db.pricing.rules,
       stages: db.pricing.stages,
-      subjects: db.pricing.subjects,
       /*
        * 网站报价器上的班型名与报价页**同一份口径**（课程类型的维度表）：
        * 机构改了班型名，构站出来的报价页跟着变，不必再去改 pricing.md。
+       * 班型上挂的 `coefficient` 就是**人数系数**（一对二 0.7 / 一对三 0.6 …）。
        */
       classTypes: syncClassTypes(db.pricing.classTypes, db.catalog).classTypes,
       durations: db.pricing.durations,

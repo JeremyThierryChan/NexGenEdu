@@ -1086,6 +1086,29 @@ function migrate(db: Database): Database | null {
     db.version = 28;
   }
 
+  if (db.version === 28) {
+    /*
+     * v28 → v29：**删掉「科目系数」这一维**（机构口径：「科目系数可以删除」）。
+     *
+     * 报价从 v10 起是四档相乘的：基础价 × 科目系数 × 人数系数（原叫班级系数）× 时长乘数。
+     * 现在科目那一维整个不存在了 —— 网站报价器不再让家长选科目、公式里也没有那个乘法，
+     * 因此这份配置里不该再留着那份科目表。
+     *
+     * **这一步不改变任何已算出的价**，所以可以放心地只删字段、不做任何换算：
+     *   1. 那份科目表里的系数**全都是 1**（内容文件里一个 `科目 ×系数` 的写法都没有），
+     *      ×1 乘不乘结果一样；
+     *   2. **试课费**本来就按课程基础价原价收（不带任何系数），与科目无关；
+     *   3. 教师课时费的「标准单价」口径以前是"基础价 × 科目系数"，系数为 1 时它就是
+     *      基础价本身 —— 删掉之后算出来的课时费一分没变。
+     *
+     * 用 `delete` 而不是把它置成 `undefined`：留一个 `subjects: undefined` 的键，
+     * "这份配置里到底还有没有科目"就变成一个要看序列化实现才知道的问题
+     * （`JSON.stringify` 会把它丢掉，而内存里那份对象还带着这个键）。
+     */
+    delete (db.pricing as PricingConfig & { subjects?: unknown }).subjects;
+    db.version = 29;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1149,7 +1172,16 @@ function migrate(db: Database): Database | null {
   if (!Array.isArray(db.offers)) db.offers = [];
 
   /*
-   * 收尾归一：报价里的**班级类型名称以维度表为准**（与上面几条同一条纪律）。
+   * 收尾归一：报价里**不该再有 `subjects`**（v29 删掉的那一维）。
+   *
+   * 与「维度表里不该再有 deliveries」同一条纪律：一份"自称 v29"却还带着它的文件
+   * （手改过的导出、半份恢复、更早版本导出的 JSON）不会读错任何数 —— 但那个字段会随
+   * 每次 `persist` 一直活下去，而它已经不是任何东西的输入了。在这一层统一抹掉。
+   */
+  delete (db.pricing as PricingConfig & { subjects?: unknown }).subjects;
+
+  /*
+   * 收尾归一：报价里的**班型名称以维度表为准**（与上面几条同一条纪律）。
    *
    * 为什么放在收尾而不是只留在 v25 那一步：班型的名字是会变的（机构在「课程类型」页改名），
    * 而"自称 v25"的库未必真对齐过 —— 手改过的导出、只跑了一半的恢复、以及**导入**都长这样。
@@ -1565,18 +1597,14 @@ function describePricingChange(before: PricingConfig, after: PricingConfig): str
       }
     }
   }
-  for (const subject of after.subjects) {
-    const previous = before.subjects.find(
-      (item) => item.name === subject.name && item.stageName === subject.stageName,
-    );
-    if (previous !== undefined && previous.coefficient !== subject.coefficient) {
-      parts.push(`「${subject.name}」科目系数 ${previous.coefficient} → ${subject.coefficient}`);
-    }
-  }
+  /*
+   * 人数系数按**班型**比（`classType.coefficient` 就是人数系数）。
+   * 这里曾经还有一段"科目系数 1.2 → 1.1"的日志 —— 科目那一维 v29 删掉了。
+   */
   for (const classType of after.classTypes) {
     const previous = before.classTypes.find((item) => item.name === classType.name);
     if (previous !== undefined && previous.coefficient !== classType.coefficient) {
-      parts.push(`「${classType.name}」班级系数 ${previous.coefficient ?? "—"} → ${classType.coefficient ?? "—"}`);
+      parts.push(`「${classType.name}」人数系数 ${previous.coefficient ?? "—"} → ${classType.coefficient ?? "—"}`);
     }
   }
   if (before.rules.singleLessonFeePercent !== after.rules.singleLessonFeePercent) {

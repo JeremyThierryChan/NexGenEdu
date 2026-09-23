@@ -63,7 +63,7 @@ const TABS: Array<{ key: TabKey; label: string; hint: string }> = [
   { key: "stages", label: "学段", hint: "机构清单的第一层：小学 / 初中 / 高中 / 大学 / 其他类型" },
   { key: "subjects", label: "学科与项目", hint: "语文、数学、雅思、托管项目…（学科与学段解耦，勾学段即可）" },
   { key: "modules", label: "内容模块", hint: "教材进度 / 能力点 / 语言等级（诊断推荐按类别筛）" },
-  { key: "formats", label: "班型", hint: "全系统唯一口径 —— 报价的班级系数按它算" },
+  { key: "formats", label: "班型", hint: "全系统唯一口径 —— 报价的人数系数按它算" },
 ];
 
 /** 重排用的公共动作：把下标 `from` 与 `to` 换位（越界就原样返回）。 */

@@ -21,21 +21,24 @@
  * | 维度 | 字段 | 含义 | 默认 |
  * | --- | --- | --- | --- |
  * | 课程 | `basePrice` | **每小时的价**（元 / 小时）：一对一、报 2 节及以上；再乘时长才是课单价 | 分阶段设定 |
- * | 科目 | `subject.coefficient` | 同一阶段内不同科目的师资/难度差异 | 1.0（不加价） |
- * | 班级 | `classType.coefficient` | 人越多每人越便宜 | 一对二 0.7、一对三 0.6、一对多 0.5 |
+ * | 人数 | `classType.coefficient` | **人数系数**：人越多每人越便宜 | 一对二 0.7、一对三 0.6、一对多 0.5 |
  * | 时长 | `duration.multiplier` | 一节课上多久 | 1 小时 1.0、1.5 小时 1.5、2 小时 2.0 |
  * | 手续费 | `rules.singleLessonFeePercent` | 只报 1 节时加收（一次课不划算） | 10% |
  * | 试课 | `rules.freeTrialMinLessons` | 报满多少节后试课免费，否则按原价收 1 节 | 10 节 |
  *
+ * **科目这一维已经没有了**（机构口径：「科目系数可以删除」）：以前还有一列
+ * `subject.coefficient`（同一阶段内不同科目的师资 / 难度差异），删掉它**不改变任何
+ * 已算出的价** —— 那份表里的系数全是 1（×1 乘不乘一样），而试课费本来就按基础价原价收。
+ *
  * 两个例外，都不是「乘系数」：
  *
- *   - **班课（9-20 人）**：按「教师课时总费用 ÷ 班级人数」分摊，不用班级系数；
- *   - **试课费**：永远按**课程基础价原价**收，不带科目系数、班级系数、时长与手续费
+ *   - **班课（9-20 人）**：按「教师课时总费用 ÷ 班级人数」分摊，不用人数系数；
+ *   - **试课费**：永远按**课程基础价原价**收，不带人数系数、时长与手续费
  *     （试课是单独产品，不是正课的折扣价）。
  *
  * 计算顺序（改动这里等于改价，务必同步 `npm run check` 里的用例）：
  *
- *   1. 课时价 = 基础价 × 科目系数 × 班级系数       （班课：教师费用 ÷ 人数）
+ *   1. 课时价 = 基础价 × 人数系数                （班课：教师费用 ÷ 人数）
  *   2. 课时价 ×= 时长乘数
  *   3. 课时价 ×= (1 + 手续费百分比)
  *   4. 正课总价 = 课时价 × 节数
@@ -55,7 +58,6 @@ import {
   type PricingData,
   type PricingRules,
   type StageCourse,
-  type SubjectOption,
 } from "@/lib/data/pricing";
 
 import {
@@ -98,15 +100,13 @@ export type PricingStage = {
   courses: PricingCourse[];
 };
 
-/** 某阶段下的一个科目及其系数。 */
-export type PricingSubject = {
-  name: string;
-  /** 所属阶段名；科目是分阶段定义的（小学的「英语」与高中的「英语」可以不同价）。 */
-  stageName: string;
-  coefficient: number;
-};
-
-/** 班级类型：系数模式 or 按人数分摊。 */
+/**
+ * 班型：系数模式 or 按人数分摊。
+ *
+ * 名字沿用 `PricingClassType`（改名会牵动契约与数据库形状，不值当），
+ * 但这个类型表达的是**「班型 → 人数系数」这张表**：`coefficient` 就是**人数系数**
+ * （人越多每人越便宜），与"班级"这个字眼无关。
+ */
 export type PricingClassType = {
   /**
    * 名称**以课程类型的维度表为准**（v25）：这里是快照，读的时候会被 `syncClassTypes`
@@ -122,7 +122,7 @@ export type PricingClassType = {
    */
   formatId: string;
   mode: ClassPricingMode;
-  /** 系数模式下的系数；按人数分摊时为 null。 */
+  /** 系数模式下的**人数系数**；按人数分摊时为 null。 */
   coefficient: number | null;
 };
 
@@ -151,7 +151,6 @@ export type PricingConfig = {
   /** 教师课时费（分成）规则：见 lib/backend/teacher-share.ts。 */
   teacherShare: TeacherShareRules;
   stages: PricingStage[];
-  subjects: PricingSubject[];
   classTypes: PricingClassType[];
   durations: PricingDuration[];
   trial: PricingTrial | null;
@@ -174,12 +173,7 @@ export const PRICING_SOURCE_ADMIN = "后台修改";
 export type QuoteInput = {
   /** 所选课程（含基础价）。 */
   course: StageCourse;
-  /**
-   * 所选科目（含科目系数）。
-   * 部分阶段（「其他类型」那一组）没有科目概念，此时传 null，科目系数按 1 计。
-   */
-  subject: SubjectOption | null;
-  /** 所选班级类型。 */
+  /** 所选班级类型（人数系数在这上面）。 */
   classType: ClassType;
   /** 所选每节课时长。 */
   duration: LessonDuration;
@@ -202,7 +196,7 @@ export type QuoteResult = {
   ok: boolean;
   reason?: string;
   /**
-   * 课单价（**元 / 节**）= 基础价（元/小时）× 每节课几小时 × 科目系数 × 班级系数
+   * 课单价（**元 / 节**）= 基础价（元/小时）× 每节课几小时 × 人数系数
    * （报 1 节时再含手续费）。别与基础价混淆：基础价是"每小时"的价。
    */
   unitPrice: number;
@@ -246,7 +240,7 @@ export function isTrialFree(lessons: number, rules: PricingRules): boolean {
   return lessons >= rules.freeTrialMinLessons;
 }
 
-/** 试课费用：免费时 0，否则按课程原价（不含科目系数、班级系数、时长与手续费）计。 */
+/** 试课费用：免费时 0，否则按课程原价（不含人数系数、时长与手续费）计。 */
 export function trialFeeFor(
   lessons: number,
   coursePrice: number | null,
@@ -261,11 +255,11 @@ export function trialFeeFor(
  * 计算课时价（不含时长乘数与手续费）。
  *
  * 分两种模式：
- *   - coefficient：一对一 / 小班，按班级系数计价
+ *   - coefficient：一对一 / 小班，按**人数系数**计价（基础价 × 人数系数）
  *   - cost-share：班课，按「教师课时总费用 ÷ 班级人数」分摊
  */
 function baseUnitPrice(input: QuoteInput): { price: number } | { error: string } {
-  const { course, subject, classType } = input;
+  const { course, classType } = input;
 
   if (course.price === null) {
     return { error: "所选课程暂未开放，无法报价。" };
@@ -279,9 +273,7 @@ function baseUnitPrice(input: QuoteInput): { price: number } | { error: string }
     return { price: cost / students };
   }
 
-  // 无科目分组时科目系数按 1（不参与加价）
-  const subjectCoefficient = subject?.coefficient ?? 1;
-  return { price: course.price * subjectCoefficient * (classType.coefficient ?? 1) };
+  return { price: course.price * (classType.coefficient ?? 1) };
 }
 
 /**
@@ -300,14 +292,10 @@ function buildBreakdown(
   finalUnitPrice: number,
   lessonsPrice: number,
 ): QuoteBreakdownItem[] {
-  const { course, subject, classType, lessons } = input;
+  const { course, classType, lessons } = input;
   const items: QuoteBreakdownItem[] = [
     { label: `${course.name} 基础价（元/小时）`, value: money(course.price ?? 0) },
   ];
-
-  if (subject !== null && subject.coefficient !== 1) {
-    items.push({ label: `${subject.name} 科目系数`, value: `×${subject.coefficient}` });
-  }
 
   if (input.duration.multiplier !== 1) {
     items.push({ label: `每节课 ${input.duration.hours} 小时`, value: `×${input.duration.multiplier}` });
@@ -319,7 +307,7 @@ function buildBreakdown(
     items.push({ label: "课时价（费用 ÷ 人数）", value: money(basePrice) });
   } else {
     items.push({
-      label: `${classType.name} 班级系数`,
+      label: `${classType.name} 人数系数`,
       value: `×${classType.coefficient ?? 1}`,
     });
   }
@@ -394,15 +382,16 @@ export function calculateQuote(input: QuoteInput, rules: PricingRules): QuoteRes
 /* ── 三、按名字报价（服务端形态）────────────────────────────────────── */
 
 /**
- * 报价请求：页面只发「选了哪个课程 / 哪个科目 / 哪个班型 / 多少节」。
+ * 报价请求：页面只发「选了哪个课程 / 哪个班型 / 多少节」。
  *
  * 刻意不发价格：价格由服务端（这里是伪后端）自己查，
  * 否则前端改个数字就能改价，转真后端时这是必须堵住的口子。
+ *
+ * **没有科目**（机构口径：「科目系数可以删除」）：页面也不再让家长选科目，
+ * 因此这里连 `subjectName` 这个字段都不该有 —— 老前端若还发它，会被忽略。
  */
 export type QuoteSelection = {
   courseName: string;
-  /** 科目名；该阶段没有科目概念时省略。 */
-  subjectName?: string;
   classTypeName: string;
   durationName: string;
   lessons: number;
@@ -416,16 +405,14 @@ export function resolveSelection(
   selection: QuoteSelection,
 ): { ok: true; input: QuoteInput } | { ok: false; reason: string } {
   let course: PricingCourse | undefined;
-  let stage: PricingStage | undefined;
   for (const item of config.stages) {
     const found = item.courses.find((entry) => entry.name === selection.courseName);
     if (found !== undefined) {
       course = found;
-      stage = item;
       break;
     }
   }
-  if (course === undefined || stage === undefined) {
+  if (course === undefined) {
     return { ok: false, reason: `报价配置里没有课程「${selection.courseName}」。` };
   }
 
@@ -439,25 +426,10 @@ export function resolveSelection(
     return { ok: false, reason: `报价配置里没有时长「${selection.durationName}」。` };
   }
 
-  let subjectOption: SubjectOption | null = null;
-  if (selection.subjectName !== undefined && selection.subjectName !== "") {
-    const subject = config.subjects.find(
-      (item) => item.stageName === stage.name && item.name === selection.subjectName,
-    );
-    if (subject === undefined) {
-      return {
-        ok: false,
-        reason: `${stage.name}里没有科目「${selection.subjectName}」。`,
-      };
-    }
-    subjectOption = { name: subject.name, available: true, coefficient: subject.coefficient };
-  }
-
   return {
     ok: true,
     input: {
       course: { name: course.name, price: course.basePrice, available: course.available },
-      subject: subjectOption,
       classType: {
         name: classType.name,
         available: true,
@@ -508,7 +480,7 @@ export type TeacherFeeResult = {
   percent: number;
   /** 「课程单价 / 小时」：按所选口径算出的数。 */
   hourlyPrice: number;
-  /** 家长每生每小时的课时价（含班级系数），用于算机构留存。 */
+  /** 家长每生每小时的课时价（含人数系数），用于算机构留存。 */
   seatHourlyPrice: number;
   /** 教师课时费。 */
   teacherFee: number;
@@ -560,7 +532,12 @@ export function teacherFeeForSelection(
   }
 
   const students = Math.max(1, Math.floor(selection.students ?? selection.studentCount ?? 1));
-  const courseHourly = round2(input.course.price * (input.subject?.coefficient ?? 1));
+  /*
+   * `priceBasis: "course"`（标准单价）现在**就是基础价本身** —— 以前还要乘一个
+   * 科目系数，科目这一维删掉之后那个乘法也随之消失（系数全是 1，所以算出来的
+   * 课时费一分没变）。
+   */
+  const courseHourly = round2(input.course.price);
   const seatHourly = round2(courseHourly * (input.classType.coefficient ?? 1));
   const hourlyPrice = config.teacherShare.priceBasis === "seat" ? seatHourly : courseHourly;
   const percent = sharePercentFor(students, config.teacherShare);
@@ -663,19 +640,6 @@ export function validatePricingConfig(config: PricingConfig): string[] {
     }
   }
 
-  const subjectKeys = new Set<string>();
-  for (const subject of config.subjects) {
-    if (!Number.isFinite(subject.coefficient) || subject.coefficient <= 0) {
-      problems.push(`科目「${subject.name}」的系数必须大于 0。`);
-    }
-    if (!config.stages.some((stage) => stage.name === subject.stageName)) {
-      problems.push(`科目「${subject.name}」挂在不存在的学习阶段「${subject.stageName}」上。`);
-    }
-    const key = `${subject.stageName}/${subject.name}`;
-    if (subjectKeys.has(key)) problems.push(`「${subject.stageName}」里的科目「${subject.name}」重复了。`);
-    subjectKeys.add(key);
-  }
-
   const classTypeNames = new Set<string>();
   const classTypeFormatIds = new Set<string>();
   for (const classType of config.classTypes) {
@@ -692,13 +656,13 @@ export function validatePricingConfig(config: PricingConfig): string[] {
     const formatId = classType.formatId ?? "";
     if (formatId !== "") {
       if (classTypeFormatIds.has(formatId)) {
-        problems.push(`班型「${classType.name}」在报价里出现了两条（同一个班型只能有一行系数）。`);
+        problems.push(`班型「${classType.name}」在报价里出现了两条（同一个班型只能有一行人数系数）。`);
       }
       classTypeFormatIds.add(formatId);
     }
     if (classType.mode === "coefficient") {
       if (!Number.isFinite(classType.coefficient) || (classType.coefficient ?? 0) <= 0) {
-        problems.push(`班型「${classType.name}」的系数必须大于 0。`);
+        problems.push(`班型「${classType.name}」的人数系数必须大于 0。`);
       }
     }
   }
@@ -737,13 +701,6 @@ export function configFromPricingData(data: PricingData, source: string): Pricin
         available: course.available,
       })),
     })),
-    subjects: data.subjectGroups.flatMap((group) =>
-      group.subjects.map((subject) => ({
-        name: subject.name,
-        stageName: group.name,
-        coefficient: subject.coefficient,
-      })),
-    ),
     classTypes: data.classTypes.map((classType) => ({
       name: classType.name,
       /*
@@ -804,15 +761,6 @@ export function pricingConfigToMarkdown(config: PricingConfig): string {
           ? UNAVAILABLE_PRICE_LABEL
           : String(course.basePrice);
       lines.push(`#### 课程: ${course.name}: ${price}`, "");
-    }
-    const subjects = config.subjects.filter((subject) => subject.stageName === stage.name);
-    if (subjects.length > 0) {
-      const text = subjects
-        .map((subject) =>
-          subject.coefficient === 1 ? subject.name : `${subject.name} ×${subject.coefficient}`,
-        )
-        .join("、");
-      lines.push(`#### 科目: ${text}`, "");
     }
   }
 
@@ -886,7 +834,7 @@ export function pricingConfigToMarkdown(config: PricingConfig): string {
  *   - `classTypes[].formatId`（班型 ↔ 课程类型那条关联）：Markdown 只写「名称 / 系数」，
  *     而读的时候 `syncClassTypes` 会按名字再认一次。
  *
- * 其余（价格、开放状态、科目系数、班级系数、时长、规则、分成、试课、其他项目）**一个不漏**：
+ * 其余（价格、开放状态、人数系数、时长、规则、分成、试课、其他项目）**一个不漏**：
  * 漏掉哪个，导出到内容文件时那个字段丢了都不会有人知道。
  */
 export function pricingConfigCore(config: PricingConfig): string {
@@ -901,7 +849,6 @@ export function pricingConfigCore(config: PricingConfig): string {
         available: course.available,
       })),
     })),
-    subjects: config.subjects,
     classTypes: config.classTypes.map((classType) => ({
       name: classType.name,
       mode: classType.mode,

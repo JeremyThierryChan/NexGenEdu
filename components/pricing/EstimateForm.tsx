@@ -19,14 +19,16 @@ type EstimateFormProps = {
  * 选项清单来自 data/site/pricing.md，公式来自 lib/pricing/quote.ts，
  * 因此调价或改公式都不需要改本组件。
  *
- * 联动关系：学习阶段 → 课程 / 科目 → 班级类型。
- * 上级变化时下级自动清空，避免出现「阶段与科目不匹配」的组合。
+ * 联动关系：学习阶段 → 课程 → 人数（班型）。上级变化时下级自动清空，
+ * 避免出现「阶段与课程不匹配」的组合。
  * 报课节数与每节课时长由用户直接填写 / 选择。
+ *
+ * **没有「科目」这一步**（机构口径：那一维的系数可以删掉）：以前这里在下拉里
+ * 再选一次科目，只为了让公式多乘一个系数；现在家长走到课程就直接选人数（班型）。
  */
 export function EstimateForm({ data }: EstimateFormProps) {
   const [stageName, setStageName] = useState("");
   const [courseName, setCourseName] = useState("");
-  const [subjectName, setSubjectName] = useState("");
   const [classTypeName, setClassTypeName] = useState("");
   const [durationName, setDurationName] = useState("");
   const [lessons, setLessons] = useState("");
@@ -34,9 +36,7 @@ export function EstimateForm({ data }: EstimateFormProps) {
   const [classCost, setClassCost] = useState("");
 
   const stage = data.stages.find((item) => item.name === stageName) ?? null;
-  const subjectGroup = data.subjectGroups.find((item) => item.name === stageName) ?? null;
   const course = stage?.courses.find((item) => item.name === courseName) ?? null;
-  const subject = subjectGroup?.subjects.find((item) => item.name === subjectName) ?? null;
   const classType = data.classTypes.find((item) => item.name === classTypeName) ?? null;
   const duration = data.durations.find((item) => item.name === durationName) ?? null;
 
@@ -49,46 +49,27 @@ export function EstimateForm({ data }: EstimateFormProps) {
     }));
 
   const isCostShare = classType?.mode === "cost-share";
-  /** 该阶段是否有科目可选（「其他类型」那一组没有科目分组）。 */
-  const subjectsRequired = (subjectGroup?.subjects.length ?? 0) > 0;
   const lessonsNumber = Number.parseInt(lessons, 10);
 
   /** 三项核心选择是否完成（不含节数）。 */
-  const coreReady =
-    course !== null &&
-    classType !== null &&
-    duration !== null &&
-    (!subjectsRequired || subject !== null);
+  const coreReady = course !== null && classType !== null && duration !== null;
 
   const result = useMemo(() => {
     if (course === null || classType === null || duration === null) return null;
     if (!course.available) return null;
-    // 有科目分组时必须选择科目；没有科目分组的阶段直接计算
-    if (subjectsRequired && (subject === null || !subject.available)) return null;
     return calculateQuote({
       course,
-      subject: subjectsRequired ? subject : null,
       classType,
       duration,
       lessons: Number.isFinite(lessonsNumber) ? lessonsNumber : 0,
       studentCount: Number.parseFloat(studentCount),
       classCost: Number.parseFloat(classCost),
     });
-  }, [
-    course,
-    subject,
-    subjectsRequired,
-    classType,
-    duration,
-    lessonsNumber,
-    studentCount,
-    classCost,
-  ]);
+  }, [course, classType, duration, lessonsNumber, studentCount, classCost]);
 
   const reset = () => {
     setStageName("");
     setCourseName("");
-    setSubjectName("");
     setClassTypeName("");
     setDurationName("");
     setLessons("");
@@ -112,7 +93,6 @@ export function EstimateForm({ data }: EstimateFormProps) {
             onChange={(event) => {
               setStageName(event.target.value);
               setCourseName("");
-              setSubjectName("");
             }}
           />
 
@@ -125,20 +105,9 @@ export function EstimateForm({ data }: EstimateFormProps) {
             onChange={(event) => setCourseName(event.target.value)}
           />
 
-          {/* 只有存在科目分组的阶段才显示科目下拉 */}
-          {subjectsRequired && (
-            <Select
-              label="科目"
-              placeholder="请选择科目"
-              options={toOptions(subjectGroup?.subjects ?? [])}
-              value={subjectName}
-              onChange={(event) => setSubjectName(event.target.value)}
-            />
-          )}
-
           <Select
-            label="班级类型"
-            placeholder="请选择班级类型"
+            label="人数（班型）"
+            placeholder="请选择人数与班型"
             options={data.classTypes.map((item) => ({ value: item.name, label: item.name }))}
             value={classTypeName}
             onChange={(event) => {

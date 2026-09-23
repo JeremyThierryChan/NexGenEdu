@@ -11,9 +11,11 @@ import { parseDocument, type PageBlock, type Section } from "@/lib/data/content"
  *   ## 学习阶段             ← 分组
  *   ### 小学                ← 阶段（分组下的子节）
  *   #### 课程: 小学课内: 150  ← 条目名「课程」，值为「课程名: 基础价」
- *   #### 科目: 语文、数学     ← 条目名「科目」，值为科目清单
  *
  * 字段值写「暂未开放」时视为不可选（页面上显示但禁选）。
+ *
+ * **没有「科目」这一维了**（机构口径：「科目系数可以删除」）：阶段下只有课程，
+ * 价格 = 基础价 × 人数系数 × 时长乘数（见 `lib/backend/pricing.ts` 的文件头）。
  */
 
 /**
@@ -44,29 +46,21 @@ export type PricingStage = {
   available: boolean;
 };
 
-/** 某个阶段下可选的科目。 */
-export type SubjectOption = {
-  name: string;
-  available: boolean;
-  /** 科目系数，未配置时为 1。 */
-  coefficient: number;
-};
-
-/** 科目分组：阶段 → 科目列表。 */
-export type SubjectGroup = {
-  name: string;
-  subjects: SubjectOption[];
-};
-
 /** 班级类型的计价方式。 */
 export type ClassPricingMode = "coefficient" | "cost-share";
 
-/** 班级类型（一对一 / 一对二 / 班课…）。 */
+/**
+ * 人数（班型）档：一对一 / 一对二 / 一对三 / 一对多（4-8）/ 班课（9-20）。
+ *
+ * 标识符沿用 `ClassType` / `coefficient` 这两个老名字（改名会牵动契约与数据库形状，
+ * 不值当），但它表达的是**「班型 → 人数系数」这张表**：`coefficient` 就是**人数系数**
+ * （人越多每人越便宜），不是"班级"的什么属性。
+ */
 export type ClassType = {
   name: string;
   available: boolean;
   mode: ClassPricingMode;
-  /** coefficient 模式下的系数；cost-share 模式为 null。 */
+  /** coefficient 模式下的**人数系数**；cost-share 模式（班课按人数分摊）为 null。 */
   coefficient: number | null;
 };
 
@@ -93,7 +87,7 @@ export type TeacherSharePriceBasis = "course" | "seat";
  * 教师课时费（分成）规则。
  *
  * 原始口径：`教师课时费 = 小时数 × (课程单价/小时) × (0.4 + (学生人数 − 1) × 0.1)`，
- * 适用于课内课程里按系数计价的班型（一对一 … 一对多小班课），9 人以上大班课另议。
+ * 适用于课内课程里按人数系数计价的班型（一对一 … 一对多小班课），9 人以上大班课另议。
  * 算法与人话说明见 `lib/backend/teacher-share.ts`。
  */
 export type TeacherShareRules = {
@@ -153,7 +147,6 @@ export type PricingData = {
     classCostHint: string;
   };
   stages: PricingStage[];
-  subjectGroups: SubjectGroup[];
   classTypes: ClassType[];
   durations: LessonDuration[];
   /** 计费规则（手续费 / 试课免费门槛）。 */
@@ -194,27 +187,10 @@ function parseCourse(raw: string): { name: string; priceLabel: string } {
 }
 
 /**
- * 解析一个科目项。
+ * 解析班级类型（这张表就是「班型 → **人数系数**」）。
  *
- * 写法有两种，都支持：
- *
- *   - `语文`          → 系数 1（不加价，绝大多数科目的情况）
- *   - `物理 ×1.1`     → 系数 1.1（该科目单独加价）
- *
- * 用「×」而不是单独一列，是为了让内容文件继续像一份价目表 —— 科目多起来
- * 之后，一眼能看出哪个科目贵、贵多少。系数省略时按 1 计，老内容不用改。
+ * 系数不是数字（如「按人数分摊」）时使用 cost-share 模式。
  */
-function parseSubject(token: string): SubjectOption | null {
-  if (token === "") return null;
-  const match = /^(.*?)\s*[×xX*]\s*([0-9]+(?:\.[0-9]+)?)$/.exec(token);
-  if (match === null) return { name: token, available: true, coefficient: 1 };
-  const name = (match[1] ?? "").trim();
-  const coefficient = toNumber(match[2], 1) ?? 1;
-  if (name === "") return null;
-  return { name, available: true, coefficient };
-}
-
-/** 解析班级类型。系数不是数字（如「按人数分摊」）时使用 cost-share 模式。 */
 function toClassTypes(sections: Section[]): ClassType[] {
   return sections
     .map((section) => {
@@ -335,13 +311,17 @@ export function parsePricingSource(source: string): PricingData {
   const named = (name: string): Section =>
     page.groups.find((group) => group.name === name) ?? emptySection(name);
 
-  // 阶段与科目都写在 `## 学习阶段` 的子节里
+  /*
+   * 阶段写在 `## 学习阶段` 的子节里。
+   *
+   * 以前这里还会解析 `#### 科目:` 那一行（科目系数表），这一维已经删掉了
+   * （机构口径：「科目系数可以删除」）—— 旧内容文件里若还留着那一行，
+   * 现在会被当成一个**没人读的条目**，不报错也不参与任何计算。
+   */
   const stages: PricingStage[] = [];
-  const subjectGroups: SubjectGroup[] = [];
 
   for (const stage of named("学习阶段").children) {
     const courseEntries = stage.items.filter((item) => item.title === "课程");
-    const subjectEntries = stage.items.filter((item) => item.title === "科目");
 
     stages.push({
       name: stage.name,
@@ -354,17 +334,6 @@ export function parsePricingSource(source: string): PricingData {
         return { name, price: available ? toNumber(priceLabel) : null, available };
       }),
     });
-
-    const subjects: SubjectOption[] = [];
-    for (const entry of subjectEntries) {
-      for (const token of entry.value.split(/[、,，|]/).map((x) => x.trim())) {
-        const subject = parseSubject(token);
-        if (subject !== null) subjects.push(subject);
-      }
-    }
-    if (subjects.length > 0) {
-      subjectGroups.push({ name: stage.name, subjects });
-    }
   }
 
   return {
@@ -387,7 +356,6 @@ export function parsePricingSource(source: string): PricingData {
       classCostHint: field("class_cost_hint"),
     },
     stages,
-    subjectGroups,
     classTypes: toClassTypes(named("班级类型").children),
     durations: toDurations(named("课时选择").children),
     rules: toRules(named("计费规则").children),
@@ -421,7 +389,7 @@ export function getPricingData(): PricingData {
   /*
    * 没连上后端（默认）：**文案用模版、价格数据为空**。
    * `labels` 是按钮与标签的文字（"算一算""课单价"这类），属于页面骨架 ——
-   * 空着会得到一堆空按钮（那比空列表更像坏了）；阶段 / 科目 / 班级系数是**数据**，为空。
+   * 空着会得到一堆空按钮（那比空列表更像坏了）；阶段 / 人数系数是**数据**，为空。
    */
   return {
     ...emptyPricingData(),
@@ -454,7 +422,6 @@ function emptyPricingData(): PricingData {
       classCostHint: "",
     },
     stages: [],
-    subjectGroups: [],
     classTypes: [],
     durations: [],
     rules: { singleLessonFeePercent: 0, freeTrialMinLessons: 0, chargeTrialWhenNotFree: false },

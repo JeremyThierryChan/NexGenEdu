@@ -292,20 +292,13 @@ const dbLabels = db.siteContent.pricingPage.labels;
     }
   }
 
-  const tplSubjects = tplPricing.subjectGroups.map((group) => `${group.name}: ${group.subjects.map((s) => `${s.name}×${s.coefficient}`).join("、")}`);
-  const dbSubjects = Object.entries(
-    dbPricing.subjects.reduce<Record<string, string[]>>((acc, subject) => {
-      (acc[subject.stageName] ??= []).push(`${subject.name}×${subject.coefficient}`);
-      return acc;
-    }, {}),
-  ).map(([stage, list]) => `${stage}: ${list.join("、")}`);
-  if (JSON.stringify(tplSubjects) !== JSON.stringify(dbSubjects)) {
-    add({ area: "报价", kind: "两边不同", what: "科目系数", template: tplSubjects, db: dbSubjects });
-  }
-
+  /*
+   * 这里以前还有一段比「科目系数」的（模版的 `subjectGroups` vs 库里的 `subjects`）——
+   * 那一维 v29 删掉了，两边都没有可比的东西，于是整段删掉而不是让它永远相等。
+   */
   const tplClass = tplPricing.classTypes.map((item) => `${item.name}=${item.coefficient ?? "按人数分摊"}`).join("|");
   const dbClass = dbPricing.classTypes.map((item) => `${item.name}=${item.coefficient ?? "按人数分摊"}`).join("|");
-  if (tplClass !== dbClass) add({ area: "报价", kind: "两边不同", what: "班级系数", template: tplClass, db: dbClass });
+  if (tplClass !== dbClass) add({ area: "报价", kind: "两边不同", what: "人数系数", template: tplClass, db: dbClass });
 
   const tplDuration = tplPricing.durations.map((item) => `${item.name}=${item.hours}h×${item.multiplier}`).join("|");
   const dbDuration = dbPricing.durations.map((item) => `${item.name}=${item.hours}h×${item.multiplier}`).join("|");
