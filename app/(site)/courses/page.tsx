@@ -28,32 +28,45 @@ export default function CoursesPage() {
       />
 
       <Container>
-        {/* 特色课程：按需求（而非按学科）选课。放在最前，
-            因为「按目标选课」比「按学科浏览」更接近家长的实际决策路径。 */}
-        <Section title="特色课程" description={featured.description}>
-          <CourseTree courses={featured.courses} level={3} />
-          <p className="mt-6">
-            <Link
-              href={FEATURED_INDEX_HREF}
-              className="inline-flex h-8 items-center rounded-md border border-ink-300 px-3 text-sm text-ink-800 transition-colors hover:border-brand-400 hover:text-brand-700"
-            >
-              查看特色课程全部班型
-            </Link>
-          </p>
-        </Section>
+        {/*
+          特色课程：按需求（而非按学科）选课。放在最前，
+          因为「按目标选课」比「按学科浏览」更接近家长的实际决策路径。
+
+          **一门课程都没有时整块不渲染**：特色课程来自库（v20 起），后端没连上时它是空的
+          （机构口径：需要后端数据的地方就该是空的）—— 那时渲染一个「特色课程」空标题，
+          只会让人以为这一块坏了。课程总览那块同理（见下面的 `columns.length > 0`）。
+        */}
+        {featured.courses.length > 0 && (
+          <Section title="特色课程" description={featured.description}>
+            <CourseTree courses={featured.courses} level={3} />
+            <p className="mt-6">
+              <Link
+                href={FEATURED_INDEX_HREF}
+                className="inline-flex h-8 items-center rounded-md border border-ink-300 px-3 text-sm text-ink-800 transition-colors hover:border-brand-400 hover:text-brand-700"
+              >
+                查看特色课程全部班型
+              </Link>
+            </p>
+          </Section>
+        )}
 
         {/*
           课程总览：栏目 → 子标题 → 卡片，与首页共用同一份结构
           （「页面: 全站 → 课程栏目」）。一张卡片 = 一门课程，
           卡片与标签都跳到下方课程详情里的对应小节。
+
+          **没有栏目时整块不渲染**（卡片来自库，没连后端时是空的）：见上面那段说明。
+          上边框只在"上面确实有内容"时才加，否则页面上会出现一条孤零零的横线。
         */}
-        <Section
-          title="课程总览"
-          description="点卡片进入这门课的页面；卡片里的标签是同一页面内的不同阶段。"
-          className="border-t border-ink-200 pb-0"
-        >
-          <CourseColumns columns={columns} />
-        </Section>
+        {columns.length > 0 && (
+          <Section
+            title="课程总览"
+            description="点卡片进入这门课的页面；卡片里的标签是同一页面内的不同阶段。"
+            className={featured.courses.length > 0 ? "border-t border-ink-200 pb-0" : "pb-0"}
+          >
+            <CourseColumns columns={columns} />
+          </Section>
+        )}
 
         {/*
           课程详情已改为「一张卡片一个页面」：点课程总览里的卡片或标签，

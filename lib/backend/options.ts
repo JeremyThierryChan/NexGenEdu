@@ -1,6 +1,6 @@
-import { getFeaturedContent } from "@/lib/data/featured";
+import { getFeaturedContentFromTemplate } from "@/lib/data/featured";
 import { getScheduleContent } from "@/lib/data/pages";
-import { getSiteBrand, getCourseColumnsFromTemplate } from "@/lib/data/site";
+import { getCourseColumnsFromTemplate, getSiteBrand } from "@/lib/data/site";
 import { parseGapWindow, type GapWindow } from "./timetable";
 
 /**
@@ -68,23 +68,15 @@ export function getClassHoursWindow(): GapWindow | null {
 }
 
 /**
- * 课程库的「分类」候选：网站课程栏目的名字（小学课内 / 初中课内 / 高中课内 / 外语 …）。
+ * 班型候选（**只读模版**，作为下拉的同步种子）。
  *
- * 只作为输入建议（页面用 datalist），机构完全可以自己写一个新分类（如「兴趣才艺」）——
- * 围棋、书法这类课本来就不属于现有的六个栏目。
+ * 真正的候选来自**库里的特色课程树**（`useFormOptions` 挂载后会用后端那一份替换掉它）：
+ * v20 把特色课程搬进库之后，机构在后台加班型就该在后台的下拉里出现 ——
+ * 而这里读的模版是**构建期**的一份，改不了。留着它的唯一理由是"表单第一帧不为空"。
  */
-export function getCourseCategoryOptions(): string[] {
+export function getFormOptionsFromTemplate(): string[] {
   try {
-    return getCourseColumnsFromTemplate().map((column) => column.title);
-  } catch {
-    return [];
-  }
-}
-
-/** 班型候选：特色课程里「课内辅导」下的二级课程（一对一定制课 / 晚托管 …）。 */
-export function getFormOptions(): string[] {
-  try {
-    return getFeaturedContent().courses.flatMap((course) =>
+    return getFeaturedContentFromTemplate().courses.flatMap((course) =>
       course.children.map((child) => child.name),
     );
   } catch {

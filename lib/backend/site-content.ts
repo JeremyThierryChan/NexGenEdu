@@ -23,12 +23,17 @@
 
 import { getCoursesPageFromTemplate, getTeachersPageFromTemplate } from "@/lib/data/site";
 import { getCasesContentFromTemplate } from "@/lib/data/pages";
+import { getFeaturedContentFromTemplate } from "@/lib/data/featured";
 import { getPricingData } from "@/lib/data/pricing";
 import { coursesReferencingAnchor } from "./site-bands";
+import { nextId } from "./ids";
+import { FEATURED_MAX_DEPTH } from "./featured-tree";
 import type {
   Course,
   SiteCase,
   SiteCasesPage,
+  SiteFeaturedCourse,
+  SiteFeaturedPage,
   SiteContent,
   SiteCoursePage,
   SitePricingLabels,
@@ -106,7 +111,53 @@ export function siteContentFromContent(): SiteContent {
     teacherPage: { heading: teacherHeading },
     pricingPage: { labels },
     casesPage: casesFromContent(),
+    featuredPage: featuredFromContent(),
   };
+}
+
+/**
+ * 特色课程（内容文件 → 库结构）。
+ *
+ * id 由服务生成（`feat_…`）：它只用来"认人"（日志、上下移、删除），
+ * URL 用的是 `slug`（路径分段）—— 两者分开，改名才不会让网址失效。
+ * 反复导入不会重复（导入侧按 `slug` 路径认已有的行，见 `site-import.ts`）。
+ */
+function featuredFromContent(): SiteFeaturedPage {
+  const node = (course: {
+    name: string;
+    slug: string;
+    fields: Array<{ title: string; value: string }>;
+    body: string;
+    children: unknown[];
+  }): SiteFeaturedCourse => ({
+    id: nextId("feat"),
+    name: course.name,
+    slug: course.slug,
+    fields: course.fields.map((field) => ({ title: field.title, value: field.value })),
+    body: course.body,
+    children: (course.children as Parameters<typeof node>[0][]).map(node),
+  });
+
+  try {
+    const page = getFeaturedContentFromTemplate();
+    return {
+      heading: {
+        eyebrow: page.eyebrow,
+        title: page.title,
+        description: page.description,
+      },
+      notice: page.notice,
+      courses: page.courses.map(node),
+    };
+  } catch {
+    // 内容坏了就留空结构：后台照常能开，网站那侧显示"暂时没有特色课程"
+    return { heading: { eyebrow: "", title: "", description: "" }, notice: "", courses: [] };
+  }
+}
+
+/** 特色课程的空结构。 */
+function emptyFeaturedPage(): SiteFeaturedPage {
+  return { heading: { eyebrow: "", title: "", description: "" }, notice: "", courses: [] };
 }
 
 /**
@@ -188,6 +239,7 @@ export function emptySiteContent(): SiteContent {
     teacherPage: { heading: { eyebrow: "", title: "", description: "" } },
     pricingPage: { labels: emptyPricingLabels() },
     casesPage: emptyCasesPage(),
+    featuredPage: emptyFeaturedPage(),
   };
 }
 
@@ -233,9 +285,59 @@ export function validateCasesPage(page: SiteCasesPage): string[] {
  * 就会出现"课程正文还没导入的空库里，连一条案例都存不进去"这种荒唐的连锁失败。
  * 两个入口各管各的块，校验也各管各的。
  */
-export function validateSiteBlocks(blocks: { casesPage?: SiteCasesPage }): string[] {
+export function validateSiteBlocks(blocks: {
+  casesPage?: SiteCasesPage;
+  featuredPage?: SiteFeaturedPage;
+}): string[] {
   const problems: string[] = [];
   if (blocks.casesPage !== undefined) problems.push(...validateCasesPage(blocks.casesPage));
+  if (blocks.featuredPage !== undefined) problems.push(...validateFeaturedPage(blocks.featuredPage));
+  return problems;
+}
+
+/**
+ * 特色课程的校验。
+ *
+ * 四条规则各自对应一次真实的误操作：
+ *   - 课程名为空 → 页面上出现一条点不开、也认不出的课程；
+ *   - **同级重名** → 两门同名课程在页面上长得一样，而且它们的 URL 分段会撞车
+ *     （没写路径时路径由名字派生）；
+ *   - 路径分段重复 → 两条不同的路径映射到同一个网址，其中一个页面会被另一个盖掉；
+ *   - **超过三级** → 网站的导航与页面结构只做到三级（内容文件的标题层级也只到 `#####`），
+ *     第四级存得下但没有任何入口能到达它。
+ */
+export function validateFeaturedPage(page: SiteFeaturedPage): string[] {
+  const problems: string[] = [];
+
+  const walk = (courses: readonly SiteFeaturedCourse[], depth: number, where: string): void => {
+    const names = new Set<string>();
+    const slugs = new Set<string>();
+    for (const course of courses) {
+      const name = course.name.trim();
+      const label = name === "" ? "（未命名）" : name;
+      if (name === "") problems.push(`${where}有一门课程没有名字。`);
+      if (names.has(name)) {
+        problems.push(`${where}有两门课程都叫「${name}」：同级课程名不能重复（它们的网址也会撞车）。`);
+      }
+      names.add(name);
+
+      const slug = course.slug.trim();
+      if (slug !== "" && slugs.has(slug)) {
+        problems.push(`${where}的路径「${slug}」出现了两次：两条不同的课程会指向同一个网址。`);
+      }
+      if (slug !== "") slugs.add(slug);
+
+      if (depth >= FEATURED_MAX_DEPTH && course.children.length > 0) {
+        problems.push(
+          `「${label}」下面还有子课程：特色课程最多 ${String(FEATURED_MAX_DEPTH)} 级` +
+            `（一级 → 二级 → 三级），第四级在网站上没有入口。`,
+        );
+      }
+      walk(course.children, depth + 1, `「${label}」下`);
+    }
+  };
+
+  walk(page.courses, 1, "特色课程");
   return problems;
 }
 

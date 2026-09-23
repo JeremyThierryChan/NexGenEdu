@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { Button } from "@/components/ui/Button";
 import {
@@ -27,7 +27,7 @@ import {
 import { cn } from "@/lib/utils/cn";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel } from "@/lib/backend/format";
-import { getFormOptions } from "@/lib/backend/options";
+import { useFormOptions } from "@/components/admin/useFormOptions";
 import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 import { FOLLOWUP_RULES } from "@/lib/backend/followup";
 
@@ -90,7 +90,7 @@ export function EnrollmentPanel({
   const active = student.enrollments.filter((item) => item.status === "在读");
   // 科目候选来自课程库（网站课程 + 机构自己加的课），见 useSubjectOptions
   const { names: subjectOptions } = useSubjectOptions();
-  const formOptions = useMemo(() => getFormOptions(), []);
+  const formOptions = useFormOptions();
 
   async function run(action: () => Promise<unknown>) {
     setPending(true);

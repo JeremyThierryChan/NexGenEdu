@@ -27,7 +27,7 @@ import {
   type BandHit,
   type CardAnchorSource,
 } from "@/lib/backend/site-bands";
-import { getFormOptions } from "@/lib/backend/options";
+import { useFormOptions } from "@/components/admin/useFormOptions";
 import { canRemoveCourse } from "@/lib/backend/courses";
 import {
   childPartitions,
@@ -301,7 +301,7 @@ export default function AdminCoursesPage() {
     siteContentRef.current = siteContent;
   }, [siteContent]);
 
-  const formOptions = useMemo(() => getFormOptions(), []);
+  const formOptions = useFormOptions();
   /**
    * 表单与清单用的分区下拉项：一级栏目在前，子栏目缩进跟在它下面。
    *

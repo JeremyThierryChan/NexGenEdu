@@ -139,6 +139,8 @@ import type {
   CoursePartition,
   SiteCase,
   SiteCasesPage,
+  SiteFeaturedCourse,
+  SiteFeaturedPage,
   LessonTransaction,
   Payment,
   ClassroomAvailability,
@@ -861,6 +863,20 @@ function migrate(db: Database): Database | null {
     db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
     db.siteContent.casesPage = siteContentFromContent().casesPage;
     db.version = 19;
+  }
+
+  if (db.version === 19) {
+    /*
+     * v19 → v20：**特色课程进库**。
+     *
+     * 与 v19 的案例同一个理由与同一个做法：这是一块**已经发布出去的对外文案**
+     * （`/courses` 底部那块 + 14 个 `/courses/featured/**` 页面），空着等于升级完
+     * 那一整块内容消失 —— 因此迁移**从内容文件灌初值**，而不是留空等导入。
+     * 只写 `featuredPage` 这一块，其余块一个字都不动。
+     */
+    db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
+    db.siteContent.featuredPage = siteContentFromContent().featuredPage;
+    db.version = 20;
   }
 
   /*
@@ -4469,6 +4485,8 @@ const localApi = {
          * 谁也不该动对方那一块。案例的写入口只有 `site.saveBlocks`。
          */
         casesPage: db.siteContent.casesPage,
+        // 特色课程同理：它由「网站内容」页维护，课程库页保存正文时不许把它冲回去
+        featuredPage: db.siteContent.featuredPage,
       };
 
       const after = db.siteContent.coursePage;
@@ -4510,7 +4528,7 @@ const localApi = {
      * 免得页面上留着一份"我自己的"旧值。
      */
     async saveBlocks(
-      blocks: Partial<Pick<SiteContent, "casesPage">>,
+      blocks: Partial<Pick<SiteContent, "casesPage" | "featuredPage">>,
     ): Promise<SiteContent> {
       await delay();
       const db = load();
@@ -4539,16 +4557,47 @@ const localApi = {
         };
       }
 
+      /*
+       * 特色课程：整棵树一起保存（与案例同理）。
+       * id 为空 = 新加的课程，这里才生成；`name` / `slug` 去空白，其余原样。
+       */
+      if (blocks.featuredPage !== undefined) {
+        const incoming = blocks.featuredPage;
+        const node = (course: SiteFeaturedCourse): SiteFeaturedCourse => ({
+          id: course.id.trim() === "" ? nextId("feat") : course.id.trim(),
+          name: course.name.trim(),
+          slug: course.slug.trim(),
+          fields: course.fields.map((field) => ({
+            title: field.title.trim(),
+            value: field.value.trim(),
+          })),
+          body: course.body.trim(),
+          children: course.children.map(node),
+        });
+        db.siteContent = {
+          ...db.siteContent,
+          featuredPage: {
+            heading: { ...incoming.heading },
+            notice: incoming.notice.trim(),
+            courses: incoming.courses.map(node),
+          },
+        };
+      }
+
       const after = db.siteContent.casesPage;
+      const afterFeatured = db.siteContent.featuredPage;
+      const featuredNodes = (() => {
+        const count = (list: readonly SiteFeaturedCourse[]): number =>
+          list.reduce((sum, item) => sum + 1 + count(item.children), 0);
+        return count(afterFeatured.courses);
+      })();
       writeLog(db, {
         entity: "数据",
         action: "保存网站内容",
         targetId: "",
         summary:
-          `网站内容：学生案例 ${after.cases.length} 条` +
-          (beforeCases.cases.length === after.cases.length
-            ? "（数量未变）"
-            : `（原 ${beforeCases.cases.length} 条）`),
+          `网站内容：学生案例 ${after.cases.length} 条 / 特色课程 ${featuredNodes} 门` +
+          (beforeCases.cases.length === after.cases.length ? "（案例数量未变）" : `（案例原 ${beforeCases.cases.length} 条）`),
       });
       persist(db);
       return clone(db.siteContent);
@@ -5155,6 +5204,8 @@ export type {
   CoursePartition,
   SiteCase,
   SiteCasesPage,
+  SiteFeaturedCourse,
+  SiteFeaturedPage,
   PublicSite,
   SiteContentImportReport,
   SiteContent,

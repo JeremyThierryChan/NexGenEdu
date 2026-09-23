@@ -35,7 +35,12 @@ import {
 } from "@/lib/data/site";
 import { getPricingData, getPricingDataFromTemplate, parsePricingSource } from "@/lib/data/pricing";
 import { getCasesContent, getCasesContentFromTemplate, getFaqContent, getScheduleContent } from "@/lib/data/pages";
-import { findFeaturedCourse, getAllFeaturedCourses, getFeaturedContent } from "@/lib/data/featured";
+import {
+  findFeaturedCourse,
+  getAllFeaturedCourses,
+  getFeaturedContent,
+  getFeaturedContentFromTemplate,
+} from "@/lib/data/featured";
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
 import { __removeFixture, __useStoreForTesting, api } from "@/lib/backend/api";
 import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
@@ -103,6 +108,11 @@ import {
 } from "@/lib/site/backend-source";
 import { siteTeachers as siteTeachersFromContent } from "@/lib/backend/site-import";
 import { coursesFromSite } from "@/lib/backend/courses";
+import {
+  featuredDeleteRefusal,
+  featuredFormOptions,
+} from "@/lib/backend/featured-tree";
+import { validateFeaturedPage } from "@/lib/backend/site-content";
 import {
   childPartitions,
   partitionDeleteRefusal,
@@ -8360,6 +8370,128 @@ console.log("\n=== 26. 学生案例进库（v19：机构要求「学生案例以
   eq("api.ts 导出的每个类型都在前面出现过（忘了 import 会静默变成 any）",
     exportedNames.filter((name) => !new RegExp(`\\b${name}\\b`).test(beforeExport)),
     []);
+}
+
+console.log("\n=== 27. 特色课程进库（v20：机构要求「特色课程也该来源于后端」）===");
+
+/*
+ * 机构的原话是「特色课程应该也来源于后端呀，为什么现在前端还有」——
+ * 它原先确实只在 `data/site/featured.md` 里，因此后端没起时照样显示。
+ * v20 把它搬进 `siteContent.featuredPage`（三级课程树），后台「网站内容」页可维护。
+ *
+ * 这一节守五件事：
+ *   1. **迁移真的灌了初值**（14 门课程、三级结构、字段与正文都在）；
+ *   2. **三态**：后端态用库里的树，空白态是空的，显式 template 才用文件；
+ *   3. **校验**：名字空 / 同级重名 / 路径重复 / 超过三级都要拒；
+ *   4. **删除护栏**：有子课程不能删；名字还被课程当班型用时也不能删（并点名是哪几门课）；
+ *   5. **耦合解开**：后台的「可开班型」候选取自**库里的**特色课程（不再是网站内容文件）。
+ */
+{
+  __useStoreForTesting(memory);
+
+  // ① 迁移：v19 老库（没有 featuredPage）→ 课程树从内容文件灌进来
+  const legacyFeaturedDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    siteContent: Record<string, unknown>;
+    version: number;
+  };
+  delete legacyFeaturedDb.siteContent.featuredPage;
+  legacyFeaturedDb.version = 19;
+  eq("v19 老库（没有特色课程块）能升级导入",
+    (await api.importDatabase(JSON.stringify(legacyFeaturedDb))).ok, true);
+  const afterFeatured = await api.exportDatabase();
+  eq("升级后版本号是当前版本", afterFeatured.version, CURRENT_VERSION);
+  const templateFeatured = getFeaturedContentFromTemplate();
+  const countNodes = (list: readonly { children: unknown[] }[]): number =>
+    list.reduce((sum, item) => sum + 1 + countNodes(item.children as { children: unknown[] }[]), 0);
+  eq("迁移把内容文件里的课程树灌进了库（门数一致）",
+    countNodes(afterFeatured.siteContent.featuredPage.courses), countNodes(templateFeatured.courses));
+  ok(`库里的特色课程不止一门（${String(countNodes(afterFeatured.siteContent.featuredPage.courses))} 门）`,
+    countNodes(afterFeatured.siteContent.featuredPage.courses) > 10);
+  eq("一级课程名与内容文件一致",
+    afterFeatured.siteContent.featuredPage.courses.map((item) => item.name),
+    templateFeatured.courses.map((item) => item.name));
+  eq("二级课程名与 URL 分段都搬了（路径不是从名字现算的）",
+    afterFeatured.siteContent.featuredPage.courses[0]?.children.map((item) => [item.name, item.slug]),
+    templateFeatured.courses[0]?.children.map((item) => [item.name, item.slug]));
+  eq("字段与详细介绍也搬了（不是只搬了名字）",
+    [
+      (afterFeatured.siteContent.featuredPage.courses[0]?.children[0]?.fields.length ?? 0) > 0,
+      (afterFeatured.siteContent.featuredPage.courses[0]?.children[0]?.body ?? "").length > 0,
+    ],
+    [true, true]);
+  ok("每门课程都有自己的 id（日志 / 上下移 / 删除按它认人）",
+    afterFeatured.siteContent.featuredPage.courses.every((item) => item.id !== ""));
+  await api.restoreBackup();
+
+  // ② 三态
+  __useBackendSnapshotForTesting(null);
+  __useSiteContentSourceForTesting("template");
+  eq("显式 template：特色课程来自模版",
+    getFeaturedContent().courses.map((item) => item.name),
+    templateFeatured.courses.map((item) => item.name));
+  __useSiteContentSourceForTesting("blank");
+  eq("没连上后端（默认）：特色课程**空白**，不回落到模版",
+    [getFeaturedContent().courses.length, getAllFeaturedCourses().length], [0, 0]);
+  __useSiteContentSourceForTesting(undefined);
+  __useBackendSnapshotForTesting(null);
+
+  // ③ 校验：四类拒绝
+  const basePage = { heading: { eyebrow: "", title: "t", description: "" }, notice: "", courses: [] };
+  const course = (name: string, slug = "", children: unknown[] = []): unknown => ({
+    id: "", name, slug, fields: [], body: "", children,
+  });
+  const refusalOf = (page: unknown): string[] => validateFeaturedPage(page as never);
+  ok("课程名为空被拒", refusalOf({ ...basePage, courses: [course("  ")] }).some((t) => t.includes("没有名字")));
+  ok("同级课程名重复被拒",
+    refusalOf({ ...basePage, courses: [course("同名"), course("同名")] }).some((t) => t.includes("不能重复")));
+  ok("同级路径分段重复被拒",
+    refusalOf({ ...basePage, courses: [course("A", "same"), course("B", "same")] })
+      .some((t) => t.includes("路径")));
+  ok("超过三级被拒（第四级在网站上没有入口）",
+    refusalOf({
+      ...basePage,
+      courses: [course("一", "", [course("二", "", [course("三", "", [course("四")])])])],
+    }).some((t) => t.includes("三级")));
+
+  // ④ 删除护栏
+  const guardPage = {
+    ...basePage,
+    courses: [
+      { id: "f1", name: "课内辅导", slug: "in-class", fields: [], body: "", children: [
+        { id: "f2", name: "一对多小班课", slug: "mini-class", fields: [], body: "", children: [] },
+      ] },
+    ],
+  } as never;
+  ok("有子课程的节点：拒绝删除并点名子课程",
+    featuredDeleteRefusal(guardPage, "f1", []).includes("子课程"));
+  ok("名字正被课程当班型用：拒绝删除并点名是哪几门课",
+    featuredDeleteRefusal(guardPage, "f2", [{ name: "小学数学", forms: ["一对多小班课"] }])
+      .includes("小学数学"));
+  eq("既没子课程、也没被引用：可以删（护栏不误伤）",
+    featuredDeleteRefusal(guardPage, "f2", []), "");
+
+  // ⑤ 后台「可开班型」候选取自库里的树（不再是网站内容文件）
+  eq("班型候选 = 库里特色课程的二级课程名",
+    featuredFormOptions(afterFeatured.siteContent.featuredPage).includes("一对多小班课"), true);
+  const optionsSource = readFileSync(new URL("../lib/backend/options.ts", import.meta.url), "utf8");
+  ok("那一份只读模版的班型候选**明确写着是同步种子**（名字里带 FromTemplate）",
+    optionsSource.includes("getFormOptionsFromTemplate"));
+  const hookSource = readFileSync(new URL("../components/admin/useFormOptions.ts", import.meta.url), "utf8");
+  ok("后台表单的班型候选改成问后端（库里的树），不再是读文件",
+    /\.publicContent\(\)/.test(hookSource) &&
+    hookSource.includes("featuredFormOptions(data.siteContent.featuredPage)"));
+  const formUsers = ["app/admin/(dashboard)/courses/page.tsx", "components/admin/StudentForm.tsx",
+    "components/admin/EnrollmentPanel.tsx", "components/admin/LessonForm.tsx",
+    "components/admin/LessonSeriesForm.tsx"]
+    .filter((file) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8").includes("useFormOptions()"));
+  eq("五个用班型的地方都换成了那个 hook", formUsers.length, 5);
+
+  // ⑥ 后台编辑界面挂在「网站内容」页上（否则库里那份数据没地方改）
+  const contentPage = readFileSync(
+    new URL("../app/admin/(dashboard)/content/page.tsx", import.meta.url), "utf8");
+  ok("「网站内容」页挂了特色课程编辑器，并且与案例一起保存",
+    contentPage.includes("FeaturedCoursesEditor") &&
+    /saveBlocks\(\{ casesPage, featuredPage \}\)/.test(contentPage));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

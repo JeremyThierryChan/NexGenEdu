@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { MultiSelect } from "@/components/admin/MultiSelect";
 import { Button } from "@/components/ui/Button";
-import { getFormOptions } from "@/lib/backend/options";
+import { useFormOptions } from "@/components/admin/useFormOptions";
 import { api, STUDENT_STATUSES, type Student, type Teacher } from "@/lib/backend/api";
 import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 
@@ -53,7 +53,7 @@ export function StudentForm({
    * 节数用字符串存，因为输入框允许「先删空再补数字」，中间态不是合法数字。
    */
   const { options: subjectOptions } = useSubjectOptions();
-  const formOptions = useMemo(() => getFormOptions(), []);
+  const formOptions = useFormOptions();
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
   /*
@@ -68,7 +68,8 @@ export function StudentForm({
   const [formBySubject, setFormBySubject] = useState<Record<string, string>>({});
   const [teacherBySubject, setTeacherBySubject] = useState<Record<string, string>>({});
   const [bulkLessons, setBulkLessons] = useState("10");
-  const defaultForm = getFormOptions()[0] ?? "";
+  // 班型候选是异步来的（见 useFormOptions）：第一帧用模版那一份的第一个当默认值
+  const defaultForm = formOptions[0] ?? "";
 
   useEffect(() => {
     if (editing) return;

@@ -47,6 +47,7 @@
  */
 
 import { backendSiteSnapshot, backendSiteSource } from "@/data/site/.backend-snapshot";
+import { deriveSlug } from "@/lib/backend/featured-tree";
 import { groupByPartition, partitionPlace } from "@/lib/backend/course-partitions";
 import type { CoursePartition } from "@/lib/backend/types";
 import type {
@@ -55,7 +56,7 @@ import type {
   PublicSite,
   PublicTeacher,
 } from "@/lib/backend/public-site";
-import type { SiteCase, SiteHeading, SiteSubject } from "@/lib/backend/types";
+import type { SiteCase, SiteFeaturedCourse, SiteHeading, SiteSubject } from "@/lib/backend/types";
 import type {
   ClassType,
   LessonDuration,
@@ -74,6 +75,8 @@ import type {
   CasesContent,
   Course,
   CourseColumn,
+  CourseDetail,
+  FeaturedContent,
   CourseColumnCard,
   CourseColumnSubgroup,
   CourseTag,
@@ -505,6 +508,58 @@ export function backendCoursesPage(snapshot: PublicSite): {
     columns: backendCourseColumns(snapshot),
     electiveTitle,
     electiveGroups: toElectiveGroups(electives, electiveTitle, snapshotPartitions(snapshot)),
+  };
+}
+
+/* ── 特色课程 ───────────────────────────────────────────────────────────── */
+
+/**
+ * 特色课程树（库里的 `siteContent.featuredPage` → 网站视图模型）。
+ *
+ * URL 路径由**每一级的 slug 拼出来**（`path` 字段），与模版路径同一含义 ——
+ * 页面组件因此一行都不用改：查找、面包屑、`generateStaticParams` 都用 `path`。
+ *
+ * 两种"名字与路径不一致"的情况都在这里处理掉：
+ *   - 库里没写 `slug`（后台新加的课程）→ 按名字派生（`deriveSlug`），与模版同一套规则；
+ *   - 派生出空串（名字全是符号）→ 用 `course-<序号>` 兜底，宁可网址难看，也不要 `//` 那种
+ *     "拼出来就 404"的路径。
+ */
+function toFeaturedCourses(
+  courses: readonly SiteFeaturedCourse[],
+  parentPath: readonly string[],
+): CourseDetail[] {
+  return courses.map((course, index) => {
+    const declared = text(course.slug).trim();
+    const derived = declared !== "" ? declared : deriveSlug(text(course.name));
+    const segment = derived !== "" ? derived : `course-${String(index + 1)}`;
+    const path = [...parentPath, segment];
+    return {
+      slug: segment,
+      path,
+      name: text(course.name),
+      // 空值字段不渲染（与模版那条 `.filter(item => item.value !== "")` 同一口径）
+      fields: (course.fields ?? [])
+        .map((field) => ({ title: text(field.title), value: text(field.value) }))
+        .filter((field) => field.value !== ""),
+      body: text(course.body),
+      children: toFeaturedCourses(course.children ?? [], path),
+    };
+  });
+}
+
+/**
+ * 特色课程页（标题 + 提示 + 课程树）。
+ *
+ * 一条课程都没有时返回**空树**（页面显示空状态），不回模版 —— 三态口径见本文件开头。
+ */
+export function backendFeaturedContent(snapshot: PublicSite): FeaturedContent {
+  const page = snapshot.siteContent?.featuredPage;
+  return {
+    eyebrow: text(page?.heading?.eyebrow),
+    title: text(page?.heading?.title),
+    description: text(page?.heading?.description),
+    notice: text(page?.notice),
+    courses: toFeaturedCourses(page?.courses ?? [], []),
   };
 }
 

@@ -161,6 +161,25 @@ export type SiteContent = {
    */
   pricingPage: SitePricingPage;
   /**
+   * 特色课程（`/courses` 底部那块 + `/courses/featured/**` 的课程页）。
+   *
+   * 与案例同一个理由搬进库（v20）：它是**对外文案**，机构会改（改文案、加班型、
+   * 调顺序），而它原先只在 `data/site/featured.md` 里 —— 后台看不到、改一次要动文件再构站。
+   * 另外它还牵着后台的「可开班型」候选（课程库表单里那个多选），
+   * 搬进库之后后台才不用去读网站文件（见 `lib/backend/options.ts` 原先那处）。
+   *
+   * ## 为什么是**嵌套结构**而不是"一行一个课程 + parentId"
+   *
+   * 特色课程本来就是一棵**有层级的内容树**（一级 → 二级 → 三级，每级都有独立页面），
+   * 而且它**整块一起编辑、整块一起保存**（像案例那样）—— 没有"单独改某一行"的场景。
+   * 那就没必要拆成扁平表再在两边各写一遍"行 → 树"的拼装：
+   * 嵌套结构本身就是那棵树，页面直接用，后台直接改。
+   * （课程分区当初拆成行，是因为它**是**结构数据：一门课要引用某一区、还要排序；
+   * 这里的层级只属于它自己。）
+   */
+  featuredPage: SiteFeaturedPage;
+
+  /**
    * 学生案例（`/cases` 与首页那块案例区）。
    *
    * 机构明确要求「学生案例以后端为主」：案例是**要经常更新**的内容
@@ -185,6 +204,40 @@ export type SiteCasesPage = {
   /** 页面底部那条提示（例如"案例均经家长同意后发布"）。允许空。 */
   notice: string;
   cases: SiteCase[];
+};
+
+/**
+ * 网站「特色课程」页：标题区 + 一条提示 + 课程树（一级 → 二级 → 三级）。
+ *
+ * 三级是**内容本身的层级**（内容文件用 `###` / `####` / `#####` 表达），
+ * 每一级都有独立页面：`/courses/featured/<一级>/<二级>/<三级>`。
+ * `validateFeaturedPage` 会拒绝超过三级（网站的页面结构与导航只做到三级）。
+ */
+export type SiteFeaturedPage = {
+  heading: SiteHeading;
+  /** 页面底部那条提示。允许空。 */
+  notice: string;
+  courses: SiteFeaturedCourse[];
+};
+
+/** 一门特色课程（可含子课程）。 */
+export type SiteFeaturedCourse = {
+  /** id：由服务生成，稳定不变（日志、上下移、删除都按它认人）。 */
+  id: string;
+  /** 课程名（页面上显示的名字）。 */
+  name: string;
+  /**
+   * URL 路径分段（ASCII，例如 `in-class` / `one-on-one` / `junior-prep`）。
+   *
+   * 与课程名**分开存**：改名不该让网址失效（内容文件里那些 `- · 路径:` 字段就是干这个的）。
+   * 留空＝按名字自动派生（派生规则见 `lib/backend/featured-tree.ts`）。
+   */
+  slug: string;
+  /** 课程描述字段（适合对象 / 课程定位 / 主要做法 / 可以期待…），空的跳过。 */
+  fields: Array<{ title: string; value: string }>;
+  /** 详细介绍（段落之间空一行）。 */
+  body: string;
+  children: SiteFeaturedCourse[];
 };
 
 /** 一条学生案例。 */

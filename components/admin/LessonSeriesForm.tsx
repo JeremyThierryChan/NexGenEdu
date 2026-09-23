@@ -13,7 +13,7 @@ import {
   type Student,
   type Teacher,
 } from "@/lib/backend/api";
-import { getFormOptions } from "@/lib/backend/options";
+import { useFormOptions } from "@/components/admin/useFormOptions";
 import { remainingOf } from "@/lib/backend/enrollment";
 import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 
@@ -56,7 +56,7 @@ export function LessonSeriesForm({
   onCancel: () => void;
 }) {
   // 班型候选（与特色课程页一致：一对一定制课、小组课…）
-  const formOptions = useMemo(() => getFormOptions(), []);
+  const formOptions = useFormOptions();
   const { options: subjectOptions } = useSubjectOptions();
 
   const [subject, setSubject] = useState("");

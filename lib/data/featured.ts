@@ -1,4 +1,5 @@
 import { getPage, pageString, type Section } from "@/lib/data/content";
+import { backendFeaturedContent, backendSnapshot, siteContentSource } from "@/lib/site/backend-source";
 import type { CourseDetail, FeaturedContent, LabeledItem } from "@/lib/types/site";
 
 /**
@@ -66,11 +67,11 @@ function flatten(courses: CourseDetail[]): CourseDetail[] {
   return courses.flatMap((course) => [course, ...flatten(course.children)]);
 }
 
-/** 缓存解析结果：数据是编译期常量，无需每次重建。 */
-let cached: { content: FeaturedContent; all: CourseDetail[] } | null = null;
+/** 缓存**模版**解析结果：内容文件是编译期常量，无需每次重建。 */
+let cachedTemplate: { content: FeaturedContent; all: CourseDetail[] } | null = null;
 
-function load(): { content: FeaturedContent; all: CourseDetail[] } {
-  if (cached !== null) return cached;
+function loadTemplate(): { content: FeaturedContent; all: CourseDetail[] } {
+  if (cachedTemplate !== null) return cachedTemplate;
 
   const page = getPage("featured", "特色课程");
   const courses = toCourses(page.groups, []);
@@ -83,18 +84,42 @@ function load(): { content: FeaturedContent; all: CourseDetail[] } {
     courses,
   };
 
-  cached = { content, all: flatten(courses) };
-  return cached;
+  cachedTemplate = { content, all: flatten(courses) };
+  return cachedTemplate;
 }
 
-/** 特色课程页面内容（含完整课程树）。 */
+/**
+ * 特色课程（`/courses` 底部那块 + `/courses/featured/**` 的课程页）。
+ *
+ * **三态取数**（口径见 `lib/data/site.ts` 的文件头）：连上后端就用**库里的课程树**；
+ * 没连上 = **空白**（机构要求：需要后端数据的地方就该是空的）；
+ * 显式 `SITE_CONTENT_SOURCE=template` 才解析 `data/site/featured.md`。
+ *
+ * 为什么它也要进库：它是**对外文案**（机构会改文案、加班型、调顺序），
+ * 而它原先只在内容文件里 —— 后台看不到、改一次要动文件再构站；
+ * 而且后台课程表单里的「可开班型」候选就是它的**二级课程名**（见 `lib/backend/featured-tree.ts`）。
+ */
 export function getFeaturedContent(): FeaturedContent {
-  return load().content;
+  const snapshot = backendSnapshot();
+  if (siteContentSource() === "backend" && snapshot !== null) return backendFeaturedContent(snapshot);
+  if (siteContentSource() === "template") return loadTemplate().content;
+  return { eyebrow: "", title: "", description: "", notice: "", courses: [] };
 }
 
-/** 全部课程（含各级），用于静态路由生成。 */
+/** 全部课程（含各级），用于静态路由生成 —— 与 `getFeaturedContent()` 同源。 */
 export function getAllFeaturedCourses(): CourseDetail[] {
-  return load().all;
+  return flatten(getFeaturedContent().courses);
+}
+
+/**
+ * 特色课程（**只读模版**，不看后端快照）。
+ *
+ * 为什么单独留这个出口：`lib/backend/site-content.ts` 属于
+ * **「内容文件 → 数据库」**这个方向（空库初始化、老库迁移、从网站导入），
+ * 它必须读模版 —— 否则就是把库里的课程树再导一遍，绕成一个圈。
+ */
+export function getFeaturedContentFromTemplate(): FeaturedContent {
+  return loadTemplate().content;
 }
 
 /**
@@ -108,7 +133,8 @@ export function findFeaturedCourse(
   if (slugs.length === 0) return null;
 
   const trail: CourseDetail[] = [];
-  let level: CourseDetail[] = load().content.courses;
+  // 查的是**当前实际渲染的那一棵树**（后端态就是快照里那棵），而不是模版那一份
+  let level: CourseDetail[] = getFeaturedContent().courses;
 
   for (const slug of slugs) {
     const found: CourseDetail | undefined = level.find((course) => course.slug === slug);

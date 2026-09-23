@@ -192,6 +192,57 @@ await check("网站内容", "删掉刚加的案例（收尾）", async () => {
   return saved.casesPage.cases.some((item) => item.id === casesPageId) === false;
 });
 
+await check("网站内容", "特色课程读数（初始来自内容文件）", async () => {
+  const content = await api.site.publicContent();
+  const count = (list: Array<{ children: unknown[] }>): number =>
+    list.reduce((sum, item) => sum + 1 + count(item.children as Array<{ children: unknown[] }>), 0);
+  return count(content.siteContent.featuredPage.courses);
+}, (n: number) => n > 0);
+await check("网站内容", "改一门特色课程的名字并保存", async () => {
+  const content = await api.site.publicContent();
+  const page = content.siteContent.featuredPage;
+  const first = page.courses[0];
+  if (first === undefined) return "没有一级课程";
+  const saved = await api.site.saveBlocks({
+    featuredPage: {
+      ...page,
+      courses: [{ ...first, name: `${first.name}（验收改名）` }, ...page.courses.slice(1)],
+    },
+  });
+  return saved.featuredPage.courses[0]?.name ?? "";
+}, (name: string) => name.endsWith("（验收改名）"));
+await check("网站内容", "改回原名（收尾）", async () => {
+  const content = await api.site.publicContent();
+  const page = content.siteContent.featuredPage;
+  const first = page.courses[0];
+  if (first === undefined) return "没有一级课程";
+  const saved = await api.site.saveBlocks({
+    featuredPage: {
+      ...page,
+      courses: [{ ...first, name: first.name.replace("（验收改名）", "") }, ...page.courses.slice(1)],
+    },
+  });
+  return saved.featuredPage.courses[0]?.name.includes("验收改名") === false;
+}, (ok: boolean) => ok === true);
+await check("网站内容", "同级重名被拒", async () => {
+  const content = await api.site.publicContent();
+  const page = content.siteContent.featuredPage;
+  const first = page.courses[0];
+  if (first === undefined) return "没有一级课程";
+  try {
+    await api.site.saveBlocks({ featuredPage: { ...page, courses: [first, { ...first, id: "" }] } });
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("不能重复") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+await check("网站内容", "保存特色课程不会动学生案例", async () => {
+  const content = await api.site.publicContent();
+  const before = content.siteContent.casesPage.cases.length;
+  const saved = await api.site.saveBlocks({ featuredPage: content.siteContent.featuredPage });
+  return saved.casesPage.cases.length === before;
+});
+
 /* ── 2 教室 ── */
 let classroomId = "";
 await check("教室", "新建教室（含可用时段）", async () => {

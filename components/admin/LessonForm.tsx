@@ -13,7 +13,7 @@ import {
   type Student,
   type Teacher,
 } from "@/lib/backend/api";
-import { getFormOptions } from "@/lib/backend/options";
+import { useFormOptions } from "@/components/admin/useFormOptions";
 import { remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
 import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
@@ -80,7 +80,7 @@ export function LessonForm({
 
   // 科目候选来自课程库（网站课程 + 机构自己加的课），见 useSubjectOptions
   const { names: subjectOptions } = useSubjectOptions();
-  const formOptions = useMemo(() => getFormOptions(), []);
+  const formOptions = useFormOptions();
 
   useEffect(() => {
     void Promise.all([

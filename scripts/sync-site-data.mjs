@@ -206,6 +206,6 @@ if (mode === "backend" || strict) {
 write(null, `空白（${why}）`, "blank");
 console.log(`[site-data] 本次网站数据来源：**空白** —— ${why}`);
 console.log(
-  "[site-data] 那五块（教师页 / 课程卡片 / 课程正文 / 报价 / 学生案例）这一版**会是空的**；" +
-    "想改看模版：SITE_CONTENT_SOURCE=template npm run build（或 npm run dev）。",
+  "[site-data] 库里才有的那几块（教师页 / 课程卡片 / 课程正文 / 报价 / 学生案例 / 特色课程）" +
+    "这一版**会是空的**；想改看模版：SITE_CONTENT_SOURCE=template npm run build（或 npm run dev）。",
 );
