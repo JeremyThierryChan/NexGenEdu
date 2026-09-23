@@ -730,6 +730,8 @@ export default function AdminCoursesPage() {
    * 而且不往页顶放横幅（页顶横幅出现/消失＝页高变化，就在点击的同一瞬间）。
    */
   async function toggleStatus(course: Course) {
+    // 防连点：改用 aria-disabled 之后按钮仍可点，因此在这里挡住（见按钮上的注释）
+    if (togglingId === course.id) return;
     // 只拦"同一张卡片被连点两下"：那会发出两条方向相反的写，而界面上哪个是最后状态看谁先回来。
     // 不同卡片之间互不阻塞（各改各的一行，计数最后各读一次）。
     if (togglingId === course.id) return;
@@ -1574,11 +1576,22 @@ export default function AdminCoursesPage() {
                               网站正文
                             </button>
                           )}
+                          {/*
+                            **刻意不用 `disabled`**：点击的瞬间把聚焦中的按钮置为 disabled，
+                            浏览器会把焦点丢回文档体，而在焦点落回 body 时页面可能被滚回顶部 ——
+                            这就是"代码里一处滚动都没有、点一下却被弹到最上面"的成因
+                            （机构反馈：点完还要重新滚下来才能继续切别的科目）。
+                            改成 `aria-disabled` + `pointer-events-none` + 在 handler 里提前返回：
+                            外观与防连点一样，但**不夺走焦点**，页面不会动。
+                          */}
                           <button
                             type="button"
+                            aria-disabled={togglingId === course.id}
                             onClick={() => void toggleStatus(course)}
-                            disabled={togglingId === course.id}
-                            className="rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 hover:border-brand-300 hover:text-brand-700 disabled:opacity-50"
+                            className={cn(
+                              "rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 hover:border-brand-300 hover:text-brand-700",
+                              togglingId === course.id && "pointer-events-none opacity-50",
+                            )}
                           >
                             {togglingId === course.id
                               ? "切换中…"
