@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { ActionNoticeView } from "@/components/admin/ActionNotice";
 import { useActionNotice } from "@/components/admin/useActionNotice";
@@ -22,19 +22,26 @@ import {
   describeWeekdays,
   toMinutes,
 } from "@/lib/backend/availability";
+// 教室名的**唯一显示口径**（「校区·教室名」），与"输入时分开填"配套 —— 见 §7 的说明
+import { classroomLabel } from "@/lib/backend/classrooms";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
 
 /**
  * 教室模块。
  *
- * 每个场地有三层信息：
- *   1. **用途**：上课用教室 / 自习室 —— 前者按班型排课，后者是学生自习的座位；
- *   2. **容量**：可容纳人数（自习室即座位数）；
- *   3. **可用时段**：一周中哪几天、哪个时间段开放；**留空表示不限**。
+ * 每个场地有四层信息：
+ *   1. **校区**：这间房在哪个校区（自由文本，可留空）—— 与教室名**分开输入**，
+ *      显示时由 `classroomLabel` 拼成「校区·教室名」（机构口径：**输入分开、显示不变**，v31）；
+ *   2. **用途**：上课用教室 / 自习室 —— 前者按班型排课，后者是学生自习的座位；
+ *   3. **容量**：可容纳人数（自习室即座位数）；
+ *   4. **可用时段**：一周中哪几天、哪个时间段开放；**留空表示不限**。
  *
  * 可用时段不只是展示：排课时会检查「这节课是否落在教室开放时间内」，
  * 落在开放时间之外会在保存前提示（见 components/admin/LessonForm.tsx）。
+ *
+ * 全页**只有标题与确认框显示教室名**，两处都走 `classroomLabel` ——
+ * 其余地方只出现容量 / 时段这类数字，不会出现"半个教室名"。
  */
 export default function AdminClassroomsPage() {
   const [classrooms, setClassrooms] = useState<Classroom[]>([]);
@@ -83,6 +90,22 @@ export default function AdminClassroomsPage() {
     [classrooms, kindFilter],
   );
 
+  /**
+   * **已在用的校区**（v30）：给表单里那个 `<datalist>` 用。
+   *
+   * 从当前列表收集（而不是单独存一份"校区清单"）：校区的真源就是教室里那一列，
+   * 另存一份就多一处要对齐的地方。去空白、去重、排序 —— 排序是为了让下拉的顺序
+   * 与"库里谁先建"无关（否则新加一间房就会让候选值的顺序变来变去）。
+   */
+  const campusOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const room of classrooms) {
+      const campus = room.campus.trim();
+      if (campus !== "") names.add(campus);
+    }
+    return [...names].sort((a, b) => a.localeCompare(b, "zh"));
+  }, [classrooms]);
+
   /** 每个场地今天的课（按开始时间升序）。 */
   const todayByRoom = useMemo(() => {
     const map = new Map<string, Lesson[]>();
@@ -101,7 +124,7 @@ export default function AdminClassroomsPage() {
     const extra = count > 0 ? `\n该场地还有 ${count} 节课。` : "";
     if (
       !window.confirm(
-        `删除「${room.name}」？${extra}\n` +
+        `删除「${classroomLabel(room)}」？${extra}\n` +
           "还有排课时系统不会删（那些课会查不到场地、利用率也没法算）——\n" +
           "不再使用的话，建议改成「停用」而不是删除。",
       )
@@ -135,9 +158,10 @@ export default function AdminClassroomsPage() {
         <Panel
           className="mt-6"
           title="新增场地"
-          description="可用时段留空表示不限（营业时间内都可用）。"
+          description="校区与教室名称分开填（显示时拼成「校区·教室名」）；可用时段留空表示不限（营业时间内都可用）。"
         >
           <ClassroomForm
+            campusOptions={campusOptions}
             onCancel={() => setCreating(false)}
             onSaved={async () => {
               setCreating(false);
@@ -205,7 +229,13 @@ export default function AdminClassroomsPage() {
             <section key={room.id} className="rounded-lg border border-ink-200 bg-white">
               <header className="border-b border-ink-100 px-4 py-3">
                 <div className="flex items-start justify-between gap-2">
-                  <h2 className="text-sm font-medium text-ink-900">{room.name}</h2>
+                  {/*
+                    卡片标题用 `classroomLabel`（v31）：**显示格式与机构原来看到的一模一样**
+                    ——「校区·教室名」（例如「沐阳教育·教室1」），没填校区时就是纯教室名。
+                    机构的口径是"输入分开、显示不变"，因此这一行**不再单独印一遍「校区 …」**：
+                    同一条信息不重复两遍（信息在标题里已经全了）。
+                  */}
+                  <h2 className="text-sm font-medium text-ink-900">{classroomLabel(room)}</h2>
                   <span className={kindClass(room.kind)}>{room.kind}</span>
                 </div>
                 <p className="mt-1 text-xs text-ink-500">
@@ -268,6 +298,7 @@ export default function AdminClassroomsPage() {
                 <div className="border-t border-ink-100">
                   <ClassroomForm
                     classroom={room}
+                    campusOptions={campusOptions}
                     onCancel={() => setEditingId(null)}
                     onSaved={async () => {
                       setEditingId(null);
@@ -292,7 +323,10 @@ export default function AdminClassroomsPage() {
         <RoomSchedule
           className="mt-6"
           classroomId={openId}
-          classroomName={classrooms.find((item) => item.id === openId)?.name ?? ""}
+          classroomName={(() => {
+            const room = classrooms.find((item) => item.id === openId);
+            return room === undefined ? "" : classroomLabel(room);
+          })()}
         />
       )}
     </>
@@ -371,16 +405,25 @@ function newRowId(): string {
  */
 function ClassroomForm({
   classroom,
+  campusOptions,
   onCancel,
   onSaved,
 }: {
   classroom?: Classroom;
+  /** 已在用的校区（父组件从列表里收集），供 `<datalist>` 提示；空数组表示一个都还没登记 */
+  campusOptions: string[];
   onCancel: () => void;
   onSaved: () => void | Promise<void>;
 }) {
   const editing = classroom !== undefined;
   const [name, setName] = useState(classroom?.name ?? "");
   const [kind, setKind] = useState<ClassroomKind>(classroom?.kind ?? "上课用教室");
+  /*
+   * 校区（v30）：**自由文本**，但给一个 `<datalist>` 把**已在用的校区**列出来
+   * （候选值由父组件从当前列表里收集后传进来）—— 自由文本的坑是同一个校区被写成
+   * 「城西校区」「城西」「西校区」三种，统计与筛选当场失效；让它可复用、但不强制。
+   */
+  const [campus, setCampus] = useState(classroom?.campus ?? "");
   const [capacity, setCapacity] = useState(`${classroom?.capacity ?? 8}`);
   const [note, setNote] = useState(classroom?.note ?? "");
   const [rows, setRows] = useState<ClassroomAvailability[]>(
@@ -388,6 +431,12 @@ function ClassroomForm({
   );
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  /**
+   * `<datalist>` 的 id：用 React 的 `useId`（不是写死的字符串）——
+   * 同屏可能出现两个表单（「新增场地」面板与某间房的编辑表单），
+   * 写死的 id 会让两个 datalist 撞名，浏览器只认第一个，候选值就串了。
+   */
+  const campusListId = useId();
   /*
    * 乐观锁（v17）：打开表单时读到的那一版。存成 state 而不是提交时读
    * `classroom.version` —— 父组件的列表一刷新，那个 prop 就是新对象了，
@@ -414,7 +463,7 @@ function ClassroomForm({
     event.preventDefault();
 
     if (name.trim() === "") {
-      setError("名称必填。");
+      setError("教室名称必填（校区可以留空，教室名不行 —— 它是排课与冲突判定里认这间房的依据）。");
       return;
     }
     // 时段行必须选星期且结束晚于开始，否则排课时的可用性判断会失效
@@ -437,6 +486,8 @@ function ClassroomForm({
     const payload = {
       name: name.trim(),
       kind,
+      // 校区（v30）：自由文本，只去前后空白（口径在服务端 normalizeClassroomRecord 里也是"只 trim"）
+      campus: campus.trim(),
       capacity: Math.max(1, Math.trunc(Number(capacity) || 1)),
       availability: rows,
       note: note.trim(),
@@ -468,11 +519,18 @@ function ClassroomForm({
   return (
     <form onSubmit={onSubmit} className="px-4 py-4">
       <div className="grid gap-3 sm:grid-cols-3">
+        {/*
+          「教室名称」只填**房间本身**的名字（v31）：校区在右边那一格单独填，
+          显示时由 `classroomLabel` 拼成「校区·教室名」。
+          placeholder 刻意**不再**写「301 教室 / 自习区」那种带校区感的完整叫法，
+          免得引导人把「沐阳教育·教室1」整串填进来（填了也会被归一拆开，但那是兜底、不是用法）。
+        */}
         <TextField
-          label="名称"
+          label="教室名称"
+          hint="只填房间名；校区在右边单独填，显示时会拼成「校区·教室名」"
           value={name}
           onChange={(event) => setName(event.target.value)}
-          placeholder="例如 301 教室 / 自习区"
+          placeholder="例如 教室1 / 落地房四楼小"
           required
         />
         <label className="block">
@@ -496,7 +554,29 @@ function ClassroomForm({
           onChange={(event) => setCapacity(event.target.value)}
           min={1}
         />
+        <TextField
+          label="校区"
+          hint="与教室名称分开填（显示时拼成「校区·教室名」）。已登记过的校区会提示出来，可直接选；也可以写新的（例如 城西校区 / 总校）"
+          value={campus}
+          onChange={(event) => setCampus(event.target.value)}
+          placeholder="例如 城西校区 / 总校"
+          list={campusOptions.length > 0 ? campusListId : undefined}
+        />
       </div>
+
+      {/*
+        「已在用的校区」候选值（v30）。放在表单里、**不在 label 里面**：
+        `<datalist>` 只提供候选，不显示在页面上，但塞进 `<label>` 里会让读屏软件
+        把它当成这个字段的一部分念出来。没有任何已登记校区时**整块不渲染** ——
+        一个空的 datalist 没意义，而下拉箭头会让第一次用的人以为"这里能选"。
+      */}
+      {campusOptions.length > 0 && (
+        <datalist id={campusListId}>
+          {campusOptions.map((option) => (
+            <option key={option} value={option} />
+          ))}
+        </datalist>
+      )}
 
       {/* 可用时段 */}
       <div className="mt-4">

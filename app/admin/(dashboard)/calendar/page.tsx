@@ -21,6 +21,16 @@ import {
   shiftMonths,
   weekDays,
 } from "@/lib/backend/format";
+// 教室名的唯一显示口径（「校区·教室名」，v31）
+import { classroomLabel } from "@/lib/backend/classrooms";
+/*
+ * 教室名在列表里走唯一显示口径（「校区·教室名」，v31）：
+ * `find(...)?.name` 只能拿到房间号，写出来会与卡片上的教室名对不上。
+ */
+const classroomLabelById = (rooms: Classroom[], id: string): string => {
+  const room = rooms.find((item) => item.id === id);
+  return room === undefined ? "—" : classroomLabel(room);
+};
 import { cn } from "@/lib/utils/cn";
 import { countLessons } from "@/lib/backend/lesson-stats";
 import { LoadFailure } from "@/components/admin/LoadFailure";
@@ -468,7 +478,7 @@ export default function AdminCalendarPage() {
                 <span className="text-xs text-ink-500">{lesson.form}</span>
                 <span className="text-xs text-ink-500">
                   {teachers.find((t) => t.id === lesson.teacherId)?.name ?? "—"} ·{" "}
-                  {classrooms.find((c) => c.id === lesson.classroomId)?.name ?? "—"}
+                  {classroomLabelById(classrooms, lesson.classroomId)}
                 </span>
                 <span className="ml-auto text-xs text-ink-400">{lesson.status}</span>
               </li>
@@ -583,7 +593,7 @@ function DayCard({
               <span className="mt-0.5 block truncate">{lesson.subject}</span>
               <span className="mt-0.5 block truncate text-[11px] opacity-80">
                 {teachers.find((t) => t.id === lesson.teacherId)?.name ?? "—"} ·{" "}
-                {classrooms.find((c) => c.id === lesson.classroomId)?.name ?? "—"}
+                {classroomLabelById(classrooms, lesson.classroomId)}
               </span>
             </button>
           </li>

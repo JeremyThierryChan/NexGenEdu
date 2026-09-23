@@ -1,4 +1,12 @@
 import { bumpVersion } from "./concurrency";
+/*
+ * 教室的"拆分「校区·教室名」"与 api.ts 里的迁移**共用同一处实现**（v31）。
+ * 导入为什么要自己调一次：导入的记录是 `Record<string, unknown>`（文件里的原始形状），
+ * 不是 `Classroom` 对象，而**判重键用的是 `name`** —— 不先拆开的话，
+ * 一份"名称列里写着「沐阳教育·教室1」"的旧表会被当成一间**新**教室，
+ * 于是库里出现两间同一校区的同一间房（一间叫「教室1」、一间叫「沐阳教育·教室1」）。
+ */
+import { normalizeClassroom, splitCampusFields } from "./classrooms";
 import { ensurePartitions, partitionName } from "./course-partitions";
 import { nextId } from "./ids";
 import type {
@@ -54,6 +62,17 @@ export type FieldSpec = {
   kind: FieldKind;
   /** enum 的候选值。 */
   options?: string[];
+  /**
+   * `enum` 列**留空时**取什么值（默认取 `options[0]`）。
+   *
+   * 为什么需要它（v30 的「全职兼职」）：枚举列有两类完全不同的语义 ——
+   *   - `kind`（教师 / AI）：留空＝"没说"，取第一个候选「教师」是**安全**的
+   *     （宁可多一个可排课的教师，也不要因为空格把一个真人从排课下拉里静默移走）；
+   *   - `employment`（全职 / 兼职）：留空＝**未填**，这是一个**真实的第三档**，
+   *     取第一个候选「全职」等于凭空记下一条用工事实。
+   * 因此把"留空取什么"变成列自己的一个显式声明，而不是让所有枚举列共用一个默认值。
+   */
+  empty?: string;
   /** 模板里的示例值。 */
   example: string;
 };
@@ -106,10 +125,42 @@ export const ENTITY_SPECS: Record<ImportEntity, EntitySpec> = {
       { key: "bio", header: "详细介绍", aliases: ["介绍", "bio"], kind: "text", example: "（可留空；网站教师页的完整介绍会填在这里）" },
       { key: "kind", header: "类型", kind: "enum", options: ["教师", "AI"], example: "教师" },
       { key: "siteVisible", header: "网站展示", aliases: ["在网站展示"], kind: "bool", example: "否" },
+      /*
+       * v30 的两个**内部**字段（机构要的「全职/兼职」与「教师来源」）。
+       *
+       * 「全职兼职」用 enum：非法值（「临时工」这种）**报错拒绝并指到行**，
+       * 而不是当自由文本收下来 —— 服务层那道闸也只认这两个值，
+       * 在导入这一层就拦下能给出更好的提示（哪一行、错在哪一列）。
+       * `empty: ""` 是**必须的**：留空＝未填，不能默认成「全职」（见 FieldSpec.empty 的说明）。
+       *
+       * 「来源」是**招聘渠道**（人事口径，自由文本），与教师表里那个技术性的
+       * `origin`（网站同步 / 后台手建）**不是一回事** —— 那一列刻意**不做成可导入的列**：
+       * 它由系统自己写（见 `finalize` 里那一行），人手工指定"这条档案是网站来的"
+       * 只会造出一批说法的自相矛盾。
+       */
+      {
+        key: "employment",
+        header: "全职兼职",
+        aliases: ["全职/兼职", "全职 / 兼职", "用工性质", "雇佣性质"],
+        kind: "enum",
+        options: ["全职", "兼职"],
+        empty: "",
+        example: "全职",
+      },
+      {
+        key: "source",
+        header: "来源",
+        aliases: ["招聘渠道", "教师来源", "来源渠道"],
+        kind: "text",
+        example: "朋友介绍",
+      },
     ],
     warning:
       "可选科目要与**课程库里的课程名**一致，否则排课时会报「教师科目不符」。" +
       "类型选 AI 的是智能体（如试课诊断）：它留在档案里，但**不会出现在排课下拉里**。" +
+      "「全职兼职」只能填 全职 / 兼职（留空＝未填）；「来源」填的是**招聘渠道**" +
+      "（招聘网站 / 朋友介绍 / 内部推荐 / 校招 / 其他）—— 它与档案本身的技术来源（`origin`）" +
+      "不是一回事，但那个来源**界面上已经不显示了**，因此不必担心两个「来源」撞名。" +
       "「详细介绍」里如果要换行，写在引号里（CSV 支持多行单元格）。",
   },
   classrooms: {
@@ -121,9 +172,16 @@ export const ENTITY_SPECS: Record<ImportEntity, EntitySpec> = {
       { key: "name", header: "名称", required: true, kind: "text", example: "301 教室" },
       { key: "kind", header: "用途", kind: "enum", options: ["上课用教室", "自习室"], example: "上课用教室" },
       { key: "capacity", header: "容量", kind: "number", example: "8" },
+      // v30：校区（自由文本，可空）。同一份名单里往往同一个校区连着好几行 —— 重复填即可
+      { key: "campus", header: "校区", aliases: ["所属校区", "所在校区"], kind: "text", example: "城西校区" },
       { key: "note", header: "备注", kind: "text", example: "白板 + 投影" },
     ],
-    warning: "可用时段（哪个时段开放）不在这里导入 —— 导入后到「教室」页给每间房设时段；不设时段表示不限。",
+    warning: "可用时段（哪个时段开放）不在这里导入 —— 导入后到「教室」页给每间房设时段；不设时段表示不限。" +
+      "「校区」与「名称」分开两列填（显示时拼成「校区·教室名」）：**名称只填房间本身的名字**。" +
+      "「校区」是自由文本（沐阳教育 / 全慧教育这类机构自己的叫法），可以留空；" +
+      "已经在用的校区会在页面表单里提示出来，导完想统一叫法到教室页改一下就行。" +
+      "老表里那种「沐阳教育·教室1」的合并写法也能直接导 —— 系统会按第一个「·」拆开（显示一模一样），" +
+      "因此重导一份旧名单不会多出一间重复的房。",
   },
   courses: {
     key: "courses",
@@ -298,7 +356,11 @@ function convertCell(field: FieldSpec, raw: string): { ok: true; value: unknown 
       return { ok: false, reason: `「${field.header}」要填 是/否，收到“${raw}”` };
     }
     case "enum": {
-      if (text === "") return { ok: true, value: field.options?.[0] ?? "" };
+      /*
+       * 留空取什么由列自己声明（`field.empty`；没声明才退回第一个候选值）。
+       * 这里刻意**不用** `?? ""`：`??` 分不清"列没声明"与"列声明了空串"。
+       */
+      if (text === "") return { ok: true, value: field.empty ?? field.options?.[0] ?? "" };
       if ((field.options ?? []).includes(text)) return { ok: true, value: text };
       return {
         ok: false,
@@ -432,10 +494,27 @@ export function parseImport(entity: ImportEntity, text: string, format?: ImportF
       convertedProblems.push({ line: row.line, reason: `「${emptyRequired.header}」不能为空` });
       continue;
     }
-    records.push(record);
+    records.push(entity === "classrooms" ? normalizeClassroomRow(record) : record);
   }
 
   return { entity, records, problems: convertedProblems, headers, unknownHeaders, missingRequiredHeaders: [] };
+}
+
+/**
+ * 一行教室记录的**行归一**：把「校区·教室名」的合并写法拆开（规则与迁移同一处实现）。
+ *
+ * 为什么在解析这一层就做，而不是留到落库时的 `finalize`：
+ *   - 判重键用的是 `name`（`keyFields: ["name"]`）。一份**导出/旧表**里名称列写着
+ *     「沐阳教育·教室1」的名单，如果等落库时才拆，判重那一刻它叫「沐阳教育·教室1」、
+ *     库里那间叫「教室1」→ 认不出是同一条 → **库里多出一间重复的房**
+ *     （旧表重导一次就会发生，而这正是机构最常做的事）；
+ *   - 顺带让界面上的"体检"预览显示的是**将要落库的形状**，而不是文件里的原始写法。
+ *
+ * 只碰 `name` / `campus` 两格，其余字段原样带过（`splitCampusFields` 的约定）。
+ */
+function normalizeClassroomRow(record: Record<string, unknown>): Record<string, unknown> {
+  const parts = splitCampusFields(record);
+  return { ...record, name: parts.name, campus: parts.campus };
 }
 
 // ── 落库 ────────────────────────────────────────────────────────────────────
@@ -655,17 +734,32 @@ function finalize(
           record.siteVisible === undefined
             ? record.origin === "网站"
             : record.siteVisible === true || record.siteVisible === "是" || record.siteVisible === "true",
+        /*
+         * v30 的两个内部字段。`employment` 已经在 `convertCell` 里过了 enum 那道校验，
+         * 因此这里只需要给"整份 JSON 导入、没写这一列"的行补空串（＝未填）。
+         * **不要在这里再猜一次**：空就是未填，与迁移给老库补的口径完全一致。
+         */
+        employment: String(record.employment ?? ""),
+        source: String(record.source ?? ""),
       };
     case "classrooms":
-      return {
+      /*
+       * 教室：落库前的形状走**与迁移同一处实现**的 `normalizeClassroom`
+       * （去空白 + 把「校区·教室名」拆开）。解析那一步已经拆过一次，这里是幂等的第二道 ——
+       * 留着它是为了"无论从哪条路进来，落库的形状都过同一处归一"这条纪律不漏。
+       */
+      return normalizeClassroom({
         name: String(record.name ?? ""),
         version: 1,
-        kind: (record.kind as string) ?? "上课用教室",
+        // 「用途」列已经过 enum 校验（只能是两个候选值之一），这里只兜"整份 JSON 没写这一列"
+        kind: (record.kind as Classroom["kind"]) ?? "上课用教室",
         capacity: Number(record.capacity ?? 0),
         // 时段留空 = 不限（与页面上的语义一致）
         availability: [],
+        // v30：校区（自由文本）
+        campus: String(record.campus ?? ""),
         note: String(record.note ?? ""),
-      };
+      });
     case "courses":
       return {
         name: String(record.name ?? ""),

@@ -6,6 +6,8 @@ import { PageHeading } from "@/components/ui/PageHeading";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { api, type Classroom, type Lesson, type Teacher } from "@/lib/backend/api";
 import { formatDayLabel, formatTimeRange, dateKey, weekDays } from "@/lib/backend/format";
+// 教室名的唯一显示口径（「校区·教室名」，v31）—— 课表这一页有四处要显示教室名
+import { classroomLabel } from "@/lib/backend/classrooms";
 import {
   buildDayTimeline,
   formatGapDuration,
@@ -134,7 +136,13 @@ export default function AdminTimetablePage() {
       const counts = countLessons(own);
       return {
         id: item.id,
-        name: item.name,
+        /*
+         * 教室页签下这一行显示的是**教室名**，因此要走唯一显示口径（「校区·教室名」，v31）；
+         * 教师页签下就是教师姓名。两边的 `item` 类型不同，所以在这里分一次 ——
+         * 分岔只有这一处，比在下面三处渲染点各判一次好（那样漏一处的表现是"某一列只剩房间号"，
+         * 很难看出来）。
+         */
+        name: tab === "teacher" ? (item as Teacher).name : classroomLabel(item as Classroom),
         count: counts.active,
         cancelled: counts.cancelled,
         hours: Math.round((counts.activeMinutes / 60) * 10) / 10,
@@ -145,7 +153,10 @@ export default function AdminTimetablePage() {
   const focusName =
     (tab === "teacher"
       ? teachers.find((item) => item.id === focusId)?.name
-      : classrooms.find((item) => item.id === focusId)?.name) ?? "";
+      : (() => {
+          const room = classrooms.find((item) => item.id === focusId);
+          return room === undefined ? undefined : classroomLabel(room);
+        })()) ?? "";
 
   return (
     <>
@@ -221,7 +232,8 @@ export default function AdminTimetablePage() {
           >
             {(tab === "teacher" ? teachers : classrooms).map((item) => (
               <option key={item.id} value={item.id}>
-                {item.name}
+                {/* 教室页签下用显示口径（「校区·教室名」，v31）；教师页签就是姓名 */}
+                {tab === "teacher" ? (item as Teacher).name : classroomLabel(item as Classroom)}
               </option>
             ))}
           </select>
@@ -243,7 +255,11 @@ export default function AdminTimetablePage() {
                 title: `${lesson.subject}${lesson.form !== "" ? ` · ${lesson.form}` : ""}`,
                 location:
                   tab === "teacher"
-                    ? (classrooms.find((item) => item.id === lesson.classroomId)?.name ?? "")
+                    ? /* ICS 的「地点」是给人看的（进手机日历）→ 用显示口径「校区·教室名」 */
+                      (() => {
+                        const room = classrooms.find((item) => item.id === lesson.classroomId);
+                        return room === undefined ? "" : classroomLabel(room);
+                      })()
                     : (teachers.find((item) => item.id === lesson.teacherId)?.name ?? ""),
                 description: tab === "classroom" ? "" : "来自 NexGenEdu 教务后台",
                 startsAt: lesson.startsAt,
@@ -322,7 +338,12 @@ export default function AdminTimetablePage() {
                       <span className="mt-0.5 block truncate">{item.lesson.subject}</span>
                       <span className="mt-0.5 block truncate text-[11px] opacity-80">
                         {tab === "teacher"
-                          ? classrooms.find((entry) => entry.id === item.lesson.classroomId)?.name
+                          ? (() => {
+                              const room = classrooms.find(
+                                (entry) => entry.id === item.lesson.classroomId,
+                              );
+                              return room === undefined ? null : classroomLabel(room);
+                            })()
                           : teachers.find((entry) => entry.id === item.lesson.teacherId)?.name}
                       </span>
                     </li>

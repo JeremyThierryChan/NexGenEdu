@@ -11,6 +11,8 @@ import {
   type Teacher,
 } from "@/lib/backend/api";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
+// 教室名的唯一显示口径（「校区·教室名」，v31）
+import { classroomLabel } from "@/lib/backend/classrooms";
 import { cn } from "@/lib/utils/cn";
 
 /**
@@ -58,7 +60,14 @@ export function InquiryReport({
   }, [load]);
 
   const teacherName = (id: string) => teachers.find((item) => item.id === id)?.name ?? "—";
-  const roomName = (id: string) => classrooms.find((item) => item.id === id)?.name ?? "—";
+  /*
+   * 教室名走**唯一显示口径** `classroomLabel`（「校区·教室名」，v31）：
+   * 这里的「挡路的课：某某 · 哪间房」与调课建议都会点到教室，写法要和卡片上一致。
+   */
+  const roomName = (id: string) => {
+    const room = classrooms.find((item) => item.id === id);
+    return room === undefined ? "—" : classroomLabel(room);
+  };
   const studentNames = (ids: string[]) =>
     ids.map((id) => students.find((item) => item.id === id)?.name ?? id).join("、");
 

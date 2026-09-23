@@ -38,6 +38,8 @@ import {
 import { formatDayLabel } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
 import { BACKUP_SLOTS, LOG_LIMIT } from "@/lib/backend/api";
+// 教室名的唯一显示口径（「校区·教室名」，v31）
+import { classroomLabel } from "@/lib/backend/classrooms";
 
 /**
  * 数据与备份。
@@ -162,7 +164,11 @@ export default function AdminDataPage() {
       lessons.map((lesson) => ({
         uid: `lesson-${lesson.id}@nexgenedu`,
         title: `${lesson.subject}${lesson.form !== "" ? ` · ${lesson.form}` : ""}`,
-        location: classrooms.find((item) => item.id === lesson.classroomId)?.name ?? "",
+        // ICS 的「地点」是给人看的 → 唯一显示口径（「校区·教室名」，v31）
+        location: (() => {
+          const room = classrooms.find((item) => item.id === lesson.classroomId);
+          return room === undefined ? "" : classroomLabel(room);
+        })(),
         description: [
           `教师：${teachers.find((item) => item.id === lesson.teacherId)?.name ?? "待定"}`,
           ...(lesson.note !== "" ? [`备注：${lesson.note}`] : []),
@@ -437,6 +443,18 @@ function nameById<T extends { id: string; name: string }>(list: T[], id: string)
 }
 
 /**
+ * 教室专用：**显示口径**（「校区·教室名」，v31）。
+ *
+ * 为什么不能直接用 `nameById`：它只认 `{id, name}` 这个最小形状（教师 / 学生都适用），
+ * 而教室的显示名要由 `classroomLabel` 拼出来 —— 借 `nameById` 的话这里只会印出房间号，
+ * 与卡片上的教室名对不上。
+ */
+function classroomNameById(classrooms: Classroom[], id: string): string {
+  const room = classrooms.find((item) => item.id === id);
+  return room === undefined ? "" : classroomLabel(room);
+}
+
+/**
  * 取某个数据集的行（**只取当前选中的这一个**）。
  *
  * 为什么不把 8 个数据集一起加载：排课、流水、课堂记录加起来几百条，
@@ -465,7 +483,8 @@ async function loadDatasetRows(datasetId: string): Promise<RowOption[]> {
         .map((lesson: Lesson) => ({
           id: lesson.id,
           label: `${monthDayTime(lesson.startsAt)} ${lesson.subject} · ${nameById(teachers, lesson.teacherId) || "待定"}`,
-          hint: `${nameById(classrooms, lesson.classroomId) || "未定教室"} · ${lesson.durationMinutes} 分钟 · ${lesson.status}`,
+          // 教室名走唯一显示口径（「校区·教室名」，v31）
+          hint: `${classroomNameById(classrooms, lesson.classroomId) || "未定教室"} · ${lesson.durationMinutes} 分钟 · ${lesson.status}`,
         }));
     }
     case "teachers": {
@@ -480,7 +499,8 @@ async function loadDatasetRows(datasetId: string): Promise<RowOption[]> {
       const rooms: Classroom[] = await api.classrooms.list();
       return rooms.map((room) => ({
         id: room.id,
-        label: `${room.name} · ${room.kind}`,
+        // 「导出哪些行」的清单里也是给人看的名字 → 走唯一显示口径（「校区·教室名」，v31）
+        label: `${classroomLabel(room)} · ${room.kind}`,
         hint: `容量 ${room.capacity} 人`,
       }));
     }

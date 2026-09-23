@@ -16,6 +16,8 @@ import {
 import { useFormOptions } from "@/components/admin/useFormOptions";
 import { remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
+// 教室名的唯一显示口径（「校区·教室名」，v31）
+import { classroomLabel } from "@/lib/backend/classrooms";
 import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 
 /**
@@ -307,10 +309,11 @@ export function LessonForm({
           onChange={(event) => setClassroomId(event.target.value)}
           options={classrooms.map((room) => ({
             value: room.id,
+            // 教室名走唯一显示口径（「校区·教室名」，v31）；括号里是容量提示
             label:
               room.kind === "自习室"
-                ? `${room.name}（自习室 · ${room.capacity} 座）`
-                : `${room.name}（${room.capacity} 人）`,
+                ? `${classroomLabel(room)}（自习室 · ${room.capacity} 座）`
+                : `${classroomLabel(room)}（${room.capacity} 人）`,
           }))}
         />
       </div>

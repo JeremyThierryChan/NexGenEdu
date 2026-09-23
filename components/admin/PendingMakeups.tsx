@@ -12,6 +12,8 @@ import {
   type Teacher,
 } from "@/lib/backend/api";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
+// 教室名的唯一显示口径（「校区·教室名」，v31）
+import { classroomLabel } from "@/lib/backend/classrooms";
 
 type PendingRow = {
   original: Lesson;
@@ -256,7 +258,8 @@ function MakeupForm({
           >
             {classrooms.map((room) => (
               <option key={room.id} value={room.id}>
-                {room.name}
+                {/* 教室名走唯一显示口径（「校区·教室名」，v31） */}
+                {classroomLabel(room)}
               </option>
             ))}
           </select>

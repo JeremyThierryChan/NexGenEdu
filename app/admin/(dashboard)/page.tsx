@@ -21,6 +21,8 @@ import {
   type Teacher,
   type TodaySummary,
 } from "@/lib/backend/api";
+// 教室名的唯一显示口径（「校区·教室名」，v31）
+import { classroomLabel } from "@/lib/backend/classrooms";
 
 /**
  * 今日概览。
@@ -97,8 +99,11 @@ export default function AdminTodayPage() {
   }, [load]);
 
   const teacherName = (id: string) => teachers.find((item) => item.id === id)?.name ?? "—";
-  const classroomName = (id: string) =>
-    classrooms.find((item) => item.id === id)?.name ?? "—";
+  // 教室名走唯一显示口径（「校区·教室名」，v31）：今日概览上也该看到机构习惯的那个写法
+  const classroomName = (id: string) => {
+    const room = classrooms.find((item) => item.id === id);
+    return room === undefined ? "—" : classroomLabel(room);
+  };
   const studentNames = (ids: string[]) =>
     ids.map((id) => students.find((item) => item.id === id)?.name ?? "—").join("、");
 
@@ -241,7 +246,7 @@ export default function AdminTodayPage() {
               {(summary?.classroomUsage ?? []).map(({ classroom, lessonCount }) => (
                 <li key={classroom.id} className="flex items-center justify-between px-4 py-2.5">
                   <span className="text-sm text-ink-800">
-                    {classroom.name}
+                    {classroomLabel(classroom)}
                     <span className="ml-2 text-xs text-ink-400">{classroom.capacity} 人</span>
                   </span>
                   <span className="text-sm tabular text-ink-600">{lessonCount} 节</span>

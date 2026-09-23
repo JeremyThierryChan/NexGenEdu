@@ -19,6 +19,8 @@ import {
   type Teacher,
 } from "@/lib/backend/api";
 import { dateKey, formatDayLabel, formatTimeRange } from "@/lib/backend/format";
+// 教室名的唯一显示口径（「校区·教室名」，v31）
+import { classroomLabel } from "@/lib/backend/classrooms";
 import { countLessons, describeLessonCounts } from "@/lib/backend/lesson-stats";
 import { LoadFailure } from "@/components/admin/LoadFailure";
 
@@ -125,7 +127,14 @@ export default function AdminLessonsPage() {
   }, []);
 
   const teacherName = (id: string) => teachers.find((item) => item.id === id)?.name ?? "—";
-  const classroomName = (id: string) => classrooms.find((item) => item.id === id)?.name ?? "—";
+  /*
+   * 教室名走**唯一显示口径** `classroomLabel`（「校区·教室名」，v31）：
+   * 机构在卡片上习惯看到的就是这个写法，排课清单里也不该退化成只剩房间号。
+   */
+  const classroomName = (id: string) => {
+    const room = classrooms.find((item) => item.id === id);
+    return room === undefined ? "—" : classroomLabel(room);
+  };
   const studentNames = (ids: string[]) =>
     ids.map((id) => students.find((item) => item.id === id)?.name ?? "—").join("、");
 

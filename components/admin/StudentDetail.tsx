@@ -10,6 +10,8 @@ import { StudentProfileView } from "@/components/admin/StudentProfileView";
 import { api, type Classroom, type Lesson, type Student, type Teacher } from "@/lib/backend/api";
 import { remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
+// 教室名的唯一显示口径（「校区·教室名」，v31）
+import { classroomLabel } from "@/lib/backend/classrooms";
 import { cn } from "@/lib/utils/cn";
 import { FOLLOWUP_RULES } from "@/lib/backend/followup";
 
@@ -196,7 +198,11 @@ function StudentLessons({ studentId }: { studentId: string }) {
               <span className="text-sm text-ink-800">{lesson.subject}</span>
               <span className="text-xs text-ink-500">
                 {teachers.find((item) => item.id === lesson.teacherId)?.name ?? "—"} ·{" "}
-                {classrooms.find((item) => item.id === lesson.classroomId)?.name ?? "—"}
+                {(() => {
+                  // 教室名走唯一显示口径（「校区·教室名」，v31）
+                  const room = classrooms.find((item) => item.id === lesson.classroomId);
+                  return room === undefined ? "—" : classroomLabel(room);
+                })()}
               </span>
             </li>
           ))}

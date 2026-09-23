@@ -58,16 +58,41 @@ export function createSeedDatabase(now: Date = new Date()): Database {
       siteVisible: true,
       origin: "网站" as const,
       kind: "教师" as const,
+      /*
+       * v30 的「全职 / 兼职」与「来源（招聘渠道）」。
+       *
+       * ⚠️ **下面这两个值只是夹具的示例值，不是机构真实的人事信息** ——
+       * 网站教师页上只写着名字 / 科目 / 简介，从来没写过谁是全职谁是兼职、
+       * 是从哪个渠道招来的。这里给**前两位**填上非空值，目的是让自检与演示
+       * 能看到"填了与没填"两种长相（列表上有没有那个小标、表单里下拉选到哪一档）；
+       * 其余几位**一律留空**（＝未填，与老库迁移出来的口径一致）。
+       * 真实部署是**空库起步**（见 `initial.ts`），这份夹具不会进真实库。
+       */
+      employment: index < 2 ? "全职" : "",
+      source: index < 2 ? "朋友介绍" : "",
     }));
 
   // 可用时段刻意留了两种形态：工作日晚上 + 周末全天（上课教室），
   // 以及自习室的全周开放 —— 方便一眼看出「不限时段」与「有时段」的区别
+  /*
+   * v30 的「校区」：301 / 302 写同一个校区、自习区写另一个 ——
+   * 这样演示与自检能同时看到"同一校区的两间房"与"另一个校区的房"。
+   *
+   * v31 起**教室名只写房间本身**（分类在 `campus` 那一格），夹具里因此**一个「·」都没有**：
+   * 界面上看到的「总校·301 教室」是 `classroomLabel` 拼出来的，不是名字里带出来的。
+   * 夹具要是自己写成「总校·301 教室」，反而验不到"显示口径真的在工作"。
+   *
+   * ⚠️ 与教师那两个字段一样，**这两个校区名只是夹具的示例值，不是机构真实校区**：
+   * 网站内容里没有任何校区名（「校区信息」那一块写的是学段 / 学科数量这类数据）。
+   * 真实部署是空库起步，机构自己在教室表单里填（表单会列出已在用的校区供复用）。
+   */
   const classrooms: Classroom[] = [
     {
       id: "c1",
       version: 1,
       name: "301 教室",
       kind: "上课用教室",
+      campus: "总校",
       capacity: 8,
       availability: [
         { id: "c1-a1", weekdays: [1, 2, 3, 4, 5], start: "17:00", end: "21:30" },
@@ -80,6 +105,7 @@ export function createSeedDatabase(now: Date = new Date()): Database {
       version: 1,
       name: "302 教室",
       kind: "上课用教室",
+      campus: "总校",
       capacity: 20,
       availability: [
         { id: "c2-a1", weekdays: [1, 2, 3, 4, 5, 6, 7], start: "08:00", end: "21:30" },
@@ -91,6 +117,7 @@ export function createSeedDatabase(now: Date = new Date()): Database {
       version: 1,
       name: "自习区",
       kind: "自习室",
+      campus: "城西校区",
       capacity: 6,
       availability: [],
       note: "独立自习位，不限时段",

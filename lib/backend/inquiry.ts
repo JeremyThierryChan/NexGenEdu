@@ -1,6 +1,8 @@
 import type { Classroom, Inquiry, InquirySlot, Lesson, Teacher } from "./types";
 import { isWithinAvailability } from "./availability";
 import { dateKey } from "./format";
+// 教室名的唯一显示口径（「校区·教室名」，v31）：可行性说明里点名教室的地方都用它
+import { classroomLabel } from "./classrooms";
 
 /**
  * 咨询可行性：家长说「每周六上午十点，指定陈老师」——这安排能不能接？
@@ -245,7 +247,7 @@ export function checkAssignment(input: {
             teacherId: roomClash.teacherId,
             classroomId: roomClash.classroomId,
             studentIds: roomClash.studentIds,
-            detail: `${dateKey(date)} ${input.classroom.name} 已被占用：${roomClash.subject}`,
+            detail: `${dateKey(date)} ${classroomLabel(input.classroom)} 已被占用：${roomClash.subject}`,
           },
         ];
       }
@@ -273,7 +275,7 @@ export function checkAssignment(input: {
             teacherId: "",
             classroomId: input.classroom.id,
             studentIds: [],
-            detail: `${input.classroom.name} 在 ${weekdayLabel(slot.weekday)} ${slot.start} 不开放`,
+            detail: `${classroomLabel(input.classroom)} 在 ${weekdayLabel(slot.weekday)} ${slot.start} 不开放`,
           },
         ];
       }

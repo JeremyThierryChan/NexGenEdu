@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { ActionNoticeView } from "@/components/admin/ActionNotice";
 import { useActionNotice } from "@/components/admin/useActionNotice";
@@ -10,8 +10,8 @@ import { MultiSelect } from "@/components/admin/MultiSelect";
 import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
 import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
-import { api, type Lesson, type Teacher } from "@/lib/backend/api";
-import { TEACHER_KINDS } from "@/lib/backend/types";
+import { api, type Lesson, type Teacher, type TeacherEmployment } from "@/lib/backend/api";
+import { TEACHER_EMPLOYMENTS, TEACHER_KINDS } from "@/lib/backend/types";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
 
 /**
@@ -22,7 +22,35 @@ import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
  *
  * 「在职」开关很重要：离职教师保留档案但不出现在排课下拉里，
  * 因此列表里可以直接切换，不必删除历史记录。
+ *
+ * 两个**人事字段**（「全职 / 兼职」与「来源（招聘渠道）」）在列表上是**两态**的：
+ * 填了显示值，没填显示一个灰色的待办小标（「用工未填」/「来源未填」）——
+ * 机构口径是「**教师信息我自己在后台填，更希望没填的时候也看得出来**」，
+ * 因此这里刻意不是"没填就不显示"（那样没人知道还缺多少人的信息）。
  */
+
+/**
+ * 已填的人事字段：白底描边小标（与其它已填信息同一档）。
+ *
+ * 两个字段共用一份样式，是为了让「填了」在卡片上看起来都是同一件事 ——
+ * 各写一套的话，机构会以为其中一个字段"更重要"或"没生效"。
+ */
+const HR_FILLED_CLASS =
+  "rounded-sm border border-ink-200 bg-white px-1.5 py-0.5 text-[10px] text-ink-600";
+
+/**
+ * **未填**的人事字段：虚线边框 + 灰底 + 更浅的字色 —— 读起来像"待办"，不像一个值。
+ *
+ * 与 `HR_FILLED_CLASS` **必须一眼分得开**（这一条比好看重要）：
+ * 同一个样式的话，「用工未填」会被当成这个人的用工性质（一条**假的人事信息**），
+ * 而机构正是拿这两个字段算排课量与成本的。
+ */
+const HR_TODO_CLASS =
+  "rounded-sm border border-dashed border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[10px] text-ink-400";
+
+/** 灰标上的悬停提示：告诉人"去哪儿补"（点姓名那一列就是展开档案的入口）。 */
+const HR_TODO_HINT = "点姓名展开就能填";
+
 export default function AdminTeachersPage() {
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
@@ -83,6 +111,23 @@ export default function AdminTeachersPage() {
     return counts;
   }, [lessons]);
 
+  /**
+   * **已在用的招聘渠道**（v30）：给表单里那个 `<datalist>` 用。
+   *
+   * 来源是**自由文本**（机构现在没定死渠道清单），但同一个渠道被写成
+   * 「朋友介绍」「熟人介绍」「朋友推荐」三种，按渠道统计就失效了 ——
+   * 因此把已在用的值提示出来复用，同时不拦着写新的。
+   * 真源就是教师列表上那一列，不另存一份"渠道清单"。
+   */
+  const sourceOptions = useMemo(() => {
+    const values = new Set<string>();
+    for (const teacher of teachers) {
+      const source = teacher.source.trim();
+      if (source !== "") values.add(source);
+    }
+    return [...values].sort((a, b) => a.localeCompare(b, "zh"));
+  }, [teachers]);
+
   async function toggleActive(teacher: Teacher) {
     await api.teachers.update(teacher.id, { active: !teacher.active });
     // 安静刷新：表格一直挂着，切在职状态不该把整张表塌成一行（见 load 的说明）
@@ -134,6 +179,7 @@ export default function AdminTeachersPage() {
       {creating && (
         <Panel className="mt-6" title="新增教师" description="科目请与课程名用同一套叫法，便于排课与前台一致。">
           <TeacherForm
+            sourceOptions={sourceOptions}
             onCancel={() => setCreating(false)}
             onSaved={async () => {
               setCreating(false);
@@ -214,9 +260,55 @@ export default function AdminTeachersPage() {
                     {teacher.years !== "" && (
                       <span className="text-[11px] text-ink-400">教龄 {teacher.years}</span>
                     )}
-                    {teacher.origin === "网站" && (
-                      <span className="text-[11px] text-ink-300">来自网站</span>
+                    {/*
+                      用工性质（v30）与「来源（招聘渠道）」这两个**人事字段**：
+                      **填了显示值、没填显示灰标**（机构口径：「教师信息我自己在后台填，
+                      更希望没填的时候也看得出来」—— 没填的那个是**待办**，得提醒人去补）。
+
+                      两态样式刻意差开一档（这一条比"好看"重要）：
+                        · 填了 → 白底描边（`HR_FILLED_CLASS`），与其它已填信息同一档；
+                        · 没填 → **虚线边框 + 灰底 + 更浅的字色**（`HR_TODO_CLASS`）+ `title` 提示。
+                      不差开的话，那个灰标会被读成"这个人的用工性质叫『用工未填』" ——
+                      一条**假的人事信息**比不显示更糟（机构正是拿这两个字段算排课量与成本的）。
+
+                      顺序：`AI` → `教龄 …` → 用工性质 → 来源。
+                      待办灰标**排在 AI 与教龄之后**：身份与资历是"这个人是谁"，
+                      待办是"还缺一条信息"，缺的不该抢在身份前面。
+                    */}
+                    {teacher.employment === "" ? (
+                      <span className={HR_TODO_CLASS} title={HR_TODO_HINT}>
+                        用工未填
+                      </span>
+                    ) : (
+                      <span className={HR_FILLED_CLASS}>{teacher.employment}</span>
                     )}
+                    {/*
+                      「来源」＝**招聘渠道**（v30，人事口径）：这位老师是怎么来的。
+                      它与 `Teacher.origin`（"这条档案当初从哪来"）**是两个东西**，
+                      因此两边都改名避让：这一格叫「来源」、`origin` 那个小标**已经不显示了**
+                      （见下面那段说明）。两者在中文里都像"来源"，但界面上一处会把它写清。
+                    */}
+                    {teacher.source === "" ? (
+                      <span className={HR_TODO_CLASS} title={HR_TODO_HINT}>
+                        来源未填
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-ink-400">来源 {teacher.source}</span>
+                    )}
+                    {/*
+                      卡片上**不再显示 `origin`（网站 / 后台）那个小标**（机构口径：
+                      「教师标签里的『网站导入』能删掉吗？」）。
+
+                      为什么可以删：v36 把「从网站导入教师」那个入口整块删掉之后，
+                      **以后不会再有新的档案是「网站」来源** —— 这个标只会出现在当年那几条
+                      老记录上（真实库里 5 位教师中 4 位是 `网站`），留着只是噪声，
+                      而且它还容易和上面那个人事的「来源（招聘渠道）」撞名。
+
+                      为什么**字段本身保留**：`origin` 记的是"**这条档案当初从哪来**"，
+                      那是一段历史事实 —— 删字段要动数据库形状（迁移 / 导出 / 导入 / 断言
+                      全都用它），而"不假造历史"比"界面上少一个标"重要得多。
+                      字段仍然在 `types.ts` 里、仍然由迁移与导入维护、导出时也照旧带出去。
+                    */}
                   </div>
                   {teacher.summary !== "" && (
                     <p className="mt-1 max-w-md text-[11px] leading-relaxed text-ink-500">
@@ -278,6 +370,7 @@ export default function AdminTeachersPage() {
         <Panel className="mt-4" title="编辑教师">
           <TeacherForm
             teacher={teachers.find((item) => item.id === editingId) ?? undefined}
+            sourceOptions={sourceOptions}
             onCancel={() => setEditingId(null)}
             onSaved={async () => {
               setEditingId(null);
@@ -361,10 +454,13 @@ function TeacherLessons({
 /** 教师表单：新建与编辑共用。 */
 function TeacherForm({
   teacher,
+  sourceOptions,
   onCancel,
   onSaved,
 }: {
   teacher?: Teacher;
+  /** 已在用的招聘渠道（父组件从列表里收集），供「来源」那个 `<datalist>` 提示 */
+  sourceOptions: string[];
   onCancel: () => void;
   onSaved: () => void | Promise<void>;
 }) {
@@ -397,6 +493,18 @@ function TeacherForm({
   const [siteVisible, setSiteVisible] = useState(teacher?.siteVisible ?? false);
   const [order, setOrder] = useState(String(teacher?.order ?? ""));
   const [kind, setKind] = useState<string>(teacher?.kind ?? "教师");
+  /*
+   * 用工性质与来源（v30）：机构要的两个**内部**字段。
+   *
+   * `employment` 的 state 用空串表示「未填」——它就是服务端认的第三档取值，
+   * 不在前端另造一个 `undefined` / `null`（否则要写两套"空"的判据）。
+   * `source` 是**招聘渠道**（人是怎么招来的），与上面的 `origin`（这条档案从哪来）
+   * 是两件事：`origin` 是只读的技术来源（**界面上已经不显示了**，见列表那段说明），
+   * 这里这一格是人事口径、由人自己填。
+   */
+  const [employment, setEmployment] = useState<TeacherEmployment | "">(teacher?.employment ?? "");
+  const [source, setSource] = useState(teacher?.source ?? "");
+  const sourceListId = useId();
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   /*
@@ -433,8 +541,15 @@ function TeacherForm({
       // 留空按 999（排在最后）；不是数字就当没填，不让 NaN 进库
       order: Number.isFinite(Number(order)) && order.trim() !== "" ? Number(order) : 999,
       kind: kind === "AI" ? ("AI" as const) : ("教师" as const),
-      // 新建的档案来源是"后台"；网站导入的档案保留"网站"（编辑资料不该改掉它的来历）
+      /*
+       * 新建的档案来源是"后台"；老档案保留原来的值（编辑资料不该改掉它的来历）。
+       * 这个字段**界面上已经不显示了**，但照旧写：它是"这条档案当初从哪来"的历史事实，
+       * 导出/迁移仍然要用（见列表里那段完整说明）。
+       */
       origin: teacher?.origin ?? ("后台" as const),
+      // v30：整份提交 → 这两个字段也跟着一起交（服务端会复核「全职 / 兼职」的取值）
+      employment,
+      source: source.trim(),
     };
 
     try {
@@ -504,7 +619,44 @@ function TeacherForm({
           value={kind}
           onChange={(event) => setKind(event.target.value)}
         />
+        {/*
+          「全职 / 兼职」（v30，机构要的）。**三档**：未填 / 全职 / 兼职 ——
+          「未填」必须是能选回来的一项，否则人一旦点错（或从"没填"变成填了）
+          就再也回不到"未填"，只能随便选一个，把"没登记"变成一条假的人事信息。
+        */}
+        <SelectInput
+          label="全职 / 兼职"
+          hint="未填就是没登记过（老档案迁移过来都是未填）"
+          options={[
+            { value: "", label: "未填" },
+            ...TEACHER_EMPLOYMENTS.map((value) => ({ value, label: value })),
+          ]}
+          value={employment}
+          // 候选值就是 TEACHER_EMPLOYMENTS + 未填，因此这里的断言与 `<option>` 集合严格一致
+          onChange={(event) => setEmployment(event.target.value as TeacherEmployment | "")}
+        />
+        <TextField
+          label="来源"
+          hint="招聘渠道：这位老师是怎么招来的（招聘网站 / 朋友介绍 / 内部推荐 / 校招 / 其他）；可留空"
+          value={source}
+          onChange={(event) => setSource(event.target.value)}
+          placeholder="例如 朋友介绍"
+          list={sourceOptions.length > 0 ? sourceListId : undefined}
+        />
       </div>
+
+      {/*
+        「已在用的来源」候选值（v30）：来源是自由文本，但同一个渠道写成几种叫法会让
+        按渠道统计失效，因此把已在用的值提示出来。放在表单里、不在 label 里面
+        （与教室页那个校区 datalist 同一处做法与理由）；一个都还没填时整块不渲染。
+      */}
+      {sourceOptions.length > 0 && (
+        <datalist id={sourceListId}>
+          {sourceOptions.map((option) => (
+            <option key={option} value={option} />
+          ))}
+        </datalist>
+      )}
 
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         <TextField

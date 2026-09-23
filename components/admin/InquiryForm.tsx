@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { NumberInput, SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { Button } from "@/components/ui/Button";
 import { api, type Classroom, type InquirySlot, type Teacher } from "@/lib/backend/api";
+// 教室名的唯一显示口径（「校区·教室名」，v31）
+import { classroomLabel } from "@/lib/backend/classrooms";
 import { getStandardSlots } from "@/lib/backend/options";
 import { weekdayLabel } from "@/lib/backend/inquiry";
 import { cn } from "@/lib/utils/cn";
@@ -201,7 +203,7 @@ export function InquiryForm({
             <option value="">不限</option>
             {classrooms.map((room) => (
               <option key={room.id} value={room.id}>
-                {room.name}（{room.capacity} 人）
+                {classroomLabel(room)}（{room.capacity} 人）
               </option>
             ))}
           </select>

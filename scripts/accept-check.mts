@@ -11,6 +11,8 @@
  */
 
 import { api } from "../lib/backend/api.ts";
+// 教室名的唯一显示口径（「校区·教室名」，v31）—— 逐页验收要按用户看到的样子核对
+import { classroomLabel } from "../lib/backend/classrooms.ts";
 import { applyDecision, offerKey, offersByKey, resolveOffer } from "../lib/backend/offers.ts";
 import { isRemoteMode, remoteBase } from "../lib/backend/remote.ts";
 
@@ -607,12 +609,67 @@ let classroomId = "";
 await check("教室", "新建教室（含可用时段）", async () => {
   const created = await api.classrooms.create({
     name: "验收教室", capacity: 6, kind: "上课用教室", note: "",
+    // v30：校区（自由文本）。验收一律先给一个非空值，下面再验"存进去能读回来"
+    campus: "验收校区",
     availability: [{ id: "a1", weekdays: [1, 2, 3, 4, 5, 6, 7], start: "08:00", end: "22:00" }],
   });
   classroomId = created.id;
   return created;
-}, (r: { name: string }) => r.name === "验收教室");
+}, (r: { name: string; campus: string }) => r.name === "验收教室" && r.campus === "验收校区");
 await check("教室", "修改教室容量", async () => (await api.classrooms.update(classroomId, { capacity: 8 }))?.capacity === 8);
+/*
+ * 校区（v30）：**改一次、再整份提交一次**，两次都读回来核对。
+ * 第二次刻意走"页面表单那条路"的形状（把读到的整条记录原样交回去 + `expectedVersion`）——
+ * 教师/教室表单是整份覆盖，新字段跟着一起交上来，写错一处就会静默丢掉。
+ */
+await check("教室", "改校区并读回来（v30 新字段）", async () => {
+  await api.classrooms.update(classroomId, { campus: "验收校区·改" });
+  const after = (await api.classrooms.list()).find((room) => room.id === classroomId);
+  return after?.campus ?? "（读不到这间教室）";
+}, (campus: string) => campus === "验收校区·改");
+await check("教室", "整份提交（页面表单那样交回整条）时校区不丢", async () => {
+  const current = (await api.classrooms.get(classroomId))!;
+  const saved = await api.classrooms.update(
+    classroomId,
+    { ...current, capacity: 7, campus: "验收校区·整份" } as Omit<typeof current, "id" | "version">,
+    { expectedVersion: current.version },
+  );
+  return [(await api.classrooms.get(classroomId))?.capacity, saved?.campus];
+}, (value: unknown[]) => value[0] === 7 && value[1] === "验收校区·整份");
+/*
+ * v31：「校区·教室名」这一对（机构口径：**输入分开、显示不变**）。
+ * 三条都要真写一遍：
+ *   ① 校区 + 纯教室名 → 落库两格分开，**显示拼回「校区·教室名」**；
+ *   ② 只填教室名（校区空）→ 显示就是纯名，不留一个孤零零的「·」；
+ *   ③ 教室名里粘着校区（老表那种写法）→ 拆开，显示与原来一字不差。
+ */
+await check("教室", "校区 + 纯教室名：落库分开、显示拼成「校区·教室名」", async () => {
+  const current = (await api.classrooms.get(classroomId))!;
+  const saved = await api.classrooms.update(
+    classroomId,
+    { ...current, name: "验收教室3", campus: "沐阳教育" } as Omit<typeof current, "id" | "version">,
+    { expectedVersion: current.version },
+  );
+  return [saved?.campus, saved?.name, classroomLabel(saved!)];
+}, (value: unknown[]) =>
+  value[0] === "沐阳教育" && value[1] === "验收教室3" && value[2] === "沐阳教育·验收教室3");
+await check("教室", "老表那种合并写法（名称里带「校区·」）会被拆开，显示不变", async () => {
+  // 交上去的是老表里那串合并写法（校区那一格空着）
+  const submitted = "沐阳教育·验收老格式教室";
+  const created = await api.classrooms.create({
+    name: submitted, kind: "上课用教室", campus: "", capacity: 4, availability: [], note: "",
+  });
+  // 存下来的是两格，拼回去必须与交上去那一串**一字不差**（机构要的"显示格式不变"）
+  return [created.campus, created.name, classroomLabel(created), submitted];
+}, (value: unknown[]) =>
+  value[0] === "沐阳教育" && value[1] === "验收老格式教室" &&
+  value[2] === value[3] && value[2] === "沐阳教育·验收老格式教室");
+await check("教室", "没填校区时显示就是纯教室名（不会多出一个「·」）", async () => {
+  const created = await api.classrooms.create({
+    name: "验收独栋教室", kind: "上课用教室", campus: "", capacity: 4, availability: [], note: "",
+  });
+  return [created.campus, created.name, classroomLabel(created)];
+}, (value: unknown[]) => value[0] === "" && value[1] === "验收独栋教室" && value[2] === "验收独栋教室");
 
 /* ── 3 教师 ── */
 let teacherId = "";
@@ -621,11 +678,56 @@ await check("教师", "新建教师（可带科目用课程名）", async () => 
     name: "验收老师", role: "数学", subjects: ["围棋", "初中数学"], phone: "138", active: true,
     years: "", summary: "", bio: "", recommendation: "", order: 900, siteVisible: false,
     origin: "后台", kind: "教师",
+    // v30：用工性质与招聘渠道。新建就给非空值，读回来核对
+    employment: "兼职", source: "验收来源·朋友介绍",
   });
   teacherId = created.id;
   return created;
-}, (t: { subjects: string[] }) => t.subjects.includes("围棋"));
+}, (t: { subjects: string[]; employment: string; source: string }) =>
+  t.subjects.includes("围棋") && t.employment === "兼职" && t.source === "验收来源·朋友介绍");
 await check("教师", "在职教师列表", async () => (await api.teachers.listActive()).some((t) => t.id === teacherId));
+/*
+ * v30 的两个内部字段（机构要的「全职/兼职」与「教师来源」）：真实写、真实读回来。
+ *
+ * 三件都要验到，因为它们是三种不同的失败形态：
+ *   ① 合法值改得动、读得回来（后端字段没丢）；
+ *   ② **整份提交**（页面表单那样把整条记录交回去）时新字段不丢 —— 教师表单是整份覆盖，
+ *      少交一个字段就会把它清掉，而这种丢失**看起来一切正常**；
+ *   ③ 非法取值被服务端**拒绝**，而且库里那条**一点没变**（拒绝时不许写进去半截）。
+ */
+await check("教师", "改「全职 / 兼职」与「来源」并读回来（v30 新字段）", async () => {
+  await api.teachers.update(teacherId, { employment: "全职", source: "验收来源·校招" });
+  const after = (await api.teachers.get(teacherId))!;
+  return [after.employment, after.source];
+}, (value: unknown[]) => value[0] === "全职" && value[1] === "验收来源·校招");
+await check("教师", "整份提交（页面表单那样交回整条）时新字段不丢", async () => {
+  const current = (await api.teachers.get(teacherId))!;
+  const saved = await api.teachers.update(
+    teacherId,
+    { ...current, role: "验收职务", employment: "兼职", source: "验收来源·朋友介绍" } as Omit<
+      typeof current,
+      "id" | "version"
+    >,
+    { expectedVersion: current.version },
+  );
+  return [saved?.role, saved?.employment, saved?.source];
+}, (value: unknown[]) =>
+  value[0] === "验收职务" && value[1] === "兼职" && value[2] === "验收来源·朋友介绍");
+await check("教师", "非法的「全职 / 兼职」被服务端拒绝，且库里那条一点没变", async () => {
+  const before = (await api.teachers.get(teacherId))!;
+  let rejection = "没有报错（非法值被接受了）";
+  try {
+    /*
+     * 故意传一个类型上不允许的值：这一条验的正是**运行时那道闸**
+     * （`/api/call` 的 args 原样进服务层，编译期拦不住别处来的请求）。
+     */
+    await api.teachers.update(teacherId, { employment: "临时工" as never });
+  } catch (cause) {
+    rejection = cause instanceof Error ? cause.message : String(cause);
+  }
+  const after = (await api.teachers.get(teacherId))!;
+  return [rejection.includes("全职"), after.employment, after.version === before.version];
+}, (value: unknown[]) => value[0] === true && value[1] === "兼职" && value[2] === true);
 
 /* ── 4 学生与报课收费 ── */
 let studentId = "";

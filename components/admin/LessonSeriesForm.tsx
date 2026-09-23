@@ -13,6 +13,8 @@ import {
   type Student,
   type Teacher,
 } from "@/lib/backend/api";
+// 教室名的唯一显示口径（「校区·教室名」，v31）
+import { classroomLabel } from "@/lib/backend/classrooms";
 import { useFormOptions } from "@/components/admin/useFormOptions";
 import { remainingOf } from "@/lib/backend/enrollment";
 import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
@@ -217,7 +219,8 @@ export function LessonSeriesForm({
           }}
           options={[
             { value: "", label: "（请选择）" },
-            ...classrooms.map((room) => ({ value: room.id, label: room.name })),
+            // 教室名走唯一显示口径（「校区·教室名」，v31）
+            ...classrooms.map((room) => ({ value: room.id, label: classroomLabel(room) })),
           ]}
         />
       </div>

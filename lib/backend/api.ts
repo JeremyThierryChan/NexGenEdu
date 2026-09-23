@@ -160,6 +160,7 @@ import type {
   Payment,
   ClassroomAvailability,
   ClassroomKind,
+  TeacherEmployment,
   CompletionResult,
   HomeworkRecord,
   LessonRecord,
@@ -196,6 +197,23 @@ import type {
   CourseStatus,
   CourseSiteKind,
 } from "./types";
+/*
+ * 上面那一大块是 `import type`（只给类型用的）。`TEACHER_EMPLOYMENTS` 是**值**：
+ * 校验（`isTeacherEmployment`）与错误文案都要在运行时读它，因此单独再导一次
+ * —— 候选值只有这一处定义，页面、批量导入与校验都从它生成（不许各写一份）。
+ */
+import { TEACHER_EMPLOYMENTS } from "./types";
+/*
+ * 教室的显示口径与归一（v31）也各只有一处实现：
+ *   - `classroomLabel`：给用户看教室名的地方都必须走它（`scripts/check.mts` 有源码级断言）；
+ *   - `normalizeClassroom` / `needsCampusSplit`：迁移、收尾归一、批量导入、服务层写入共用。
+ */
+import {
+  classroomLabel,
+  hasRedundantCampusPrefix,
+  needsCampusSplit,
+  normalizeClassroom,
+} from "./classrooms";
 
 /*
  * 冲突错误在这里**对外再导出一次**：界面与将来的调用方只认 `lib/backend/api`
@@ -1109,6 +1127,90 @@ function migrate(db: Database): Database | null {
     db.version = 29;
   }
 
+  if (db.version === 29) {
+    /*
+     * v29 → v30：机构加三个**内部**字段（教室的「校区」、教师的「全职 / 兼职」与「来源」）。
+     *
+     * 机构原话：「在教室页面里添加一个校区字段吧，教师界面也添加一个全职/兼职以及教师来源」。
+     *
+     * 老库没有这三个字段 → **一律补空串，不猜内容**（与 v12 → v13 补教师资料那一步
+     * 同一条纪律）。这一步**尤其不能猜**：
+     *
+     *   - 「全职 / 兼职」是**人事事实**。库里现有的教师档案是照网站教师页建的
+     *     （`origin: "网站"` 那几位），机构从没登记过谁是全职谁是兼职 ——
+     *     默认成「全职」等于凭空记下一条用工事实，而它会被拿去算排课量、算成本；
+     *   - 「校区」同理：教室名里写着「沐阳教育·教室1」这种叫法，看得出是哪个校区，
+     *     但**"看得出"不是"机构登过记"** —— 按名字截一个校区名进库，
+     *     以后机构真要按校区分权分账时会拿着一批没人确认过的值去对账；
+     *   - 「来源」是招聘渠道，老库里根本没有这条信息。
+     *
+     * 空串在这三个字段上的含义都是明确的（＝未填），页面上会显示成"没填"，
+     * 人一条条补即可 —— 补字段这件事宁可留一堆空，也不要留一堆猜错的非空值
+     * （空的会被看见，错的看着像真的）。
+     */
+    db.teachers = db.teachers.map((teacher) => ({
+      ...teacher,
+      employment: teacher.employment ?? "",
+      source: teacher.source ?? "",
+    }));
+    db.classrooms = db.classrooms.map((room) => ({
+      ...room,
+      campus: room.campus ?? "",
+    }));
+    db.version = 30;
+  }
+
+  if (db.version === 30) {
+    /*
+     * v30 → v31：把教室名里那种**合并写法**「校区·教室名」拆成两个字段。
+     *
+     * 机构口径（原话）：「**沐阳教育·教室1**，现在这个显示格式就是校区·教室名，现在添加了校区字段，
+     * 也就意味着我需要这个**卡片显示格式不变**，但**输入的时候校区和教室名称要单独输入**」。
+     *
+     * 真实库里 6 间教室全都是「沐阳教育·教室1」这种写法（v30 那一步只补了空的 `campus`，
+     * 没敢从名字里猜 —— 那是"不猜内容"的纪律）。现在机构把「·」的含义**明确下来了**，
+     * 于是可以照着拆：`campus` 为空且名字含「·」→ 按第一个「·」拆开。
+     *
+     * **这一步不改显示**：`classroomLabel` 拼回来与原地那串一模一样（见 `classrooms.ts`）。
+     * 拆分规则、幂等性（`campus` 非空就不再拆）与"名字里本来就有「·」"这个已知含义
+     * 都写在那一处实现里 —— 迁移、收尾归一、批量导入、服务层写入共用它，不许各写一份。
+     *
+     * 拆了几条要**记进操作日志**：这是"库里的教室名怎么变了"的唯一线索
+     * （机构下次打开看到教室名的写法变了，能查到是哪一次升级做的）。
+     */
+    const splitTargets = db.classrooms.filter((room) => needsCampusSplit(room));
+    const prefixTargets = db.classrooms.filter((room) => hasRedundantCampusPrefix(room));
+    db.classrooms = db.classrooms.map((room) => normalizeClassroom(room));
+    db.version = 31;
+    if (splitTargets.length + prefixTargets.length > 0) {
+      /*
+       * `db.logs` 兜一次：一份手改过的、自称 v30 却没有 `logs` 的文件如果在 `writeLog` 上抛错，
+       * 后果是**整库读不出来**（`load()` 会抛）—— 比"少一条日志"坏得多。
+       */
+      if (!Array.isArray(db.logs)) db.logs = [];
+      writeLog(db, {
+        entity: "教室",
+        action: "修改",
+        // 与"批量导入 教师 42 条"同一套写法：一次动作一条摘要，没有单条 targetId
+        targetId: "",
+        summary:
+          (splitTargets.length > 0
+            ? `升级：把 ${splitTargets.length} 间教室的「校区·教室名」拆成两个字段` +
+              `（${splitTargets
+                .map((room) => `「${room.name}」`)
+                .slice(0, 3)
+                .join("")}${splitTargets.length > 3 ? " 等" : ""}）`
+            : "") +
+          (splitTargets.length > 0 && prefixTargets.length > 0 ? "；" : "") +
+          (prefixTargets.length > 0
+            ? `升级：另有 ${prefixTargets.length} 间教室的名字里重复写了校区，` +
+              `已去掉那段重复前缀（校区那一格没动）`
+            : "") +
+          " —— 显示格式不变（仍是 校区·教室名），只是校区与教室名分开存、以后分开填",
+      });
+    }
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1192,6 +1294,25 @@ function migrate(db: Database): Database | null {
     ...db.pricing,
     classTypes: syncClassTypes(db.pricing.classTypes, db.catalog).classTypes,
   };
+
+  /*
+   * 收尾归一：教师与教室的内部字段（v30 的校区 / 全职兼职 / 来源，v31 起的「校区·教室名」拆分）。
+   *
+   * 为什么放在收尾而不是只留在 v29 → v30 / v30 → v31 那两步（与 `db.coursePartitions` 那种兜法
+   * 同一条纪律）：一份"自称 v31"却缺字段、或者还写着合并教室名的文件照样会出现 ——
+   * 手改过的导出、只跑了一半的恢复、以及**导入**都长这样。缺了它们的后果是**看得见的坏**：
+   * 教师页那个下拉读到 `undefined`、教室卡片上「校区：undefined」、课表里又一次出现
+   * 「沐阳教育·沐阳教育·教室1」这种拼两遍的名字，而且不报错。
+   * `normalizeTeacherRecord` / `normalizeClassroom` 把缺的字段补成空串、把多余空白去掉、
+   * 把合并的教室名拆开，并且**与新建 / 修改 / 导入走的是同一处实现**（不会出现两套口径）。
+   *
+   * 注意这里**不做严格校验**：非法取值（例如手改文件里写着「临时工」）在这一层
+   * 归成空串＝未填，而不是抛错 —— 抛错会让整库读不出来（那是更坏的结局），
+   * 而空串是页面上能表达、人能重选的状态。**拒绝非法值的那道闸在服务层**
+   * （见 `teacherIssues`）：那里是"人刚填的表单"，可以当场把原话顶回去。
+   */
+  db.teachers = db.teachers.map((teacher) => normalizeTeacherRecord(teacher));
+  db.classrooms = db.classrooms.map((room) => normalizeClassroom(room));
 
   return db.version === CURRENT_VERSION ? db : null;
 }
@@ -1313,6 +1434,104 @@ function normalizeVacations(input: readonly VacationPeriod[]): VacationPeriod[] 
     endDate: text(item.endDate),
     note: text(item.note),
   }));
+}
+
+/*
+ * ── 教师 / 教室的归一与校验（v30：校区 / 全职兼职 / 来源；v31：教室名拆分）──────
+ *
+ * 分四件事、各有各的调用点，**别把它们合成一个函数**：
+ *
+ *   1. `normalizeTeacherRecord` —— 补默认值 + 去空白。调用点有**两处**：
+ *      服务层的 create / update（落库前统一形状），以及 `migrate()` 的收尾归一
+ *      （"自称当前版本却缺字段"的导入别让页面崩）。
+ *      **教室那一边的归一不在这里** —— 它连同"拆分「校区·教室名」"一起住在
+ *      `lib/backend/classrooms.ts` 的 `normalizeClassroom`（迁移 / 收尾归一 / 导入 /
+ *      服务层四处共用同一个实现，与 `normalizeCourse` 放在 `courses.ts` 同一个理由）。
+ *   2. `teacherIssues` —— **校验**，返回问题清单（空数组＝通过）。
+ *      只在服务层调用，由它抛错拒绝。收尾归一**不调它**：老库里已经存在的
+ *      非法值如果在这里抛错，后果是整库读不出来（比"显示成未填"坏得多）。
+ *
+ * 为什么校验看的是**没归一过的**值：`employment` 的非法值归一时会被压成空串，
+ * 先归一后校验就等于把"填了临时工"悄悄变成"没填" —— 机构报的现象会是
+ * "我明明选了兼职，存完变成未填了"。因此服务层是**先 `teacherIssues`、后归一**。
+ */
+
+/** 三位新字段的空白处理：非字符串一律当空串（不是 `String(value)` —— 那会把 null 变成 "null"）。 */
+function trimText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/** 这个值是不是合法的用工性质（`""`＝未填，允许）。 */
+function isTeacherEmployment(value: unknown): value is TeacherEmployment | "" {
+  return value === "" || (TEACHER_EMPLOYMENTS as readonly string[]).includes(String(value));
+}
+
+/**
+ * 教师档案归一：去空白、补默认值（缺字段兜成空串）。
+ *
+ * 与 `normalizeCourse` 同一条做法（展开原对象、只覆盖要归一的那几个字段），
+ * 因此**不会顺手丢掉调用方带的其他字段**（`version` / `id` 也在其中 ——
+ * 服务层要靠它们维持乐观锁）。
+ */
+function normalizeTeacherRecord(input: Teacher): Teacher {
+  return {
+    ...input,
+    /*
+     * 非法取值归成空串（＝未填），而不是原样留着：
+     * 保留下来的话，教师表单那个 `<select>` 会拿到一个没有对应 `<option>` 的值，
+     * 浏览器显示成"第一个选项"（全职）而 state 里还是「临时工」——
+     * 看着像全职、存下去是临时工，是最难查的一类不一致。
+     */
+    employment: isTeacherEmployment(input.employment) ? input.employment : "",
+    source: trimText(input.source),
+  };
+}
+
+/** 教室归一（v31 起在 `lib/backend/classrooms.ts`：它是"显示 / 拆分 / 归一"的唯一一处实现）。 */
+
+/**
+ * 教师新字段的**校验**（服务层用）：返回问题清单，空数组＝通过。
+ *
+ * 校验的是「已与库里那条合并、但还没归一」的那份记录，也就是
+ * `teachers.create` 的入参 / `teachers.update` 合并后的结果 ——
+ * 因此**整份表单提交**与**只改一个字段**（例如页面上点一下切换在职）都走这里。
+ *
+ * ## 两条判据刻意分开（这是这一处最容易判错的地方）
+ *
+ *   - **字段没给**（`undefined` / `null`）→ **不算错**，归一时补成空串＝未填。
+ *     理由：`create` 的入参在运行时不保证带全字段（`/api/call` 的 args 原样传进来，
+ *     老调用方与脚本根本不知道这个字段存在），而"缺字段补空串"正是迁移与收尾归一
+ *     的口径（v12/v13 补教师字段时那条纪律）。对缺失报错等于把"不知道"当成"填错了"。
+ *   - **给了值但不在取值域里**（「临时工」、`true`、数字…）→ **报错拒绝**。
+ *     这是机构明确要的那一条：非法值**不静默改成空串**，否则"我填的是兼职"
+ *     会变成一条没有痕迹的数据改动（操作日志里只写着"改了几列"）。
+ *
+ * 为什么非法值要报错而不是像收尾归一那样压成空串：调用方是人刚点的表单或一次 API 调用，
+ * 错误当场能显示给人看；而收尾归一面对的是已经躺在库里的历史数据 ——
+ * 在那里抛错等于整库读不出来（比"显示成未填"坏得多）。
+ */
+function teacherIssues(input: Teacher): string[] {
+  const issues: string[] = [];
+  const provided = input.employment !== undefined && input.employment !== null;
+  if (provided && !isTeacherEmployment(input.employment)) {
+    issues.push(
+      `教师的「全职 / 兼职」只能是 ${TEACHER_EMPLOYMENTS.join(" / ")} 或留空（未填），` +
+        `收到「${String(input.employment)}」`,
+    );
+  }
+  return issues;
+}
+
+/**
+ * 服务层用的归一 + 校验（传给 `versionedCollection` 的 `normalize` 钩子）。
+ *
+ * 顺序**必须是先校验、后归一**（理由见上面那段）：
+ * 归一之后的非法值已经变成空串，校验就再也看不见它了。
+ */
+function normalizeTeacherStrict(teacher: Teacher): Teacher {
+  const issues = teacherIssues(teacher);
+  if (issues.length > 0) throw new Error(issues.join("；"));
+  return normalizeTeacherRecord(teacher);
 }
 
 function persist(db: Database): void {
@@ -1792,12 +2011,23 @@ function collection<T extends { id: string }>(
  *
  * `list` / `get` / `remove` 直接**复用** `collection` 的实现（`...base` 的三个方法）：
  * 这三件事与版本号无关，再写一遍就是两处要同步维护的口径。
+ *
+ * ## `normalize` 钩子（v30 起）
+ *
+ * 教师与教室在落库前要先**归一 + 校验**（补默认值、去空白、拒绝非法的「全职 / 兼职」），
+ * 而两者的规则不一样，因此不写死在这个工厂里，由调用方传一个 `(记录) => 记录` 进来。
+ * 钩子**在这两个方法里各调一次、且都在 `version` 被钉住之后**：
+ *   - `create`：`{ ...input, id, version: 1 }` 之后；
+ *   - `update`：`{ ...current, ...patch }` 之后、`bumpVersion` 之前。
+ * 这样"入库的每一行都经过同一处归一"是**结构性**成立的，而不是靠每个调用点自觉。
+ * 钩子里抛错就是拒绝写入（非法值走这条）—— 抛在 `persist` 之前，什么都不落盘。
  */
 function versionedCollection<T extends { id: string; version: number }>(
   pick: (db: Database) => T[],
   prefix: string,
   label = "",
   guardDelete: DeleteGuard<T> | null = null,
+  normalize: ((record: T) => T) | null = null,
 ) {
   const base = collection<T>(pick, prefix, label, guardDelete);
   return {
@@ -1810,17 +2040,24 @@ function versionedCollection<T extends { id: string; version: number }>(
       const db = load();
       // 新记录一律从第 1 版开始（与迁移给老数据补的口径一致：见 migrate 的 v16 → v17）
       const created = { ...input, id: nextId(prefix), version: 1 } as T;
-      pick(db).push(created);
+      /*
+       * 归一定在 `push` **之前**：钩子抛错时这一行还没进数组，也就不会落盘
+       * （非法值拒绝走这条）。`id` / `version` 显式写回 —— 钩子只该改业务字段，
+       * 不该能改这两样，否则"这条记录从第 7 版开始"这种数据会从归一里冒出来。
+       */
+      const saved: T =
+        normalize === null ? created : { ...normalize(created), id: created.id, version: 1 };
+      pick(db).push(saved);
       if (label !== "") {
         writeLog(db, {
           entity: label,
           action: "新建",
-          targetId: created.id,
-          summary: `新建${label}${describeTarget(created)}`,
+          targetId: saved.id,
+          summary: `新建${label}${describeTarget(saved)}`,
         });
       }
       persist(db);
-      return clone(created);
+      return clone(saved);
     },
 
     /**
@@ -1853,19 +2090,27 @@ function versionedCollection<T extends { id: string; version: number }>(
        * 不盖回去就等于"调用方可以自己定版本号"，乐观锁当场变成摆设。
        */
       const updated = { ...current, ...patch, version: current.version } as T;
-      bumpVersion(updated);
-      list[index] = updated;
+      /*
+       * 归一 + 校验在这之后、`bumpVersion` 之前（顺序理由见工厂的说明）：
+       * 钩子抛错时 **`updated` 还没写回 `list[index]`**，因此什么都不会变
+       * （连版本号都不会推进），调用方拿到的是原话错误。
+       * `version: current.version` 再钉一次：钩子是别人写的，不能让它顺手改掉锁。
+       */
+      const next: T =
+        normalize === null ? updated : { ...normalize(updated), version: current.version };
+      bumpVersion(next);
+      list[index] = next;
       if (label !== "") {
         writeLog(db, {
           entity: label,
           action: "修改",
           targetId: id,
           // 记下改了哪些字段：只说「修改了学生」等于没说
-          summary: `修改${label}${describeTarget(updated)}（${Object.keys(patch).join("、")}）`,
+          summary: `修改${label}${describeTarget(next)}（${Object.keys(patch).join("、")}）`,
         });
       }
       persist(db);
-      return clone(updated);
+      return clone(next);
     },
   };
 }
@@ -1940,7 +2185,7 @@ const classroomDeleteRefusal: DeleteGuard<Classroom> = (db, classroom) => {
   const lessons = db.lessons.filter((item) => item.classroomId === classroom.id);
   if (lessons.length === 0) return null;
   return (
-    `「${classroom.name}」还有 ${lessons.length} 节排课，不能直接删除 —— ` +
+    `「${classroomLabel(classroom)}」还有 ${lessons.length} 节排课，不能直接删除 —— ` +
     "删掉之后那些课查不到教室，教室利用率也没法算。请先取消或改掉这些课，或者改成「停用」。"
   );
 };
@@ -2182,7 +2427,9 @@ function describeConflicts(db: Database, report: ConflictReport): string {
     parts.push(`${name} 这个时段已有课`);
   }
   if (report.classroom.length > 0) {
-    const name = db.classrooms.find((item) => item.id === report.classroom[0]?.classroomId)?.name ?? "该教室";
+    // 点名教室要按**显示口径**（「校区·教室名」）—— 机构在卡片上习惯看到的写法
+    const room = db.classrooms.find((item) => item.id === report.classroom[0]?.classroomId);
+    const name = room === undefined ? "该教室" : classroomLabel(room);
     parts.push(`${name} 这个时段已被占用`);
   }
   if (report.students.length > 0) {
@@ -3567,9 +3814,20 @@ const localApi = {
    * 教师表单一次交上来十来个字段（资料 / 网站展示 / 顺序 / 可带科目…），
    * 教室表单连**可用时段**一起交上来 —— 而可用时段直接决定排课冲突判定，
    * 被别人静默盖掉就会出现"排了节不该排的课，却没人知道为什么"。
+   *
+   * v30 起两边各接一个 `normalize` 钩子：整份提交意味着**新字段也跟着一起进来**，
+   * 归一（去空白、补空串）与校验（「全职 / 兼职」只认两个值）必须挂在**唯一那道写入闸**上，
+   * 否则页面、批量导入、`/api/call` 三条路各有各的口径。
    */
   teachers: {
-    ...versionedCollection<Teacher>((db) => db.teachers, "t", "教师", teacherDeleteRefusal),
+    ...versionedCollection<Teacher>(
+      (db) => db.teachers,
+      "t",
+      "教师",
+      teacherDeleteRefusal,
+      // 先校验后归一（顺序不能反，理由见 normalizeTeacherStrict）
+      normalizeTeacherStrict,
+    ),
     /**
      * 在职**教师**，排课下拉用。
      *
@@ -3585,7 +3843,22 @@ const localApi = {
     },
   },
 
-  classrooms: versionedCollection<Classroom>((db) => db.classrooms, "c", "教室", classroomDeleteRefusal),
+  classrooms: versionedCollection<Classroom>(
+    (db) => db.classrooms,
+    "c",
+    "教室",
+    classroomDeleteRefusal,
+    /*
+     * 教室的归一：去空白 + 把「校区·教室名」的合并写法拆开（v31）。
+     * 「校区」是自由文本、没有可拒绝的取值域，因此这里**不抛错**，只归一。
+     *
+     * 为什么服务层也拆（而不是只在迁移 / 导入里拆）：机构的口径是「**·** 就是校区与教室名的
+     * 连接符」—— 名字里带「·」、校区空着，就是那条旧的合并写法。放在这里之后
+     * **同一条记录无论从哪条路进来，存下来的形状都一样**（否则表单建的和迁移修的是两种形状，
+     * 校区的候选值也会随"这间房是怎么来的"而不同）。拆分不改变显示（`classroomLabel` 拼回来一样）。
+     */
+    normalizeClassroom,
+  ),
 
   /**
    * 收款流水（钱的账本）：**只读 + 一条正规入口 `record`**。
@@ -5755,6 +6028,7 @@ export type {
   Payment,
   ClassroomAvailability,
   ClassroomKind,
+  TeacherEmployment,
   CompletionResult,
   HomeworkRecord,
   LessonRecord,
@@ -5818,6 +6092,7 @@ export {
   PAYMENT_METHODS,
   TRANSACTION_KINDS,
   CLASSROOM_KINDS,
+  TEACHER_EMPLOYMENTS,
   ENROLLMENT_STATUSES,
   FOCUS_OPTIONS,
   INTERACTION_OPTIONS,

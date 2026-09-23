@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/Button";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { api } from "@/lib/backend/api";
 import { CLASS_HOURS_PER_DAY, describeMinutes, describeRate } from "@/lib/backend/stats";
+// 教室名的唯一显示口径（「校区·教室名」，v31）
+import { classroomLabel } from "@/lib/backend/classrooms";
 import { formatDayLabel, weekDays } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
 import { LoadFailure } from "@/components/admin/LoadFailure";
@@ -138,7 +140,7 @@ export default function AdminStatsPage() {
           {(data?.rooms ?? []).map((room) => (
             <li key={room.classroom.id} className="px-4 py-3">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                <span className="text-sm font-medium text-ink-900">{room.classroom.name}</span>
+                <span className="text-sm font-medium text-ink-900">{classroomLabel(room.classroom)}</span>
                 <span className="text-xs text-ink-500">{room.classroom.kind}</span>
                 <span className="text-xs tabular text-ink-600">
                   {room.lessonCount} 节 · {describeMinutes(room.bookedMinutes)} / 可用{" "}

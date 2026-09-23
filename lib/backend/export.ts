@@ -21,6 +21,8 @@
  */
 
 import { partitionPathLabel, partitionPlace } from "./course-partitions";
+// 教室名的唯一显示口径（「校区·教室名」，v31）：排课表与 ICS 的「地点」都用它
+import { classroomLabel } from "./classrooms";
 import type { Database } from "./types";
 import {
   createCsv,
@@ -64,6 +66,18 @@ export type ExportDataset = {
 
 const nameOf = <T extends { id: string; name: string }>(list: T[], id: string): string =>
   list.find((item) => item.id === id)?.name ?? "";
+
+/**
+ * 教室在导出里的写法：**显示口径**（「校区·教室名」，v31）。
+ *
+ * 排课那张表的「教室」列与 ICS 的「地点」都是**给人看的**（导出给老师、进手机日历），
+ * 因此与后台卡片上保持同一个写法；教室那张表自己不在这里 —— 它是**数据**（名称与校区分两列，
+ * 见下面 `classrooms` 数据集的说明）。
+ */
+const classroomLabelOf = (list: Database["classrooms"], id: string): string => {
+  const room = list.find((item) => item.id === id);
+  return room === undefined ? "" : classroomLabel(room);
+};
 
 const joinNames = <T extends { id: string; name: string }>(list: T[], ids: string[]): string =>
   ids.map((id) => nameOf(list, id)).filter((name) => name !== "").join("、");
@@ -145,7 +159,7 @@ export const EXPORT_DATASETS: ExportDataset[] = [
           lesson.subject,
           lesson.form,
           nameOf(db.teachers, lesson.teacherId),
-          nameOf(db.classrooms, lesson.classroomId),
+          classroomLabelOf(db.classrooms, lesson.classroomId),
           joinNames(db.students, lesson.studentIds),
           lesson.status,
           lesson.note,
@@ -159,7 +173,7 @@ export const EXPORT_DATASETS: ExportDataset[] = [
         .map((lesson) => ({
           uid: `lesson-${lesson.id}@nexgenedu`,
           title: lesson.subject === "" ? "课程" : lesson.subject,
-          location: nameOf(db.classrooms, lesson.classroomId),
+          location: classroomLabelOf(db.classrooms, lesson.classroomId),
           description: [
             lesson.form,
             nameOf(db.teachers, lesson.teacherId),
@@ -195,14 +209,21 @@ export const EXPORT_DATASETS: ExportDataset[] = [
   {
     id: "classrooms",
     label: "教室",
-    description: "每间教室一行：用途、容量、可用时段、已排课次。",
+    description: "每间教室一行：校区、名称、用途、容量、可用时段、已排课次。",
     formats: ["csv", "json"],
     rows: (db) => db.classrooms,
+    /*
+     * 这一张是**数据**（可能被拿去再导回来），不是给人念的名字，因此：
+     *   - 「名称」只写教室名本身、**不拼校区**（拼了的话回读时又得靠拆分救回来）；
+     *   - 单独一列「校区」—— 与批量导入那两列（`ENTITY_SPECS.classrooms`）**同形**，
+     *     导出/导入才是可往返的。界面上的显示口径（`classroomLabel`）不在这里用。
+     */
     columns: (db) => ({
-      headers: ["名称", "用途", "容量", "可用时段", "已排课次"],
+      headers: ["校区", "名称", "用途", "容量", "可用时段", "已排课次"],
       row: (item: never) => {
         const room = item as Database["classrooms"][number];
         return [
+          room.campus,
           room.name,
           room.kind,
           String(room.capacity),

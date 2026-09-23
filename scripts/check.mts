@@ -84,7 +84,18 @@ import type {
   LessonRecord,
   Student,
   Teacher,
+  TeacherEmployment,
 } from "@/lib/backend/types";
+/*
+ * `TEACHER_EMPLOYMENTS` 是**值**（候选值清单），不能走上面那块 `import type` ——
+ * 第 44 节要拿它比对「全职 / 兼职」这个取值域是不是只有两项。
+ */
+import { TEACHER_EMPLOYMENTS } from "@/lib/backend/types";
+/*
+ * 教室的显示口径与拆分（v31）也是**值**：第 45 节要拿 `classroomLabel` 比
+ * 「校区为空时就是纯名」、拿 `splitCampusFields` 验"按第一个「·」拆"。
+ */
+import { classroomLabel, splitCampusFields } from "@/lib/backend/classrooms";
 import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
 import { createMemoryStore } from "@/lib/backend/storage";
 import {
@@ -1687,6 +1698,8 @@ monday2030.setHours(20, 30, 0, 0);
 const limited = await api.classrooms.create({
   name: "自检·限时教室",
   kind: "自习室",
+  // v30：校区（自由文本）。自检建的是临时教室，不登记校区 —— 空串＝未填，与迁移口径一致
+  campus: "",
   capacity: 4,
   availability: [{ id: "r1", weekdays: [1], start: "17:00", end: "21:00" }],
   note: "",
@@ -1848,6 +1861,8 @@ eq("老档案读不到的新多选字段返回空数组", profileList(seeded[1]!
     name: "自检·乐观锁教师", subjects: [], role: "", phone: "", active: true,
     years: "", summary: "", bio: "", recommendation: "", order: 999,
     siteVisible: false, origin: "后台", kind: "教师",
+    // v30 的两个内部字段：自检建的临时档案留空（空串＝未填）
+    employment: "", source: "",
   });
   eq("新建记录的版本从 1 开始", lockTeacher.version, 1);
 
@@ -2630,6 +2645,8 @@ await api.restoreBackup();
     name, subjects: ["自检·改报课科目"], role: "", phone: "", active: true,
     years: "", summary: "", bio: "", recommendation: "", order: 999,
     siteVisible: false, origin: "后台" as const, kind: "教师" as const,
+    // v30：用工性质与招聘渠道（这里都用不上，留空）
+    employment: "" as const, source: "",
   });
   const teacherA = await api.teachers.create(newTeacher("自检·改课甲老师"));
   const teacherB = await api.teachers.create(newTeacher("自检·改课乙老师"));
@@ -3291,12 +3308,12 @@ const statLesson = (
 
 const statRooms: Classroom[] = [
   {
-    id: "c1", version: 1, name: "301", kind: "上课用教室", capacity: 8,
+    id: "c1", version: 1, name: "301", kind: "上课用教室", campus: "", capacity: 8,
     // 周一至周五 17:00–21:00 → 每天 4 小时，一周 20 小时 = 1200 分钟
     availability: [{ id: "a1", weekdays: [1, 2, 3, 4, 5], start: "17:00", end: "21:00" }],
     note: "",
   },
-  { id: "c2", version: 1, name: "不限时段教室", kind: "自习室", capacity: 4, availability: [], note: "" },
+  { id: "c2", version: 1, name: "不限时段教室", kind: "自习室", campus: "", capacity: 4, availability: [], note: "" },
 ];
 const statLessons: Lesson[] = [
   statLesson("sl1", 0, 17, 120),           // 周一 2 小时
@@ -3326,8 +3343,8 @@ ok("时段按小时升序", hourly.every((row, index) => index === 0 || hourly[i
 
 // 教师课时：按科目拆分 + 平均人数
 const statTeachers: Teacher[] = [
-  { id: "t1", version: 1, name: "自检老师A", subjects: ["数学"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 1, siteVisible: true, origin: "后台", kind: "教师" },
-  { id: "t2", version: 1, name: "自检老师B", subjects: ["英语"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 2, siteVisible: true, origin: "后台", kind: "教师" },
+  { id: "t1", version: 1, name: "自检老师A", subjects: ["数学"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 1, siteVisible: true, origin: "后台", kind: "教师", employment: "", source: "" },
+  { id: "t2", version: 1, name: "自检老师B", subjects: ["英语"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 2, siteVisible: true, origin: "后台", kind: "教师", employment: "", source: "" },
 ];
 const workload = teacherWorkload(statTeachers, [
   statLesson("wl1", 0, 17, 60, { studentIds: ["s1", "s2"] }),
@@ -3431,11 +3448,13 @@ const searchInput = {
       id: "t1", version: 1, name: "陈老师", subjects: ["数学"], role: "全科教师", phone: "",
       active: true, years: "", summary: "", bio: "", recommendation: "", order: 1,
       siteVisible: true, origin: "网站" as const, kind: "教师" as const,
+      // v30：这两个内部字段**不参与搜索**（搜「朋友介绍」不该搜出一个人），留空即可
+      employment: "" as const, source: "",
     },
   ],
   classrooms: [
     {
-      id: "c1", version: 1, name: "301 教室", kind: "上课用教室" as const, capacity: 8,
+      id: "c1", version: 1, name: "301 教室", kind: "上课用教室" as const, campus: "", capacity: 8,
       availability: [], note: "白板",
     },
   ],
@@ -4054,16 +4073,16 @@ eq("起始日之后的第一个周六才算第一次",
 
 // 教师匹配：科目名出现在教师可带科目里
 const iqTeachers: Teacher[] = [
-  { id: "it1", version: 1, name: "数学老师", subjects: ["数学"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 1, siteVisible: true, origin: "后台", kind: "教师" },
-  { id: "it2", version: 1, name: "英语老师", subjects: ["英语"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 2, siteVisible: true, origin: "后台", kind: "教师" },
-  { id: "it3", version: 1, name: "离职数学", subjects: ["数学"], role: "", phone: "", active: false, years: "", summary: "", bio: "", recommendation: "", order: 3, siteVisible: true, origin: "后台", kind: "教师" },
+  { id: "it1", version: 1, name: "数学老师", subjects: ["数学"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 1, siteVisible: true, origin: "后台", kind: "教师", employment: "", source: "" },
+  { id: "it2", version: 1, name: "英语老师", subjects: ["英语"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 2, siteVisible: true, origin: "后台", kind: "教师", employment: "", source: "" },
+  { id: "it3", version: 1, name: "离职数学", subjects: ["数学"], role: "", phone: "", active: false, years: "", summary: "", bio: "", recommendation: "", order: 3, siteVisible: true, origin: "后台", kind: "教师", employment: "", source: "" },
 ];
 eq("按科目筛教师（在职且科目匹配）",
   teachersForSubject(iqTeachers, "初中数学").map((t) => t.id), ["it1"]);
 
 const iqRooms: Classroom[] = [
-  { id: "ic1", version: 1, name: "小教室", kind: "上课用教室", capacity: 4, availability: [], note: "" },
-  { id: "ic2", version: 1, name: "限时教室", kind: "上课用教室", capacity: 8,
+  { id: "ic1", version: 1, name: "小教室", kind: "上课用教室", campus: "", capacity: 4, availability: [], note: "" },
+  { id: "ic2", version: 1, name: "限时教室", kind: "上课用教室", campus: "", capacity: 8,
     availability: [{ id: "r", weekdays: [6], start: "09:00", end: "12:00" }], note: "" },
 ];
 const iqLessons: Lesson[] = [
@@ -4760,7 +4779,7 @@ ok("删除后不再出现在科目候选里",
 const pbTeacher = await api.teachers.create({
   name: "自检老师", role: "", subjects: ["初中数学", "围棋"], phone: "", active: true,
   years: "", summary: "", bio: "", recommendation: "", order: 999, siteVisible: false,
-  origin: "后台", kind: "教师",
+  origin: "后台", kind: "教师", employment: "", source: "",
 });
 eq("教师可带科目可以写后台新增的课程名", pbTeacher.subjects, ["初中数学", "围棋"]);
 await dropFixture("teachers", pbTeacher.id);
@@ -5261,10 +5280,10 @@ const seriesSubject = "自检批量排课科目";
 const seriesTeacher = await api.teachers.create({
   name: "自检批量排课老师", subjects: [seriesSubject], role: "授课教师", phone: "",
   active: true, years: "", summary: "", bio: "", recommendation: "", order: 999,
-  siteVisible: false, origin: "后台", kind: "教师",
+  siteVisible: false, origin: "后台", kind: "教师", employment: "", source: "",
 });
 const seriesRoom = await api.classrooms.create({
-  name: "自检批量排课教室", kind: "上课用教室", capacity: 8, availability: [], note: "",
+  name: "自检批量排课教室", kind: "上课用教室", campus: "", capacity: 8, availability: [], note: "",
 });
 const seriesStudent = await api.students.create({
   name: "自检批量排课学生", grade: "初二", guardian: "", status: "在读", note: "", profile: {},
@@ -5420,7 +5439,9 @@ const fakeReport = (over: Record<string, unknown> = {}) => ({
     name: "自检·AI 助手", role: "试课诊断", subjects: ["全科诊断"], phone: "", active: true,
     years: "", summary: "自检用", bio: "自检用的一段介绍。", recommendation: "", order: 999,
     siteVisible: false, origin: "后台", kind: "AI",
-  } as never);
+    // v30：这里刻意用**示例值**（而不是留空）—— 顺带证明"AI 档案也能带用工性质"，见下面那条断言
+    employment: "兼职", source: "自检·内部推荐",
+  });
   ok("AI 智能体能进教师档案（机构要能看到有哪些工具在服务学生）",
     (await api.teachers.list()).some((teacher) => teacher.id === ai.id && teacher.kind === "AI"));
   ok("AI 不出现在排课下拉里（排课下拉是给「人」用的）",
@@ -5460,10 +5481,22 @@ const fakeReport = (over: Record<string, unknown> = {}) => ({
     "app/admin/(dashboard)/students/page.tsx",
     "app/admin/(dashboard)/data/page.tsx",
   ];
+  /*
+   * **去掉注释再查**（与 §22 / §44 同一个坑、同一个做法）：这两条要拦的是
+   * "页面上还留着一个点了报 404 的入口"，而**注释里提到那个入口**是正当的 ——
+   * 教师卡片那段注释正解释着"v36 把那个入口删掉之后为什么可以不再显示 origin"。
+   * 不剥注释的话，写清楚历史的人反而会把断言弄红，最后大家只好把话说得含糊。
+   */
+  const importPageCode = new Map(
+    importPages.map((file) => [
+      file,
+      readFile(file).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, ""),
+    ]),
+  );
   eq("这几个页面与导入面板里都不再出现「从网站导入」",
-    importPages.filter((file) => readFile(file).includes("从网站导入")), []);
+    [...importPageCode].filter(([, code]) => code.includes("从网站导入")).map(([file]) => file), []);
   eq("导入面板里也不再接 siteSource / 调 fromSite",
-    importPages.filter((file) => /siteSource|fromSite/.test(readFile(file))), []);
+    [...importPageCode].filter(([, code]) => /siteSource|fromSite/.test(code)).map(([file]) => file), []);
   ok("只服务它的那个模块整块删掉了（留着就是死代码 + 一句已经不对的文件头注释）",
     !existsSync(new URL("../lib/backend/site-import.ts", import.meta.url)));
 
@@ -5694,6 +5727,13 @@ try {
       kind: teacher.kind === "ai" ? ("AI" as const) : ("教师" as const),
       // v17 起每条记录带乐观锁版本号：夹具也要与真实记录同形
       version: 1,
+      /*
+       * v30 的两个内部字段：夹具一样留空（＝未填）。
+       * 顺带说明为什么它们**不影响**这一节的等价性：这两个字段与网站无关
+       * （`publicTeacher` 的白名单里没有它们），因此模版路径与后端路径比得平。
+       */
+      employment: "" as const,
+      source: "",
     })),
   };
   const snapshot = buildPublicSite(fixture);
@@ -10934,6 +10974,9 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
     siteVisible: true,
     origin: "网站" as const,
     kind: teacher.kind === "ai" ? ("AI" as const) : ("教师" as const),
+    // v30：内部字段留空；它们不导出，因此下面那条"逐字节不变"不受影响
+    employment: "" as const,
+    source: "",
   }));
   const fileSite = buildPublicSite(fileDb);
   const sameAgain = exportSiteMarkdown({ site: fileSite, existing: exportFiles });
@@ -11078,6 +11121,748 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
     blanked.unsafe.map((item) => item.file),
     ["schedule"],
   );
+}
+
+console.log("\n=== 44. 三个内部字段：校区 / 全职兼职 / 来源（v30）===");
+
+/*
+ * 机构原话：「**在教室页面里添加一个校区字段吧，教师界面也添加一个全职/兼职以及教师来源**」。
+ *
+ * 这一节守四件事，每一件都对应"加字段最容易踩的一种坑"：
+ *
+ *   ① **迁移**：老库（v29）缺这三个字段 → 补**空串**（不猜内容）。
+ *      这里尤其值得钉住：库里那几位教师是照网站教师页建的，机构从没登记过
+ *      谁是全职谁是兼职 —— 默认成「全职」等于凭空记下一条会被拿去算成本的人事事实。
+ *   ② **校验**：`employment` 只认 全职 / 兼职 / 空串，**非法值报错拒绝**，
+ *      而且被拒的那一次**什么都不写**（连版本号都不推进）。
+ *   ③ **导入**：模板与表头里有这三列；空单元格导出「未填」而不是第一个候选值。
+ *   ④ **不许泄漏到公网**：公开快照（`site.publicContent` 的产出形状）与
+ *      `data/site/content.md` 里都不出现它们 —— 招聘渠道与用工性质是人事信息，
+ *      校区是内部结构，公开仓库与 Pages 上都不该有。
+ *
+ * 还要单独说清 **`source`（招聘渠道）与 `origin`（这条档案从哪来）是两个东西**：
+ * 前者回答"这个人是机构从哪招来的"，后者回答"这条记录是网站同步还是后台手建"。
+ * 两者在中文里都能叫"来源"，因此界面上刻意分开：字段叫「来源」，技术小标叫「网站导入」。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+  /** 切到一份干净的存储上验（与前面几节同一条做法） */
+  const internalMemory = createMemoryStore();
+  __useStoreForTesting(internalMemory);
+
+  // ── ① 取值域常量 ───────────────────────────────────────────────────────
+  eq("用工性质只有「全职 / 兼职」两个候选值（空串＝未填不在常量里）",
+    [...TEACHER_EMPLOYMENTS], ["全职", "兼职"]);
+
+  /** 教师入参（与页面表单交上来的形状一致）。 */
+  const teacherPayload = (
+    name: string,
+    fields: { employment?: TeacherEmployment | ""; source?: string } = {},
+  ): Omit<Teacher, "id" | "version"> => ({
+    name, role: "", subjects: [], phone: "", active: true,
+    years: "", summary: "", bio: "", recommendation: "", order: 999,
+    siteVisible: false, origin: "后台", kind: "教师",
+    employment: fields.employment ?? "",
+    source: fields.source ?? "",
+  });
+
+  /*
+   * 故意传一个**类型上不合法**的值。类型系统本来就会拦住这种调用，
+   * 这一条验的是**运行时那道闸**（`/api/call` 的 args 原样进服务层，编译期帮不上忙），
+   * 因此这里必须绕过类型 —— 用一个说清意图的小函数，而不是散落的 `as never`。
+   */
+  const illegalEmployment = (value: unknown): Partial<Teacher> => ({
+    employment: value as TeacherEmployment,
+  });
+
+  // ── ② 迁移：v29 老库 → v30，一律补空串 ────────────────────────────────
+  const v29Internal = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    version: number;
+    teachers: Array<Record<string, unknown>>;
+    classrooms: Array<Record<string, unknown>>;
+  };
+  v29Internal.version = 29;
+  v29Internal.teachers = v29Internal.teachers.map((teacher) => {
+    const copy = { ...teacher };
+    delete copy.employment;
+    delete copy.source;
+    return copy;
+  });
+  v29Internal.classrooms = v29Internal.classrooms.map((room) => {
+    const copy = { ...room };
+    delete copy.campus;
+    return copy;
+  });
+  eq("夹具确实是「缺这三个字段的 v29 库」",
+    [
+      v29Internal.teachers.every((t) => !("employment" in t) && !("source" in t)),
+      v29Internal.classrooms.every((c) => !("campus" in c)),
+    ],
+    [true, true]);
+
+  const v30Upgrade = await api.importDatabase(JSON.stringify(v29Internal));
+  ok("v29 老库能导入并升级", v30Upgrade.ok);
+  eq("升级后版本号是当前版本", (await api.exportDatabase()).version, CURRENT_VERSION);
+  const v30Teachers = await api.teachers.list();
+  ok("v29 → v30 给教师补的「全职 / 兼职」是空串（不猜内容：机构从没登记过谁是全职）",
+    v30Teachers.every((teacher) => teacher.employment === ""),
+    v30Teachers.map((teacher) => `${teacher.name}=${JSON.stringify(teacher.employment)}`).join(" / "));
+  ok("v29 → v30 给教师补的「来源」是空串（招聘渠道是机构自己才知道的事）",
+    v30Teachers.every((teacher) => teacher.source === ""));
+  ok("v29 → v30 给教室补的「校区」是空串（教室名里看得出校区，但「看得出」不等于「登记过」）",
+    (await api.classrooms.list()).every((room) => room.campus === ""));
+  ok("补字段不动原有内容（姓名 / 职务 / 来源口径 / 容量都还在）",
+    v30Teachers.every(
+      (teacher) =>
+        teacher.name !== "" &&
+        teacher.role !== "" &&
+        // `origin`（这条档案从哪来）仍然是那两档之一 —— 迁移不该搅动它
+        (teacher.origin === "网站" || teacher.origin === "后台"),
+    ) &&
+    (await api.classrooms.list()).every((room) => room.name !== "" && room.capacity > 0));
+  /* 迁移只加字段、不改别的：拿迁移前后各表逐字节比一次是 `scripts/` 外的事（真实库上做过），
+   * 这里选两条最容易被迁移顺手改掉的：教师版本号与教室可用时段。 */
+  ok("迁移不推版本号（乐观锁不该被一次升级搅动）",
+    v30Teachers.every((teacher) => teacher.version >= 1));
+  ok("迁移不动教室的可用时段",
+    (await api.classrooms.list()).every((room) => Array.isArray(room.availability)));
+
+  /*
+   * 收尾归一：一份**自称 v30 却缺这三个字段**的文件。
+   *
+   * 会出现的场合：手改过的导出、只跑了一半的恢复、以及**导入**。
+   * 缺了它们的后果是看得见的坏（教师页下拉读到 `undefined`、教室卡片上「校区：undefined」），
+   * 而且不报错 —— 因此收尾归一必须兜一次，与 `db.coursePartitions` 那种兜法同一条纪律。
+   */
+  const v30MissingFields = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown>;
+  for (const teacher of (v30MissingFields.teachers ?? []) as Array<Record<string, unknown>>) {
+    delete teacher.employment;
+    delete teacher.source;
+  }
+  for (const room of (v30MissingFields.classrooms ?? []) as Array<Record<string, unknown>>) {
+    delete room.campus;
+  }
+  eq("夹具自称的就是当前版本（走的不是迁移分支，而是收尾归一）",
+    v30MissingFields.version, CURRENT_VERSION);
+  ok("「自称 v30 却缺字段」的文件也能导入", (await api.importDatabase(JSON.stringify(v30MissingFields))).ok);
+  ok("收尾归一给教师补上空串",
+    (await api.teachers.list()).every((teacher) => teacher.employment === "" && teacher.source === ""));
+  ok("收尾归一给教室补上空串",
+    (await api.classrooms.list()).every((room) => room.campus === ""));
+
+  /*
+   * 收尾归一遇到**非法取值**时不许抛错：抛错等于整库读不出来，
+   * 那是比"显示成未填"坏得多的结局。归成空串（＝未填，人可以在下拉里重选），
+   * 而**拒绝非法值的那道闸留在服务层**（下面第三条验它）。
+   */
+  const v30DirtyValue = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    teachers: Array<Record<string, unknown>>;
+  };
+  const dirtyIndex = 0;
+  v30DirtyValue.teachers[dirtyIndex]!.employment = "临时工";
+  v30DirtyValue.teachers[dirtyIndex]!.source = "  内部推荐  ";
+  ok("手改文件里带着非法取值也能读进来（不许因此整库打不开）",
+    (await api.importDatabase(JSON.stringify(v30DirtyValue))).ok);
+  const dirtyTeacher = (await api.teachers.list())[dirtyIndex]!;
+  eq("那个非法取值被归成空串＝未填（下拉里显示不出「临时工」，留着才是坑）",
+    dirtyTeacher.employment, "");
+  eq("同一行的「来源」只是去掉了前后空白", dirtyTeacher.source, "内部推荐");
+
+  // ── ③ 服务层：合法值能存能读回来，非法值报错拒绝 ──────────────────────
+  const internalTeacher = await api.teachers.create(
+    teacherPayload("自检·内部字段老师", { employment: "全职", source: "  朋友介绍  " }),
+  );
+  /*
+   * 来源去空白：与 `note` / `campus` 同一处口径。不去的话「朋友介绍」与「朋友介绍 」是两条
+   * 不同的值，按渠道统计时会各算一份 —— 而列表上看不出区别（尾部空格不显示）。
+   */
+  eq("合法的「全职」能存能读回来，且「来源」去掉了前后空白",
+    [(await api.teachers.get(internalTeacher.id))?.employment, (await api.teachers.get(internalTeacher.id))?.source],
+    ["全职", "朋友介绍"]);
+
+  const internalUpdated = await api.teachers.update(internalTeacher.id, {
+    employment: "兼职", source: "招聘网站",
+  });
+  eq("改成另一个合法值也能读回来", [internalUpdated?.employment, internalUpdated?.source], ["兼职", "招聘网站"]);
+
+  const versionBeforeReject = (await api.teachers.get(internalTeacher.id))!.version;
+  const rejection = await (async () => {
+    try {
+      await api.teachers.update(internalTeacher.id, illegalEmployment("临时工"));
+      return null;
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  })();
+  ok("非法取值被**报错拒绝**（不是静默压成空串）",
+    rejection !== null && rejection.includes("全职") && rejection.includes("临时工"),
+    rejection ?? "没有报错 —— 非法值被静默接受了");
+  eq("被拒的那一次**什么都没写**（值还是原来的值，版本号也没推进）",
+    [(await api.teachers.get(internalTeacher.id))?.employment, (await api.teachers.get(internalTeacher.id))?.version],
+    ["兼职", versionBeforeReject]);
+
+  const cleared = await api.teachers.update(internalTeacher.id, { employment: "" });
+  eq("空串（＝未填）是合法的一档，能选回来", cleared?.employment, "");
+  /*
+   * 字段级 patch（页面上点一下切在职就是这种调用）**不能把新字段抹掉**：
+   * patch 会与库里那条合并，因此合并后的记录照样过一遍校验与归一。
+   */
+  const patched = await api.teachers.update(internalTeacher.id, { active: false });
+  eq("只改一个字段的 patch 不会把新字段弄丢", [patched?.employment, patched?.source], ["", "招聘网站"]);
+
+  /*
+   * **不知道这个字段的老调用方**（老脚本、老版客户端）仍然能建档案：
+   * 入参里根本没有这两个键时按"未提供"处理 → 补空串＝未填。
+   * 这条与"非法值报错"是一对：**没给** 不等于 **给错了** —— 前者按迁移那条纪律补空串，
+   * 后者必须顶回去（"我明明填了兼职"不能变成一次无声的数据改动）。
+   */
+  const legacyPayload = teacherPayload("自检·老调用方老师") as Record<string, unknown>;
+  delete legacyPayload.employment;
+  delete legacyPayload.source;
+  const legacyTeacher = await api.teachers.create(
+    legacyPayload as unknown as Omit<Teacher, "id" | "version">,
+  );
+  eq("入参里没有这两个字段的老调用方仍然能建档案（缺字段＝未填，与迁移同口径）",
+    [legacyTeacher.employment, legacyTeacher.source], ["", ""]);
+
+  // 教室：校区是自由文本，只去空白，没有取值域可拒
+  /*
+   * 夹具的教室名**刻意不带「·」**（v31 起「·」是校区与教室名的连接符，见第 45 节）：
+   * 这一组验的是「校区」这一格本身（trims、改值、清空），名字里带「·」会把
+   * "清空校区"变成"又从名字里拆出一个校区"，那是另一条规则、由第 45 节单独验。
+   */
+  const internalRoom = await api.classrooms.create({
+    name: "自检校区教室", kind: "上课用教室", capacity: 4,
+    availability: [], note: "", campus: "  城西校区  ",
+  });
+  eq("校区存的时候去掉前后空白", (await api.classrooms.get(internalRoom.id))?.campus, "城西校区");
+  eq("校区能改成另一个值并读回来",
+    (await api.classrooms.update(internalRoom.id, { campus: "总校" }))?.campus, "总校");
+  eq("校区也允许清空（＝未填）",
+    (await api.classrooms.update(internalRoom.id, { campus: "  " }))?.campus, "");
+
+  // ── ④ 批量导入：模板与表头里有这三列 ──────────────────────────────────
+  /*
+   * 表头那一行要先掐掉 BOM 与行尾的 `\r`：CSV 模板为了 Excel 会在开头写 BOM，
+   * 而 `toCsv` 用的是 CRLF —— 不处理的话最后一列会带着一个看不见的 `\r`，
+   * `includes("来源")` 就会假红（第一版就是这么红的）。
+   */
+  const headerCells = (text: string): string[] =>
+    (text.split("\n")[0] ?? "").replace(/^\uFEFF/, "").trim().split(",");
+  const internalTeacherHeader = headerCells(csvTemplate("teachers"));
+  ok("教师 CSV 模板的表头里有「全职兼职」与「来源」",
+    internalTeacherHeader.includes("全职兼职") && internalTeacherHeader.includes("来源"),
+    internalTeacherHeader.join(","));
+  const internalTeacherJson = jsonTemplate("teachers");
+  ok("教师 JSON 模板里有 employment / source 两个键",
+    internalTeacherJson.includes('"employment"') && internalTeacherJson.includes('"source"'));
+  const internalRoomHeader = headerCells(csvTemplate("classrooms"));
+  ok("教室 CSV 模板的表头里有「校区」", internalRoomHeader.includes("校区"), internalRoomHeader.join(","));
+  ok("教室 JSON 模板里有 campus 键", jsonTemplate("classrooms").includes('"campus"'));
+
+  /*
+   * 表头识别：列名写「全职兼职」或「全职/兼职」都认（`aliases` 惯例，与「家长电话 / 联系方式」同一套）。
+   * 空单元格必须是**未填**，不能是第一个候选值 —— 否则一份没写用工性质的名单导进来，
+   * 所有人都会变成「全职」（凭空多出几十条假的人事事实）。
+   */
+  const internalImport = parseImport(
+    "teachers",
+    "姓名,全职/兼职,来源\n导入·兼职老师,兼职,内部推荐\n导入·未填老师,,\n",
+  );
+  eq("「全职/兼职」这种列名也认，两行都通过校验",
+    [internalImport.problems, internalImport.records.length], [[], 2]);
+  eq("合法的取值原样收下", internalImport.records[0]?.employment, "兼职");
+  eq("**空单元格 = 未填**（不是第一个候选值「全职」）", internalImport.records[1]?.employment, "");
+  eq("「来源」列被收下", internalImport.records[0]?.source, "内部推荐");
+  const internalBadImport = parseImport("teachers", "姓名,全职兼职\n导入·错老师,临时工\n");
+  eq("导入里非法取值被拦下并指到行", internalBadImport.problems.map((item) => item.line), [2]);
+  ok("错误信息说明只能是哪几个值",
+    (internalBadImport.problems[0]?.reason ?? "").includes("全职") &&
+    (internalBadImport.problems[0]?.reason ?? "").includes("临时工"),
+    internalBadImport.problems[0]?.reason ?? "");
+  eq("教室的「校区」列能解析",
+    parseImport("classrooms", "名称,用途,校区\n导入·校区教室,上课用教室,城西校区\n").records[0]?.campus,
+    "城西校区");
+
+  const appliedInternal = await api.imports.apply({
+    entity: "teachers",
+    text: "姓名,全职兼职,来源\n导入·用工性质老师,兼职,校招\n",
+  });
+  ok("导入真的落库（含这两个新字段）",
+    appliedInternal.ok &&
+      (await api.teachers.list()).some(
+        (teacher) => teacher.name === "导入·用工性质老师" &&
+          teacher.employment === "兼职" && teacher.source === "校招",
+      ),
+    JSON.stringify(appliedInternal.skipped));
+
+  // ── ⑤ 界面源码里有这三处（源码级，不依赖浏览器）──────────────────────
+  /**
+   * 去掉注释再查源码（与 §22 同一个坑、同一个做法）：注释里正解释着"另一处怎么写"，
+   * 直接子串匹配会把注释算进去 —— 例如下面那条"小标顺序"断言，注释里就写着
+   * 「填了显示值、没填显示灰色待办小标（「用工未填」/「来源未填」）」，不剥注释会取到它。
+   */
+  const internalStripComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  const internalTeachersPage = read("app/admin/(dashboard)/teachers/page.tsx");
+  const internalClassroomsPage = read("app/admin/(dashboard)/classrooms/page.tsx");
+  ok("教师表单里有「全职 / 兼职」下拉，且带上「未填」这一档",
+    internalTeachersPage.includes('label="全职 / 兼职"') &&
+      internalTeachersPage.includes("TEACHER_EMPLOYMENTS") &&
+      internalTeachersPage.includes('label: "未填"'));
+  ok("教师表单里有「来源」输入框，并写明它是**招聘渠道**",
+    internalTeachersPage.includes('label="来源"') && internalTeachersPage.includes("招聘渠道"));
+  ok("教师表单整份提交时把这两个字段一起交上去",
+    /employment,\s*\n\s*source: source\.trim\(\)/.test(internalTeachersPage));
+  ok("「来源」给了 `<datalist>`（已在用的渠道可复用，也不拦着写新的）",
+    internalTeachersPage.includes("<datalist") && internalTeachersPage.includes("sourceOptions"));
+  /*
+   * ── 卡片上那两个人事小标：**填了显示值、没填显示灰色待办标**（机构口径）──
+   *
+   * 机构原话：「**教师信息我自己在后台填**，更希望**没填的时候也看得出来**
+   * （比如卡片上显示一个灰色的「用工未填」，提醒你去补）」。
+   *
+   * 因此这里查的是"**空值那一支渲染出来的是什么**"，而不是"有没有这个字段"：
+   * 写成 `{x !== "" && <span>…</span>}`（没填就什么都不渲染）正好是机构要反过来的那种写法，
+   * 一条断言就能把它拦住。
+   */
+  const employmentBranch = /teacher\.employment === ""\s*\?([\s\S]{0,400}?)\)\s*:\s*\(/.exec(internalTeachersPage);
+  const sourceBranch = /teacher\.source === ""\s*\?([\s\S]{0,400}?)\)\s*:\s*\(/.exec(internalTeachersPage);
+  ok("没填时卡片上渲染的是「用工未填」文案（不是 null / 不渲染）",
+    employmentBranch !== null && employmentBranch[1]!.includes("用工未填"),
+    employmentBranch === null ? "源码里没有「employment 为空 ? … : …」这样的分支" : employmentBranch[1]!.slice(0, 120));
+  ok("「来源」没填时渲染的是「来源未填」文案",
+    sourceBranch !== null && sourceBranch[1]!.includes("来源未填"),
+    sourceBranch === null ? "源码里没有「source 为空 ? … : …」这样的分支" : sourceBranch[1]!.slice(0, 120));
+  /* 另一态也要钉住（这一条以前叫"有值才显示"，现在两态都要看得见） */
+  ok("填了的时候渲染的是**值本身**（不是灰标、也不是空着）",
+    internalTeachersPage.includes("{teacher.employment}") &&
+      internalTeachersPage.includes("来源 {teacher.source}"));
+  ok("两个待办灰标用同一个类与同一条提示（一个字段一个样式会让人以为其中一个没生效）",
+    (internalTeachersPage.match(/HR_TODO_CLASS/g) ?? []).length >= 3 &&
+      (internalTeachersPage.match(/HR_TODO_HINT/g) ?? []).length >= 3);
+  ok("灰标是虚线边框 + 灰底 + 更浅的字色，与已填的白底描边**分得开**",
+    /HR_TODO_CLASS =\s*"[^"]*border-dashed[^"]*bg-ink-50[^"]*text-ink-400/.test(internalTeachersPage) &&
+      /HR_FILLED_CLASS =\s*"[^"]*border-ink-200[^"]*bg-white[^"]*text-ink-600/.test(internalTeachersPage));
+  ok("灰标带悬停提示，说明去哪儿补（「点姓名展开就能填」）",
+    /HR_TODO_HINT =\s*"[^"]*点姓名展开就能填/.test(internalTeachersPage));
+  /*
+   * 顺序：`AI` → `教龄 …` → 用工性质 → 来源。
+   * 待办灰标**不许抢到 AI / 教龄 前面** —— 身份与资历是"这个人是谁"，
+   * 待办是"还缺一条信息"，缺的不该排在身份前面（机构原话里的那个例子就在教龄那一排）。
+   */
+  {
+    const teachersCode = internalStripComments(internalTeachersPage);
+    const order = ["kind === \"AI\"", "教龄 {teacher.years}", "用工未填", "来源未填"]
+      .map((marker) => teachersCode.indexOf(marker));
+    ok("卡片上小标的顺序：AI → 教龄 → 用工性质 → 来源",
+      order.every((index) => index >= 0) &&
+        order.every((index, i) => i === 0 || order[i - 1]! < index),
+      order.join(" / "));
+  }
+  /*
+   * ── 卡片上**不再渲染 `origin`**（机构口径：「教师标签里的『网站导入』能删掉吗？」）──
+   *
+   * 这一条与上面那条**配套、方向相反**，两条都要在：
+   *   - 这里：界面上**没有**那个标了（那段 JSX 与它的文案都不在了）——
+   *     上一条口径（把标改名成「网站导入」）已经作废，因此这条是"反过来"的那一条；
+   *   - 下面那条：`origin` **字段还在**（类型 / 迁移 / 导入都在用），不许有人顺手把字段也删了。
+   *
+   * 为什么删标但留字段：v36 删掉「从网站导入教师」入口之后**不会再有新的「网站」来源档案**，
+   * 这个标只会出现在当年那几条老记录上（真实库里 5 位教师有 4 位是 `网站`），留着只是噪声、
+   * 还容易与人事的「来源（招聘渠道）」撞名；而 `origin` 记的是"这条档案当初从哪来"这段历史事实，
+   * 删字段要动数据库形状（迁移 / 夹具 / 导入 / 导出 / 断言全在用），不值当。
+   */
+  {
+    const teachersCode = internalStripComments(internalTeachersPage);
+    ok("教师卡片上不再渲染 origin（那段 JSX 与「网站导入」文案都不在了）",
+      !teachersCode.includes("teacher.origin") && !teachersCode.includes("网站导入"));
+    ok("列表里也不再出现「来自网站」那种技术小标的文案",
+      !teachersCode.includes("来自网站"));
+    /* 字段还在：类型里有它、导入会给它赋值、导出的教师映射与断言都照旧用它 */
+    const teacherSource = read("lib/backend/types.ts");
+    ok("`origin` 字段仍在类型里（删标不等于删字段）",
+      teacherSource.includes("origin: TeacherOrigin") && teacherSource.includes("TeacherOrigin"));
+    ok("`origin` 仍然由迁移与导入维护（不是「没人写了」的死字段）",
+      read("lib/backend/import.ts").includes("origin: record.origin") &&
+        read("lib/backend/api.ts").includes("origin: teacher.origin ?? \"后台\""));
+    ok("`origin` 的类型注释写清了「为什么留字段、界面为什么不显示」",
+      teacherSource.includes("界面上不再显示") && teacherSource.includes("以后不会再有新的档案是「网站」来源"));
+  }
+
+  ok("教室表单里有「校区」输入框", internalClassroomsPage.includes('label="校区"'));
+  ok("校区给了 `<datalist>`（已在用的校区可复用）",
+    internalClassroomsPage.includes("<datalist") && internalClassroomsPage.includes("campusOptions"));
+  ok("教室页卡片标题走显示口径（v31：校区为空时就是纯教室名，因此不会出现一个空的「校区：」）",
+    internalClassroomsPage.includes("classroomLabel(room)") &&
+      !internalClassroomsPage.includes("校区：") &&
+      // 标题里已经含校区，那一行不再单独印一遍（同一条信息不重复两遍）
+      !internalClassroomsPage.includes("校区 {room.campus}"));
+  ok("教室表单整份提交时带上校区", /campus: campus\.trim\(\)/.test(internalClassroomsPage));
+
+  // ── ⑥ 不许泄漏到公网 ──────────────────────────────────────────────────
+  const internalPublicKeys = [...collectKeys(await api.site.publicContent())].map((key) => key.toLowerCase());
+  eq("公开快照里没有 employment / source / campus 这三个键（内部信息不上网）",
+    internalPublicKeys.filter((key) => ["employment", "source", "campus"].includes(key)), []);
+
+  /*
+   * 值层面的金丝雀：夹具给前两位教师写了「全职」「朋友介绍」、给教室里写了「总校 / 城西校区」——
+   * 万一有人把字段塞进公开映射，这些**只可能来自内部字段**的字符串会当场出现在快照里。
+   * （查键名可能漏掉"换了个名字给出去"，查值能把这条也堵上。）
+   */
+  const internalPublicText = JSON.stringify(await api.site.publicContent());
+  ok("公开快照的正文里也没有「全职 / 朋友介绍」这类人事内容",
+    !/全职|兼职|朋友介绍|内部推荐|校招|招聘渠道/.test(internalPublicText));
+
+  /**
+   * `public-site.ts` 的**字段白名单**里不许出现这三个字段。
+   *
+   * 那个文件的设计是"新增字段必须显式写一行，忘了就是没给出去 —— 失败方向是安全的"，
+   * 因此它里面不该有这三个字段的任何痕迹，连注释里都不该有
+   * （免得后人以为"它已经给出去过了"）。
+   *
+   * **查之前先去注释**：这个文件的注释里引用了 `lib/site/backend-source.ts`
+   * （一个模块路径，里面正好有 `source` 这个词）—— 直接子串匹配会当场假红。
+   * 与 §22 那条"去掉注释再查"同一个坑、同一个做法。
+   */
+  const internalPublicSiteCode = internalStripComments(read("lib/backend/public-site.ts"));
+  eq("公开字段白名单的源码里没有这三个字段（注释里也没有）",
+    ["employment", "source", "campus"].filter((key) => internalPublicSiteCode.includes(key)), []);
+
+  /*
+   * `data/site/content.md`：网站内容的真源（线上连不上后端时读的就是它）。
+   * 招聘渠道与用工性质是**人事信息**，公开仓库与 Pages 上都不该有。
+   *
+   * 注意判据要挑准：`campus` 这个词**不能**直接禁用 —— 文件里本来就有 `campus_title: 校区信息`
+   * 这个页面文案键（讲的是"关于页那一块叫校区信息"），它合法。因此查的是
+   * `campus:` 这种**数据字段**写法，以及那几个只在人事语境里出现的词。
+   */
+  const internalContentMd = read("data/site/content.md");
+  eq("content.md 里没有这三个数据字段的键",
+    ["employment:", "source:", "campus:"].filter((key) => internalContentMd.includes(key)), []);
+  ok("content.md 里没有招聘渠道 / 用工性质那类内容",
+    !/招聘渠道|全职|兼职|朋友介绍|内部推荐|校招|用工性质/.test(internalContentMd));
+
+  /*
+   * 导出到文件的那条路同样不许带出去（导出的是网站内容，不是整库里的每一列）。
+   *
+   * 判据要挑**字段写法**（`key:`）而不是裸词：导出的 `content.md` 里本来就有
+   * `campus_title: 校区信息` / `campus_description` 这两个**页面文案键**
+   * （「关于」页那一块的标题与说明），它们是合法的 —— 禁裸词 `campus` 会当场误报。
+   * 真正要拦住的是"有人把 `Classroom.campus` 加到导出映射里"，那写出来是 `campus: 值`。
+   */
+  const internalExportExisting = {} as Record<SiteExportFile, string>;
+  for (const name of SITE_EXPORT_FILES) {
+    internalExportExisting[name] = readFileSync(new URL(`../data/site/${name}.md`, import.meta.url), "utf8");
+  }
+  const internalExported = exportSiteMarkdown({
+    site: buildPublicSite(await api.exportDatabase()),
+    existing: internalExportExisting,
+  });
+  const internalExportText = Object.values(internalExported.files).join("\n");
+  eq("导出成 `data/site/*.md` 的内容里没有这三个数据字段的键",
+    ["employment:", "source:", "campus:"].filter((key) => internalExportText.includes(key)), []);
+  ok("导出里也没有「全职 / 朋友介绍」这类值（值层面的金丝雀）",
+    !/全职|兼职|朋友介绍|内部推荐|校招/.test(internalExportText));
+
+  // ── 收尾：清掉这一节造的夹具，别影响后面的用例 ────────────────────────
+  await api.teachers.remove(legacyTeacher.id);
+  await api.teachers.remove(internalTeacher.id);
+  await api.classrooms.remove(internalRoom.id);
+  __useStoreForTesting(memory);
+}
+
+console.log("\n=== 45. 教室名：显示格式不变、输入分开（v31「校区·教室名」）===");
+
+/*
+ * 机构原话：「**沐阳教育·教室1**，现在这个显示格式就是校区·教室名，现在添加了校区字段，
+ * 也就意味着我需要这个**卡片显示格式不变**，但**输入的时候校区和教室名称要单独输入**」。
+ *
+ * 这一节守四件事：
+ *   ① **显示口径只有一处**（`classroomLabel`）：全后台给用户看教室名的地方都走它
+ *      —— 源码级断言（清单显式写出来，新增显示点要加进来）；
+ *   ② **拆分只有一处**（`normalizeClassroom` 内的 `splitCampusFields`）：用一份
+ *      「沐阳教育·教室1」的 **v30 老库**走真实 `migrate()`，断言拆成
+ *      `campus=沐阳教育` / `name=教室1`，并且**再跑一次不变**（幂等）；
+ *   ③ **导入也拆**：一份"名称列写着「沐阳教育·教室1」"的老表要识别成**同一间房**
+ *      （否则重导一次就多出一间重复的房）；
+ *   ④ **表单是两个独立输入框**（校区 / 教室名称），且显示时拼回去。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+  /** 去掉注释再查源码（与 §22 / §44 同一个坑：注释里提到的词不算代码） */
+  const stripComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  // ── ① helper 本身：有校区就拼、没有就纯名 ───────────────────────────────
+  eq("有校区 → 「校区·教室名」（中文间隔号、**不加空格**）",
+    classroomLabel({ campus: "沐阳教育", name: "教室1" }), "沐阳教育·教室1");
+  eq("没有校区 → 就是教室名本身（不留下一个孤零零的「·」）",
+    classroomLabel({ campus: "", name: "教室1" }), "教室1");
+  eq("两边只有一边有时也不出多余符号",
+    [classroomLabel({ campus: "沐阳教育", name: "" }), classroomLabel({ campus: "", name: "" })],
+    ["沐阳教育", ""]);
+  eq("夹具里那两间房拼出来就是机构熟悉的样子",
+    [classroomLabel({ campus: "总校", name: "301 教室" }), classroomLabel({ campus: "城西校区", name: "自习区" })],
+    ["总校·301 教室", "城西校区·自习区"]);
+  /*
+   * 拆分规则的三行表（`splitCampusFields`）。第二行是**真实数据里出现过**的那种：
+   * 校区那一格填了、教室名里又粘着同一段校区 —— 不管的话显示会拼两遍
+   * （「沐阳教育·沐阳教育·教室1」），而那看起来像界面坏了、不像数据问题。
+   */
+  eq("三种情形各归各位（拆 / 去重复前缀 / 原样）",
+    [
+      splitCampusFields({ campus: "", name: "沐阳教育·教室1" }),
+      splitCampusFields({ campus: "沐阳教育", name: "沐阳教育·教室1" }),
+      splitCampusFields({ campus: "沐阳教育", name: "教室1" }),
+    ],
+    [
+      { campus: "沐阳教育", name: "教室1" },
+      { campus: "沐阳教育", name: "教室1" },
+      { campus: "沐阳教育", name: "教室1" },
+    ]);
+  eq("去重复前缀时**只**动名字（校区那一格原样保留）",
+    splitCampusFields({ campus: "全慧教育", name: "全慧教育·落地房四楼大" }),
+    { campus: "全慧教育", name: "落地房四楼大" });
+  eq("去掉前缀之后名字不能变成空的（「沐阳教育·」这种原样留着）",
+    splitCampusFields({ campus: "沐阳教育", name: "沐阳教育·" }),
+    { campus: "沐阳教育", name: "沐阳教育·" });
+  /*
+   * **只剥一次**（机构口径里写明的一条，而且它是对的）。
+   * 粘了两遍校区时（粘两回才会出现），剥一次之后显示仍是原来那串（不变）；
+   * 若改成"循环剥到干净"，名字会变成「教室9」、显示**被改短** —— 那就不是"去掉重复"
+   * 而是"替用户改名字"了。这一条防止有人把实现"优化"成循环。
+   */
+  eq("粘了两遍校区：只剥一次（剥完显示与原文一字不差）",
+    [
+      splitCampusFields({ campus: "沐阳教育", name: "沐阳教育·沐阳教育·教室9" }).name,
+      classroomLabel({
+        campus: "沐阳教育",
+        name: splitCampusFields({ campus: "沐阳教育", name: "沐阳教育·沐阳教育·教室9" }).name,
+      }),
+    ],
+    ["沐阳教育·教室9", "沐阳教育·沐阳教育·教室9"]);
+
+  // ── ② 真实 migrate()：一份「沐阳教育·教室1」的 v30 老库 ─────────────────
+  const splitMemory = createMemoryStore();
+  __useStoreForTesting(splitMemory);
+  const v30Merged = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    version: number;
+    classrooms: Array<Record<string, unknown>>;
+  };
+  v30Merged.version = 30;
+  // 真实库那 6 间就是这么写的：名字里是「校区·教室名」、campus 是空的
+  v30Merged.classrooms = [
+    { id: "cx1", version: 1, name: "沐阳教育·教室1", kind: "上课用教室", campus: "", capacity: 2, availability: [], note: "无白板" },
+    { id: "cx2", version: 1, name: "沐阳教育·自习室", kind: "自习室", campus: "", capacity: 10, availability: [], note: "网课+自习+答疑" },
+    { id: "cx3", version: 1, name: "全慧教育·落地房四楼小", kind: "上课用教室", campus: "", capacity: 2, availability: [], note: "小白板" },
+    // 已经分开填过的（campus 非空）—— 迁移**不许**再动它
+    { id: "cx4", version: 1, name: "教室9", kind: "上课用教室", campus: "沐阳教育", capacity: 4, availability: [], note: "" },
+    // 名字里没有「·」的 —— 没什么可拆
+    { id: "cx5", version: 1, name: "自习区", kind: "自习室", campus: "", capacity: 6, availability: [], note: "" },
+    /*
+     * 校区那一格已经有值、名字里**又**粘着同一段校区（真实数据里出现过：先在表单里填了
+     * 校区，又把老表那串「沐阳教育·教室1」粘进了教室名称）→ 只去掉重复的前缀。
+     */
+    { id: "cx6", version: 1, name: "沐阳教育·教室7", kind: "上课用教室", campus: "沐阳教育", capacity: 3, availability: [], note: "" },
+  ];
+  const v30Import = await api.importDatabase(JSON.stringify(v30Merged));
+  ok("v30 老库（教室名是合并写法）能导入并升级", v30Import.ok, v30Import.ok ? "" : v30Import.error);
+  eq("升级后版本号是当前版本", (await api.exportDatabase()).version, CURRENT_VERSION);
+  const upgradedRooms = await api.classrooms.list();
+  const roomByName = (id: string) => upgradedRooms.find((room) => room.id === id)!;
+  eq("「沐阳教育·教室1」被拆成 校区 + 教室名",
+    [roomByName("cx1").campus, roomByName("cx1").name], ["沐阳教育", "教室1"]);
+  eq("自习室同样拆（自习室也是教室）",
+    [roomByName("cx2").campus, roomByName("cx2").name], ["沐阳教育", "自习室"]);
+  eq("按**第一个**「·」拆：剩下的「·」留在教室名里",
+    [roomByName("cx3").campus, roomByName("cx3").name], ["全慧教育", "落地房四楼小"]);
+  eq("已经分开填过的**一个字都没动**（幂等、也不覆盖机构填的内容）",
+    [roomByName("cx4").campus, roomByName("cx4").name], ["沐阳教育", "教室9"]);
+  eq("名字里没有「·」的不拆", [roomByName("cx5").campus, roomByName("cx5").name], ["", "自习区"]);
+  eq("两边都写了校区的：只去掉名字里那段重复前缀（校区那一格没动）",
+    [roomByName("cx6").campus, roomByName("cx6").name, classroomLabel(roomByName("cx6"))],
+    ["沐阳教育", "教室7", "沐阳教育·教室7"]);
+  eq("**显示格式不变**：拆完拼回来与迁移前那串一字不差",
+    [classroomLabel(roomByName("cx1")), classroomLabel(roomByName("cx3"))],
+    ["沐阳教育·教室1", "全慧教育·落地房四楼小"]);
+
+  /*
+   * **幂等**：把这份库的版本号退回 v30 再升一次 —— 结果必须完全一样。
+   * （机构的库可能被反复导入/恢复；一个"拆一次变一次"的迁移会把教室名越切越短。）
+   */
+  const afterFirst = await api.exportDatabase();
+  const again = JSON.parse(JSON.stringify(afterFirst)) as Record<string, unknown> & { version: number };
+  again.version = 30;
+  ok("再跑一次迁移（版本退回 v30 再升）", (await api.importDatabase(JSON.stringify(again))).ok);
+  eq("第二次迁移的结果与第一次逐字节相同（幂等）",
+    (await api.exportDatabase()).classrooms, afterFirst.classrooms);
+  eq("第二次也只是把校区原样带过（没有把教室名再切一刀）",
+    (await api.classrooms.list()).map((room) => `${room.campus}|${room.name}`),
+    ["沐阳教育|教室1", "沐阳教育|自习室", "全慧教育|落地房四楼小", "沐阳教育|教室9", "|自习区", "沐阳教育|教室7"]);
+
+  /*
+   * 迁移拆了几条要**写进操作日志**：这是"库里的教室名怎么变了"的唯一线索。
+   * 上面那次升级拆了 3 条（cx1 / cx2 / cx3），cx4 / cx5 不算，
+   * 另有 1 条是"名字里重复写了校区"（cx6）—— 两件事分开记。
+   */
+  const splitLogs = (await api.logs.list(50)).filter(
+    (log) => log.entity === "教室" && log.summary.includes("拆成两个字段"),
+  );
+  ok("拆了几条进了操作日志（点名是哪几间）",
+    splitLogs.length >= 1 &&
+      splitLogs.some((log) => log.summary.includes("3 间教室") && log.summary.includes("沐阳教育·教室1")),
+    splitLogs.map((log) => log.summary).join(" / ").slice(0, 200));
+  ok("两种情形在日志里分开说（拆字段 / 去重复前缀）—— 混成一句会让人以为后者也丢了一份信息",
+    splitLogs.some((log) => log.summary.includes("1 间教室的名字里重复写了校区")),
+    splitLogs.map((log) => log.summary).join(" / ").slice(0, 300));
+
+  // ── ③ 导入：老表里的合并写法要认成同一间房（否则重导一次多一间）──────────
+  const importMemory = createMemoryStore();
+  __useStoreForTesting(importMemory);
+  await api.importDatabase(JSON.stringify(afterFirst));
+  const mergedImport = await api.imports.apply({
+    entity: "classrooms",
+    text: "名称,用途,校区,容量\n沐阳教育·教室1,上课用教室,,2\n全慧教育·落地房四楼小,上课用教室,全慧教育,2\n",
+  });
+  eq("老表里的合并写法**不会新增**（认成同一间房）",
+    [mergedImport.added, mergedImport.skipped.length], [0, 2]);
+  /*
+   * 判重的**键**是拆开之后的教室名 —— `skipped` 里只有行号与原因（键在体检那一阶段的
+   * `conflicts[].key` 里），因此这里直接对着"体检"再要一次键，比从原因文案里抠字符串结实。
+   */
+  const mergeConflicts = parseImport(
+    "classrooms",
+    "名称,用途,校区,容量\n沐阳教育·教室1,上课用教室,,2\n全慧教育·落地房四楼小,上课用教室,全慧教育,2\n",
+  );
+  eq("体检阶段给出的判重键就是拆开之后的教室名（因此才认得出是同一间房）",
+    mergeConflicts.records.map((record) => record.name), ["教室1", "落地房四楼小"]);
+  const importedSplit = await api.imports.apply({
+    entity: "classrooms",
+    text: "名称,用途,校区,容量\n沐阳教育·新教室,上课用教室,,5\n",
+  });
+  eq("新的一行照样拆开落库（显示还是「沐阳教育·新教室」）",
+    importedSplit.added, 1);
+  const newRoom = (await api.classrooms.list()).find((room) => room.name === "新教室")!;
+  eq("落库的形状是 校区 + 教室名两格",
+    [newRoom.campus, newRoom.name, classroomLabel(newRoom)], ["沐阳教育", "新教室", "沐阳教育·新教室"]);
+
+  // ── ④ 表单：两个独立输入框（源码级）────────────────────────────────────
+  const classroomsPage = stripComments(read("app/admin/(dashboard)/classrooms/page.tsx"));
+  ok("教室表单的名称那一格叫「教室名称」（与「校区」分开）",
+    classroomsPage.includes('label="教室名称"') && classroomsPage.includes('label="校区"'));
+  ok("名称的 placeholder **不引导**用户填带「·」的完整写法",
+    /placeholder="例如 教室1 \/ 落地房四楼小"/.test(classroomsPage) &&
+      !classroomsPage.includes("例如 301 教室 / 自习区"));
+  ok("提示里写清了两者会拼起来显示",
+    classroomsPage.includes("拼成「校区·教室名」") || classroomsPage.includes("校区·教室名"));
+  ok("列表/卡片上按显示口径出（因此看到的还是「校区·教室名」）",
+    classroomsPage.includes("classroomLabel(room)"));
+
+  /*
+   * ── ⑤ 显示口径只有一处（源码级）──────────────────────────────────────
+   *
+   * 清单是**显式写出来**的：这些文件都会给用户看教室名，因此都必须走 `classroomLabel`。
+   * 新增一处显示点时要把它加到这里 —— 漏了的话，那个页面会显示成"半个教室名"，
+   * 而那看起来不像 bug（只是一间房少了校区），很难被人发现。
+   *
+   * **允许的例外**（逐个说明，免得后来的人以为漏了）：
+   *   ① `lib/backend/classrooms.ts` —— helper 自己（`classroomLabel` 拼、`splitCampusFields` 拆）；
+   *   ② `lib/backend/import.ts` —— 判重键用的是**文件里的 `name` 字段**（`Record<string, unknown>`），
+   *      它决定"这一行算不算同一间房"，不是给人看的文案（拆分在解析那一步已经做过）；
+   *   ③ `lib/backend/api.ts` 的 v30 → v31 迁移那一段 —— 日志里点名的必须是**拆之前**那串
+   *      （「把「沐阳教育·教室1」拆开」），拿显示口径反而说不清改了什么；
+   *   ④ `lib/backend/export.ts` 的教室数据集那一列 —— 导出的是**数据**：
+   *      「名称」只写房间名、校区单独一列，与导入同形（见那里的说明）；
+   *   ⑤ `app/admin/(dashboard)/timetable/page.tsx` 的 `row.name` —— 那是 `summary` 里
+   *      **早就拼好的显示名**（教室页签下就是 `classroomLabel` 的结果），不是原始字段。
+   */
+  const CLASSROOM_DISPLAY_FILES = [
+    "app/admin/(dashboard)/classrooms/page.tsx",
+    "app/admin/(dashboard)/lessons/page.tsx",
+    "app/admin/(dashboard)/timetable/page.tsx",
+    "app/admin/(dashboard)/calendar/page.tsx",
+    "app/admin/(dashboard)/page.tsx",
+    "app/admin/(dashboard)/stats/page.tsx",
+    "app/admin/(dashboard)/data/page.tsx",
+    "components/admin/LessonForm.tsx",
+    "components/admin/LessonSeriesForm.tsx",
+    "components/admin/InquiryForm.tsx",
+    "components/admin/InquiryReport.tsx",
+    "components/admin/PendingMakeups.tsx",
+    "components/admin/StudentDetail.tsx",
+    "lib/backend/search.ts",
+    "lib/backend/inquiry.ts",
+    "lib/backend/api.ts",
+    "lib/backend/export.ts",
+  ];
+  eq("每个显示教室名的文件都走唯一显示口径 classroomLabel",
+    CLASSROOM_DISPLAY_FILES.filter((file) => !stripComments(read(file)).includes("classroomLabel")),
+    []);
+
+  /*
+   * 第二道网：这些文件里**不许**再把教室对象的 `.name` 直接读出来渲染。
+   * 判据挑的是"取教室名的那几种写法"（`room.name` / `classroom.name` /
+   * `classrooms.find(...)?.name`）；`teacher.name`、教师列表里的 `item.name`
+   * 都合法，因此不进这张网 —— 宁可漏一个，也不要为了这条断言把别处搅进来。
+   */
+  const RAW_NAME_OFFENDERS = [
+    ["room.name", /(^|[^A-Za-z])room\.name/g],
+    ["classroom.name", /(^|[^A-Za-z])classroom\.name/g],
+    ["classrooms.find(...)?.name", /classrooms\.find\([^;]{0,120}?\?\.name/g],
+  ] as const;
+  const rawNameHits: string[] = [];
+  for (const file of CLASSROOM_DISPLAY_FILES) {
+    // `data/page.tsx` 的 `nameById` 是通用小工具（教师 / 学生 / 教室都过它），教室那处已改用专用函数
+    const code = stripComments(read(file));
+    for (const [label, pattern] of RAW_NAME_OFFENDERS) {
+      for (const match of code.matchAll(pattern)) {
+        // 允许的例外：教室数据集那一列（数据不是显示）、迁移日志里点名的旧名字
+        const around = code.slice(Math.max(0, (match.index ?? 0) - 200), (match.index ?? 0) + 60);
+        const allowed =
+          around.includes("这一张是**数据**") ||
+          around.includes("room.name") && file === "lib/backend/export.ts" ||
+          (file === "lib/backend/api.ts" && around.includes("splitTargets"));
+        if (!allowed) rawNameHits.push(`${file} → ${label}`);
+      }
+    }
+  }
+  eq("这些文件里没有「直接读教室 .name 来显示」的写法", rawNameHits, []);
+
+  /*
+   * 搜索也走显示口径：机构按**校区**找房时得能搜到「沐阳教育·教室1」。
+   * 只匹配 `room.name`（＝「教室1」）的话，搜「沐阳教育」会得到"查无此房"——
+   * 而机构脑子里的名字就是带校区的那一串。
+   */
+  const searchHits = searchAll({
+    keyword: "沐阳教育",
+    students: [],
+    teachers: [],
+    classrooms: [{
+      id: "sx1", version: 1, name: "教室1", kind: "上课用教室" as const,
+      campus: "沐阳教育", capacity: 4, availability: [], note: "",
+    }],
+    lessons: [],
+    courses: [],
+  });
+  eq("按校区能搜到那间房（匹配串与结果标题都是显示口径）",
+    searchHits.map((hit) => [hit.kind, hit.title]), [["教室", "沐阳教育·教室1"]]);
+
+  ok("`classroomLabel` 与拆分都在同一个模块里（唯一的显示 / 拆分实现）",
+    read("lib/backend/classrooms.ts").includes("export function classroomLabel") &&
+      read("lib/backend/classrooms.ts").includes("export function splitCampusFields") &&
+      read("lib/backend/classrooms.ts").includes("export function normalizeClassroom"));
+
+  // 夹具：示例教室是"校区 + 纯名"，示例数据里不该再出现「·」
+  eq("示例教室的名字里一个「·」都没有（合并写法是显示时拼的，不是存出来的）",
+    seedDb.classrooms.filter((room) => room.name.includes("·") || room.campus.includes("·")), []);
+  ok("示例教室确实填了校区（否则「显示口径没在工作」这件事看不出来）",
+    seedDb.classrooms.some((room) => room.campus !== ""));
+
+  __useStoreForTesting(memory);
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

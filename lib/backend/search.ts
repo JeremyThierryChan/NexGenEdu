@@ -1,5 +1,7 @@
 import type { Classroom, Lesson, SearchHit, Student, Teacher } from "./types";
 import { dateKey } from "./format";
+// 教室名的唯一显示口径（「校区·教室名」，v31）：搜索的匹配串与标题都用它
+import { classroomLabel } from "./classrooms";
 
 /**
  * 全局搜索。
@@ -80,15 +82,21 @@ export function searchAll(input: SearchInput): SearchHit[] {
       })),
   );
 
-  // 教室：名称 / 用途 / 备注
+  /*
+   * 教室：**显示名** / 用途 / 备注。
+   *
+   * 匹配串与标题都用 `classroomLabel`（「校区·教室名」，v31）：机构在后台看到的教室名
+   * 就是这个写法，因此搜「沐阳教育」应当搜得到「沐阳教育·教室1」——
+   * 只匹配 `room.name`（＝「教室1」）的话，按校区找人会得到一个"查无此房"。
+   */
   hits.push(
     ...input.classrooms
-      .filter((room) => matches([room.name, room.kind, room.note].join(" "), keyword))
+      .filter((room) => matches([classroomLabel(room), room.kind, room.note].join(" "), keyword))
       .slice(0, limit)
       .map((room) => ({
         kind: "教室" as const,
         id: room.id,
-        title: room.name,
+        title: classroomLabel(room),
         subtitle: `${room.kind} · 容纳 ${room.capacity} 人`,
         href: "/admin/classrooms",
       })),

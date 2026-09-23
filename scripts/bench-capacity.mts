@@ -171,7 +171,7 @@ for (const studentCount of scales) {
     const coldMs = await timeIt(() => api.students.list());
     const warmMs = await timeIt(() => api.students.list());
     const createMs = await timeIt(() =>
-      api.classrooms.create({ name: "容量探针", capacity: 1, kind: "上课用教室", note: "", availability: [] }),
+      api.classrooms.create({ name: "容量探针", capacity: 1, kind: "上课用教室", campus: "", note: "", availability: [] }),
     );
     const rss = process.memoryUsage().rss / 1024 / 1024;
 
