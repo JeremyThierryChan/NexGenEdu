@@ -9,6 +9,7 @@ import {
   api,
   type Classroom,
   type Course,
+  type CoursePartition,
   type Enrollment,
   type Lesson,
   type LessonRecord,
@@ -24,6 +25,7 @@ import {
   type ExportFormat,
 } from "@/lib/backend/export";
 import { remainingTotal } from "@/lib/backend/enrollment";
+import { partitionPathLabel } from "@/lib/backend/course-partitions";
 import {
   createCsv,
   createIcs,
@@ -483,12 +485,20 @@ async function loadDatasetRows(datasetId: string): Promise<RowOption[]> {
       }));
     }
     case "courses": {
-      const courses: Course[] = await api.courses.list();
-      return courses.map((course) => ({
-        id: course.id,
-        label: `${course.name} · ${course.category}`,
-        hint: `${course.origin} · ${course.status}`,
-      }));
+      const [courses, partitions]: [Course[], CoursePartition[]] = await Promise.all([
+        api.courses.list(),
+        api.coursePartitions.list(),
+      ]);
+      return courses.map((course) => {
+        // 分区名要拿 id 去分区表里换（v18 起课程只存 id）；写法与别处共用一处实现
+        const label = partitionPathLabel(partitions, course.partitionId);
+        const where = label === "" ? "未归类" : label;
+        return {
+          id: course.id,
+          label: `${course.name} · ${where}`,
+          hint: `${course.origin} · ${course.status}`,
+        };
+      });
     }
     case "enrollments": {
       // 报课记录没有独立列表接口：挂在学生身上，这里摊平（id 用报课记录自己的 id）

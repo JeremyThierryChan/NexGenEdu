@@ -46,7 +46,7 @@ import { openDatabase } from "../server/db.mts";
 import { createSqliteStore } from "../server/kv-store.mts";
 import { api, __useStoreForTesting, LOG_LIMIT } from "../lib/backend/api.ts";
 import { CURRENT_VERSION } from "../lib/backend/version.ts";
-import { coursesFromSite } from "../lib/backend/courses.ts";
+import { materializeSiteCourses } from "../lib/backend/courses.ts";
 import { pricingConfigFromContent } from "../lib/backend/pricing.ts";
 
 /** 测量用的临时库：与真实库同目录但名字不同，跑完即删。 */
@@ -115,6 +115,7 @@ function buildDatabase(studentCount: number, lessonsPerStudent: number): Record<
     }
   }
 
+  const siteCourses = materializeSiteCourses([]);
   return {
     version: CURRENT_VERSION,
     students, teachers, classrooms, lessons,
@@ -124,7 +125,12 @@ function buildDatabase(studentCount: number, lessonsPerStudent: number): Record<
       id: `log${i}`, at: iso(-i), operator: "admin", entity: "学生", action: "修改",
       targetId: "s0", summary: "修改了基础字段",
     })),
-    inquiries: [], courses: coursesFromSite(), pricing: pricingConfigFromContent(), updatedAt: iso(0),
+    inquiries: [],
+    // 课程与分区一起造（与空库起步同一处实现）：只给 courses 会让课程全部变成「未归类」
+    courses: siteCourses.courses,
+    coursePartitions: siteCourses.partitions,
+    pricing: pricingConfigFromContent(),
+    updatedAt: iso(0),
   };
 }
 

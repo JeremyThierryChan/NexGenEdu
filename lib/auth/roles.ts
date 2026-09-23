@@ -364,6 +364,8 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
   "courses.list": "global",
   "courses.options": "global",
   "courses.summary": "global",
+  // 分区（栏目 → 子栏目）与课程库同样是参考数据：清单要按它分组、下拉要选它
+  "coursePartitions.list": "global",
   "site.publicContent": "global",
 
   /* 我的课：列表、单条、按日期 / 区间 / 教室 / 学生 / 教师取 */
@@ -422,6 +424,13 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
   "lessons.createSeries": "hidden",
   "lessons.suggestMoves": "hidden",
   "courses.syncFromSite": "hidden",
+  /*
+   * 课程分区的四个写方法与 `courses.setPartition` **刻意不在这里登记**：
+   * 它们在角色层（`GROUP_ACCESS.crud`）就不给普通教师，登记成 `hidden` 是一条没人维护的
+   * 假配置 —— 自检有一条断言专门盯着这种"压根轮不到这一层的条目"。
+   * 读方法 `coursePartitions.list` 已在上面的参考数据一栏登记为 `global`
+   * （教师的课程清单要按分区分组）。
+   */
 };
 
 /**

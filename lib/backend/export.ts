@@ -20,6 +20,7 @@
  * 2. **只读**：这里只从数据库读数、拼文本，不改任何东西 —— 导出不该有副作用。
  */
 
+import { partitionPathLabel, partitionPlace } from "./course-partitions";
 import type { Database } from "./types";
 import {
   createCsv,
@@ -66,6 +67,17 @@ const nameOf = <T extends { id: string; name: string }>(list: T[], id: string): 
 
 const joinNames = <T extends { id: string; name: string }>(list: T[], ids: string[]): string =>
   ids.map((id) => nameOf(list, id)).filter((name) => name !== "").join("、");
+
+/**
+ * 分区在导出里的写法：`栏目 / 子栏目`（未归类为空串）。
+ *
+ * 写法本身收在 `partitionPathLabel()` 一处 —— 导出、下拉、清单、数据页四处必须一模一样，
+ * 否则"导出来是 `高中课内 / 七选三`、下拉里是 `七选三`"这种不一致没有任何自检能发现。
+ * 导入那侧的解析见 `import.ts` 的 `parsePartitionPath`：两处都认 `/` 与 `／`。
+ */
+function partitionLabel(db: Database, partitionId: string): string {
+  return partitionPathLabel(db.coursePartitions, partitionId);
+}
 
 /** 本地时间 `YYYY-MM-DD HH:MM`。 */
 function localDateTime(iso: string): string {
@@ -209,13 +221,20 @@ export const EXPORT_DATASETS: ExportDataset[] = [
       "课程库的课程。Markdown 格式导出的是内容文件里的卡片行，可直接粘进 data/site/content.md。",
     formats: ["csv", "json", "md"],
     rows: (db) => db.courses,
-    columns: () => ({
+    /*
+     * 「分类」一列给的是**分区路径**：`高中课内 / 七选三`（没有子栏目时就只是栏目名）。
+     *
+     * 为什么合成一列而不是拆成「栏目」「子栏目」两列：导出的 CSV 是给**人**看、也是给
+     * 导入用的，而导入时一行对应一门课、分区用一条路径就说清了。拆两列会让"只填了子栏目、
+     * 没填栏目"这种半截行变成可能（导入时只能拒收）。
+     */
+    columns: (db) => ({
       headers: ["课程名", "分类", "来源", "状态", "可开班型", "备注"],
       row: (item: never) => {
         const course = item as Database["courses"][number];
         return [
           course.name,
-          course.category,
+          partitionLabel(db, course.partitionId),
           course.origin,
           course.status,
           course.forms.join("、"),
@@ -223,12 +242,14 @@ export const EXPORT_DATASETS: ExportDataset[] = [
         ];
       },
     }),
-    markdown: (_db, items) => {
+    markdown: (db, items) => {
       const courses = items as Database["courses"];
       const lines = courses.map((course) => {
+        const place = partitionPlace(db.coursePartitions, course.partitionId);
         const parts = [
           `路径: ${slugHint(course.name)}`,
-          ...(course.category === "" ? [] : [`栏目: ${course.category}`]),
+          ...(place.column === null ? [] : [`栏目: ${place.column.name}`]),
+          ...(place.leaf === null || place.leaf.parentId === "" ? [] : [`子栏目: ${place.leaf.name}`]),
           ...(course.forms.length === 0 ? [] : [`班型: ${course.forms.join("、")}`]),
           ...(course.status === "开放" ? [] : ["状态: 暂未开放"]),
         ];

@@ -1,5 +1,5 @@
 import { getTeachersPageFromTemplate } from "@/lib/data/site";
-import { coursesFromSite } from "./courses";
+import { materializeSiteCourses } from "./courses";
 import { pricingConfigFromContent } from "./pricing";
 import { siteContentFromContent } from "./site-content";
 import { CURRENT_VERSION } from "./version";
@@ -33,6 +33,8 @@ import type {
  *      万一它出现在真实库里，一眼就能认出来。
  */
 export function createSeedDatabase(now: Date = new Date()): Database {
+  // 课程库与分区一起落定（与空库起步同一处实现：`materializeSiteCourses`）
+  const siteCourses = materializeSiteCourses([]);
   const teachers: Teacher[] = getTeachersPageFromTemplate()
     .teachers.filter((teacher) => teacher.kind === "teacher")
     .map((teacher, index) => ({
@@ -260,7 +262,8 @@ export function createSeedDatabase(now: Date = new Date()): Database {
      * 课程库：直接用网站内容里的课程卡片初始化（课程名与网站一致），
      * 机构自己加的课（围棋、书法）由 /admin/courses 页面添加。
      */
-    courses: coursesFromSite(),
+    courses: siteCourses.courses,
+    coursePartitions: siteCourses.partitions,
     /*
      * 报价配置：用站点内容（data/site/pricing.md）初始化，而不是在种子里
      * 再抄一份价格。抄一份的后果是「宣传页一个价、后台算出来另一个价」，

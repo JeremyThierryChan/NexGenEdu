@@ -526,6 +526,18 @@ try {
       equal("教师不能记收款", await attempt(teacher.token, "payments.record"), 403);
       equal("教师不能改价", await attempt(teacher.token, "pricing.update"), 403);
       equal("教师不能看操作日志", await attempt(teacher.token, "logs.list"), 403);
+      /*
+       * 课程分区（v18）：教师**能读**（课程清单要按分区分组），**不能写**。
+       *
+       * 为什么两条都要钉：分区的写方法刻意**没有**在 `TEACHER_SCOPE_RULES` 里登记
+       * "hidden" —— 它们在角色层（`GROUP_ACCESS.crud`）就已经把普通教师挡在外面了，
+       * 再登记一条就是没人维护的假配置（`check.mts` 有一条断言专门盯这种死条目）。
+       * 因此这里的 403 来自**角色闸门**，这条断言就是它的证据。
+       */
+      equal("教师能读课程分区（清单要按它分组）", await attempt(teacher.token, "coursePartitions.list"), 200);
+      equal("教师不能新建分区（课程库写入）", await attempt(teacher.token, "coursePartitions.create"), 403);
+      equal("教师不能删分区", await attempt(teacher.token, "coursePartitions.remove"), 403);
+      equal("教师不能把课移到别的分区", await attempt(teacher.token, "courses.setPartition"), 403);
       equal("教师不能导出整库", await attempt(teacher.token, "exportDatabase"), 403);
 
       // 财务管理员：钱与报课能用（机构确认①），运维仍然不行

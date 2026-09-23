@@ -48,16 +48,37 @@ export type PublicTeacher = {
 /** 公开的课程（网站卡片所需的全部字段）。 */
 export type PublicCourse = {
   name: string;
-  category: string;
+  /**
+   * 所属分区 id（v18 起）——网站那侧拿它在 `partitions` 里换栏目名与层级。
+   *
+   * 为什么给 id 而不是直接给「栏目名 + 子栏目名」：栏目顺序与层级由分区自己的
+   * `order` / `parentId` 决定，网站必须能看到**整棵树**才排得对（例如一个空栏目
+   * 该不该占位置、子栏目之间的先后）。只给名字的话，网站又要自己从卡片反推一遍结构
+   * ——那正是两边对不上的根源（见 `lib/site/backend-source.ts` 的 `backendCourseColumns`）。
+   */
+  partitionId: string;
   forms: string[];
   status: Course["status"];
   path: string;
-  subgroup: string;
   tags: CourseTag[];
   target: string;
   order: number;
   intro: string;
   siteKind: Course["siteKind"];
+};
+
+/**
+ * 公开的课程分区（栏目 → 子栏目）。
+ *
+ * 名字与层级都在这里 —— 网站不读数据库，只读这份快照，因此**分区表必须一起出门**，
+ * 否则网站只能看到"哪些 id 被用到了"，看不到空栏目、也排不出顺手改过的顺序。
+ */
+export type PublicCoursePartition = {
+  id: string;
+  name: string;
+  /** 上级分区 id；空串＝一级（栏目）。 */
+  parentId: string;
+  order: number;
 };
 
 /**
@@ -85,6 +106,8 @@ export type PublicSite = {
   generatedAt: string;
   teachers: PublicTeacher[];
   courses: PublicCourse[];
+  /** 课程分区：课程页的「栏目 → 子栏目」由它和 `courses` 一起决定。 */
+  partitions: PublicCoursePartition[];
   siteContent: SiteContent;
   pricing: PublicPricing;
 };
@@ -110,11 +133,10 @@ function publicTeacher(teacher: Teacher): PublicTeacher {
 function publicCourse(course: Course): PublicCourse {
   return {
     name: course.name,
-    category: course.category,
+    partitionId: course.partitionId,
     forms: course.forms,
     status: course.status,
     path: course.path,
-    subgroup: course.subgroup,
     tags: course.tags.map((tag) => ({ label: tag.label, target: tag.target })),
     target: course.target,
     order: course.order,
@@ -132,6 +154,13 @@ export function publicSite(db: Database): PublicSite {
     // 而不是让后端替网站决定"哪些人该出现" —— 双方口径才会一致。
     teachers: db.teachers.map(publicTeacher),
     courses: db.courses.map(publicCourse),
+    // 分区原样出门（只有 id / 名字 / 上级 / 顺序，没有任何机构内部信息）
+    partitions: db.coursePartitions.map((item) => ({
+      id: item.id,
+      name: item.name,
+      parentId: item.parentId,
+      order: item.order,
+    })),
     siteContent: {
       coursePage: db.siteContent.coursePage,
       teacherPage: db.siteContent.teacherPage,

@@ -11,7 +11,7 @@
  *     有方法没登记（漏文档）或登记了却不存在（文档漂移）都会失败；
  *   - 同时会检查 `docs/后台API约定.md` 里提到了每一个方法 —— 文档不能悄悄漏掉接口。
  *
- * ## 为什么按「类别」而不是把 98 个方法平铺成一张表
+ * ## 为什么按「类别」而不是把上百个方法平铺成一张表
  *
  * 服务端实现时，这五类的做法完全不同：通用 CRUD 用一套 REST 就行，
  * 业务动作必须是一个事务，聚合查询是只读的报表接口。平铺一张 82 行的表
@@ -36,7 +36,7 @@ export type ContractGroup = {
 export const API_CONTRACT: ContractGroup[] = [
   {
     id: "crud",
-    title: "一、通用 CRUD（9 个资源 × 5 个方法）",
+    title: "一、通用 CRUD（档案类资源的增删改查）",
     note:
       "学生 / 教师 / 教室 / 排课 / 课堂记录 / 作业记录 / 阶段测评 / 收款记录。" +
       "服务端用一套 REST 即可：GET 列表、GET 单项、POST 新建、PATCH 修改、DELETE 删除。" +
@@ -60,6 +60,18 @@ export const API_CONTRACT: ContractGroup[] = [
        * 收款的唯一写入口是 `payments.record`（见「三、业务动作」）。
        */
       "payments.list", "courses.list", "courses.create", "courses.update", "courses.remove",
+      /*
+       * 课程分区（v18）：栏目 → 子栏目，课程挂在它下面。
+       *
+       * 归在通用 CRUD 而不是业务动作：它是**配置类**的增删改（名字 / 顺序 / 层级），
+       * 不牵扯钱与课时，也不改任何历史记录；删除有护栏（有课 / 有子栏目就拒绝），
+       * 那是服务端的一条校验，而不是一个跨表事务。
+       * `courses.setPartition` 也在这里：它是"一次把一批课挂到另一区"，
+       * 与 `courses.update` 是同一类写入（只动课程行），只是**一次写多条、写一条日志**。
+       */
+      "coursePartitions.list", "coursePartitions.create", "coursePartitions.update",
+      "coursePartitions.reorder", "coursePartitions.remove",
+      "courses.setPartition",
     ],
   },
   {

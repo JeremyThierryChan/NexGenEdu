@@ -113,15 +113,25 @@ import {
   canRemoveCourse,
   courseOptions,
   coursesFromSite,
+  materializeSiteCourses,
   mergeSiteCourses,
   normalizeCourse,
   summarizeCourses,
   validateCourse,
 } from "./courses";
 import type { CourseOption, CourseSummary } from "./courses";
+import { nextId } from "./ids";
+import {
+  applyPartitionOrder,
+  normalizePartition,
+  partitionDeleteRefusal,
+  partitionName,
+  validatePartition,
+} from "./course-partitions";
 import type {
   Assessment,
   Classroom,
+  CoursePartition,
   LessonTransaction,
   Payment,
   ClassroomAvailability,
@@ -290,10 +300,6 @@ function delay(): Promise<void> {
 }
 
 
-/** 生成 id：时间戳 + 随机后缀，够用且不依赖自增（将来换服务端也无缝）。 */
-function nextId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-}
 
 /** 读取整库；首次访问时灌入示例数据。 */
 function load(): Database {
@@ -737,6 +743,116 @@ function migrate(db: Database): Database | null {
     db.courses = db.courses.map((course) => ({ ...course, version: course.version ?? 1 }));
     db.version = 17;
   }
+
+  if (db.version === 17) {
+    /*
+     * v17 → v18：**课程分区成为真实数据**。
+     *
+     * 老库里分区不是数据 —— 它是每门课的 `category` / `subgroup` 两个字符串**聚合**出来的。
+     * 这一版把它们变成 `coursePartitions` 里的行，课程改用 `partitionId` 引用。
+     *
+     * ## 分区怎么建、顺序怎么定（这一版最容易做错的地方）
+     *
+     * 顺序必须**与升级前网站的显示顺序逐项一致**，否则机构升级完会发现课程页的栏目重新排过，
+     * 而他们什么也没改。升级前网站的顺序规则是（见 `backendCourseColumns()` 的注释）：
+     *
+     *   - 卡片先按 `order` 升序；
+     *   - **栏目顺序 = 该栏目下最小的 `order`**（即"第一个出现的卡片"决定栏目位置）；
+     *   - 子栏目同理（栏目内第一个出现的卡片决定子栏目的位置）。
+     *
+     * 因此这里不做"按名字排序"这种自认为更整齐的事，而是**照抄**那套顺序：先按
+     * `(order, 原数组里的位置)` 把课程排一遍，然后按出现顺序给栏目与子栏目编 `order`。
+     * 有自检断言盯着"迁移前后网站栏目结构一致"（`scripts/check.mts` 的分区一节）。
+     *
+     * ## 名字为空的行
+     *
+     * `category` 为空（后台新增、还没分类的课）→ `partitionId` 留空串＝未归类，
+     * **不建分区**：建一个没有名字的分区只会让清单里多出一块点不到的空白区域。
+     * `subgroup` 为空但有 `category` → 直接挂在栏目上（网站上不渲染子标题），与升级前一致。
+     *
+     * ## 最后必须把 category / subgroup 两个字段**删掉**
+     *
+     * 留着它们就等于"同一个事实写两处"：改名时分区表改了、课程行上的旧名字还在，
+     * 于是下次有人按老字段分组就会裂出两个分区。这里是**搬完就拆桥**：
+     * 数据已经在新结构里了，老字段没有任何读者（`Course` 类型里也删了）。
+     */
+    const legacy = db.courses.map((course, index) => ({
+      course,
+      category: String((course as { category?: unknown }).category ?? "").trim(),
+      subgroup: String((course as { subgroup?: unknown }).subgroup ?? "").trim(),
+      index,
+    }));
+    // 与网站一致的顺序：order 升序，同 order 保持原数组顺序（稳定）
+    const ordered = [...legacy].sort((a, b) => a.course.order - b.course.order || a.index - b.index);
+
+    const partitions: CoursePartition[] = [];
+    const columnIds = new Map<string, string>();
+    const subgroupIds = new Map<string, string>();
+    for (const row of ordered) {
+      if (row.category === "") continue;
+      if (!columnIds.has(row.category)) {
+        const created: CoursePartition = {
+          id: nextId("cp"),
+          name: row.category,
+          parentId: "",
+          order: columnIds.size + 1,
+        };
+        partitions.push(created);
+        columnIds.set(row.category, created.id);
+      }
+      if (row.subgroup === "") continue;
+      const key = `${row.category}\u0000${row.subgroup}`;
+      if (subgroupIds.has(key)) continue;
+      const columnId = columnIds.get(row.category) ?? "";
+      const created: CoursePartition = {
+        id: nextId("cp"),
+        name: row.subgroup,
+        parentId: columnId,
+        // 子栏目的 order 只在同一栏目内比较，因此按"这一栏目里第几个出现的子栏目"编号
+        order: partitions.filter((item) => item.parentId === columnId).length + 1,
+      };
+      partitions.push(created);
+      subgroupIds.set(key, created.id);
+    }
+
+    db.coursePartitions = partitions;
+    db.courses = legacy.map((row) => {
+      const columnId = columnIds.get(row.category) ?? "";
+      const partitionId =
+        row.subgroup === "" ? columnId : (subgroupIds.get(`${row.category}\u0000${row.subgroup}`) ?? columnId);
+      /*
+       * 逐字段重建而不是 `{...row.course}` 再删两个键：删键的写法（`delete obj.category`）
+       * 一不小心就会留下一个值为 `undefined` 的键，而 `undefined` 会跟着 JSON.stringify
+       * 一起消失得无影无踪 —— 排查时看不到它，只会看到"这个字段怎么没了"。
+       * 这里显式列出保留的字段，多一个字段没写上会在类型上直接报错。
+       */
+      const { category: _dropCategory, subgroup: _dropSubgroup, ...rest } = row.course as Course & {
+        category?: unknown;
+        subgroup?: unknown;
+      };
+      void _dropCategory;
+      void _dropSubgroup;
+      return normalizeCourse({ ...rest, partitionId });
+    });
+    db.version = 18;
+  }
+
+  /*
+   * 收尾归一：分区表**必须是一个数组**。
+   *
+   * 为什么在迁移链最后统一兜一次，而不是只在 v17 → v18 里做：
+   * 一份"自称 v18"的文件未必真有这张表 —— 手改过的导出、只跑了一半的恢复、
+   * 以及早期版本导出的 JSON 都长这样，而缺了它会让课程库整页打不开
+   * （读 `db.coursePartitions.filter` 直接 TypeError）。与 v15 分支里
+   * "顺手把 v14 的教师字段再兜一遍"是同一条纪律：**声称的版本号不是证据**。
+   *
+   * 兜成空数组（而不是"照课程名重建一批"）：名字已经不在课程行上了，重建只能**猜**，
+   * 猜出一批机构没建过的分区比看见「分区已失效」糟糕得多 —— 后者会显示在清单里，
+   * 人可以自己去重选分区。
+   */
+  db.coursePartitions = Array.isArray(db.coursePartitions)
+    ? db.coursePartitions.map((item) => normalizePartition(item))
+    : [];
 
   return db.version === CURRENT_VERSION ? db : null;
 }
@@ -2500,27 +2616,30 @@ const localApi = {
       await delay();
       const db = load();
       const normalized = normalizeCourse(input);
-      const problems = validateCourse(normalized, db.courses);
+      const problems = validateCourse(normalized, db.courses, db.coursePartitions);
       if (problems.length > 0) throw new Error(problems.join("；"));
 
       // 新记录从第 1 版开始；normalizeCourse 对没带版本的入参也会补 1，这里显式写出来
       const created: Course = { ...normalized, id: nextId("course"), version: 1 };
       db.courses.push(created);
       syncPricingWithCourses(db);
+      const where = partitionName(db.coursePartitions, created.partitionId);
       writeLog(db, {
         entity: "课程",
         action: "新建",
         targetId: created.id,
-        summary: `新建课程「${created.name}」（${created.category}${created.origin === "后台" ? " · 后台新增" : ""}）`,
+        summary:
+          `新建课程「${created.name}」` +
+          `（${where === "" ? "未归类" : where}${created.origin === "后台" ? " · 后台新增" : ""}）`,
       });
       persist(db);
       return clone(created);
     },
 
     /**
-     * 修改课程：改名同样要防重名；网站来源的课程也能改状态 / 班型 / 分类 / 备注 / 网站卡片字段。
+     * 修改课程：改名同样要防重名；网站来源的课程也能改状态 / 班型 / 分区 / 备注 / 网站卡片字段。
      *
-     * 课程表单是整份提交（名字 / 分类 / 班型 / 状态 / 备注 / 网站卡片字段一起交上来），
+     * 课程表单是整份提交（名字 / 分区 / 班型 / 状态 / 备注 / 网站卡片字段一起交上来），
      * 因此这里接 `expectedVersion`：两个人同时编辑同一门课，后提交的会被拒绝并要求刷新。
      *
      * **先比版本、再校验参数**：版本不一致时，手上这份表单本来就是过期的 ——
@@ -2545,7 +2664,7 @@ const localApi = {
        * normalizeCourse 会保留传进去的版本，因此必须在**进它之前**把版本钉住。
        */
       const next = normalizeCourse({ ...target, ...patch, version: target.version });
-      const problems = validateCourse(next, db.courses, id);
+      const problems = validateCourse(next, db.courses, db.coursePartitions, id);
       if (problems.length > 0) throw new Error(problems.join("；"));
 
       Object.assign(target, next);
@@ -2560,6 +2679,47 @@ const localApi = {
       });
       persist(db);
       return clone(target);
+    },
+
+    /**
+     * **把一批课移到某个分区**（课程库清单里的「移动」）。
+     *
+     * 为什么单独一个方法，而不是让界面循环调 `courses.update`：
+     *   - 那会写 N 条日志（"移动 5 门课"变成 5 条互不相关的记录，事后看不出这是一次整理）；
+     *   - 每门课都要带自己的 `expectedVersion`，界面得先把 N 门课的版本都读全 ——
+     *     中间任何一门被改过，就会出现"移了一半"的状态。
+     * 这里一次事务、一条日志、要么全成要么全不成。
+     *
+     * 返回真正移动了几门（已经在目标分区里的课不计入，也不写日志）。
+     */
+    async setPartition(ids: string[], partitionId: string): Promise<number> {
+      await delay();
+      const db = load();
+      const target = partitionId.trim();
+      if (target !== "" && !db.coursePartitions.some((item) => item.id === target)) {
+        throw new Error("目标分区不存在（可能刚被删掉了）：请刷新页面重新选择。");
+      }
+      const wanted = new Set(ids);
+      const moved: Course[] = [];
+      for (const course of db.courses) {
+        if (!wanted.has(course.id) || course.partitionId === target) continue;
+        course.partitionId = target;
+        bumpVersion(course);
+        moved.push(course);
+      }
+      if (moved.length === 0) return 0;
+
+      const where = partitionName(db.coursePartitions, target);
+      writeLog(db, {
+        entity: "课程",
+        action: "移动分区",
+        targetId: target,
+        summary:
+          `把 ${String(moved.length)} 门课移到「${where === "" ? "未归类" : where}」：` +
+          moved.map((course) => course.name).join("、"),
+      });
+      persist(db);
+      return moved.length;
     },
 
     /**
@@ -2593,22 +2753,38 @@ const localApi = {
     /** 科目候选：网站课程 + 后台新增（按内容顺序，后台的接在后面）。 */
     async options(): Promise<CourseOption[]> {
       await delay();
-      return clone(courseOptions(load().courses));
+      const db = load();
+      return clone(courseOptions(db.courses, db.coursePartitions));
     },
 
-    /** 从网站内容同步新增的课程卡片（**只增不改**：不动机构在后台维护的信息）。 */
+    /**
+     * 从网站内容同步新增的课程卡片（**只增不改**：不动机构在后台维护的信息）。
+     *
+     * 「只增不改」也包括**分区**：内容文件里那个栏目如果已经存在（同名同上级），
+     * 就用现有的那一条 —— 机构可能已经给它改过名、排过位置了。
+     */
     async syncFromSite(): Promise<{ added: string[]; total: number }> {
       await delay();
       const db = load();
-      const merged = mergeSiteCourses(db.courses);
+      const materialized = materializeSiteCourses(db.coursePartitions);
+      const merged = mergeSiteCourses(db.courses, materialized.courses);
       if (merged.added.length > 0) {
+        const before = new Set(db.coursePartitions.map((item) => item.id));
+        db.coursePartitions = materialized.partitions;
+        const newPartitions = db.coursePartitions.filter((item) => !before.has(item.id));
         db.courses = merged.courses;
         syncPricingWithCourses(db);
         writeLog(db, {
           entity: "课程",
           action: "同步",
           targetId: "",
-          summary: `从网站同步了 ${merged.added.length} 门课程：${merged.added.join("、")}`,
+          summary:
+            `从网站同步了 ${String(merged.added.length)} 门课程：${merged.added.join("、")}` +
+            (newPartitions.length === 0
+              ? ""
+              : `（顺带新建了 ${String(newPartitions.length)} 个分区：${newPartitions
+                  .map((item) => item.name)
+                  .join("、")}）`),
         });
         persist(db);
       }
@@ -2618,8 +2794,155 @@ const localApi = {
     /** 课程库统计（列表页顶部）。 */
     async summary(): Promise<CourseSummary> {
       await delay();
-      return clone(summarizeCourses(load().courses));
+      const db = load();
+      return clone(summarizeCourses(db.courses, db.coursePartitions));
     },
+  },
+
+  /*
+   * ── 课程分区（栏目 → 子栏目）────────────────────────────────────────────
+   *
+   * 它是课程库里"结构那一半"：机构在这里建栏目、分子栏目、排序、改名，
+   * 课程再挂到某一区上。网站课程页的栏目顺序直接读它（`publicSite()` → 构站快照）。
+   *
+   * 四条写方法各自只做一件事，为什么不合成一个 `save(wholeTree)`：
+   * 分区是**小而碎的编辑**（改个名字、上移一位、新加一个子栏目），整份提交意味着
+   * 每次改一个字都要把整棵树交上来 —— 两个人同时整理不同栏目时会互相覆盖，
+   * 而这里根本不需要那种"整份表单"的保护（见 `types.ts` 版本号表里 `CoursePartition` 那一行）。
+   */
+  coursePartitions: {
+    list: collection<CoursePartition>((db) => db.coursePartitions, "cp").list,
+
+    /** 新建分区：一级（栏目）或二级（子栏目，传 `parentId`）。 */
+    async create(input: { name: string; parentId?: string; order?: number }): Promise<CoursePartition> {
+      await delay();
+      const db = load();
+      const parentId = (input.parentId ?? "").trim();
+      const problems = validatePartition({ name: input.name, parentId }, db.coursePartitions);
+      if (problems.length > 0) throw new Error(problems.join("；"));
+
+      const siblings = db.coursePartitions.filter((item) => item.parentId === parentId);
+      const created: CoursePartition = {
+        id: nextId("cp"),
+        name: input.name.trim(),
+        parentId,
+        // 不传顺序就排在同级最后：新建的分区跑不到最前面（那会让人以为自己把顺序弄乱了）
+        order:
+          Number.isFinite(Number(input.order)) && input.order !== undefined
+            ? Number(input.order)
+            : siblings.reduce((max, item) => Math.max(max, item.order), 0) + 1,
+      };
+      db.coursePartitions.push(created);
+      writeLog(db, {
+        entity: "课程分区",
+        action: "新建",
+        targetId: created.id,
+        summary:
+          `新建${parentId === "" ? "栏目" : "子栏目"}「${created.name}」` +
+          (parentId === "" ? "" : `（挂在「${partitionName(db.coursePartitions, parentId)}」下）`),
+      });
+      persist(db);
+      return clone(created);
+    },
+
+    /**
+     * 改分区（名字 / 上级 / 顺序）。
+     *
+     * 改名的效果是"一处改、处处变"：课程引用的是 id，因此课程行的 `partitionId` 一个字都不用动
+     * —— 这正是这一版把分区做成数据的目的（v17 及以前改名要逐门课改）。
+     */
+    async update(
+      id: string,
+      patch: Partial<Pick<CoursePartition, "name" | "parentId" | "order">>,
+    ): Promise<CoursePartition | null> {
+      await delay();
+      const db = load();
+      const target = db.coursePartitions.find((item) => item.id === id);
+      if (target === undefined) return null;
+
+      const name = patch.name === undefined ? target.name : patch.name.trim();
+      const parentId = patch.parentId === undefined ? target.parentId : patch.parentId.trim();
+      const problems = validatePartition({ name, parentId }, db.coursePartitions, id);
+      if (problems.length > 0) throw new Error(problems.join("；"));
+
+      const before = target.name;
+      const beforeParent = target.parentId;
+      target.name = name;
+      target.parentId = parentId;
+      if (patch.order !== undefined && Number.isFinite(Number(patch.order))) {
+        target.order = Number(patch.order);
+      }
+      const changes: string[] = [];
+      if (before !== name) changes.push(`名字 ${before} → ${name}`);
+      if (beforeParent !== parentId) {
+        changes.push(
+          `上级 ${beforeParent === "" ? "（无，一级栏目）" : partitionName(db.coursePartitions, beforeParent)}` +
+            ` → ${parentId === "" ? "（无，一级栏目）" : partitionName(db.coursePartitions, parentId)}`,
+        );
+      }
+      writeLog(db, {
+        entity: "课程分区",
+        action: "修改",
+        targetId: id,
+        summary: `修改分区「${name}」${changes.length === 0 ? "（顺序）" : `（${changes.join("；")}）`}`,
+      });
+      persist(db);
+      return clone(target);
+    },
+
+    /**
+     * 同级重排：把这一组的 id 按给定顺序重新编号。
+     *
+     * 为什么不提供 `moveUp` / `moveDown` 两个方法：它们在两次点击之间被别人插了一条时
+     * 会移错位置，而且各自要算一遍边界。整份交顺序只有一个语义，界面点 ↑↓ 时
+     * 把交换后的整组顺序交上来即可。
+     */
+    async reorder(ids: string[]): Promise<CoursePartition[]> {
+      await delay();
+      const db = load();
+      const known = ids.filter((id) => db.coursePartitions.some((item) => item.id === id));
+      if (known.length === 0) return clone(db.coursePartitions);
+      db.coursePartitions = applyPartitionOrder(db.coursePartitions, known);
+      writeLog(db, {
+        entity: "课程分区",
+        action: "排序",
+        targetId: "",
+        summary: `调整分区顺序：${known.map((id) => partitionName(db.coursePartitions, id)).join(" → ")}`,
+      });
+      persist(db);
+      return clone(db.coursePartitions);
+    },
+
+    /**
+     * 删除分区（**有课 / 有子栏目就拒绝**，理由由 `partitionDeleteRefusal` 给出）。
+     *
+     * 与学员、课程同一条口径：删掉一个有课的分区不会报错，只会让那些课静默变成
+     * 「分区已失效」—— 那比"删不掉"糟糕得多，因为它看起来像是数据自己坏了。
+     */
+    async remove(id: string): Promise<boolean> {
+      await delay();
+      const db = load();
+      const index = db.coursePartitions.findIndex((item) => item.id === id);
+      if (index === -1) return false;
+
+      const refusal = partitionDeleteRefusal(
+        db.coursePartitions,
+        (partitionId) => db.courses.filter((course) => course.partitionId === partitionId).length,
+        id,
+      );
+      if (refusal !== "") throw new Error(refusal);
+
+      const [removed] = db.coursePartitions.splice(index, 1);
+      writeLog(db, {
+        entity: "课程分区",
+        action: "删除",
+        targetId: id,
+        summary: `删除分区「${removed?.name ?? ""}」`,
+      });
+      persist(db);
+      return true;
+    },
+
   },
 
   /*
@@ -4525,6 +4848,8 @@ function runImport(
     targetId: "",
     summary:
       `批量导入${label} ${outcome.added} 条${conflictNote}` +
+      // 分区是导入时顺带建出来的，日志里说清楚（否则"库里怎么多了一个栏目"查不到出处）
+      (outcome.partitionsCreated > 0 ? `，新建分区 ${outcome.partitionsCreated} 个` : "") +
       (options.source === "" ? "" : `，来源 ${options.source}`),
   });
   persist(db);
@@ -4714,6 +5039,7 @@ export type {
   CourseOrigin,
   CourseStatus,
   CourseSiteKind,
+  CoursePartition,
   PublicSite,
   SiteContentImportReport,
   SiteContent,

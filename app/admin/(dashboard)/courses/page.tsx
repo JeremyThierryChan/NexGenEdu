@@ -14,6 +14,7 @@ import {
   COURSE_SITE_KINDS,
   COURSE_STATUSES,
   type Course,
+  type CoursePartition,
   type CourseSiteKind,
   type CourseSummary,
   type SiteContent,
@@ -26,8 +27,20 @@ import {
   type BandHit,
   type CardAnchorSource,
 } from "@/lib/backend/site-bands";
-import { getCourseCategoryOptions, getFormOptions } from "@/lib/backend/options";
+import { getFormOptions } from "@/lib/backend/options";
 import { canRemoveCourse } from "@/lib/backend/courses";
+import {
+  childPartitions,
+  groupByPartition,
+  partitionDeleteRefusal,
+  partitionPathLabel,
+  partitionPlace,
+  topLevelPartitions,
+} from "@/lib/backend/course-partitions";
+import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
+import { rolesOrAll, useAuth } from "@/components/admin/AuthContext";
+import { useActionNotice } from "@/components/admin/useActionNotice";
+import { ActionNoticeView } from "@/components/admin/ActionNotice";
 import type { SiteContentImportReport } from "@/lib/backend/api";
 import {
   addLibraryCourseToPricing,
@@ -96,6 +109,13 @@ function structureOf(content: SiteContent): string {
  */
 export default function AdminCoursesPage() {
   const [courses, setCourses] = useState<Course[] | null>(null);
+  /**
+   * 课程分区（栏目 → 子栏目）。
+   *
+   * 它与课程**一起读**：清单要按分区分组、表单要选分区，因此这里与 `courses` 是
+   * 一份数据的两个视图 —— 分区读到了、课程没读到（或反过来）都不行。
+   */
+  const [partitions, setPartitions] = useState<CoursePartition[]>([]);
   // 批量导入面板（低频操作：导完就收起来，不占着页面）
   const [importing, setImporting] = useState(false);
   /** 每门课在报价配置里的定价状态（「打通」的可见部分）。 */
@@ -138,6 +158,37 @@ export default function AdminCoursesPage() {
    */
   const [creatingCourse, setCreatingCourse] = useState(false);
   /**
+   * 分区管理的表单状态：新分区名 + "在哪个栏目下新建"。
+   *
+   * 收纳成一个字符串状态而不是一个表单对象：这里只有两个字段、而且都是"输入框 + 按钮"，
+   * 用 `useState` 各存一份就够了。
+   */
+  const [newPartitionName, setNewPartitionName] = useState("");
+  const [newPartitionParent, setNewPartitionParent] = useState("");
+  /** 正在改名的那一行（`null` = 没有在改名）。 */
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState("");
+  /** 分区那块的提示（与课程的 message/error 分开：两个动作的结果各说各的）。 */
+  const partitionNotice = useActionNotice();
+  /** 正在"把本区课程移到…"的分区 id（防连点）。 */
+  const [movingFrom, setMovingFrom] = useState<string | null>(null);
+
+  /*
+   * 这个角色的动作能力：**直接问服务端用的那个判定函数**（`canCallMethod`），
+   * 不另建一张页面权限表 —— 两张表迟早分叉，而分叉的表现就是"按钮看得见、点了 403"。
+   */
+  const auth = useAuth();
+  const roles = rolesOrAll(auth);
+  /*
+   * 三个写动作各自问一次（而不是共用一个 `canWriteCourse`）：它们分属不同的方法，
+   * 权限表里将来完全可以给"能建、不能删"这种组合 —— 界面上提前合成一个标志的话，
+   * 那种组合一出现就会露出一个点了 403 的按钮（审计里那类"按钮看得见、点了没反应"）。
+   */
+  const canCreateCourse = canCallMethod(roles, "courses.create");
+  const canUpdateCourse = canCallMethod(roles, "courses.update");
+  const canRemoveCourseByRole = canCallMethod(roles, "courses.remove");
+  const canWritePartition = canCallMethod(roles, "coursePartitions.create");
+  /**
    * 小节级动作（删小节 / 新增小节）被拒的原因，**挂在被点的那个小节框里**。
    *
    * `key` 与列表项的 key 同源（学科下标-小节下标）：理由就出现在手指底下。
@@ -158,7 +209,8 @@ export default function AdminCoursesPage() {
   // 表单（新建 / 编辑共用）
   const [editing, setEditing] = useState<Course | null>(null);
   const [name, setName] = useState("");
-  const [category, setCategory] = useState("");
+  /** 表单里选的**分区 id**（空串＝未归类）。分区名与层级在分区面板里维护。 */
+  const [partitionId, setPartitionId] = useState("");
   const [forms, setForms] = useState<string[]>([]);
   const [status, setStatus] = useState<string>("开放");
   const [note, setNote] = useState("");
@@ -168,7 +220,6 @@ export default function AdminCoursesPage() {
    * 因此这几项要能在这里改，而不是只能去改内容文件。
    */
   const [path, setPath] = useState("");
-  const [subgroup, setSubgroup] = useState("");
   const [tagsText, setTagsText] = useState("");
   const [target, setTarget] = useState("");
   const [order, setOrder] = useState("");
@@ -241,8 +292,36 @@ export default function AdminCoursesPage() {
     siteContentRef.current = siteContent;
   }, [siteContent]);
 
-  const categoryOptions = useMemo(() => getCourseCategoryOptions(), []);
   const formOptions = useMemo(() => getFormOptions(), []);
+  /**
+   * 表单与清单用的分区下拉项：一级栏目在前，子栏目缩进跟在它下面。
+   *
+   * 用一个扁平数组而不是两级下拉：机构说的"分区"就是"这门课在哪一栏、哪一小节"，
+   * 一次选定比先选栏目再选子栏目少一半点击；层级用 `　` 缩进与「/」路径表达。
+   */
+  const partitionChoices = useMemo(
+    () =>
+      topLevelPartitions(partitions).flatMap((column) => [
+        { value: column.id, label: column.name, depth: 1 as const },
+        ...childPartitions(partitions, column.id).map((child) => ({
+          value: child.id,
+          // 写法与导出、清单、数据页共用一处实现（见 course-partitions.ts）
+          label: partitionPathLabel(partitions, child.id),
+          depth: 2 as const,
+        })),
+      ]),
+    [partitions],
+  );
+  /**
+   * 分区 id → 显示名（清单里每张卡片上要写"属于哪一区"）。
+   *
+   * 直接用 `partitionPathLabel()`：导出、下拉、清单、数据页四处必须是同一个写法，
+   * 各拼一次的话"这里写 `七选三`、导出写 `高中课内 / 七选三`"没有任何自检能发现。
+   */
+  const partitionLabelOf = useCallback(
+    (id: string): string => partitionPathLabel(partitions, id),
+    [partitions],
+  );
 
   /**
    * 就地动作期间的滚动守护（见 `useScrollGuard`）：`toggleStatus` 前后各用一次。
@@ -263,8 +342,16 @@ export default function AdminCoursesPage() {
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
     if (options.quiet === true) setRefreshing(true);
     else setLoading(true);
-    const [list, stats, config, site] = await Promise.all([
+    const [list, both, stats, config, site] = await Promise.all([
+      /*
+       * 分区与课程一起读。
+       *
+       * `coursePartitions.list` 是 `crud` 组的**只读**方法 → 四类角色都能读
+       * （与 `courses.list` 同一个权限口径），因此不像报价那样需要单独 catch：
+       * 读得到课程就一定读得到分区。
+       */
       api.courses.list(),
+      api.coursePartitions.list().then((items) => ({ items })),
       api.courses.summary(),
       /*
        * 报价配置**单独 catch**：`pricing.get` 对普通教师是 403（报价归技术/财务/招生），
@@ -284,6 +371,7 @@ export default function AdminCoursesPage() {
         .catch(() => null),
     ]);
     setCourses(list);
+    setPartitions(both.items);
     setSummary(stats);
     setPricingConfig(config);
     setPricingStatus(config === null ? [] : pricingStatusForCourses(config, list));
@@ -317,12 +405,11 @@ export default function AdminCoursesPage() {
   function resetForm() {
     setEditing(null);
     setName("");
-    setCategory("");
+    setPartitionId("");
     setForms([]);
     setStatus("开放");
     setNote("");
     setPath("");
-    setSubgroup("");
     setTagsText("");
     setTarget("");
     setOrder("");
@@ -336,12 +423,11 @@ export default function AdminCoursesPage() {
   function startEdit(course: Course) {
     setEditing(course);
     setName(course.name);
-    setCategory(course.category);
+    setPartitionId(course.partitionId);
     setForms(course.forms);
     setStatus(course.status);
     setNote(course.note);
     setPath(course.path);
-    setSubgroup(course.subgroup);
     // 标签写成「学考→高中物理学考、选考→高中物理选考」，与内容文件里的写法一致
     setTagsText(course.tags.map((tag) => `${tag.label}→${tag.target}`).join("、"));
     setTarget(course.target);
@@ -608,12 +694,12 @@ export default function AdminCoursesPage() {
 
     const payload = {
       name: name.trim(),
-      category: category.trim(),
+      // 分区存的是 id（v18）：名字与层级都在分区表里，这里不改名、也不建区
+      partitionId,
       forms,
       status: (status === "暂未开放" ? "暂未开放" : "开放") as Course["status"],
       note: note.trim(),
       path: path.trim(),
-      subgroup: subgroup.trim(),
       tags: cardTags,
       // 卡片点进哪个小节：没填就按「课程名，其次是第一个标签的目标」推导（网站那侧的口径）
       target: target.trim(),
@@ -755,6 +841,248 @@ export default function AdminCoursesPage() {
    * 只会反复点、再怀疑是"点了就跳顶部"。现在失败原话显示在**那张卡片上**，
    * 而且不往页顶放横幅（页顶横幅出现/消失＝页高变化，就在点击的同一瞬间）。
    */
+  /* ── 分区：新建 / 改名 / 排序 / 删除 / 把一批课移进来 ────────────────────── */
+
+  /**
+   * 分区的写动作统一走这里：**动作名 + 一次真正的写**。
+   *
+   * 三个共同点值得收在一处（否则每个动作各写一遍，迟早漏掉一个）：
+   *   1. 写之前 `clear()`、失败把服务端原话显示出来（删除被护栏拦下时那句话就是给人看的下一步）；
+   *   2. 写完**重读整页数据**（课程与分区一起）—— 分区一动，清单的分组就变了，
+   *      局部拼一份新状态比重新读一遍更容易写错（尤其是顺序）；
+   *   3. 重读用 `quiet`：不清空列表，免得页面高度塌一下把人家的滚动位置带走。
+   */
+  async function partitionAction(label: string, run: () => Promise<string>): Promise<void> {
+    partitionNotice.clear();
+    try {
+      const text = await run();
+      await load({ quiet: true });
+      partitionNotice.succeed(text);
+    } catch (cause) {
+      partitionNotice.fail(
+        `${label}失败：${cause instanceof Error ? cause.message : "未知原因"}`,
+      );
+    }
+  }
+
+  async function createPartition(): Promise<void> {
+    const name = newPartitionName.trim();
+    if (name === "") {
+      partitionNotice.fail("分区名不能为空。");
+      return;
+    }
+    await partitionAction("新建分区", async () => {
+      const created = await api.coursePartitions.create({ name, parentId: newPartitionParent });
+      setNewPartitionName("");
+      return `已新建${created.parentId === "" ? "栏目" : "子栏目"}「${created.name}」。`;
+    });
+  }
+
+  async function renamePartition(id: string): Promise<void> {
+    const current = partitions.find((item) => item.id === id);
+    const name = renameText.trim();
+    setRenamingId(null);
+    if (current === undefined || name === "" || name === current.name) return;
+    await partitionAction("改分区名", async () => {
+      await api.coursePartitions.update(id, { name });
+      return `分区已改名为「${name}」（课程挂的是分区 id，因此下面每一门课都跟着变了，不需要逐门改）。`;
+    });
+  }
+
+  /**
+   * 同级上移 / 下移：把**整组的新顺序**交上去（`reorder` 的语义就是"按这个顺序排"）。
+   *
+   * 为什么不交"把这个和上一个换一下"：两次点击之间别人插了一条时，那种语义会移错位置。
+   */
+  async function movePartition(id: string, delta: -1 | 1): Promise<void> {
+    const target = partitions.find((item) => item.id === id);
+    if (target === undefined) return;
+    const siblings = childPartitions(partitions, target.parentId);
+    const index = siblings.findIndex((item) => item.id === id);
+    const swap = index + delta;
+    if (index === -1 || swap < 0 || swap >= siblings.length) return;
+    const ids = siblings.map((item) => item.id);
+    const moved = ids[index]!;
+    ids[index] = ids[swap]!;
+    ids[swap] = moved;
+    await partitionAction("调整分区顺序", async () => {
+      await api.coursePartitions.reorder(ids);
+      return `已把「${target.name}」${delta === -1 ? "上移" : "下移"}一位。`;
+    });
+  }
+
+  async function removePartition(id: string): Promise<void> {
+    const target = partitions.find((item) => item.id === id);
+    if (target === undefined) return;
+    /*
+     * 先按同一套护栏**在界面上预判**一次，把理由当场说出来。
+     * 服务端仍会再拦一遍（界面上的判断只是"早点说"，不是"说过了就不拦"）——
+     * 两边用同一个 `partitionDeleteRefusal`，因此不会出现"界面说能删、服务端拒绝"。
+     */
+    const block = partitionDeleteRefusal(
+      partitions,
+      (partitionId) => (courses ?? []).filter((course) => course.partitionId === partitionId).length,
+      id,
+    );
+    if (block !== "") {
+      partitionNotice.fail(block);
+      return;
+    }
+    if (!window.confirm(`删除分区「${target.name}」？`)) return;
+    await partitionAction("删除分区", async () => {
+      await api.coursePartitions.remove(id);
+      return `已删除分区「${target.name}」。`;
+    });
+  }
+
+  /** 把某一区（或某一子栏目）的课整批移到另一个分区。 */
+  async function moveCourses(ids: string[], fromName: string, toId: string): Promise<void> {
+    if (ids.length === 0) return;
+    setMovingFrom(fromName);
+    await partitionAction("移动课程", async () => {
+      const count = await api.courses.setPartition(ids, toId);
+      const to = partitionChoices.find((item) => item.value === toId)?.label ?? "未归类";
+      return count === 0 ? "这些课本来就在目标分区里，没有移动。" : `已把「${fromName}」下的 ${count} 门课移到「${to}」。`;
+    });
+    setMovingFrom(null);
+  }
+
+  /**
+   * 清单里一个分区的标题行：名字 + 门数 + （有权限时）改名 / 上下移 / 删除 / 整批移课。
+   *
+   * 标题行同时承担"分区管理"的入口，而不是另做一张管理页：
+   * 机构整理课程时看的正是这一屏 —— 发现"这一区该叫别的名字"就地改，比跳到另一页找
+   * 那个分区要顺手得多（也确实少了"两个地方都要维护"的负担）。
+   */
+  function renderPartitionHeader(
+    partition: CoursePartition,
+    items: Course[],
+    level: 1 | 2,
+  ): ReactNode {
+    const Heading = level === 1 ? "h3" : "h4";
+    const siblings = childPartitions(partitions, partition.parentId);
+    const index = siblings.findIndex((item) => item.id === partition.id);
+    const pending = partitionNotice.pending;
+    return (
+      <div className={cn("flex flex-wrap items-center gap-2", level === 1 ? "mb-1" : "mb-2")}>
+        {renamingId === partition.id ? (
+          <form
+            className="flex items-center gap-1.5"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void renamePartition(partition.id);
+            }}
+          >
+            <input
+              autoFocus
+              value={renameText}
+              onChange={(event) => setRenameText(event.target.value)}
+              onBlur={() => void renamePartition(partition.id)}
+              className="h-7 w-40 rounded-md border border-brand-400 px-2 text-xs outline-none"
+            />
+            <Button type="submit" size="sm" variant="outline" disabled={pending}>
+              保存名字
+            </Button>
+            <Button type="button" size="sm" variant="ghost" onClick={() => setRenamingId(null)}>
+              取消
+            </Button>
+          </form>
+        ) : (
+          <Heading
+            className={cn(
+              "font-medium",
+              level === 1 ? "text-xs text-ink-500" : "text-[11px] text-ink-400",
+            )}
+          >
+            {partition.name}
+            <span className="ml-2 font-normal text-ink-400">{items.length} 门</span>
+          </Heading>
+        )}
+
+        {canWritePartition && renamingId !== partition.id && (
+          <span className="flex flex-wrap items-center gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                setRenamingId(partition.id);
+                setRenameText(partition.name);
+                partitionNotice.clear();
+              }}
+              className="rounded-sm border border-ink-200 px-1.5 py-0.5 text-[11px] text-ink-500 hover:border-ink-300"
+            >
+              改名
+            </button>
+            {/*
+              上下移只对同级有效：第一项不能再上移、最后一项不能再下移（按钮直接禁用，
+              而不是点了没反应 —— 后者会让人以为坏了）。
+            */}
+            <button
+              type="button"
+              disabled={index <= 0 || pending}
+              onClick={() => void movePartition(partition.id, -1)}
+              className="rounded-sm border border-ink-200 px-1.5 py-0.5 text-[11px] text-ink-500 hover:border-ink-300 disabled:opacity-40"
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              disabled={index === -1 || index >= siblings.length - 1 || pending}
+              onClick={() => void movePartition(partition.id, 1)}
+              className="rounded-sm border border-ink-200 px-1.5 py-0.5 text-[11px] text-ink-500 hover:border-ink-300 disabled:opacity-40"
+            >
+              ↓
+            </button>
+            <button
+              type="button"
+              disabled={pending}
+              onClick={() => void removePartition(partition.id)}
+              className="rounded-sm border border-danger-100 px-1.5 py-0.5 text-[11px] text-danger-600 hover:border-danger-600 disabled:opacity-40"
+            >
+              删除
+            </button>
+            {/*
+              整批移课：机构最常见的整理动作是"这一区整体挪个位置"。
+              门数为 0 时不显示（没有东西可移，留着只会让人点了才知道）。
+            */}
+            {items.length > 0 && movingFrom !== partition.name && (
+              <label className="flex items-center gap-1 text-[11px] text-ink-500">
+                移到
+                <select
+                  defaultValue=""
+                  disabled={pending}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === "") return;
+                    void moveCourses(
+                      items.map((course) => course.id),
+                      partition.name,
+                      value,
+                    );
+                    event.target.value = "";
+                  }}
+                  className="h-6 rounded-sm border border-ink-200 bg-white px-1 text-[11px] outline-none"
+                >
+                  <option value="">选择分区…</option>
+                  <option value="">（未归类）</option>
+                  {partitionChoices
+                    .filter((choice) => choice.value !== partition.id)
+                    .map((choice) => (
+                      <option key={choice.value} value={choice.value}>
+                        {choice.label}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            )}
+            {movingFrom === partition.name && (
+              <span className="text-[11px] text-ink-400">移动中…</span>
+            )}
+          </span>
+        )}
+      </div>
+    );
+  }
+
   async function toggleStatus(course: Course) {
     /*
      * 防连点：改用 aria-disabled 之后按钮仍可点，因此在这里挡住（见按钮上的注释）。
@@ -898,9 +1226,11 @@ export default function AdminCoursesPage() {
       (courses ?? []).filter((course) => {
         if (originFilter !== "全部" && course.origin !== originFilter) return false;
         const key = keyword.trim();
-        return key === "" || course.name.includes(key) || course.category.includes(key);
+        // 搜索也认分区名（"高中课内"能把它下面的课都筛出来）—— 分区是清单的主结构，
+        // 只按课程名搜会让人以为那一区是空的
+        return key === "" || course.name.includes(key) || partitionLabelOf(course.partitionId).includes(key);
       }),
-    [courses, keyword, originFilter],
+    [courses, keyword, originFilter, partitionLabelOf],
   );
 
   /** 还没配价格的课程（家长问价时答不上来的那些）。 */
@@ -914,16 +1244,22 @@ export default function AdminCoursesPage() {
     return map;
   }, [pricingStatus]);
 
-  const grouped = useMemo(() => {
-    const map = new Map<string, Course[]>();
-    for (const course of visible) {
-      const key = course.category.trim() === "" ? "未分类" : course.category.trim();
-      const list = map.get(key);
-      if (list === undefined) map.set(key, [course]);
-      else list.push(course);
-    }
-    return [...map.entries()];
-  }, [visible]);
+  /**
+   * 清单的分组：**栏目 → 子栏目 → 课程**，与网站课程页同一棵树。
+   *
+   * 为什么用 `groupByPartition()` 而不是在这里再写一遍分组：那正是这一版修掉的毛病
+   * （后台一份、网站一份，迟早对不上）。顺序、层级、空组规则全在那个纯函数里。
+   *
+   * `unpartitioned`：没有有效分区的课（未归类、或引用了一条已经被删掉的分区）。
+   * 它们**不参与分组**（"没有分区"不是一个分区），单独列在清单最后。
+   */
+  const grouped = useMemo(() => groupByPartition(visible, partitions), [visible, partitions]);
+  /** 正在筛选（搜索框有字 / 来源不是「全部」）—— 空分区在筛选结果里不显示，见下面的渲染。 */
+  const filtering = keyword.trim() !== "" || originFilter !== "全部";
+  const unpartitioned = useMemo(
+    () => visible.filter((course) => partitionPlace(partitions, course.partitionId).leaf === null),
+    [visible, partitions],
+  );
 
   /**
    * 课程表单 —— **新增与编辑共用同一份 JSX**。
@@ -939,6 +1275,218 @@ export default function AdminCoursesPage() {
    * 表单里的 `editing === null ? …` 分支不是死代码：顶部这次渲染就是 editing === null 那一边，
    * 行内这次渲染就是编辑那一边 —— 提交按钮上写「添加课程」还是「保存修改」全看它。
    */
+  /**
+   * 清单里**一张课程卡片**（含就地展开的编辑器）。
+   *
+   * 为什么抽成一个渲染函数：卡片要在两处渲染 —— 分区/子栏目分组里、以及最后那块
+   * 「未归类 / 分区已失效」。复制一份出来的话，卡片上的按钮与提示要改两处，
+   * 而且"未归类那一片"会慢慢长成另一个样子（那种不一致没人会主动发现）。
+   */
+  function renderCourseCard(course: Course): ReactNode {
+    /*
+     * 一门课 = 卡片那一格 + （正在编辑时）它下面那一格编辑器。
+     * 两格是同一条课程的两半，因此用 `<Fragment key={course.id}>` 包起来：
+     * key 仍然落在"这一门课"上，刷新 / 过滤 / 改状态时卡片与编辑器不会错配
+     * （React 也就不会把这两格当成"另外一门课"重新挂载，输入焦点与光标得以保留）。
+     */
+    const isEditing = editing?.id === course.id;
+    return (
+      <Fragment key={course.id}>
+<li
+                    className={cn(
+                      "rounded-md border px-3 py-2",
+                      /*
+                       * 三选一，而不是"基础样式 + 再叠一个正在编辑的样式"：
+                       * `cn` 只拼字符串、不做 Tailwind 冲突消解（见 lib/utils/cn.ts 的说明），
+                       * 两份都写的话 border-color 谁赢全看生成 CSS 的顺序 —— 那就成了看运气。
+                       */
+                      isEditing
+                        ? "border-brand-400 bg-brand-50/60"
+                        : course.status === "开放"
+                          ? "border-ink-200"
+                          : "border-dashed border-ink-300 bg-ink-50",
+                    )}
+                  >
+                    <div className="flex flex-wrap items-baseline justify-between gap-2">
+                      <span className="text-sm text-ink-900">{course.name}</span>
+                      <span className="flex items-center gap-1">
+                        {/* 正在编辑的那张卡片：给个明确的标签，不用只靠边框颜色认 */}
+                        {isEditing && (
+                          <span className="rounded-sm border border-brand-400 bg-white px-1.5 py-0.5 text-[11px] text-brand-700">
+                            正在编辑
+                          </span>
+                        )}
+                        <span
+                          className={cn(
+                            "rounded-sm border px-1.5 py-0.5 text-[11px]",
+                            course.origin === "后台"
+                              ? "border-brand-200 bg-brand-50 text-brand-700"
+                              : "border-ink-200 bg-white text-ink-500",
+                          )}
+                        >
+                          {course.origin}
+                        </span>
+                        <span
+                          className={cn(
+                            "rounded-sm border px-1.5 py-0.5 text-[11px]",
+                            course.status === "开放"
+                              ? "border-success-100 bg-success-50 text-success-600"
+                              : "border-ink-200 bg-ink-50 text-ink-500",
+                          )}
+                        >
+                          {course.status}
+                        </span>
+                      </span>
+                    </div>
+
+                    {course.forms.length > 0 && (
+                      <p className="mt-1 text-[11px] text-ink-500">
+                        班型：{course.forms.join("、")}
+                      </p>
+                    )}
+                    {course.note !== "" && (
+                      <p className="mt-1 text-[11px] text-ink-400">{course.note}</p>
+                    )}
+
+                    {pricingLoadError !== "" && (
+                      <p className="mt-1 text-[11px] leading-relaxed text-warning-600">
+                        {pricingLoadError}
+                      </p>
+                    )}
+
+
+                    {/* 报价状态：课程库与报价配置「打通」之后，这里能一眼看出哪门课还没定价 */}
+                    {(() => {
+                      const status = priceOf.get(course.id);
+                      if (status === undefined) return null;
+                      if (!status.priced) {
+                        return (
+                          <p className="mt-1 text-[11px] text-warning-600">
+                            未定价 —— 到「报价」页给它填一个基础价，家长问价时才有依据
+                          </p>
+                        );
+                      }
+                      return (
+                        <p className="mt-1 text-[11px] text-ink-500">
+                          {status.basePrice === null
+                            ? `已关联报价（${status.stageName} · 暂未开放）`
+                            : `报价 ${status.basePrice} 元/节（${status.stageName}）`}
+                        </p>
+                      );
+                    })()}
+
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {canUpdateCourse && (
+                        <button
+                          type="button"
+                          onClick={() => startEdit(course)}
+                          className="rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 hover:border-brand-300 hover:text-brand-700"
+                        >
+                          编辑
+                        </button>
+                      )}
+                      {/*
+                        从课程清单直接跳到**这门课正文所在的学科**。
+                        卡片与它的正文是同一门课的两半；卡片里的「网站正文」已经能改小节正文了，
+                        这个按钮留着是给"学科级的东西"用的（学科导语 / 整组暂未开放 / 未挂到卡片的正文）。
+                        targets 的算法与卡片里那块共用（`cardTargets`），因此两处不会各说一套。
+                      */}
+                      {course.siteKind !== "不展示" && course.path !== "" && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            focusSiteSubject({
+                              cardName: course.name,
+                              targets: cardTargets(course),
+                            })
+                          }
+                          className="rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 hover:border-brand-300 hover:text-brand-700"
+                        >
+                          网站正文
+                        </button>
+                      )}
+                      {/*
+                        **刻意不用 `disabled`**：点击的瞬间把聚焦中的按钮置为 disabled，
+                        浏览器会把焦点丢回文档体，而在焦点落回 body 时页面可能被滚回顶部 ——
+                        这就是"代码里一处滚动都没有、点一下却被弹到最上面"的成因
+                        （机构反馈：点完还要重新滚下来才能继续切别的科目）。
+                        改成 `aria-disabled` + `pointer-events-none` + 在 handler 里提前返回：
+                        外观与防连点一样，但**不夺走焦点**，页面不会动。
+                      */}
+                      {canUpdateCourse && (
+                      <button
+                        type="button"
+                        aria-disabled={togglingId === course.id}
+                        onClick={() => void toggleStatus(course)}
+                        className={cn(
+                          "rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 hover:border-brand-300 hover:text-brand-700",
+                          togglingId === course.id && "pointer-events-none opacity-50",
+                        )}
+                      >
+                        {togglingId === course.id
+                          ? "切换中…"
+                          : course.status === "开放"
+                            ? "设为暂未开放"
+                            : "设为开放"}
+                      </button>
+                      )}
+                      {course.origin === "后台" && canRemoveCourseByRole && (
+                        <button
+                          type="button"
+                          onClick={() => void remove(course)}
+                          className="rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-500 hover:border-danger-100 hover:text-danger-600"
+                        >
+                          删除
+                        </button>
+                      )}
+                    </div>
+
+                    {/*
+                      就地动作的结果就写在这张卡片上（成功一行绿字 / 失败一行红字）。
+                      放在卡片里而不是页顶：一是眼睛就在这儿，二是页顶那条横幅
+                      一出现一消失就是滚动位置上面多了一块 / 少了一块 —— 而"少了一块"
+                      正是让浏览器把滚动位置夹回顶部的那个动作（见 toggleStatus 的说明）。
+                    */}
+                    {cardNote !== null && cardNote.id === course.id && (
+                      <p
+                        role={cardNote.kind === "error" ? "alert" : undefined}
+                        className={cn(
+                          "mt-1 text-[11px] leading-relaxed",
+                          cardNote.kind === "error" ? "text-danger-600" : "text-success-600",
+                        )}
+                      >
+                        {cardNote.text}
+                      </p>
+                    )}
+                  </li>
+                  {/*
+                   编辑器**就在这张卡片下面**展开：`col-span-full`（占满整行）。
+                   为什么不让它挤在卡片那一格里：卡片网格在宽屏是 2~3 列，编辑器里有课程字段、
+                   「网站上怎么展示」、小节正文、报价四块，挤进三分之一的宽度就没法用了；
+                   占满整行之后它落在"这张卡片所在的那一行"下面，窄屏（一列）本来就是紧跟着卡片。
+                   缩进 + 左边一条竖线 + 浅底：一眼看出它是这张卡片的编辑区，而不是又一张课程卡片。
+                  */}
+                  {isEditing && (
+                    <li className="col-span-full">
+                      <div className="ml-2 border-l-2 border-brand-300 bg-ink-50/70 py-3 pl-3 pr-3 sm:ml-4 sm:pl-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs font-medium text-ink-700">
+                            正在编辑「{course.name}」
+                            <span className="ml-2 font-normal text-ink-400">改完点下面「保存修改」，这一块会自己收起。</span>
+                          </p>
+                          <Button variant="ghost" size="sm" onClick={resetForm}>
+                            取消
+                          </Button>
+                        </div>
+                        {renderCourseForm("mt-3 space-y-3")}
+                      </div>
+                    </li>
+                )}
+                  
+      </Fragment>
+    );
+  }
+
   function renderCourseForm(formClassName: string): ReactNode {
     return (
       <form onSubmit={onSubmit} className={formClassName}>
@@ -951,19 +1499,20 @@ export default function AdminCoursesPage() {
             placeholder="例如 围棋"
             required
           />
-          <TextField
-            label="分类"
-            hint="可用下面的建议，也可以自己写"
-            list="course-categories"
-            value={category}
-            onChange={(event) => setCategory(event.target.value)}
-            placeholder="例如 兴趣才艺"
+          <SelectInput
+            label="分区"
+            hint="清单按它分组；增删改名到下面的「课程分区」"
+            options={[
+              // 未归类是**允许**的中间状态：先建课、之后再分区（服务端也接受空串）
+              { value: "", label: "（未归类）" },
+              ...partitionChoices.map((item) => ({
+                value: item.value,
+                label: item.depth === 1 ? item.label : `　└ ${item.label}`,
+              })),
+            ]}
+            value={partitionId}
+            onChange={(event) => setPartitionId(event.target.value)}
           />
-          <datalist id="course-categories">
-            {categoryOptions.map((item) => (
-              <option key={item} value={item} />
-            ))}
-          </datalist>
           <SelectInput
             label="状态"
             value={status}
@@ -1017,13 +1566,6 @@ export default function AdminCoursesPage() {
               placeholder="例如 junior-math"
             />
             <TextField
-              label="子栏目"
-              hint="栏目再分组时填（高中课内分 必考科目 / 外语 / 七选三）"
-              value={subgroup}
-              onChange={(event) => setSubgroup(event.target.value)}
-              placeholder="例如 七选三"
-            />
-            <TextField
               label="卡片标签"
               hint="「标签→小节名」用顿号分隔；不填表示这门课没有细分"
               value={tagsText}
@@ -1039,7 +1581,7 @@ export default function AdminCoursesPage() {
             />
             <TextField
               label="显示顺序"
-              hint="同一栏目内越小越靠前；留空排在最后"
+              hint="同一分区内越小越靠前；留空排在最后"
               type="number"
               value={order}
               onChange={(event) => setOrder(event.target.value)}
@@ -1368,14 +1910,20 @@ export default function AdminCoursesPage() {
         <Panel
           className="mt-5"
           title="新增课程"
-          description="例如「围棋」「书法」「编程」。分类可以填网站栏目名，也可以自己写一个（如「兴趣才艺」）。"
+          description="例如「围棋」「书法」「编程」。分区可以选一个已有的，也可以先到上面「课程分区」里新建一个。"
           actions={
-            <Button variant="outline" size="sm" onClick={() => setCreatingCourse((value) => !value)}>
-              {creatingCourse ? "收起表单" : "填写新课程"}
-            </Button>
+            canCreateCourse ? (
+              <Button variant="outline" size="sm" onClick={() => setCreatingCourse((value) => !value)}>
+                {creatingCourse ? "收起表单" : "填写新课程"}
+              </Button>
+            ) : undefined
           }
         >
-          {creatingCourse ? (
+          {!canCreateCourse ? (
+            <p className="px-4 py-4 text-xs leading-relaxed text-ink-500">
+              你的角色可以看课程库，但不能新增课程（{methodOwnerText("courses.create")}）。
+            </p>
+          ) : creatingCourse ? (
             renderCourseForm("space-y-3 px-4 py-4")
           ) : (
             <p className="px-4 py-4 text-xs leading-relaxed text-ink-500">
@@ -1445,14 +1993,80 @@ export default function AdminCoursesPage() {
         onSave={() => void saveSiteContent()}
       />
 
+      {/* ── 课程分区（栏目 → 子栏目）── */}
+      <Panel
+        className="mt-5"
+        title="课程分区"
+        description="清单按这里的分区分组；网站课程页的「栏目 → 子栏目」就是同一棵树（空分区不会出现在网站上）。"
+      >
+        <div className="px-4 py-4">
+          {/*
+            分区管理为什么做成"在这一页"而不是另开一页：整理课程时看的正是这一屏 ——
+            发现"这一区该改个名字"就地改，比跳到另一页去找那个分区顺手得多。
+            下面清单里每个分区标题旁就有改名 / 上下移 / 删除 / 整批移课。
+          */}
+          <p className="text-xs leading-relaxed text-ink-500">
+            分区**只有两级**：栏目（小学课内 / 高中课内…）与它下面的子栏目（必考科目 / 外语 / 七选三）
+            —— 宣传网站课程页渲染的就是这两级，第三级存得下也画不出来，因此服务端会拒绝。
+            改名不用逐门课改：课程挂的是分区本身，改一次，下面每一门课都跟着变。
+            <br />
+            改名 / 排序 / 删除 / 把一区的课整批移走：在下面「课程清单」里每个分区的标题旁。
+          </p>
+
+          {canWritePartition ? (
+            <form
+              className="mt-3 flex flex-wrap items-end gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createPartition();
+              }}
+            >
+              <div className="w-48">
+                <TextField
+                  label="新建分区"
+                  hint="栏目或子栏目的名字"
+                  value={newPartitionName}
+                  onChange={(event) => setNewPartitionName(event.target.value)}
+                  placeholder="例如 兴趣才艺"
+                />
+              </div>
+              <div className="w-56">
+                <SelectInput
+                  label="上级"
+                  hint="选「（一级栏目）」就是新栏目"
+                  options={[
+                    { value: "", label: "（一级栏目）" },
+                    ...topLevelPartitions(partitions).map((column) => ({
+                      value: column.id,
+                      label: `${column.name} 的子栏目`,
+                    })),
+                  ]}
+                  value={newPartitionParent}
+                  onChange={(event) => setNewPartitionParent(event.target.value)}
+                />
+              </div>
+              <Button type="submit" disabled={partitionNotice.pending}>
+                {partitionNotice.pending ? "新建中…" : "新建"}
+              </Button>
+            </form>
+          ) : (
+            <p className="mt-3 text-xs text-ink-500">
+              你的角色可以看分区，但不能改（{methodOwnerText("coursePartitions.create")}）。
+            </p>
+          )}
+
+          <ActionNoticeView notice={partitionNotice} className="mt-3" />
+        </div>
+      </Panel>
+
       {/* ── 列表 ── */}
-      <Panel className="mt-5 mb-8" title="课程清单" description="按分类分组。网站来源的课程跟着内容文件走，不能删除。">
+      <Panel className="mt-5 mb-8" title="课程清单" description="按分区（栏目 → 子栏目）分组。网站来源的课程跟着内容文件走，不能删除。">
         <div className="flex flex-wrap items-center gap-3 border-b border-ink-100 px-4 py-3">
           <input
             type="search"
             value={keyword}
             onChange={(event) => setKeyword(event.target.value)}
-            placeholder="搜索课程名或分类…"
+            placeholder="搜索课程名或分区…"
             className="h-9 min-w-48 flex-1 rounded-md border border-ink-200 px-3 text-sm outline-none focus:border-brand-400"
           />
           <div className="flex items-center gap-1.5">
@@ -1496,215 +2110,66 @@ export default function AdminCoursesPage() {
           <p className="px-4 py-6 text-sm text-ink-500">没有匹配的课程。</p>
         ) : (
           <div className="divide-y divide-ink-100">
-            {grouped.map(([group, items]) => (
-              <div key={group} className="px-4 py-3">
-                <h3 className="mb-2 text-xs font-medium text-ink-500">
-                  {group}
-                  <span className="ml-2 text-ink-400">{items.length} 门</span>
-                </h3>
-                <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                  {items.map((course) => {
-                    /*
-                     * 一门课 = 卡片那一格 + （正在编辑时）它下面那一格编辑器。
-                     * 两格是同一条课程的两半，因此用 `<Fragment key={course.id}>` 包起来：
-                     * key 仍然落在"这一门课"上，刷新 / 过滤 / 改状态时卡片与编辑器不会错配
-                     * （React 也就不会把这两格当成"另外一门课"重新挂载，输入焦点与光标得以保留）。
-                     */
-                    const isEditing = editing?.id === course.id;
-                    return (
-                      <Fragment key={course.id}>
-                      <li
-                        className={cn(
-                          "rounded-md border px-3 py-2",
-                          /*
-                           * 三选一，而不是"基础样式 + 再叠一个正在编辑的样式"：
-                           * `cn` 只拼字符串、不做 Tailwind 冲突消解（见 lib/utils/cn.ts 的说明），
-                           * 两份都写的话 border-color 谁赢全看生成 CSS 的顺序 —— 那就成了看运气。
-                           */
-                          isEditing
-                            ? "border-brand-400 bg-brand-50/60"
-                            : course.status === "开放"
-                              ? "border-ink-200"
-                              : "border-dashed border-ink-300 bg-ink-50",
-                        )}
-                      >
-                        <div className="flex flex-wrap items-baseline justify-between gap-2">
-                          <span className="text-sm text-ink-900">{course.name}</span>
-                          <span className="flex items-center gap-1">
-                            {/* 正在编辑的那张卡片：给个明确的标签，不用只靠边框颜色认 */}
-                            {isEditing && (
-                              <span className="rounded-sm border border-brand-400 bg-white px-1.5 py-0.5 text-[11px] text-brand-700">
-                                正在编辑
-                              </span>
-                            )}
-                            <span
-                              className={cn(
-                                "rounded-sm border px-1.5 py-0.5 text-[11px]",
-                                course.origin === "后台"
-                                  ? "border-brand-200 bg-brand-50 text-brand-700"
-                                  : "border-ink-200 bg-white text-ink-500",
-                              )}
-                            >
-                              {course.origin}
-                            </span>
-                            <span
-                              className={cn(
-                                "rounded-sm border px-1.5 py-0.5 text-[11px]",
-                                course.status === "开放"
-                                  ? "border-success-100 bg-success-50 text-success-600"
-                                  : "border-ink-200 bg-ink-50 text-ink-500",
-                              )}
-                            >
-                              {course.status}
-                            </span>
-                          </span>
-                        </div>
-
-                        {course.forms.length > 0 && (
-                          <p className="mt-1 text-[11px] text-ink-500">
-                            班型：{course.forms.join("、")}
-                          </p>
-                        )}
-                        {course.note !== "" && (
-                          <p className="mt-1 text-[11px] text-ink-400">{course.note}</p>
-                        )}
-
-                        {pricingLoadError !== "" && (
-                          <p className="mt-1 text-[11px] leading-relaxed text-warning-600">
-                            {pricingLoadError}
-                          </p>
-                        )}
-
-
-                        {/* 报价状态：课程库与报价配置「打通」之后，这里能一眼看出哪门课还没定价 */}
-                        {(() => {
-                          const status = priceOf.get(course.id);
-                          if (status === undefined) return null;
-                          if (!status.priced) {
-                            return (
-                              <p className="mt-1 text-[11px] text-warning-600">
-                                未定价 —— 到「报价」页给它填一个基础价，家长问价时才有依据
-                              </p>
-                            );
-                          }
-                          return (
-                            <p className="mt-1 text-[11px] text-ink-500">
-                              {status.basePrice === null
-                                ? `已关联报价（${status.stageName} · 暂未开放）`
-                                : `报价 ${status.basePrice} 元/节（${status.stageName}）`}
-                            </p>
-                          );
-                        })()}
-
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => startEdit(course)}
-                            className="rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 hover:border-brand-300 hover:text-brand-700"
-                          >
-                            编辑
-                          </button>
-                          {/*
-                            从课程清单直接跳到**这门课正文所在的学科**。
-                            卡片与它的正文是同一门课的两半；卡片里的「网站正文」已经能改小节正文了，
-                            这个按钮留着是给"学科级的东西"用的（学科导语 / 整组暂未开放 / 未挂到卡片的正文）。
-                            targets 的算法与卡片里那块共用（`cardTargets`），因此两处不会各说一套。
-                          */}
-                          {course.siteKind !== "不展示" && course.path !== "" && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                focusSiteSubject({
-                                  cardName: course.name,
-                                  targets: cardTargets(course),
-                                })
-                              }
-                              className="rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 hover:border-brand-300 hover:text-brand-700"
-                            >
-                              网站正文
-                            </button>
-                          )}
-                          {/*
-                            **刻意不用 `disabled`**：点击的瞬间把聚焦中的按钮置为 disabled，
-                            浏览器会把焦点丢回文档体，而在焦点落回 body 时页面可能被滚回顶部 ——
-                            这就是"代码里一处滚动都没有、点一下却被弹到最上面"的成因
-                            （机构反馈：点完还要重新滚下来才能继续切别的科目）。
-                            改成 `aria-disabled` + `pointer-events-none` + 在 handler 里提前返回：
-                            外观与防连点一样，但**不夺走焦点**，页面不会动。
-                          */}
-                          <button
-                            type="button"
-                            aria-disabled={togglingId === course.id}
-                            onClick={() => void toggleStatus(course)}
-                            className={cn(
-                              "rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 hover:border-brand-300 hover:text-brand-700",
-                              togglingId === course.id && "pointer-events-none opacity-50",
-                            )}
-                          >
-                            {togglingId === course.id
-                              ? "切换中…"
-                              : course.status === "开放"
-                                ? "设为暂未开放"
-                                : "设为开放"}
-                          </button>
-                          {course.origin === "后台" && (
-                            <button
-                              type="button"
-                              onClick={() => void remove(course)}
-                              className="rounded border border-ink-200 px-2 py-0.5 text-[11px] text-ink-500 hover:border-danger-100 hover:text-danger-600"
-                            >
-                              删除
-                            </button>
-                          )}
-                        </div>
-
-                        {/*
-                          就地动作的结果就写在这张卡片上（成功一行绿字 / 失败一行红字）。
-                          放在卡片里而不是页顶：一是眼睛就在这儿，二是页顶那条横幅
-                          一出现一消失就是滚动位置上面多了一块 / 少了一块 —— 而"少了一块"
-                          正是让浏览器把滚动位置夹回顶部的那个动作（见 toggleStatus 的说明）。
-                        */}
-                        {cardNote !== null && cardNote.id === course.id && (
-                          <p
-                            role={cardNote.kind === "error" ? "alert" : undefined}
-                            className={cn(
-                              "mt-1 text-[11px] leading-relaxed",
-                              cardNote.kind === "error" ? "text-danger-600" : "text-success-600",
-                            )}
-                          >
-                            {cardNote.text}
-                          </p>
-                        )}
-                      </li>
+            {grouped.map(({ column, groups }) => {
+              /*
+               * 一个栏目 = 标题（可改名 / 排序 / 删除 / 把本区课程整批移走）+ 它的子栏目分组。
+               * 结构与顺序全部来自 `groupByPartition()`（与网站课程页同一个函数），页面只负责画。
+               */
+              const columnItems = groups.flatMap((group) => group.items);
+              /*
+               * 三个显示口径：
+               *   - **搜索/筛选时**只显示有命中的分区与子栏目（否则结果里夹着一堆"0 门"的空标题）；
+               *   - 不筛选时**空分区照常显示**（机构要能先建好分区、再往里放课）；
+               *   - 空分区给一句话说明它为什么在这儿（否则会以为清单坏了）。
+               */
+              const shown = groups.filter((group) => !filtering || group.items.length > 0);
+              if (filtering && columnItems.length === 0) return null;
+              return (
+                <div key={column.id} className="px-4 py-3">
+                  {renderPartitionHeader(column, columnItems, 1)}
+                  {columnItems.length === 0 && (
+                    <p className="mb-1 text-[11px] text-ink-400">
+                      这一区还没有课 —— 新增课程时在「分区」里选它，或用别处的「移到」把课挪进来。
+                      （空分区不会出现在宣传网站的课程页上。）
+                    </p>
+                  )}
+                  {shown.map((group) => (
+                    <div key={group.subgroup?.id ?? `${column.id}-direct`} className="mt-3">
                       {/*
-                       编辑器**就在这张卡片下面**展开：`col-span-full`（占满整行）。
-                       为什么不让它挤在卡片那一格里：卡片网格在宽屏是 2~3 列，编辑器里有课程字段、
-                       「网站上怎么展示」、小节正文、报价四块，挤进三分之一的宽度就没法用了；
-                       占满整行之后它落在"这张卡片所在的那一行"下面，窄屏（一列）本来就是紧跟着卡片。
-                       缩进 + 左边一条竖线 + 浅底：一眼看出它是这张卡片的编辑区，而不是又一张课程卡片。
+                        直接挂在栏目上的课（`subgroup === null`）**不渲染子标题** ——
+                        与网站课程页一致（那一组在网站上就是没有小标题的一块）。
                       */}
-                      {isEditing && (
-                        <li className="col-span-full">
-                          <div className="ml-2 border-l-2 border-brand-300 bg-ink-50/70 py-3 pl-3 pr-3 sm:ml-4 sm:pl-4">
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <p className="text-xs font-medium text-ink-700">
-                                正在编辑「{course.name}」
-                                <span className="ml-2 font-normal text-ink-400">改完点下面「保存修改」，这一块会自己收起。</span>
-                              </p>
-                              <Button variant="ghost" size="sm" onClick={resetForm}>
-                                取消
-                              </Button>
-                            </div>
-                            {renderCourseForm("mt-3 space-y-3")}
-                          </div>
-                        </li>
-                    )}
-                      </Fragment>
-                    );
-                  })}
+                      {group.subgroup !== null && renderPartitionHeader(group.subgroup, group.items, 2)}
+                      {group.subgroup !== null && group.items.length === 0 && (
+                        <p className="mb-1 text-[11px] text-ink-400">
+                          这个子栏目还没有课。
+                        </p>
+                      )}
+                      <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        {group.items.map((course) => renderCourseCard(course))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+
+            {unpartitioned.length > 0 && (
+              <div className="px-4 py-3">
+                <h3 className="mb-2 text-xs font-medium text-warning-600">
+                  未归类 / 分区已失效
+                  <span className="ml-2 font-normal text-ink-400">{unpartitioned.length} 门</span>
+                </h3>
+                <p className="mb-2 text-[11px] leading-relaxed text-ink-500">
+                  这些课没有有效的分区：新加的课还没选分区，或者它原来那一区已经不在了
+                  （删除有课的分区会被拦住，因此后者通常意味着数据是从别处恢复过来的）。
+                  用每张卡片上的「编辑」给它们选一个分区即可。
+                </p>
+                <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {unpartitioned.map((course) => renderCourseCard(course))}
                 </ul>
               </div>
-            ))}
+            )}
           </div>
         )}
       </Panel>

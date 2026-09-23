@@ -50,16 +50,77 @@ const iso = (offsetDays = 0, hour = 10) => {
   return d.toISOString();
 };
 
-/* ── 1 课程库 ── */
+/* ── 1 课程库（含分区）── */
 let courseId = "";
-await check("课程库", "新建课程（围棋）", async () => {
+/*
+ * 分区先行：课程要挂在某一区上（v18 起课程只存 `partitionId`）。
+ * 这几条按"机构在后台整理分区"的真实顺序走一遍：
+ * 建栏目 → 建子栏目 → 把课挂进去 → 改名（一处改、处处变）→ 删除空栏目 → 有课的删不掉。
+ */
+let columnId = "";
+await check("课程库", "新建栏目（兴趣才艺）", async () => {
+  const created = await api.coursePartitions.create({ name: "兴趣才艺" });
+  columnId = created.id;
+  return created;
+}, (p: { name: string; parentId: string }) => p.name === "兴趣才艺" && p.parentId === "");
+let subId = "";
+await check("课程库", "在栏目下新建子栏目（棋类）", async () => {
+  const created = await api.coursePartitions.create({ name: "棋类", parentId: columnId });
+  subId = created.id;
+  return created;
+}, (p: { parentId: string }) => p.parentId === columnId);
+await check("课程库", "分区列表能读回来（两级都在）", async () => {
+  const list = await api.coursePartitions.list();
+  return list.some((item) => item.id === columnId) && list.some((item) => item.id === subId);
+});
+await check("课程库", "同级重名被拒绝", async () => {
+  try {
+    await api.coursePartitions.create({ name: "棋类", parentId: columnId });
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("不能重复") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+await check("课程库", "新建课程（围棋，挂到子栏目）", async () => {
   const created = await api.courses.create({
-    name: "围棋", category: "兴趣才艺", forms: ["一对一定制课"], origin: "后台",
+    name: "围棋", partitionId: subId, forms: ["一对一定制课"], origin: "后台",
     status: "开放", note: "验收用", createdAt: new Date().toISOString(),
   });
   courseId = created.id;
   return created;
-}, (c: { name: string }) => c.name === "围棋");
+}, (c: { name: string; partitionId: string }) => c.name === "围棋" && c.partitionId === subId);
+await check("课程库", "改分区名：课程引用不变、显示名跟着变", async () => {
+  await api.coursePartitions.update(columnId, { name: "兴趣才艺（改）" });
+  const option = (await api.courses.options()).find((item) => item.name === "围棋");
+  // 两级时显示完整路径（与导出、清单同一个写法）—— 只看叶子名会看不出它属于哪个栏目
+  return option?.category ?? "";
+}, (category: string) => category === "兴趣才艺（改） / 棋类");
+await check("课程库", "有子栏目的栏目删不掉（先说清是哪些子栏目）", async () => {
+  try {
+    await api.coursePartitions.remove(columnId);
+    return "竟然删掉了";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("子栏目") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+await check("课程库", "有课的子栏目也删不掉（护栏说清了先做什么）", async () => {
+  try {
+    await api.coursePartitions.remove(subId);
+    return "竟然删掉了";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("门课") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+await check("课程库", "把课移到另一区（一次事务）", async () => {
+  const target = (await api.coursePartitions.list()).find((item) => item.parentId === "");
+  if (target === undefined) return "没有可用的目标分区";
+  const moved = await api.courses.setPartition([courseId], target.id);
+  return moved;
+}, (moved: number) => moved === 1);
+await check("课程库", "空栏目可以删掉（护栏不误伤）", async () => {
+  const empty = await api.coursePartitions.create({ name: "验收·空栏目" });
+  return await api.coursePartitions.remove(empty.id);
+}, (removed: boolean) => removed === true);
 await check("课程库", "课程列表与统计", async () => (await api.courses.list()).length > 0);
 await check("课程库", "修改课程", async () => (await api.courses.update(courseId, { note: "已改" })).note === "已改");
 await check("课程库", "从网站同步课程", async () => (await api.courses.syncFromSite()).total > 0);

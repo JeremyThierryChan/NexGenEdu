@@ -23,11 +23,12 @@
  * 两者形状不同，硬并成一个接口会让"冲突时选覆盖还是跳过"这种选项失去意义。
  */
 
-import { coursesFromSite } from "./courses";
+import { coursesFromSite, materializeSiteCourses } from "./courses";
 import { bumpVersion } from "./concurrency";
 import { getTeachersPageFromTemplate } from "@/lib/data/site";
 import { siteContentFromContent } from "./site-content";
 import type { Course, CourseTag, Database, SiteBand, SiteSubject, Teacher } from "./types";
+import type { SiteCourse } from "./courses";
 
 /** 网站内容里的教师资料（含 AI），按网站上的顺序。 */
 export function siteTeachers(): Array<{
@@ -92,11 +93,14 @@ function deepCopy<T>(value: T): T {
 }
 
 /** 库里一条课程是不是"网站上的那张卡片"（按 id 或名字认）。 */
-function findCourse(courses: Course[], site: Course): Course | undefined {
-  return (
-    courses.find((course) => course.id === site.id) ??
-    courses.find((course) => course.name.trim() === site.name.trim())
-  );
+function findCourse(courses: Course[], site: SiteCourse): Course | undefined {
+  /*
+   * 认人只用**课程名**：网站同步进来的课程 id 是 `course-site-<路径>`（稳定），
+   * 但 `SiteCourse` 这一层刻意不带 id（分区还是名字，id 由 `materializeSiteCourses` 落定）。
+   * 名字在课程库里本来就是唯一的引用键（排课、报课都按它记），因此按名字找是等价的，
+   * 而且对"机构在后台把路径改过"这种情况更耐用。
+   */
+  return courses.find((course) => course.name.trim() === site.name.trim());
 }
 
 const SAME_TAGS = (a: CourseTag[], b: CourseTag[]) =>
@@ -204,12 +208,23 @@ export function importSiteContent(
     }
   }
 
-  /* ── 课程卡片：补网站字段（路径 / 子栏目 / 标签 / 顺序 / 形态），没有就新增 ── */
+  /* ── 课程卡片：补网站字段（路径 / 分区 / 标签 / 顺序 / 形态），没有就新增 ── */
+  /*
+   * 分区与课程一起落定：内容文件说的是分区**名字**，库里存 id。
+   * `materializeSiteCourses` 会把缺的分区建出来，但**只在真的用上时才写回**
+   * （见循环后的 `partitionsChanged`）—— 否则"内容文件里的栏目全都没变、
+   * 只是名字被机构改过"这种情况会凭空多出一个空分区。
+   */
+  const materialized = materializeSiteCourses(working.coursePartitions);
+  let partitionsChanged = false;
   for (const site of coursesFromSite()) {
     const existing = findCourse(working.courses, site);
+    const incoming = materialized.courses.find((course) => course.name.trim() === site.name.trim());
     if (existing === undefined) {
-      working.courses.push({ ...site });
+      if (incoming === undefined) continue;
+      working.courses.push({ ...incoming });
       counts.coursesAdded += 1;
+      partitionsChanged = true;
       changes.push(`新增课程卡片「${site.name}」（${site.category}）`);
       continue;
     }
@@ -217,7 +232,14 @@ export function importSiteContent(
     const filled: string[] = [];
     // 卡片字段属于"内容文件那一侧"，因此在**为空**时补、`overwrite` 时覆盖
     if (existing.path === "" || overwrite) { if (existing.path !== site.path) { existing.path = site.path; filled.push("路径"); } }
-    if (existing.subgroup === "" || overwrite) { if (existing.subgroup !== site.subgroup) { existing.subgroup = site.subgroup; filled.push("子栏目"); } }
+    // 分区（栏目 / 子栏目）：没归类时才补，`overwrite` 时按内容文件覆盖
+    if (incoming !== undefined && (existing.partitionId === "" || overwrite)) {
+      if (existing.partitionId !== incoming.partitionId) {
+        existing.partitionId = incoming.partitionId;
+        filled.push("分区");
+        partitionsChanged = true;
+      }
+    }
     if (existing.tags.length === 0 || overwrite) { if (!SAME_TAGS(existing.tags, site.tags)) { existing.tags = site.tags; filled.push("标签"); } }
     if (existing.target === "" || overwrite) { if (existing.target !== site.target) { existing.target = site.target; filled.push("点进哪一节"); } }
     if (existing.order === 999 || overwrite) { if (existing.order !== site.order) { existing.order = site.order; filled.push("顺序"); } }
@@ -238,6 +260,7 @@ export function importSiteContent(
       changes.push(`课程「${site.name}」补上 ${filled.join(" / ")}`);
     }
   }
+  if (partitionsChanged) working.coursePartitions = materialized.partitions;
 
   /* ── 课程正文：库里没有就写入；已有则只在 `overwrite` 时替换 ── */
   const incoming = siteContentFromContent();

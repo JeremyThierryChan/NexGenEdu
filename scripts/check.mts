@@ -95,6 +95,12 @@ import { publicSite as buildPublicSite } from "@/lib/backend/public-site";
 import { __useBackendSnapshotForTesting, backendSnapshot } from "@/lib/site/backend-source";
 import { siteTeachers as siteTeachersFromContent } from "@/lib/backend/site-import";
 import { coursesFromSite } from "@/lib/backend/courses";
+import {
+  childPartitions,
+  partitionDeleteRefusal,
+  partitionPlace,
+  topLevelPartitions,
+} from "@/lib/backend/course-partitions";
 import { weekDays } from "@/lib/backend/format";
 import {
   buildDayTimeline,
@@ -2513,8 +2519,8 @@ await api.restoreBackup();
 
   // ③ 删除护栏：让一张卡片的**标签**指向刚加的小节，然后试着删掉它
   const card = await api.courses.create({
-    name: "自检·指向小节", category: "自检", forms: [], origin: "后台", status: "开放", note: "",
-    path: "self-check-band", subgroup: "", tags: [{ label: "自检", target: anchor }], target: "",
+    name: "自检·指向小节", partitionId: "", forms: [], origin: "后台", status: "开放", note: "",
+    path: "self-check-band", tags: [{ label: "自检", target: anchor }], target: "",
     order: 999, intro: "", siteKind: "学科", createdAt: new Date().toISOString(),
   });
   eq("纯函数：能算出是哪张卡片指着这个小节",
@@ -3720,10 +3726,17 @@ ok("公开数据里的教师带上了网站要用的资料（教龄 / 简介 / �
     (teacher) =>
       teacher.years !== "" && teacher.summary !== "" && teacher.recommendation !== "" && teacher.order > 0,
   ));
-ok("公开数据里的课程带上了卡片字段（路径 / 栏目 / 班型）",
+ok("公开数据里的课程带上了卡片字段（路径 / 分区 / 班型）",
   publicSite.courses.some(
-    (course) => course.path !== "" && course.category !== "" && course.forms.length > 0,
+    (course) =>
+      course.path !== "" &&
+      partitionPlace(publicSite.partitions, course.partitionId).column !== null &&
+      course.forms.length > 0,
   ));
+ok("公开数据里带上了课程分区（网站要按它排栏目与层级）",
+  publicSite.partitions.length > 0 &&
+    publicSite.partitions.every((item) => item.name !== "") &&
+    publicSite.partitions.some((item) => item.parentId !== ""));
 
 /** 递归收集 JSON 里出现过的全部键名。 */
 function collectKeys(value: unknown, into: Set<string> = new Set()): Set<string> {
@@ -4545,9 +4558,19 @@ console.log("\n=== 9. 课程库（课程台账）===");
 __useStoreForTesting(memory);
 
 const pbLibrary = await api.courses.list();
+const pbPartitions = await api.coursePartitions.list();
+const pbPartitionName = (id: string): string =>
+  partitionPlace(pbPartitions, id).column?.name ?? "";
 ok(`课程库从网站内容播种（${pbLibrary.length} 门，至少 20 门）`, pbLibrary.length >= 20);
 ok("网站课程都标为「网站」来源", pbLibrary.every((course) => course.origin === "网站"));
-ok("每门网站课程都有分类", pbLibrary.every((course) => course.category.trim() !== ""));
+ok("每门网站课程都挂了分区（v18：不再是一串分类文字）",
+  pbLibrary.every((course) => partitionPlace(pbPartitions, course.partitionId).leaf !== null));
+ok("网站课程的分区名非空（清单与网站要按它分组）",
+  pbLibrary.every((course) => pbPartitionName(course.partitionId) !== ""));
+ok("课程行上**没有**遗留的 category / subgroup 字段（同一件事只留一处）",
+  pbLibrary.every((course) =>
+    (course as unknown as Record<string, unknown>).category === undefined &&
+    (course as unknown as Record<string, unknown>).subgroup === undefined));
 ok("网站课程的卡片班型被带进来",
   pbLibrary.some((course) => course.forms.length > 0));
 
@@ -4556,11 +4579,14 @@ ok(`科目候选非空（${pbOptions.length} 项）`, pbOptions.length >= 20);
 eq("科目候选里没有重复名字",
   pbOptions.filter((option, index) => pbOptions.findIndex((item) => item.name === option.name) !== index),
   []);
-ok("科目候选带分类（下拉要按栏目分组）", pbOptions.every((option) => option.category !== ""));
+ok("科目候选带分区名（下拉要按栏目分组）", pbOptions.every((option) => option.category !== ""));
 
-// 机构自己加一门网站上还没有的课：围棋
+// 机构自己加一门网站上还没有的课：围棋（分区里要有"兴趣才艺"，先建后挂）
+const pbHobby = await api.coursePartitions.create({ name: "兴趣才艺" });
+eq("新建的分区排在同级最后（不抢到最前面）",
+  topLevelPartitions(await api.coursePartitions.list()).at(-1)?.name, "兴趣才艺");
 const pbWeiqi = await api.courses.create({
-  name: "围棋", category: "兴趣才艺", forms: ["一对一定制课"], origin: "后台",
+  name: "围棋", partitionId: pbHobby.id, forms: ["一对一定制课"], origin: "后台",
   status: "开放", note: "自检用", createdAt: new Date().toISOString(),
 });
 eq("新建课程的来源是「后台」", pbWeiqi.origin, "后台");
@@ -4573,7 +4599,7 @@ ok("新课程出现在课程库统计里",
 let pbDupRejected = false;
 try {
   await api.courses.create({
-    name: "围棋", category: "兴趣才艺", forms: [], origin: "后台",
+    name: "围棋", partitionId: pbHobby.id, forms: [], origin: "后台",
     status: "开放", note: "", createdAt: new Date().toISOString(),
   });
 } catch {
@@ -4583,7 +4609,7 @@ ok("同名课程被拒绝", pbDupRejected);
 let pbEmptyRejected = false;
 try {
   await api.courses.create({
-    name: "  ", category: "兴趣才艺", forms: [], origin: "后台",
+    name: "  ", partitionId: pbHobby.id, forms: [], origin: "后台",
     status: "开放", note: "", createdAt: new Date().toISOString(),
   });
 } catch {
@@ -4694,7 +4720,7 @@ eq("认领后再次同步不再产生变更", syncLibraryLinks(pbClaimed.config,
 
 // 2) 课程库里加一门课 → 定价 → 后台能给这门课报价
 const pbGo = await api.courses.create({
-  name: "围棋", category: "兴趣才艺", forms: ["一对一定制课"], origin: "后台",
+  name: "围棋", partitionId: "", forms: ["一对一定制课"], origin: "后台",
   status: "开放", note: "", createdAt: new Date().toISOString(),
 });
 const pbPriced = addLibraryCourseToPricing(await api.pricing.get(), {
@@ -5798,9 +5824,14 @@ console.log("\n=== 13. 界面稳定：就地动作不滚动、不塌页高 ===")
     const coursesPage = adminPages.find((page) => page.path.endsWith("courses/page.tsx"));
     ok("找得到课程库页面（否则下面那条是空转的）", coursesPage !== undefined);
     const code = coursesPage?.code ?? "";
+    /*
+     * 形态检查：状态初值是 `false`，且渲染处**真的**按它分支。
+     * 不锚在 `{` 上：这一处外层还套了一层权限判断（没权限时显示一句说明而不是表单），
+     * 锚死大括号会让"加一层权限门控"看起来像把功能改坏了。
+     */
     const folded =
       /const \[creatingCourse, setCreatingCourse\] = useState\(false\)/.test(code) &&
-      /\{creatingCourse \? \(/.test(code);
+      /creatingCourse \? \(/.test(code);
     ok(
       "课程库：新增课程表单默认收起（点某张卡片的「编辑」时，页面上方不会少掉那一大块）",
       folded,
@@ -6949,7 +6980,7 @@ console.log("\n=== 17. P0：数据与钱的五道护栏 ===");
     lessonRefusal.includes("课时") && lessonRefusal.includes("撤销"), lessonRefusal.slice(0, 90));
 
   const course = await api.courses.create({
-    name: "护栏自检科目", category: "学科辅导", forms: [], origin: "后台",
+    name: "护栏自检科目", partitionId: "", forms: [], origin: "后台",
     status: "开放", note: "", createdAt: new Date().toISOString(),
   } as never);
   const mathCourse = (await api.courses.list()).find((item) => item.name.trim() === "数学");
@@ -7552,6 +7583,257 @@ console.log("\n=== 22. P3：迁移说明表有读者、报课判据只有一处 
   eq("判断「报课还在读」只有一处实现（activeEnrollments），不许各写一个 endedAt 判据", offenders, []);
   ok("那个判据本身在 enrollment.ts 里（唯一实现）",
     read("lib/backend/enrollment.ts").includes("export function activeEnrollments"));
+}
+
+console.log("\n=== 23. 课程分区：分区是数据，不是每门课上的一串分类文字 ===");
+
+/*
+ * 这一节守的是 v18 的那次重做（分区从"聚合出来的名字"变成"一行记录"）。
+ *
+ * 为什么值得这么多条断言：分区的三个毛病（改名要逐门改、不能排序、不能空着）
+ * 都是"看起来能用的错数据"—— 界面上只是分组分成了两块，没人会立刻发现；
+ * 而**迁移**更容易悄悄做错：顺序排错一次，机构升级完会看到课程页的栏目重新排过，
+ * 却什么都查不出来。因此这里两条线都钉：
+ *   1. 迁移（v17 的老库 → v18）：分区与网站栏目结构必须与升级前逐项一致；
+ *   2. 平时的读写：改名 / 排序 / 删除护栏 / 批量移课 / 未归类 / 第三级被拒。
+ */
+{
+  __useStoreForTesting(memory);
+
+  const seedPartitions = await api.coursePartitions.list();
+  ok(`分区从网站内容播种（${seedPartitions.length} 个，至少 6 个）`, seedPartitions.length >= 6);
+  ok("分区有两级（栏目 → 子栏目）",
+    topLevelPartitions(seedPartitions).length >= 4 &&
+    seedPartitions.some((item) => item.parentId !== ""));
+  ok("每一级的分区名都非空", seedPartitions.every((item) => item.name.trim() !== ""));
+  eq("没有重复 id", seedPartitions.filter((item, index) =>
+    seedPartitions.findIndex((other) => other.id === item.id) !== index), []);
+
+  /* ── ① 迁移：v17 的老库（课程上是 category / subgroup 字符串）── */
+  /*
+   * 老库的样子**照当时的真实结构造**：课程上写 `category` / `subgroup` 两个名字，
+   * 且没有 `coursePartitions`。这正是升级前那个库的形态。
+   *
+   * 顺序上刻意做成"与名字排序不同"（小学数学 → 高中物理 → 小学数学·提高），
+   * 用来证明迁移**不是按名字排序**：它必须照抄升级前网站的显示顺序
+   * （栏目顺序 = 该栏目下最小的卡片 order），否则升级会让栏目重新排一遍。
+   */
+  const legacyCourses = [
+    { name: "老库·小学数学", category: "小学课内", subgroup: "", order: 1 },
+    { name: "老库·初中数学", category: "初中课内", subgroup: "", order: 1 },
+    { name: "老库·高中物理", category: "高中课内", subgroup: "必考科目", order: 1 },
+    { name: "老库·高考外语", category: "高中课内", subgroup: "外语", order: 2 },
+    { name: "老库·没分类的课", category: "", subgroup: "", order: 5 },
+  ];
+  const legacyDb = {
+    ...seedDb,
+    version: 17,
+    coursePartitions: undefined,
+    courses: legacyCourses.map((course, index) => ({
+      id: `course-legacy-${String(index)}`,
+      version: 1,
+      name: course.name,
+      category: course.category,
+      subgroup: course.subgroup,
+      forms: [],
+      origin: "后台",
+      status: "开放",
+      note: "",
+      createdAt: "",
+      path: "",
+      tags: [],
+      target: "",
+      order: course.order,
+      intro: "",
+      siteKind: "不展示",
+    })),
+  };
+  /*
+   * 走 `importDatabase` 这条路而不是直接改 store：它与"从备份恢复"是同一条代码路径
+   * （校验 → migrate → 落盘），因此这一条同时钉住了"老库导入不会把数据弄丢"。
+   * 导入前它会自动留一颗后悔药（`BACKUP_KEY`），下面 `restoreBackup()` 就靠它还原。
+   */
+  const migrated = await api.importDatabase(JSON.stringify(legacyDb));
+  ok("v17 老库能导入并升级到 v18", migrated.ok);
+  const migratedCourses = await api.courses.list();
+  const migratedPartitions = await api.coursePartitions.list();
+  eq("迁移后版本号是当前版本", (await api.exportDatabase()).version, CURRENT_VERSION);
+  eq("迁移建出了 3 个栏目（按老库里的出现顺序，不是按名字排序）",
+    topLevelPartitions(migratedPartitions).map((item) => item.name),
+    ["小学课内", "初中课内", "高中课内"]);
+  eq("高中课内下的子栏目按老库的出现顺序排出",
+    childPartitions(migratedPartitions, topLevelPartitions(migratedPartitions)[2]?.id ?? "")
+      .map((item) => item.name),
+    ["必考科目", "外语"]);
+  eq("每门课挂到了正确的（栏目, 子栏目）上",
+    migratedCourses.map((course) => {
+      const place = partitionPlace(migratedPartitions, course.partitionId);
+      return [
+        course.name,
+        place.column?.name ?? "",
+        place.leaf === null || place.leaf.parentId === "" ? "" : place.leaf.name,
+      ];
+    }),
+    legacyCourses.map((course) => [course.name, course.category, course.subgroup]));
+  eq("老库里的空分类 → 未归类（不凭空建一个没名字的分区）",
+    migratedCourses.filter((course) => course.partitionId === "").map((course) => course.name),
+    ["老库·没分类的课"]);
+  ok("迁移把 category / subgroup 两个字段**删掉**了（同一件事只留一处）",
+    migratedCourses.every((course) =>
+      (course as unknown as Record<string, unknown>).category === undefined &&
+      (course as unknown as Record<string, unknown>).subgroup === undefined));
+  await api.restoreBackup();
+
+  /* ── ② 改名：一处改、处处变 ── */
+  const renamePartitions = await api.coursePartitions.list();
+  const renameTarget = topLevelPartitions(renamePartitions)[0]!;
+  const renameAffected = (await api.courses.list())
+    .filter((course) => partitionPlace(renamePartitions, course.partitionId).column?.id === renameTarget.id)
+    .length;
+  ok(`改名那一条下面确实有课（${renameAffected} 门，否则这条是空转的）`, renameAffected > 0);
+  await api.coursePartitions.update(renameTarget.id, { name: "自检·改过的栏目" });
+  eq("改名后分区名变了", (await api.coursePartitions.list()).find((item) => item.id === renameTarget.id)?.name,
+    "自检·改过的栏目");
+  const afterRename = await api.courses.list();
+  const beforeRename = await api.courses.list();
+  eq("改名没有动任何一门课的分区引用（课程挂的是 id，不是名字）",
+    afterRename.map((course) => [course.id, course.partitionId]),
+    beforeRename.map((course) => [course.id, course.partitionId]));
+  eq("科目候补里的分区名跟着变了",
+    (await api.courses.options()).filter((option) => option.category === "自检·改过的栏目").length,
+    renameAffected);
+  await api.coursePartitions.update(renameTarget.id, { name: renameTarget.name });
+  eq("改回原名", (await api.coursePartitions.list()).find((item) => item.id === renameTarget.id)?.name,
+    renameTarget.name);
+
+  /* ── ③ 校验：同级重名 / 第三级 / 挂到自己下面 ── */
+  const refusalOf = async (run: () => Promise<unknown>): Promise<string> => {
+    try {
+      await run();
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+  const columns = topLevelPartitions(await api.coursePartitions.list());
+  const dupName = await refusalOf(() => api.coursePartitions.create({ name: columns[0]!.name }));
+  ok("同级重名被拒绝（同级两个同名栏目会让课挂到哪一区说不清）",
+    dupName.includes("不能重复") && dupName.includes(columns[0]!.name), dupName);
+  ok("空的栏目的名被拒绝",
+    (await refusalOf(() => api.coursePartitions.create({ name: "   " }))).includes("不能为空"));
+  ok("挂到一个不存在的上级被拒绝",
+    (await refusalOf(() => api.coursePartitions.create({ name: "自检·孤儿", parentId: "cp_不存在" }))).includes("上级"));
+  const firstChild = (await api.coursePartitions.list()).find((item) => item.parentId !== "")!;
+  ok("第三级被拒绝（网站只渲染两级）",
+    (await refusalOf(() => api.coursePartitions.create({ name: "自检·第三级", parentId: firstChild.id })))
+      .includes("两级"));
+  ok("把栏目挂到它自己的下级下面被拒绝（不成环）",
+    (await refusalOf(() =>
+      api.coursePartitions.update(columns[2]!.id, { parentId: firstChild.id }))).length > 0);
+
+  /* ── ④ 排序：换一组顺序，网站的栏目顺序跟着变 ── */
+  const beforeOrder = topLevelPartitions(await api.coursePartitions.list()).map((item) => item.name);
+  const reversedIds = topLevelPartitions(await api.coursePartitions.list()).map((item) => item.id).reverse();
+  await api.coursePartitions.reorder(reversedIds);
+  eq("reorder 之后同级顺序就是交上去的那个顺序",
+    topLevelPartitions(await api.coursePartitions.list()).map((item) => item.name),
+    [...beforeOrder].reverse());
+  await api.coursePartitions.reorder(reversedIds.reverse());
+  eq("再排回来就回到原样（顺序是数据，不是副作用）",
+    topLevelPartitions(await api.coursePartitions.list()).map((item) => item.name), beforeOrder);
+
+  /* ── ⑤ 删除护栏 ── */
+  const withCourses = topLevelPartitions(await api.coursePartitions.list())[0]!;
+  const courseRefusal = await refusalOf(() => api.coursePartitions.remove(withCourses.id));
+  ok("有课的分区：拒绝删除，并说清先做什么",
+    courseRefusal.includes("门课") && courseRefusal.includes("移"), courseRefusal.slice(0, 90));
+  const parentOfChild = (await api.coursePartitions.list()).find((item) => item.parentId !== "")!.parentId;
+  const childRefusal = await refusalOf(() => api.coursePartitions.remove(parentOfChild));
+  ok("有子栏目的分区：拒绝删除，并点名是哪些子栏目",
+    childRefusal.includes("子栏目"), childRefusal.slice(0, 90));
+  const emptyColumn = await api.coursePartitions.create({ name: "自检·空栏目" });
+  eq("空栏目可以删（护栏不误伤）", await api.coursePartitions.remove(emptyColumn.id), true);
+
+  /* ── ⑥ 批量移课 + 未归类 ── */
+  const movePartitions = await api.coursePartitions.list();
+  const from = topLevelPartitions(movePartitions)[0]!;
+  const fromCourses = (await api.courses.list()).filter((course) =>
+    partitionPlace(movePartitions, course.partitionId).column?.id === from.id);
+  ok(`要移走的那一区确实有课（${fromCourses.length} 门，否则这条是空转的）`, fromCourses.length > 0);
+  const into = await api.coursePartitions.create({ name: "自检·收容所" });
+  const movedCount = await api.courses.setPartition(fromCourses.map((course) => course.id), into.id);
+  eq("批量移课移动了本区全部课程", movedCount, fromCourses.length);
+  eq("再移一次不算数（已经在目标区里）",
+    await api.courses.setPartition(fromCourses.map((course) => course.id), into.id), 0);
+  ok("移走之后那些课确实挂在新区上",
+    (await api.courses.list())
+      .filter((course) => fromCourses.some((item) => item.id === course.id))
+      .every((course) => course.partitionId === into.id));
+  eq("再移回原分区（这一次是真的在移动）",
+    await api.courses.setPartition(fromCourses.map((course) => course.id), from.id), fromCourses.length);
+  await api.coursePartitions.remove(into.id);
+
+  const orphanRefusal = await refusalOf(() => api.courses.create({
+    name: "自检·挂到不存在的分区", partitionId: "cp_不存在", forms: [], origin: "后台",
+    status: "开放", note: "", createdAt: new Date().toISOString(),
+  }));
+  ok("课程挂到一个不存在的分区被拒绝（第二道闸门，防的是恢复半份备份）",
+    orphanRefusal.includes("分区"), orphanRefusal.slice(0, 90));
+
+  /* ── ⑦ 纯函数：删除护栏本身（不经过服务层也能问）── */
+  const refusal = partitionDeleteRefusal(
+    [{ id: "cp_a", name: "有课的栏目", parentId: "", order: 1 }],
+    () => 3,
+    "cp_a",
+  );
+  ok("partitionDeleteRefusal 直接可用（界面预判与服务端同一处判据）",
+    refusal.includes("3 门课"), refusal);
+
+  /* ── ⑧ 唯一实现：分组逻辑只有一处 ── */
+  const readSource = (file: string): string => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  const stripComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const groupUsers = ["lib/site/backend-source.ts", "app/admin/(dashboard)/courses/page.tsx"]
+    .filter((file) => readSource(file).includes("groupByPartition("));
+  eq("网站与后台清单都用同一个 groupByPartition（不许各写一份分组）", groupUsers.length, 2);
+  ok("groupByPartition 本身在 course-partitions.ts 里",
+    readSource("lib/backend/course-partitions.ts").includes("export function groupByPartition"));
+  /*
+   * 「v17 的写法不许回流」：课程上不再有 `category` / `subgroup` 两个字段。
+   *
+   * 三条查法（各自查一个真实会退回的地方），而不是笼统地搜 `.category` 字面量 ——
+   * `.subgroup` 在别处是**别的对象**上的字段（分组结果 `group.subgroup`、
+   * 网站边界类型 `SiteCourse.subgroup`），按字面量搜会把它们一起误报。
+   *   1. `Course` 类型本身不许再声明这两个字段（这是"同一件事写两处"的根源）；
+   *   2. 出门给网站的 `PublicCourse` 同理，且必须有 `partitionId`；
+   *   3. 后台清单与网站映射这两处"读课程"的地方不许再读 `.category`。
+   */
+  const courseType = /export type Course = \{([\s\S]*?)\n\};/.exec(readSource("lib/backend/types.ts"))?.[1] ?? "";
+  ok("取到了 Course 类型定义（否则下面两条是空转的）", courseType.includes("partitionId"));
+  ok("Course 类型里没有 category / subgroup（分区只在分区表里）",
+    !/^\s*(category|subgroup)\s*:/m.test(courseType));
+  const publicCourseType =
+    /export type PublicCourse = \{([\s\S]*?)\n\};/.exec(readSource("lib/backend/public-site.ts"))?.[1] ?? "";
+  ok("公开给网站的课程带 partitionId，且不再带 category / subgroup",
+    publicCourseType.includes("partitionId") && !/^\s*(category|subgroup)\s*:/m.test(publicCourseType));
+  eq("后台清单与网站映射里不再读课程的 .category",
+    ["lib/site/backend-source.ts", "app/admin/(dashboard)/courses/page.tsx"]
+      .filter((file) => /\.category\b/.test(stripComments(readSource(file)))),
+    []);
+  /*
+   * 「分区怎么写」也只有一处：`partitionPathLabel()`。
+   *
+   * 四处会显示分区名（导出、科目下拉、后台清单、数据页），各拼一次的话
+   * "导出写 `高中课内 / 七选三`、下拉写 `七选三`"这种不一致没有任何断言能发现
+   * ——两边都非空、都"看着对"。因此这里查的是**拼法**：`${...} / ${...}` 这种模板串
+   * 只许出现在 course-partitions.ts 里的那一个函数里。
+   */
+  const labelSites = ["lib/backend/export.ts", "lib/backend/courses.ts",
+    "app/admin/(dashboard)/courses/page.tsx", "app/admin/(dashboard)/data/page.tsx"]
+    .filter((file) => /`\$\{[^}]*\}\s*\/\s*\$\{/.test(stripComments(readSource(file))));
+  eq("分区的显示写法只有一处实现（partitionPathLabel），四处不许各拼一遍", labelSites, []);
+  ok("那个实现本身在 course-partitions.ts 里",
+    readSource("lib/backend/course-partitions.ts").includes("export function partitionPathLabel"));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

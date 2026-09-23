@@ -1,8 +1,11 @@
 import { getHomeContent, getTeachersPageFromTemplate } from "@/lib/data/site";
 import { bumpVersion } from "./concurrency";
+import { ensurePartitions, partitionName } from "./course-partitions";
+import { nextId } from "./ids";
 import type {
   Classroom,
   Course,
+  CoursePartition,
   Database,
   Student,
   Teacher,
@@ -474,6 +477,14 @@ export type ApplyOutcome = {
   problems: RowProblem[];
   /** 与库里冲突的行（`onConflict: "ask"` 时返回，供人逐个决定）。 */
   conflicts: Conflict[];
+  /**
+   * 这次导入**顺带新建**了几个课程分区（只在导课程表时可能不为 0）。
+   *
+   * 为什么要报出来：表格的「分类」列写着库里还没有的栏目时，导入会把它建出来 ——
+   * 那是件好事，但必须让人知道（"导了 30 门课"与"导了 30 门课、还多了 2 个栏目"是两件事，
+   * 后者要去看一眼那个栏目名字对不对）。静默新建是这一版最该避免的。
+   */
+  partitionsCreated: number;
 };
 
 /** 覆盖时**不能动**的字段：结构性或派生的数据，改了就破坏不变式。 */
@@ -496,8 +507,34 @@ function uniqueName(taken: Set<string>, name: string): string {
   return `${name}（副本）`;
 }
 
+/**
+ * 把「分类」一列解析成分区路径：`高中课内 / 七选三` → `{ column: "高中课内", subgroup: "七选三" }`。
+ *
+ * 三个宽容处（都是真实的表格会长成的样子）：
+ *   - 半角 `/` 与全角 `／` 都认（中文输入法下很容易打出全角）；
+ *   - 两边空格一律去掉（`高中课内 / 七选三`、`高中课内/七选三` 等价）；
+ *   - 只有一个名字时视为一级栏目（`小学课内`）。
+ *
+ * 为什么按**第一个**斜杠分而不是最后一个：分区名里带斜杠的情形不存在（那会让路径本身
+ * 有歧义），因此"第一个"与"最后一个"在这份数据上等价；写清楚只是为了让后来的人不必猜。
+ * 与导出侧的 `partitionLabel()`（`export.ts`）是同一套写法 —— 导出来再导回去必须对得上。
+ */
+export function parsePartitionPath(text: string): { column: string; subgroup: string } {
+  const raw = text.trim();
+  if (raw === "") return { column: "", subgroup: "" };
+  const parts = raw.split(/[/／]/);
+  return {
+    column: (parts[0] ?? "").trim(),
+    subgroup: parts.slice(1).join("/").trim(),
+  };
+}
+
 /** 库里那条记录的一句话摘要（冲突列表里给用户看，便于判断"是不是同一个人"）。 */
-function describeExisting(entity: ImportEntity, record: Record<string, unknown>): string {
+function describeExisting(
+  entity: ImportEntity,
+  record: Record<string, unknown>,
+  partitions: readonly CoursePartition[] = [],
+): string {
   switch (entity) {
     case "students":
       return [record.grade, record.guardian].filter((value) => String(value ?? "") !== "").join(" · ");
@@ -510,7 +547,19 @@ function describeExisting(entity: ImportEntity, record: Record<string, unknown>)
         .filter((value) => String(value ?? "") !== "")
         .join(" · ");
     case "courses":
-      return [record.category, record.status].filter((value) => String(value ?? "") !== "").join(" · ");
+      /*
+       * 课程的分区在库里存的是 id，因此这里要用分区表换成名字（否则冲突列表里会显示一串 `cp_xxx`，
+       * 人根本认不出那是哪一区 —— 而这一列正是用来判断"要不要覆盖"的）。
+       * 导入行自己带的 `分类` 文本（record.category）在**新**记录上才存在，
+       * 因此两个来源都要试：先按 id 换，换不到再看有没有名字。
+       */
+      return [
+        partitionName(partitions, String(record.partitionId ?? "")),
+        String(record.category ?? ""),
+        record.status,
+      ]
+        .filter((value) => String(value ?? "") !== "")
+        .join(" · ");
   }
 }
 
@@ -537,7 +586,7 @@ export function detectConflicts(db: Database, parsed: ParsedImport): Conflict[] 
         existing: {
           id: String(existing.id ?? ""),
           name: String(existing.name ?? ""),
-          summary: describeExisting(parsed.entity, existing),
+          summary: describeExisting(parsed.entity, existing, db.coursePartitions),
         },
       });
     } else if (insideFile.has(key)) {
@@ -563,7 +612,11 @@ function keyOf(spec: EntitySpec, record: Record<string, unknown>, existing: Reco
 }
 
 /** 补齐各实体的默认值（与页面新建时的默认一致）。 */
-function finalize(entity: ImportEntity, record: Record<string, unknown>): Record<string, unknown> {
+function finalize(
+  entity: ImportEntity,
+  record: Record<string, unknown>,
+  resolvePartition?: (path: string) => string,
+): Record<string, unknown> {
   switch (entity) {
     case "students":
       return {
@@ -618,7 +671,11 @@ function finalize(entity: ImportEntity, record: Record<string, unknown>): Record
       return {
         name: String(record.name ?? ""),
         version: 1,
-        category: String(record.category ?? ""),
+        /*
+         * 分区：Excel 里写的是**路径名字**（`高中课内 / 七选三`），库里存 id。
+         * 解析器由 `applyImport` 传进来（它才有库、也才知道要新建哪些分区）。
+         */
+        partitionId: resolvePartition === undefined ? "" : resolvePartition(String(record.category ?? "")),
         forms: (record.forms as string[]) ?? [],
         origin: "后台",
         status: (record.status as string) ?? "开放",
@@ -660,6 +717,30 @@ export function applyImport(
 ): ApplyOutcome {
   const spec = ENTITY_SPECS[parsed.entity];
   const list = targetList(db, parsed.entity);
+  /*
+   * 课程导入：先把表格里的「分类」路径补成真实分区（缺的建出来），再逐行换成 id。
+   *
+   * 为什么在这里一次性补齐而不是每行各建一次：同一份表里几十行写着同一个栏目是常态，
+   * 逐行建会建出几十个同名分区（`ensurePartitions` 的名字判重只在它自己维护的表上生效，
+   * 每行传一份新的进去就判不出来）。补齐之后的映射对整份文件都有效。
+   *
+   * 新建的分区**会写进库**（`imports.apply` 本来就要落盘）：导入一份带新栏目的课程表，
+   * 期望的结果就是"栏目也建好了"，而不是"课进来了、分区全空着"。
+   * 结果里会数出来（`partitionsCreated`），不静默。
+   */
+  let resolvePartition: ((path: string) => string) | undefined;
+  let partitionsCreated = 0;
+  if (parsed.entity === "courses") {
+    const refs = parsed.records.map((record) => parsePartitionPath(String(record.category ?? "")));
+    const ensured = ensurePartitions(db.coursePartitions, refs, () => nextId("cp"));
+    partitionsCreated = ensured.partitions.length - db.coursePartitions.length;
+    db.coursePartitions = ensured.partitions;
+    resolvePartition = (path: string) => {
+      const { column, subgroup } = parsePartitionPath(path);
+      return ensured.idOf(column, subgroup);
+    };
+  }
+
   const byKey = new Map<string, Record<string, unknown>>();
   const takenNames = new Set<string>();
   for (const item of list) {
@@ -692,7 +773,7 @@ export function applyImport(
         existing: {
           id: String(existing.id ?? ""),
           name: String(existing.name ?? ""),
-          summary: describeExisting(parsed.entity, existing),
+          summary: describeExisting(parsed.entity, existing, db.coursePartitions),
         },
       });
 
@@ -707,7 +788,7 @@ export function applyImport(
          * 用一份表格把它们清掉是事故，不是更新。
          */
         const structural = STRUCTURAL_FIELDS[parsed.entity];
-        const patch = finalize(parsed.entity, record);
+        const patch = finalize(parsed.entity, record, resolvePartition);
         for (const [field, value] of Object.entries(patch)) {
           if (structural.includes(field)) continue;
           // 导入行没提这个字段（空值）时不覆盖，避免"空表格清空已有内容"
@@ -733,7 +814,10 @@ export function applyImport(
       const name = String(record.name ?? "");
       const finalName = renamed ? uniqueName(takenNames, name) : name;
       takenNames.add(finalName.toLowerCase());
-      list.push({ ...finalize(parsed.entity, { ...record, name: finalName }), id: makeId(spec.idPrefix) });
+      list.push({
+        ...finalize(parsed.entity, { ...record, name: finalName }, resolvePartition),
+        id: nextId(spec.idPrefix),
+      });
       byKey.set(keyOf(spec, { ...record, name: finalName }, record), list[list.length - 1] as Record<string, unknown>);
       duplicated += 1;
       added += 1;
@@ -742,22 +826,22 @@ export function applyImport(
 
     byKey.set(key, record);
     takenNames.add(String(record.name ?? "").toLowerCase());
-    list.push({ ...finalize(parsed.entity, record), id: makeId(spec.idPrefix) });
+    list.push({ ...finalize(parsed.entity, record, resolvePartition), id: nextId(spec.idPrefix) });
     added += 1;
   });
 
-  return { entity: parsed.entity, added, overwritten, duplicated, skipped, problems: parsed.problems, conflicts };
+  return {
+    entity: parsed.entity,
+    added,
+    overwritten,
+    duplicated,
+    skipped,
+    partitionsCreated,
+    problems: parsed.problems,
+    conflicts,
+  };
 }
 
-/**
- * 生成 id。
- *
- * 这里没有直接复用 `api.ts` 的 `nextId`（那个是模块私有），但**规则保持一致**：
- * 前缀 + 时间戳 + 随机串。同一次导入里连续生成时靠随机串避免撞号。
- */
-function makeId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-}
 
 /** 给界面用的一句话摘要。 */
 export function summarizeImport(outcome: ApplyOutcome): string {
@@ -766,6 +850,8 @@ export function summarizeImport(outcome: ApplyOutcome): string {
   if (outcome.overwritten > 0) parts.push(`更新（覆盖）${outcome.overwritten} 条`);
   if (outcome.duplicated > 0) parts.push(`保留两份 ${outcome.duplicated} 条`);
   if (outcome.skipped.length > 0) parts.push(`跳过 ${outcome.skipped.length} 条`);
+  // 顺带建出来的课程分区也要报（界面上那句"导入完成"就说全了，不必再去看日志）
+  if (outcome.partitionsCreated > 0) parts.push(`新建课程分区 ${outcome.partitionsCreated} 个`);
   if (outcome.problems.length > 0) parts.push(`${outcome.problems.length} 行没通过校验`);
   return parts.join("，");
 }

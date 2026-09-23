@@ -1,4 +1,4 @@
-import { coursesFromSite } from "./courses";
+import { materializeSiteCourses } from "./courses";
 import { pricingConfigFromContent } from "./pricing";
 import { siteContentFromContent } from "./site-content";
 import { CURRENT_VERSION } from "./version";
@@ -30,6 +30,12 @@ import type { Database } from "./types";
  * `updatedAt` 取当前时刻：它表示"这份库最后一次改动的时间"，空库也应有起始时间。
  */
 export function createEmptyDatabase(now: Date = new Date()): Database {
+  /*
+   * 课程库与分区**一起**落定：网站卡片说的是分区名字（栏目 / 子栏目），而库里存 id，
+   * 转换只有一处实现（`materializeSiteCourses`）—— 这里传空分区表起步，
+   * 它会按内容文件的顺序把 6 个栏目与它们的子栏目录出来。
+   */
+  const coursesFromContent = materializeSiteCourses([]);
   return {
     version: CURRENT_VERSION,
     students: [],
@@ -44,7 +50,8 @@ export function createEmptyDatabase(now: Date = new Date()): Database {
     logs: [],
     inquiries: [],
     // 课程库与报价配置**不是"示例数据"**：它们来自网站内容，是真实的初始值
-    courses: coursesFromSite(),
+    courses: coursesFromContent.courses,
+    coursePartitions: coursesFromContent.partitions,
     pricing: pricingConfigFromContent(),
     siteContent: siteContentFromContent(),
     updatedAt: now.toISOString(),

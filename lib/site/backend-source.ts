@@ -37,7 +37,14 @@
  */
 
 import { backendSiteSnapshot } from "@/data/site/.backend-snapshot";
-import type { PublicCourse, PublicSite, PublicTeacher } from "@/lib/backend/public-site";
+import { groupByPartition, partitionPlace } from "@/lib/backend/course-partitions";
+import type { CoursePartition } from "@/lib/backend/types";
+import type {
+  PublicCourse,
+  PublicCoursePartition,
+  PublicSite,
+  PublicTeacher,
+} from "@/lib/backend/public-site";
 import type { SiteHeading, SiteSubject } from "@/lib/backend/types";
 import type {
   ClassType,
@@ -56,6 +63,7 @@ import type {
   Course,
   CourseColumn,
   CourseColumnCard,
+  CourseColumnSubgroup,
   CourseTag,
   ElectiveCourse,
   SectionHeading,
@@ -308,51 +316,64 @@ function toCard(course: PublicCourse, anchors: ReadonlySet<string>): CourseColum
 }
 
 /**
+ * 快照里的分区表 → 纯数据的分区数组（**排序、层级都由它说了算**）。
+ *
+ * 快照可能来自旧版本的后端（`partitions` 缺失）—— 那种情况返回空数组，
+ * 页面就只渲染出"未归类"的卡片而不是崩掉（构站脚本连的是本机后端，
+ * 版本一定对得上；这条兜底是给"用一份旧快照构站"留的）。
+ */
+function snapshotPartitions(snapshot: PublicSite): CoursePartition[] {
+  return (snapshot.partitions ?? []).map((item: PublicCoursePartition) => ({
+    id: text(item.id),
+    name: text(item.name),
+    parentId: text(item.parentId),
+    order: sortOrder(item.order),
+  }));
+}
+
+/**
  * 课程栏目（栏目 → 子栏目 → 卡片）；不可用返回 `null`。
  *
- * 排序规则与「为什么这样排」：
- *   - 先把卡片按 `order` 升序排好，**再按出现顺序分组**。于是「栏目首次出现的顺序」
- *     天然就是该栏目最小的 `order`（子栏目同理），不需要另记一遍最小值，
- *     也天然满足"同 order 保持快照原顺序"（稳定排序）；
- *   - 空子栏目的 `title` 是 `""`（页面上不渲染标题），与模版 `getCourseColumns()`
- *     的 `subgroupRaw` 一致 —— 不要在这里编一个"默认子栏目名"，那会让页面上多出一行标题。
+ * ## 结构现在来自**分区表**，不再从卡片反推
  *
- * `null` 的判定：没有快照、后端没有课程正文（见 `coursePageSource`）、
- * 或一张能用的卡片都没有（返回空数组意味"后端有栏目，只是都空着"，
- * 页面会渲染出一个空骨架，所以一律 `null`）。
+ * v18 以前这里是"先按 `order` 排卡片，再按出现顺序分组"——于是栏目顺序、子栏目顺序
+ * 都是**副产物**（哪张卡片先出现谁就在前），机构想调顺序只能去改每张卡片的 `order`，
+ * 而且后台看不到这个结构。现在结构是数据（`snapshot.partitions`），排序与层级都在分区上，
+ * 后台与网站**共用同一个 `groupByPartition()`**（见 `lib/backend/course-partitions.ts`）。
+ *
+ * ## 三条仍然成立的口径
+ *
+ *   - **空栏目不上网**：机构可能先建好栏目再往里放课（后台清单里要看得到它），
+ *     但网站上渲染一个空栏目只会让家长看到一块空区域。因此这里把没有卡片的栏目与
+ *     子栏目**过滤掉**（子栏目全空的栏目也一并去掉）；
+ *   - **没有子标题的那一组先渲染**：直接挂在栏目上的卡片 `subgroup === null`，
+ *     它渲染成 `title: ""`（页面上不渲染标题）—— 不要在这里编一个"默认子栏目名"；
+ *   - **一张卡片都没有 → `null`**（返回空数组意味着"后端有栏目，只是都空着"，
+ *     页面会渲染一个空骨架，因此一律 `null`）。
  */
 export function backendCourseColumns(): CourseColumn[] | null {
   const snapshot = coursePageSource();
   if (snapshot === null) return null;
 
   const anchors = bandAnchors(snapshot);
-  const cards = byOrder(
-    (snapshot.courses ?? []).filter(isSiteCard),
-    (course) => sortOrder(course.order),
-  );
+  const partitions = snapshotPartitions(snapshot);
+  if (partitions.length === 0) return null;
 
+  const cards = (snapshot.courses ?? []).filter(isSiteCard);
   const columns: CourseColumn[] = [];
-  for (const course of cards) {
-    const columnTitle = text(course.category).trim();
-    // 没有栏目名的卡片放不进「栏目 → 子栏目 → 卡片」这棵树（模版路径同样会跳过这种行），
-    // 硬塞会渲染出一个没有标题的栏目
-    if (columnTitle === "") continue;
-
-    const subgroupTitle = text(course.subgroup).trim();
-    const card = toCard(course, anchors);
-
-    let column = columns.find((entry) => entry.title === columnTitle);
-    if (column === undefined) {
-      column = { title: columnTitle, subgroups: [] };
-      columns.push(column);
+  for (const entry of groupByPartition(cards, partitions)) {
+    const subgroups: CourseColumnSubgroup[] = [];
+    for (const group of entry.groups) {
+      const items = byOrder(group.items, (course) => sortOrder(course.order));
+      // 空组（含"没有子标题"那一组）不渲染：见上面「空栏目不上网」
+      if (items.length === 0) continue;
+      subgroups.push({
+        title: group.subgroup === null ? "" : text(group.subgroup.name).trim(),
+        cards: items.map((course) => toCard(course, anchors)),
+      });
     }
-
-    let subgroup = column.subgroups.find((entry) => entry.title === subgroupTitle);
-    if (subgroup === undefined) {
-      subgroup = { title: subgroupTitle, cards: [] };
-      column.subgroups.push(subgroup);
-    }
-    subgroup.cards.push(card);
+    if (subgroups.length === 0) continue;
+    columns.push({ title: text(entry.column.name).trim(), subgroups });
   }
 
   return columns.length > 0 ? columns : null;
@@ -374,13 +395,16 @@ export function backendCourseColumns(): CourseColumn[] | null {
 function toElectiveGroups(
   courses: readonly PublicCourse[],
   electiveTitle: string,
+  partitions: readonly CoursePartition[],
 ): Array<{ title: string; items: ElectiveCourse[] }> {
   const fallbackTitle = electiveTitle !== "" ? electiveTitle : "选修课程";
   const groups: Array<{ title: string; items: ElectiveCourse[] }> = [];
 
   for (const course of courses) {
     const name = text(course.name);
-    const group = text(course.category);
+    // 「栏目」＝分区表里那一区（它自己就是二级分区时，取它所属的一级栏目）
+    const place = partitionPlace(partitions, text(course.partitionId));
+    const group = place.column === null ? "" : text(place.column.name).trim();
     const item: ElectiveCourse = {
       id: name,
       name,
@@ -451,7 +475,7 @@ export function backendCoursesPage(): {
     courses,
     columns: backendCourseColumns() ?? [],
     electiveTitle,
-    electiveGroups: toElectiveGroups(electives, electiveTitle),
+    electiveGroups: toElectiveGroups(electives, electiveTitle, snapshotPartitions(snapshot)),
   };
 }
 

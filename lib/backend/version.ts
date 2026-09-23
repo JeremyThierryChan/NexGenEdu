@@ -11,7 +11,7 @@
  *   2. 在 api.ts 的 migrate() 里补一段「上一版 → 这一版」的转换；
  *   3. 确认 seed.ts 用的是这个常量（它已经这么做了）。
  */
-export const CURRENT_VERSION = 17;
+export const CURRENT_VERSION = 18;
 
 /** 版本变更记录（给后来的人看，不用翻提交历史）。 */
 export const VERSION_NOTES: Record<number, string> = {
@@ -32,4 +32,5 @@ export const VERSION_NOTES: Record<number, string> = {
   15: "课程库增加「网站卡片」字段（路径 / 子栏目 / 标签 / 顺序 / 一句话）与网站课程正文（学科 → 学段小节）——网站课程页要以后端为准",
   16: "教师增加「是否在宣传网站展示」——否则网站以库为准之后，机构内部老师的档案会直接出现在宣传页上",
   17: "学生 / 教师 / 课程 / 教室 / 排课增加记录级版本号 version（初始 1），用于同一条记录的乐观锁：两个人同时编辑同一条时，后提交的人会看到「刚被别人改过，请刷新」而不是静默覆盖",
+  18: "课程分区成为真实数据（新增 coursePartitions，课程用 partitionId 引用它）：分区可增删改名排序、可空着、能两级（栏目 → 子栏目），后台清单与网站课程页共用这一棵树 —— 原先分区是每门课各自的 category / subgroup 字符串聚合出来的，改名要逐门改、且不能排序",
 };

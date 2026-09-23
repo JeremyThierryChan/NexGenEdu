@@ -18,6 +18,7 @@
 import { getTeachersPageFromTemplate, getCourseColumnsFromTemplate, getCoursesPageFromTemplate } from "@/lib/data/site";
 import { getPricingDataFromTemplate } from "@/lib/data/pricing";
 import type { PublicSite } from "@/lib/backend/public-site";
+import { partitionPlace } from "@/lib/backend/course-partitions";
 
 const base = (process.env.SITE_API_BASE ?? "http://127.0.0.1:4000").replace(/\/+$/, "");
 
@@ -108,9 +109,14 @@ const dbCards = db.courses.filter((course) => course.siteKind !== "不展示" &&
     if (other === undefined) continue;
     const tags = (list: Array<{ label: string; target: string }>) =>
       list.map((tag) => `${tag.label}→${tag.target}`).join("、");
+    /*
+     * 库里的分区存的是 id，比对要换成名字（`partitionPlace` 给出的正是"栏目 + 子栏目"）。
+     * 拿 id 去比会永远不等（模版那头是名字），报出来的是几十条假差异。
+     */
+    const place = partitionPlace(db.coursePartitions, other.partitionId);
     const pairs: Array<[string, unknown, unknown]> = [
-      ["栏目", item.column, other.category],
-      ["子栏目", item.subgroup, other.subgroup],
+      ["栏目", item.column, place.column === null ? "" : place.column.name],
+      ["子栏目", item.subgroup, place.leaf === null || place.leaf.parentId === "" ? "" : place.leaf.name],
       ["路径", item.card.path, other.path],
       ["点进哪一节", item.card.target, other.target],
       ["顺序", undefined, other.order],
@@ -140,23 +146,35 @@ const dbCards = db.courses.filter((course) => course.siteKind !== "不展示" &&
       cards: subgroup.cards.map((card) => card.title),
     })),
   }));
-  const dbStructure = [...new Set(dbCards.map((course) => course.category))]
+  /*
+   * 库里的结构**直接读分区表**（v18 起它就是结构本身），不再从卡片的分类字符串聚合。
+   *
+   * 顺序也来自分区自己的 `order`（栏目的顺序、子栏目的顺序），而不是像以前那样
+   * 按"在模版里的位置"把库里的栏目硬排一遍 —— 那样比出来的顺序永远是模版的顺序，
+   * 机构在后台调过的顺序反而会被当成差异。现在两边都是"各自的顺序"，
+   * 顺序不同就是**真的不同**（这一条正是机构想知道的）。
+   */
+  const orderedPartitions = [...db.coursePartitions].sort(
+    (a, b) => a.order - b.order || a.name.localeCompare(b.name, "zh"),
+  );
+  const cardsOf = (partitionId: string): string[] =>
+    dbCards
+      .filter((course) => course.partitionId === partitionId)
+      .sort((a, b) => a.order - b.order)
+      .map((course) => course.name);
+  const dbStructure = orderedPartitions
+    .filter((item) => item.parentId === "")
     .map((column) => ({
-      column,
-      subgroups: [...new Set(dbCards.filter((course) => course.category === column).map((course) => course.subgroup))]
-        .map((subgroup) => ({
-          subgroup,
-          cards: dbCards
-            .filter((course) => course.category === column && course.subgroup === subgroup)
-            .sort((a, b) => a.order - b.order)
-            .map((course) => course.name),
-        })),
+      column: column.name,
+      subgroups: [
+        // 直接挂在栏目上的卡片：模版里对应"没有子栏目的那一组"（title 为空串）
+        { subgroup: "", cards: cardsOf(column.id) },
+        ...orderedPartitions
+          .filter((item) => item.parentId === column.id)
+          .map((child) => ({ subgroup: child.name, cards: cardsOf(child.id) })),
+      ].filter((group) => group.cards.length > 0),
     }))
-    .sort((a, b) => {
-      // 栏目顺序：按它在模版里的次序对齐（模版第一条卡片所在栏目在前）
-      const order = tplStructure.map((item) => item.column);
-      return order.indexOf(a.column) - order.indexOf(b.column);
-    });
+    .filter((column) => column.subgroups.length > 0);
   if (JSON.stringify(tplStructure) !== JSON.stringify(dbStructure)) {
     add({
       area: "课程卡片",
