@@ -7834,6 +7834,28 @@ console.log("\n=== 23. 课程分区：分区是数据，不是每门课上的一
   eq("分区的显示写法只有一处实现（partitionPathLabel），四处不许各拼一遍", labelSites, []);
   ok("那个实现本身在 course-partitions.ts 里",
     readSource("lib/backend/course-partitions.ts").includes("export function partitionPathLabel"));
+
+  /*
+   * ── 界面的"形状"断言（这一页的渲染没法在没有浏览器的地方跑）──
+   *
+   * 与 §19 那条"新增课程表单默认收起"同一类做法：钉住几条**去掉就会让人用不了**的结构。
+   * 它们不是美化检查，而是"少一个按钮，机构就只能去改数据文件"的那种：
+   *   1. 一级与二级都有标题行（缺了二级，子栏目就改名 / 删不掉）；
+   *   2. 分区写动作按权限渲染（没权限的人不该看见点了会 403 的按钮）；
+   *   3. 筛选时隐藏空分区（否则搜索结果里夹着一堆"0 门"）。
+   */
+  const coursesPageCode = readSource("app/admin/(dashboard)/courses/page.tsx");
+  ok("清单两级都有分区标题行（二级缺了，子栏目就改名 / 删不掉）",
+    /renderPartitionHeader\(column, columnItems, 1\)/.test(coursesPageCode) &&
+    /renderPartitionHeader\(group\.subgroup, group\.items, 2\)/.test(coursesPageCode));
+  ok("分区写动作按权限渲染（没权限不显示按钮，而不是点了才 403）",
+    /canWritePartition &&/.test(coursesPageCode) &&
+    /canCallMethod\(roles, "coursePartitions\.create"\)/.test(coursesPageCode));
+  ok("筛选时空分区不占位置（否则结果里夹着一堆「0 门」）",
+    /const filtering = keyword\.trim\(\) !== ""/.test(coursesPageCode) && /if \(filtering && columnItems\.length === 0\) return null;/.test(coursesPageCode));
+  ok("「移到…」下拉的占位项用了哨兵值（空串是合法目标「未归类」，两项同值会撞车）",
+    /defaultValue=\{PICK_PLACEHOLDER\}/.test(coursesPageCode) &&
+    /if \(value === PICK_PLACEHOLDER\) return;/.test(coursesPageCode));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

@@ -50,6 +50,15 @@ import {
 } from "@/lib/backend/pricing";
 import { cn } from "@/lib/utils/cn";
 
+/**
+ * 「把本区课程移到…」那个下拉里占位项的哨兵值。
+ *
+ * 为什么不用空串：这个下拉里空串是**合法目标**（＝未归类），占位项再用空串就会出现
+ * 两个 `value=""` 的选项 —— 浏览器只认其中一个，于是"选择分区…"与"（未归类）"长得一样，
+ * 点了也不知道自己选的是哪个。
+ */
+const PICK_PLACEHOLDER = "__pick__";
+
 /** 「12 个学科 / 61 个小节」——保存正文后的提示与面板摘要用同一句话。 */
 function contentCountText(content: SiteContent): string {
   const subjects = content.coursePage.subjects;
@@ -1048,21 +1057,26 @@ export default function AdminCoursesPage() {
               <label className="flex items-center gap-1 text-[11px] text-ink-500">
                 移到
                 <select
-                  defaultValue=""
+                  defaultValue={PICK_PLACEHOLDER}
                   disabled={pending}
                   onChange={(event) => {
                     const value = event.target.value;
-                    if (value === "") return;
+                    if (value === PICK_PLACEHOLDER) return;
                     void moveCourses(
                       items.map((course) => course.id),
                       partition.name,
                       value,
                     );
-                    event.target.value = "";
+                    event.target.value = PICK_PLACEHOLDER;
                   }}
                   className="h-6 rounded-sm border border-ink-200 bg-white px-1 text-[11px] outline-none"
                 >
-                  <option value="">选择分区…</option>
+                  {/*
+                    占位项用一个**不会与真值撞上**的哨兵值，而不是空串：
+                    空串本身是合法值（＝未归类），两项都用 `value=""` 的话浏览器只能选中一个
+                    ——「选择分区…」与「（未归类）」看起来一模一样，点了也不知道选的是哪个。
+                  */}
+                  <option value={PICK_PLACEHOLDER}>选择分区…</option>
                   <option value="">（未归类）</option>
                   {partitionChoices
                     .filter((choice) => choice.value !== partition.id)
