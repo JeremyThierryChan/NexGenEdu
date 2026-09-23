@@ -1135,47 +1135,177 @@ const pricing = getPricingDataFromTemplate();
  * v37：报价的**分组改成课程类型的学段**，里面的**课程名以课程库为准**
  * （机构口径：「以课程清单为准…公式依旧不变，主要修改的是课程名称以及分类」）。
  *
+ * ⚠️ **2026-09 分组口径又变了一次（见 PROJECT.md E16）**：分组**不再按学段，改成按「网站栏目」**
+ * —— 也就是每门课 `partitionId` 指向的那个**顶级分区名**。机构原话：
+ *
+ *   「**高中课内的 6 科高考外语和外语不能是一回事，虽然有同样的语言但是要单独分开**」
+ *
+ * 老口径下「高中」那一组里同时列着 `高中语文…高中技术`（栏目＝高中课内）**和**
+ * `日语 / 俄语 / 法语 / 德语 / 西班牙语`（栏目＝**外语**）—— 前者里的「高考外语」是
+ * 高中课内下「外语」子栏目的应试课，后者是外语栏目里独立的语种课，两件事混在一个下拉里。
+ * 现在分组名 = 栏目名（小学课内 / 初中课内 / 高中课内 / 外语 / 课外兴趣 / 成人课程），
+ * 与课程页、课程总览用的是**同一套名字**。
+ *
  * 这一节因此分两层断言：
- *   1. **结构性** —— 阶段名必须是课程类型里真有的学段（写死一个"小学课内"当场挂）；
+ *   1. **结构性** —— 每个分组名都必须是**真实存在的顶级栏目名**（判据是拿库里的栏目比，
+ *      不是把当前这 6 个名字抄一遍：写死"小学课内"这种当场挂），且每一门课都待在自己栏目那一组；
  *   2. **内容性** —— 这份站点内容（模板的那一份，也是新装库的报价初值）里有哪些组、
  *      每组几门课、都是什么价。价格是按"沿用同组旧价的入门档"定的，不是重新拍的。
  */
 const pricingStageNames = pricing.stages.map((stage) => stage.name);
-const catalogStageNames = catalogFromSeed().stages.map((stage) => stage.name);
-eq("报价的分组名都是课程类型里的学段",
-  pricingStageNames.filter((name) => !catalogStageNames.includes(name)), []);
-eq("阶段（没有课程的学段不建组：现在没有大学生的课）",
-  pricingStageNames, ["小学", "初中", "高中", "其他类型"]);
+/*
+ * 判据来自**库里的栏目表**（种子库那一份）：顶级分区的名字就是"网站栏目名"。
+ * 不在这里抄一份 `["小学课内", …]` —— 抄下来的话，机构把某个栏目改名（完全合法的操作）
+ * 这些断言就会指向一个不再存在的名字，而"报价分组名 = 栏目名"这句真正要守的话没人管。
+ */
+const topLevelPartitionNames = topLevelPartitions(seedDb.coursePartitions).map((item) => item.name);
+eq("报价的分组名都是顶级栏目名（判据是库里的栏目，不是抄一份名字）",
+  pricingStageNames.filter((name) => !topLevelPartitionNames.includes(name)), []);
+eq("分组（没有课程的栏目不建组：现在六个顶级栏目下都有课）",
+  pricingStageNames, ["小学课内", "初中课内", "高中课内", "外语", "课外兴趣", "成人课程"]);
 const priceLabel = (course: { name: string; price: number | null; available: boolean }) =>
   `${course.name}=${course.available ? course.price : "暂未开放"}`;
-eq("小学的课程与价格",
+eq("小学课内的课程与价格",
   pricing.stages[0]?.courses.map(priceLabel),
   ["小学语文=150", "小学数学=150", "小学英语=150", "小学科学=150", "小学奥数=260", "小学英语竞赛=260"]);
-eq("初中的课程与价格",
+eq("初中课内的课程与价格",
   pricing.stages[1]?.courses.map(priceLabel),
   ["初中语文=220", "初中数学=220", "初中英语=220", "初中科学=220", "初中社会=暂未开放",
     "小升初=200", "中考冲刺=350", "提前招专项=400"]);
-eq("高中的课程与价格（含五个语种）",
+eq("高中课内的课程与价格（**没有**那五个语种：它们在外语栏目）",
   pricing.stages[2]?.courses.map(priceLabel),
   ["高中语文=300", "高中数学=300", "高考外语=300", "高中物理=300", "高中化学=300", "高中生物=300",
-    "高中政治=暂未开放", "高中历史=暂未开放", "高中地理=暂未开放", "高中技术=暂未开放",
-    "日语=暂未开放", "俄语=暂未开放", "法语=300", "德语=300", "西班牙语=300"]);
+    "高中政治=暂未开放", "高中历史=暂未开放", "高中地理=暂未开放", "高中技术=暂未开放"]);
+eq("外语的课程与价格（独立语种课 + 雅思，与「高考外语」分开）",
+  pricing.stages[3]?.courses.map(priceLabel),
+  ["雅思=700", "日语=暂未开放", "俄语=暂未开放", "法语=300", "德语=300",
+    "意大利语=暂未开放", "西班牙语=300"]);
+eq("课外兴趣的课程与价格",
+  pricing.stages[4]?.courses.map(priceLabel),
+  ["3D建模 & 3D打印=暂未开放", "编程与信息素养=暂未开放"]);
+eq("成人课程的课程与价格",
+  pricing.stages[5]?.courses.map(priceLabel),
+  ["成人英语口语=暂未开放", "成人零基础外语=暂未开放", "出国语言备考=暂未开放",
+    "职场与商务英语=暂未开放", "医学专业英语=暂未开放", "机械行业英语=暂未开放", "贸易行业英语=暂未开放",
+    "成人旅游、出行=100", "跨国交友=暂未开放"]);
 /*
- * ⚠️ 高中这一组原先还有两行：「高考冲刺=暂未开放」「特殊计划专项=暂未开放」。
+ * ⚠️ 高中课内这一组原先还有两行：「高考冲刺=暂未开放」「特殊计划专项=暂未开放」。
  *
  * 机构把这两门课从课程库里删掉之后，2026-09 的口径是**报价里那一行一起删掉**
  * （原话：「课程报价里面删掉的课还是会出现」，见 `syncLibraryLinks` 第 4 件）——
  * 因此它们现在**不在这一份里**，也不该再回到断言里：
  * 报价页上出现的每一门课都必须能在课程库里找到。
  */
-eq("其他类型的课程与价格",
-  pricing.stages[3]?.courses.map(priceLabel),
-  ["雅思=700", "意大利语=暂未开放", "3D建模 & 3D打印=暂未开放", "编程与信息素养=暂未开放",
-    "成人英语口语=暂未开放", "成人零基础外语=暂未开放", "出国语言备考=暂未开放",
-    "职场与商务英语=暂未开放", "医学专业英语=暂未开放", "机械行业英语=暂未开放", "贸易行业英语=暂未开放",
-    "成人旅游、出行=100", "跨国交友=暂未开放"]);
-ok("每一组都有可报价的课（否则家长点进来是空的）",
-  pricing.stages.every((stage) => stage.courses.some((course) => course.available)));
+/*
+ * ── 2026-09 新增：**回归断言**（机构报的那个问题的判据）──
+ *
+ * 这是这一轮改动的**目的**，因此必须钉住：将来有人"顺手按学段或按学科重排"会把问题
+ * 原样带回来，而**没有任何东西会红**（下拉照常渲染、价格照常算）。
+ *
+ * ## ⚠️ 判据**从库里算**，不抄名字
+ *
+ * 「外语」那一组里到底有哪几门，**不是**在这里写一张名单 —— 名单会漂（机构加一门
+ * 语种课、或改一门课的名字，写死的名单就假了，而它想守的那句话与名字无关）。
+ * 这里从**分区树**算：谁挂在**顶级栏目「外语」**下面，它就属于「外语」那一组；
+ * 谁是「高考外语」那一组的，就绝不能在里面。
+ *
+ * ## ⚠️⚠️ 这个坑下次还会有人踩：**同名，但层级不同**
+ *
+ * 分区树里有两个叫「外语」的分区：
+ *   - 顶级栏目 `外语`（`cp_mudxlgqwaqm6`）：雅思 / 日语 / 俄语 / 法语 / 德语 / 意大利语 / 西班牙语；
+ *   - **高中课内下面的子栏目** `外语`（`cp_mudxlgqwp3go`）：「高考外语」挂在这里。
+ *
+ * 「高考外语」的**叶子分区名恰好也叫「外语」** —— 所以**绝不能**拿一门课的叶子名去和
+ * 分组名比（`partitionPlace()` 的 `column` 与 `leaf` 在这里同名，看着"对上了"，
+ * 其实是两个不同的分区）。分组只认 **`column`（顶级）**。
+ * 机构原话：「**高中课内的 6 科高考外语和外语不能是一回事，虽然有同样的语言但是要单独分开**」。
+ */
+{
+  const groupOf = (name: string): string =>
+    pricing.stages.find((stage) => stage.courses.some((course) => course.name === name))?.name ?? "";
+  const gaokao = groupOf("高考外语");
+
+  /* 判据：挂在**顶级栏目「外语」**下的全部课程（从分区树算，不抄名单）。 */
+  const topForeignColumn = topLevelPartitions(seedDb.coursePartitions).find((item) => item.name === "外语");
+  const inTopForeign = seedDb.courses.filter(
+    (course) => partitionPlace(seedDb.coursePartitions, course.partitionId).column?.id === topForeignColumn?.id,
+  );
+  ok(`顶级「外语」栏目下确实有一批课（当前 ${String(inTopForeign.length)} 门：` +
+    `${inTopForeign.map((course) => course.name).join("、")}）`,
+  topForeignColumn !== undefined && inTopForeign.length > 0);
+
+  eq("「高考外语」在高中课内（它是高中课内下「外语」子栏目的应试课）", gaokao, "高中课内");
+  /* ← 这一条就是机构报的那个问题的回归断言：两组不得相交。 */
+  eq("顶级「外语」栏目下的语种课一个都不在「高考外语」那一组里（机构报的那个问题）",
+    inTopForeign.filter((course) => groupOf(course.name) === gaokao).map((course) => course.name),
+    []);
+  eq("它们都在「外语」那一组里", inTopForeign.filter((course) => groupOf(course.name) === "外语").length,
+    inTopForeign.length);
+  /* 两拨课各自的分组名，按库算出来 —— 不是抄的。 */
+  eq("那两拨课的分组名（由栏目算出）",
+    [gaokao, groupOf(inTopForeign[0]?.name ?? "")], ["高中课内", "外语"]);
+  /*
+   * 把**同名不同层**这个事实本身也钉住：如果哪天有人把高考外语的分区挪到顶级「外语」
+   * 栏目下（或把那个子栏目删掉、让它落回高档栏目），上面几条会红，但**红的原因不容易看出来**
+   * —— 这一条直接说出"它的叶子和它的栏目同名、而它们不是同一个分区"，
+   * 让人一眼明白为什么按名字分组是错的。
+   */
+  {
+    const gaokaoRow = seedDb.courses.find((course) => course.name === "高考外语");
+    const place = gaokaoRow === undefined
+      ? { column: null, leaf: null }
+      : partitionPlace(seedDb.coursePartitions, gaokaoRow.partitionId);
+    eq("「高考外语」的叶子分区与顶级栏目**同名但不同层**（这个坑的来源）",
+      [place.leaf?.name ?? "", place.column?.name ?? "", place.leaf?.id === place.column?.id],
+      ["外语", "高中课内", false]);
+  }
+  eq("报价里还有一门「高考外语」之外的课也叫「外语」栏目 —— 组名与栏目名同一个词不算重名",
+    pricingStageNames.filter((name) => name === "外语"), ["外语"]);
+}
+/*
+ * 分组完全由栏目决定：把每门课按课程库的 `partitionId` 算出来它"应该"在哪一组，
+ * 与报价里它在的那一组逐门比。这一条是**判据**（不是抄名字）：
+ * 课程挂了别的栏目、或报价那一行被挪到别的组，它当场红。
+ */
+{
+  const seedByName = new Map(seedDb.courses.map((course) => [course.name, course]));
+  const misplaced = pricing.stages.flatMap((stage) =>
+    stage.courses
+      .filter((course) => {
+        const row = seedByName.get(course.name);
+        if (row === undefined) return true;
+        return (partitionPlace(seedDb.coursePartitions, row.partitionId).column?.name ?? "") !== stage.name;
+      })
+      .map((course) => `${course.name}（在「${stage.name}」里，但它的栏目不是这个名字）`));
+  eq("每一门课都在它自己那一个栏目下的分组里（分组 = 顶级栏目，一门都不错位）", misplaced, []);
+}
+ok("每一组都至少有一门课（空组非法：`validatePricingConfig` 也会拒）",
+  pricing.stages.length > 0 && pricing.stages.every((stage) => stage.courses.length > 0));
+/*
+ * ⚠️ **2026-09 分组改成按栏目之后，原先那条「每一组都有可报价的课」不再成立，
+ * 而且它红得有意义** —— 记在这里，别把它当成"断言写错了"删掉。
+ *
+ * 「课外兴趣」那两门课（3D建模 & 3D打印、编程与信息素养）**本来就是暂未开放**：
+ * 以前它们混在「其他类型」那一大组里，同组的雅思（700、在售）把整组撑住了，
+ * 所以那条断言一直绿 —— 它守的其实是"**这个组里有东西可报价**"，
+ * 而不是"每一门课都可报价"。按栏目一分，这个"整组都还不能报价"的栏目第一次露出来。
+ *
+ * 现状**不是 bug**：网站那侧 `toStage()` 把这种组的 `available` 置为 false
+ * （= 至少有一门可选课程），报价页下拉里它会显示成「课外兴趣（暂未开放）」并置灰，
+ * 家长点不进去、也就不会看到"里面全是暂未开放"。要守的那件事仍然由 `toStage` 守着
+ * （下面那条断言）。
+ *
+ * 但它是一个**数据待办**：机构要么给这两门课定价 / 开放，要么就别让这一组出现在报价页上。
+ * 因此这里**如实钉住当前状态**（而不是把断言放宽成"不看可报价"—— 那样将来真出问题时
+ * 也没人会知道）。机构定了价，这一条会红，提示把它改回"每一组都有可报价的课"。
+ */
+eq("哪些栏目整组都还不能报价（当前：课外兴趣两门都写着暂未开放 —— 待机构定价或下架）",
+  pricing.stages.filter((stage) => !stage.courses.some((course) => course.available))
+    .map((stage) => `${stage.name}（${String(stage.courses.length)} 门全暂未开放）`),
+  ["课外兴趣（2 门全暂未开放）"]);
+ok("整组都还不能报价时，网站那侧会把它整组置灰（家长不会点进去看到一屏暂未开放）",
+  readFileSync(new URL("../lib/site/backend-source.ts", import.meta.url), "utf8")
+    .includes("available: courses.some((course) => course.available)"));
 ok("「暂未开放」的课不许带价（导出时那个价会丢，回读就对不上了）",
   pricing.stages.every((stage) => stage.courses.every((course) => course.available || course.price === null)));
 /*
@@ -10884,34 +11014,43 @@ console.log("\n=== 38.5 自检与验收脚本也纳入类型检查（2026-09 清
   ok("服务端与脚本都在里面", includeLine.includes("server/**/*.mts"));
 }
 
-console.log("\n=== 39. 课程台账按维度分组（v33：默认按维度，分区视图保留）===");
+console.log("\n=== 39. 课程台账的分组视图（2026-09：默认按分区，维度视图保留）===");
 
 /*
  * 机构：「课程可以完全按照…**不靠枚举的方式为主安排**」。E3 把课程挂到了维度上（能筛、能挂），
- * 这一版把**分组**也换成维度 —— 但分区视图**保留**：分区仍然是网站的展示结构
- * （课程页按栏目分组、每个栏目在网站上都有入口），分区改名 / 排序 / 删除 / 批量移课
- * 那几个动作就挂在分区表头上。
+ * v33 把**分组**也换成维度并把默认值定成「按维度」。
  *
- * 这一节守四件事：
- *   1. **默认按维度**（学段 → 学科），且**没有维度表时强制分区视图**（否则全被归到"未挂"）；
- *   2. **多学科卡片不重复列**（「高考外语」覆盖五个语种，只出现一次，归到「多学科卡片」）；
- *   3. **没挂维度的课不进维度分组**（由那块黄色提示 + 「只看未挂维度」处理）；
- *   4. 分区视图与它的管理动作**都还在**（不是"换成维度就删了老路"）。
+ * **2026-09 默认值改成「按分区（网站栏目）」** —— 机构报的问题是
+ * 「**高中课内的 6 科高考外语和外语不能是一回事，虽然有同样的语言但是要单独分开**」，
+ * 而维度视图的一级分组是学段、二级是学科：「日语」这个学科下同时挂着
+ * 「高考外语」与「日语」（高考外语的 `subjectIds` 就是那五个语种），
+ * 机构在台账里看到的仍是混在一起的两件事。报价页这一版已经改成按栏目分组，
+ * 台账跟着换成同一套口径，两边才不会各说一套。
+ *
+ * **「按维度」视图整个保留**（不是"换掉老的"）：它回答的是另一个问题 ——
+ * 「这门课挂在哪个学段 / 学科上、组合开放对得上没有」。
+ *
+ * 这一节守五件事：
+ *   1. **默认按分区**，且**没有维度表时也只能用分区视图**（否则全被归到"未挂"）；
+ *   2. **两种视图都还在**（维度那一个没被删掉，切过去能用）；
+ *   3. **多学科卡片不重复列**（「高考外语」覆盖五个语种，只出现一次，归到「多学科卡片」）；
+ *   4. **没挂维度的课不进维度分组**（由那块黄色提示 + 「只看未挂维度」处理）；
+ *   5. 分区视图与它的管理动作**都还在**（改名 / 排序 / 删除 / 批量移课）。
  */
 {
   const rootUrl = new URL("../", import.meta.url);
   const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
   const ledger = read("components/admin/CoursesLedgerPanel.tsx");
 
-  ok("默认是「按维度」分组（机构口径：课程以维度法为主安排）",
-    /useState<"dimension" \| "partition">\("dimension"\)/.test(ledger));
+  ok("默认是「按分区（网站栏目）」分组（2026-09 口径：与报价页 / 课程页同一套）",
+    /useState<"dimension" \| "partition">\("partition"\)/.test(ledger));
   ok("两种分组方式都能切，且分区那一种标明了它是「网站栏目」",
     ledger.includes('{ key: "dimension", label: "按维度（学段 → 学科）" }') &&
       ledger.includes('{ key: "partition", label: "按分区（网站栏目）" }'));
   ok("没有维度表时维度那一个不可选（否则所有课都归到「未挂」里，像清单坏了）",
     ledger.includes('disabled={item.key === "dimension" && catalog === null}') &&
       ledger.includes("读不到课程类型，只能按分区看"));
-  ok("维度分组是学段 → 学科两层",
+  ok("维度分组仍然是学段 → 学科两层（这个视图没有被删掉，只是不再是默认）",
     ledger.includes("const dimensionGroups = useMemo") && ledger.includes("section.buckets.map("));
   ok("多学科卡片归到「多学科卡片」那一桶（不重复列 N 次）",
     ledger.includes('"多学科卡片"') && ledger.includes("一张卡片覆盖多个学科"));
@@ -10925,6 +11064,8 @@ console.log("\n=== 39. 课程台账按维度分组（v33：默认按维度，分
     ledger.includes('groupMode === "partition" && unpartitioned.length > 0'));
   ok("两种分组都复用同一张课程卡片（不是各画一套）",
     (ledger.match(/renderCourseCard\(course\)/g) ?? []).length >= 3);
+  ok("这次口径变更与机构原话一起写进了源码注释（不是只有一个孤零零的默认值）",
+    ledger.includes("高考外语和外语不能是一回事") && ledger.includes("要单独分开"));
 }
 
 console.log("\n=== 40. 「课程」页点页签有反应（一个真 bug 的回归断言）===");
@@ -10989,7 +11130,10 @@ console.log("\n=== 41. 报价与课程清单对齐（v37）===");
  *
  * 断言分三层，都是"结构上必须成立"的那一类，而不是把当前的清单再抄一遍：
  *   1. **集合相等**：报价的课程名集合 = 课程库的课程名集合（示例库 / 空库 / 新装库同一份）；
- *   2. **分组对齐**：报价的每个阶段都对应课程类型里的一个学段，且那个学段下真有课；
+ *   2. **分组对齐**：报价的每个分组都对应**一个顶级栏目**（＝网站课程页的栏目名），
+ *      且那个栏目下真有课；反过来，每门课所在栏目的名字都要能在报价里找到对应分组
+ *      —— **2026-09 起分组口径从"学段"改成"网站栏目"**（见 §4 与 PROJECT.md E16），
+ *      因此这一层比的是 `partitionId` 的顶级分区名，不再是 `stageIds`；
  *   3. **两端都在**：课程库里的课在报价里有行、开放的有价；那十二门"只在后台用"的课
  *      确实没有上网（网站卡片数没变），维度也都挂上了。
  */
@@ -11005,25 +11149,43 @@ console.log("\n=== 41. 报价与课程清单对齐（v37）===");
   eq("空库起步与示例库是同一份课程清单（否则机构装出来的库与自检断的不是一份）",
     emptyNames, libraryNames);
 
-  // 分组：报价的每个阶段 = 课程类型里的一个学段，且该学段下有课
-  const stageRows = catalogFromSeed().stages;
-  const courseStageNames = (course: { stageIds: string[] }) =>
-    course.stageIds.map((id) => stageRows.find((stage) => stage.id === id)?.name ?? id);
+  /*
+   * 分组：报价的每个分组 = **一个顶级栏目**（网站课程页的栏目名），且那个栏目下真有课。
+   *
+   * ⚠️ 判据在 2026-09 从"学段"换成了"栏目"：老口径下这里比的是 `course.stageIds`
+   * 里的学段名 —— 而 v37 那套口径正是机构报的那个问题的来源（「高考外语」与
+   * 外语栏目那几门语种课的学段都落在"高中 / 其他类型"上，按学段分组必然混在一起）。
+   * 现在比的是每门课 `partitionId` 解析出来的**顶级分区名**，分组由栏目唯一决定。
+   */
+  const columnNameOf = (course: { partitionId: string }) =>
+    partitionPlace(seedDb.coursePartitions, course.partitionId).column?.name ?? "";
   const seedByName = new Map(seedDb.courses.map((course) => [course.name, course]));
-  eq("报价的每个阶段都真有该学段的课",
+  eq("报价的每个分组都对应一个顶级栏目，且那个栏目下真有课",
     pricing.stages
       .filter((stage) =>
         !stage.courses.some((course) => {
           const row = seedByName.get(course.name);
-          return row !== undefined && courseStageNames(row).includes(stage.name);
+          return row !== undefined && columnNameOf(row) === stage.name;
         }))
       .map((stage) => stage.name),
     []);
-  eq("课程库里每一门课的学段都能在报价里找到对应阶段",
+  eq("课程库里每一门课的栏目都能在报价里找到对应分组（一门都不掉队）",
     seedDb.courses
-      .filter((course) => courseStageNames(course).every(
-        (name) => !pricing.stages.some((stage) => stage.name === name)))
+      .filter((course) => !pricing.stages.some((stage) => stage.name === columnNameOf(course)))
       .map((course) => course.name),
+    []);
+  /*
+   * **每一个报价分组名都等于某个顶级栏目名** —— 这一条是"以栏目为准"这句口径的判据。
+   *
+   * 为什么写在**这里**（而不是只在 §4）：§4 比的是**模板内容那一份**（`data/site/pricing.md`，
+   * 也就是新装库与线上读的那一份），而这里比的是**种子库**；两处各比一次，
+   * 才能同时守住"文件里的分组对"与"库里的分组对"—— 只有一处的话，
+   * 另一条路径改坏了不会有人知道（导出会把它写回文件，看起来还挺一致）。
+   */
+  eq("每一个报价分组名都等于某个顶级栏目名（判据，不是抄一份名字）",
+    pricing.stages
+      .map((stage) => stage.name)
+      .filter((name) => !topLevelPartitions(seedDb.coursePartitions).some((item) => item.name === name)),
     []);
   eq("报价的每门课都有价或明确写着暂未开放（不留「两头空」的行）",
     pricing.stages.flatMap((stage) =>
@@ -11515,8 +11677,9 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
   mutated.teachers.find((teacher) => teacher.name.startsWith("采苓"))!.summary = "自检改过的一句话简介。";
 
   // pricing.md
-  find(mutated.pricing.stages, "小学").courses[0]!.basePrice = 175;
-  find(mutated.pricing.stages, "小学").courses[1]!.available = false;
+  /* 分组的名字现在是**栏目名**（2026-09 口径）：小学那一组叫「小学课内」。 */
+  find(mutated.pricing.stages, "小学课内").courses[0]!.basePrice = 175;
+  find(mutated.pricing.stages, "小学课内").courses[1]!.available = false;
   mutated.pricing.classTypes[1]!.coefficient = 0.75;
   mutated.pricing.durations[1]!.multiplier = 1.75;
   mutated.pricing.rules.singleLessonFeePercent = 15;

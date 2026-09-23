@@ -150,19 +150,32 @@ export function CoursesLedgerPanel() {
   const [stageFilter, setStageFilter] = useState("");
   const [subjectFilter, setSubjectFilter] = useState("");
   /**
-   * **清单怎么分组**（v33）：`dimension`＝学段 → 学科（默认，机构口径"课程以维度法为主"）；
-   * `partition`＝栏目 → 子栏目（网站课程页的那棵树，分区改名 / 排序 / 删除 / 批量移课
-   * 那几个动作挂在它的表头上）。
+   * **清单怎么分组**：`partition`＝栏目 → 子栏目（**默认**）；
+   * `dimension`＝学段 → 学科。
    *
-   * 为什么两种都留：分区**仍然是网站的展示结构**（课程页按栏目分组、
-   * 每个栏目 / 子栏目在网站上都有入口），因此那套管理动作不能没有落脚点；
-   * 而"以维度为主"要的是**默认按维度看**。等网站展示也由维度生成那一步做完
-   * （E2-C-B），分区这一种就可以整个撤掉。
+   * ## 默认值从「按维度」改成「按分区」（2026-09，机构口径变更）
    *
-   * 没有维度表（后端没跑 / 拿不到）时强制用分区视图：维度视图在没有维度表时
+   * v33 定的默认是「按维度」。改的理由是机构报的那个问题 ——
+   * 「**高中课内的 6 科高考外语和外语不能是一回事，虽然有同样的语言但是要单独分开**」：
+   * 维度视图的**一级分组是学段、二级是学科**，于是「日语」这个学科下同时列着
+   * 「高考外语」与「日语」（高考外语挂的学科就是那五个语种），家长 / 机构在台账里
+   * 看到的还是混在一起的两件事 —— 而报价页那边这一版已经改成按栏目分组了
+   * （见 `lib/backend/pricing.ts` 的 `PricingStage`），两边口径不一致更难解释。
+   *
+   * 现在默认与**报价页、课程页**用同一套口径（顶级分区 = 网站栏目），
+   * 「高考外语」在「高中课内 / 外语」下，「日语」在「外语」栏目下，一眼分得开。
+   *
+   * **「按维度」这个视图整个保留**（不是删功能）：`dimension` 仍然可切，
+   * 它回答的是另一个问题 —— 「这门课挂在哪个学段 / 学科上、组合开放对得上没有」，
+   * 那正是 E3／E5 想要的能力。保留的代价只是多一个按钮。
+   *
+   * 另外：分区视图下的分区表头**仍然是分区管理动作的唯一落脚点**
+   * （改名 / 排序 / 删除 / 批量移课），现在它还是默认视图，那些动作更好找。
+   *
+   * 没有维度表（后端没跑 / 拿不到）时也**只能**用分区视图：维度视图在没有维度表时
    * 会把所有课都归到"未挂维度"那一桶，看起来像清单坏了。
    */
-  const [groupMode, setGroupMode] = useState<"dimension" | "partition">("dimension");
+  const [groupMode, setGroupMode] = useState<"dimension" | "partition">("partition");
   const [originFilter, setOriginFilter] = useState("全部");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -2357,18 +2370,19 @@ export function CoursesLedgerPanel() {
         )}
 
         {/*
-          ── 分组方式（v33）──
-          默认「按维度」（学段 → 学科），机构口径是"课程以维度法为主"；
-          「按分区」是网站课程页那棵树 —— 分区改名 / 排序 / 删除 / 批量移课那几个动作
-          挂在它的表头上，因此切回去就能用。
+          ── 分组方式 ──
+          默认「按分区（网站栏目）」：与报价页、课程页同一套口径，机构的原话是
+          「高中课内的 6 科高考外语和外语不能是一回事…要单独分开」——
+          按栏目看时高考外语在「高中课内」、日语在「外语」，不再同组；
+          「按维度（学段 → 学科）」保留可切（v33 那个视图，回答的是另一个问题）。
         */}
         <div className="flex flex-wrap items-center gap-2 border-b border-ink-100 px-4 py-2">
           <span className="text-xs text-ink-500">分组方式：</span>
           <div className="flex overflow-hidden rounded-md border border-ink-300">
             {(
               [
-                { key: "dimension", label: "按维度（学段 → 学科）" },
                 { key: "partition", label: "按分区（网站栏目）" },
+                { key: "dimension", label: "按维度（学段 → 学科）" },
               ] as const
             ).map((item) => (
               <button

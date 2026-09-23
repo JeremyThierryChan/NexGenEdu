@@ -954,14 +954,38 @@ await check("收费", "finance(月份)", async () => typeof (await api.finance(n
 
 /* ── 9 报价 ── */
 await check("报价", "读配置", async () => (await api.pricing.get()).stages.length > 0);
+/*
+ * 给「围棋」定价（用来验"按课程名就能试算"这条链路）。
+ *
+ * ⚠️ **分组名必须是真实存在的顶级栏目名**（2026-09 口径：报价的分组名 = 网站栏目名，
+ * 见 PROJECT.md 的 E16）。这里原先随手编了一个「兴趣才艺」当阶段名 —— 那是**上面**
+ * 建栏目时用的名字，而那条栏目后来被 `update` 改过名、围棋也被 `setPartition`
+ * 挪走了（再往下围棋本身还被删掉）：编出来的名字与任何一个栏目都对不上。
+ * 老口径（分组 = 学段）下这不算错，新口径下它就是一条**错的口径示范** ——
+ * 报价页上会因此多出一个课程页上根本不存在的"栏目"。
+ *
+ * 现在改成用**真实的栏目名**：围棋是兴趣课，放「课外兴趣」；
+ * 并顺带断一次"这一组真的是一个顶级栏目"（夹具前提，缺了当场说清而不是静默通过）。
+ */
 await check("报价", "给课程库的课定价", async () => {
   const current = await api.pricing.get();
   const stages = [...current.stages];
-  const target = stages.find((s) => s.name === "兴趣才艺");
-  if (target === undefined) stages.push({ name: "兴趣才艺", courses: [{ name: "围棋", basePrice: 200, available: true, courseId }] });
-  else target.courses.push({ name: "围棋", basePrice: 200, available: true, courseId });
-  return (await api.pricing.update({ ...current, stages })).stages.length;
-}, (n: number) => n > 0);
+  const column = (await api.coursePartitions.list()).find(
+    (item) => item.parentId === "" && item.name === "课外兴趣",
+  );
+  const columnName = column?.name ?? "";
+  if (columnName === "") return "临时库里没有「课外兴趣」这个顶级栏目，验收夹具不对";
+  const target = stages.find((s) => s.name === columnName);
+  if (target === undefined) {
+    stages.push({ name: columnName, courses: [{ name: "围棋", basePrice: 200, available: true, courseId }] });
+  } else {
+    target.courses.push({ name: "围棋", basePrice: 200, available: true, courseId });
+  }
+  const saved = await api.pricing.update({ ...current, stages });
+  // 顺带验新口径：围棋那一组的组名就是它挂的那个顶级栏目名
+  const group = saved.stages.find((s) => s.courses.some((course) => course.name === "围棋"));
+  return group?.name === columnName && saved.stages.some((s) => s.name === columnName);
+}, (ok: boolean) => ok === true);
 await check("报价", "试算（含新定价的课）", async () => (await api.pricing.quote({
   courseName: "围棋", classTypeName: "一对一", durationName: "1 小时", lessons: 5,
 })).ok);
