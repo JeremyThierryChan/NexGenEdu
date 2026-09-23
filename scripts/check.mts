@@ -184,6 +184,7 @@ import {
   GROUP_ACCESS,
   HOLIDAY_ACTION_ACCESS,
   PAGE_ACCESS,
+  ADMIN_COURSE_TABS,
   ROLES,
   canCallMethod,
   TEACHER_SCOPE_RULES,
@@ -5860,7 +5861,23 @@ console.log("\n=== 13. 界面稳定：就地动作不滚动、不塌页高 ===")
       const source = readFileSync(new URL(entry, adminDashboardUrl), "utf8");
       return { path: `app/admin/(dashboard)/${entry}`, source, code: stripComments(source) };
     });
-  const gatedPages = adminPages.filter((page) => page.code.includes("setLoading(true)"));
+
+  /*
+   * v29 起，三个"页面"被拆成了 `components/admin/*Panel.tsx`（机构要求把
+   * 课程库 / 课程类型 / 开放矩阵合成一页）。这些面板**事实上仍然是页面**：
+   * 它们自己读数据、自己有加载态、自己保存，因此"就地动作必须走安静刷新"这条规则
+   * 必须照旧管着它们 —— 否则拆分就等于把一整组断言悄悄放走了。
+   */
+  const adminPanelUrl = new URL("../components/admin/", import.meta.url);
+  const adminPanels = readdirSync(adminPanelUrl)
+    .filter((entry) => entry.endsWith("Panel.tsx"))
+    .sort()
+    .map((entry) => {
+      const source = readFileSync(new URL(entry, adminPanelUrl), "utf8");
+      return { path: `components/admin/${entry}`, source, code: stripComments(source) };
+    });
+  const pageLikeSources = [...adminPages, ...adminPanels];
+  const gatedPages = pageLikeSources.filter((page) => page.code.includes("setLoading(true)"));
   ok("扫描到了带加载态的后台页面", gatedPages.length >= 10, `${gatedPages.length} 个：${gatedPages.map((p) => p.path).join("、")}`);
 
   // B1. 每页最多一处裸 `load()` —— 就是首屏那一处
@@ -5909,8 +5926,9 @@ console.log("\n=== 13. 界面稳定：就地动作不滚动、不塌页高 ===")
    * 谁要把 `creatingCourse` 的初值改回 `true`，就会看到这句为什么不能改。
    */
   {
-    const coursesPage = adminPages.find((page) => page.path.endsWith("courses/page.tsx"));
-    ok("找得到课程库页面（否则下面那条是空转的）", coursesPage !== undefined);
+    const coursesPage = pageLikeSources.find((page) => page.path.endsWith("CoursesLedgerPanel.tsx"));
+    ok("找得到课程台账那一块（v29 起它是 components/admin/CoursesLedgerPanel.tsx，否则下面那条是空转的）",
+      coursesPage !== undefined);
     const code = coursesPage?.code ?? "";
     /*
      * 形态检查：状态初值是 `false`，且渲染处**真的**按它分支。
@@ -5921,9 +5939,9 @@ console.log("\n=== 13. 界面稳定：就地动作不滚动、不塌页高 ===")
       /const \[creatingCourse, setCreatingCourse\] = useState\(false\)/.test(code) &&
       /creatingCourse \? \(/.test(code);
     ok(
-      "课程库：新增课程表单默认收起（点某张卡片的「编辑」时，页面上方不会少掉那一大块）",
+      "课程台账：新增课程表单默认收起（点某张卡片的「编辑」时，页面上方不会少掉那一大块）",
       folded,
-      "见 app/admin/(dashboard)/courses/page.tsx 里 creatingCourse 的说明与 §15.3",
+      "见 components/admin/CoursesLedgerPanel.tsx 里 creatingCourse 的说明与 §15.3",
     );
   }
 
@@ -6171,7 +6189,7 @@ console.log("\n=== 14. 延迟型跳顶：点击之后就地的动作，过一会
    */
   const noTimerFiles = [
     "components/admin/DataNotice.tsx",
-    "app/admin/(dashboard)/courses/page.tsx",
+    "components/admin/CoursesLedgerPanel.tsx",
   ];
   const filesWithTimers = noTimerFiles.filter((file) =>
     /\bsetTimeout\s*\(|\bsetInterval\s*\(/.test(readFileSync(new URL(file, rootUrl), "utf8")),
@@ -6370,7 +6388,7 @@ console.log("\n=== 15. 恢复型滚动：只许「把位置放回原处」，不
 
   // ── D. 不是空转：兜底真的接在"被报告的那个动作"与后台外壳上 ────────────────
   const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
-  const coursesPageSource = read("app/admin/(dashboard)/courses/page.tsx");
+  const coursesPageSource = read("components/admin/CoursesLedgerPanel.tsx");
   const guardSource = read("components/admin/useScrollGuard.ts");
   const memorySource = read("components/admin/ScrollMemory.tsx");
   const layoutSource = read("app/admin/(dashboard)/layout.tsx");
@@ -7472,7 +7490,7 @@ console.log("\n=== 19. P2：界面不能「点了没反应」 ===");
     read("app/admin/(dashboard)/lessons/page.tsx").includes("methodOwnerText("));
 
   // ── ③ 课程库页：报价 403 不许拖垮整页 ──────────────────────────────────
-  const courses = read("app/admin/(dashboard)/courses/page.tsx");
+  const courses = read("components/admin/CoursesLedgerPanel.tsx");
   ok("课程库页单独 catch 报价（普通教师对 pricing.get 是 403，课程仍应看得见）",
     courses.includes("api.pricing.get().catch("));
   ok("报价读不到时单独说一句（不借用「网站正文」那条错误，免得说错地方）",
@@ -7899,7 +7917,7 @@ console.log("\n=== 23. 课程分区：分区是数据，不是每门课上的一
   const readSource = (file: string): string => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
   const stripComments = (source: string): string =>
     source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-  const groupUsers = ["lib/site/backend-source.ts", "app/admin/(dashboard)/courses/page.tsx"]
+  const groupUsers = ["lib/site/backend-source.ts", "components/admin/CoursesLedgerPanel.tsx"]
     .filter((file) => readSource(file).includes("groupByPartition("));
   eq("网站与后台清单都用同一个 groupByPartition（不许各写一份分组）", groupUsers.length, 2);
   ok("groupByPartition 本身在 course-partitions.ts 里",
@@ -7923,7 +7941,7 @@ console.log("\n=== 23. 课程分区：分区是数据，不是每门课上的一
   ok("公开给网站的课程带 partitionId，且不再带 category / subgroup",
     publicCourseType.includes("partitionId") && !/^\s*(category|subgroup)\s*:/m.test(publicCourseType));
   eq("后台清单与网站映射里不再读课程的 .category",
-    ["lib/site/backend-source.ts", "app/admin/(dashboard)/courses/page.tsx"]
+    ["lib/site/backend-source.ts", "components/admin/CoursesLedgerPanel.tsx"]
       .filter((file) => /\.category\b/.test(stripComments(readSource(file)))),
     []);
   /*
@@ -7935,7 +7953,7 @@ console.log("\n=== 23. 课程分区：分区是数据，不是每门课上的一
    * 只许出现在 course-partitions.ts 里的那一个函数里。
    */
   const labelSites = ["lib/backend/export.ts", "lib/backend/courses.ts",
-    "app/admin/(dashboard)/courses/page.tsx", "app/admin/(dashboard)/data/page.tsx"]
+    "components/admin/CoursesLedgerPanel.tsx", "app/admin/(dashboard)/data/page.tsx"]
     .filter((file) => /`\$\{[^}]*\}\s*\/\s*\$\{/.test(stripComments(readSource(file))));
   eq("分区的显示写法只有一处实现（partitionPathLabel），四处不许各拼一遍", labelSites, []);
   ok("那个实现本身在 course-partitions.ts 里",
@@ -7950,7 +7968,7 @@ console.log("\n=== 23. 课程分区：分区是数据，不是每门课上的一
    *   2. 分区写动作按权限渲染（没权限的人不该看见点了会 403 的按钮）；
    *   3. 筛选时隐藏空分区（否则搜索结果里夹着一堆"0 门"）。
    */
-  const coursesPageCode = readSource("app/admin/(dashboard)/courses/page.tsx");
+  const coursesPageCode = readSource("components/admin/CoursesLedgerPanel.tsx");
   ok("清单两级都有分区标题行（二级缺了，子栏目就改名 / 删不掉）",
     /renderPartitionHeader\(column, columnItems, 1\)/.test(coursesPageCode) &&
     /renderPartitionHeader\(group\.subgroup, group\.items, 2\)/.test(coursesPageCode));
@@ -8580,7 +8598,7 @@ console.log("\n=== 27. 特色课程进库（v20：机构要求「特色课程也
     /\.catalog\s*\n?\s*\.list\(\)/.test(hookSource) &&
     hookSource.includes("catalog.formats.map((format) => format.name)") &&
     !hookSource.includes("featuredFormOptions"));
-  const formUsers = ["app/admin/(dashboard)/courses/page.tsx", "components/admin/StudentForm.tsx",
+  const formUsers = ["components/admin/CoursesLedgerPanel.tsx", "components/admin/StudentForm.tsx",
     "components/admin/EnrollmentPanel.tsx", "components/admin/LessonForm.tsx",
     "components/admin/LessonSeriesForm.tsx"]
     .filter((file) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8").includes("useFormOptions()"));
@@ -9475,9 +9493,9 @@ console.log("\n=== 33. 删一个维度之后，引用它的组合怎么办（死
   __useStoreForTesting(memory);
 
   const catalogPageSource = readFileSync(
-    new URL("../app/admin/(dashboard)/catalog/page.tsx", import.meta.url), "utf8");
+    new URL("../components/admin/CatalogDimensionsPanel.tsx", import.meta.url), "utf8");
   const offersPageSource = readFileSync(
-    new URL("../app/admin/(dashboard)/offers/page.tsx", import.meta.url), "utf8");
+    new URL("../components/admin/OffersMatrixPanel.tsx", import.meta.url), "utf8");
   const apiSource = readFileSync(new URL("../lib/backend/api.ts", import.meta.url), "utf8");
 
   const catalogForDrop = catalogFromSeed();
@@ -9634,7 +9652,7 @@ console.log("\n=== 34. 删掉「交付形态」这一维（v26，机构更正）
 
   // ④ 页面口径：课程类型页不该再有「交付形态」页签
   const catalogPage = readFileSync(
-    new URL("../app/admin/(dashboard)/catalog/page.tsx", import.meta.url), "utf8");
+    new URL("../components/admin/CatalogDimensionsPanel.tsx", import.meta.url), "utf8");
   ok("「课程类型」页没有「交付形态」页签了",
     !catalogPage.includes('key: "deliveries"') && !catalogPage.includes('tab === "deliveries"'));
   ok("而且页面上写明了那些是独立项目（避免以后又有人把它加回来）",
@@ -9824,6 +9842,85 @@ console.log("\n=== 35. 哪一天按哪一组时段（v27 寒暑假段 + 时段�
     (await api.importDatabase(JSON.stringify(brokenDb))).ok, true);
   ok("导入后被兜成空数组（日历页不会整页打不开）",
     Array.isArray((await api.exportDatabase()).vacations));
+}
+
+console.log("\n=== 36. 课程一页三页签（v29：课程库 + 课程类型 + 开放矩阵合并）===");
+
+/*
+ * 机构：「课程库、课程类型、开放矩阵这里面很多功能也完全可以合并到同一个页面里」
+ * 以及「网址也只留一个」。这一节守四件事：
+ *
+ *   1. **入口只有一个**（导航一条、`PAGE_ACCESS` 里只有 `/admin/courses`）；
+ *   2. **三条保存语义各自独立**（合并最容易犯的错：合成一个"保存"按钮 ——
+ *      那会把"改一门课"变成"提交整份维度表"，乐观锁当场失效）；
+ *   3. **权限不放开也不收紧**：路由取并集，页签按合并前那三条页面权限逐字一致；
+ *   4. **页签切走不丢草稿**（面板用 `hidden` 保活，不是卸载）。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+  const page = read("app/admin/(dashboard)/courses/page.tsx");
+  const nav = read("lib/site/admin-nav.ts");
+
+  // ① 入口只有一个
+  ok("导航里只有「课程」一条入口（旧的课程类型 / 开放矩阵两条已删）",
+    nav.includes('href: "/admin/courses"') && !nav.includes('"/admin/catalog"') && !nav.includes('"/admin/offers"'));
+  eq("页面权限表里也只有课程这一条",
+    Object.keys(PAGE_ACCESS).filter((href) => ["/admin/catalog", "/admin/offers", "/admin/courses"].includes(href)),
+    ["/admin/courses"]);
+  ok("三个面板各自都在（合成一页而不是把两块删掉）",
+    page.includes("<CoursesLedgerPanel />") &&
+      page.includes("<CatalogDimensionsPanel />") &&
+      page.includes("<OffersMatrixPanel />"));
+
+  // ② 三条保存语义各自独立：三个面板里各有一个保存动作，页面自己**没有**保存按钮
+  ok("页面壳自己没有保存按钮（没有把三块合成一次提交）",
+    !/save\(|保存修改/.test(page));
+  ok("台账那块保存的是「一门课」（逐条 + 乐观锁）",
+    read("components/admin/CoursesLedgerPanel.tsx").includes("api.courses.update(") ||
+      read("components/admin/CoursesLedgerPanel.tsx").includes("courses.update("));
+  ok("课程类型那块保存的是整份维度表",
+    read("components/admin/CatalogDimensionsPanel.tsx").includes("api.catalog.save("));
+  ok("开放矩阵那块保存的是整份组合表",
+    read("components/admin/OffersMatrixPanel.tsx").includes("api.offers.save("));
+
+  // ③ 权限：路由并集 + 页签逐字一致
+  const tabRoles = Object.fromEntries(ADMIN_COURSE_TABS.map((tab) => [tab.key, tab.roles]));
+  eq("三个页签的角色与合并前那三条页面权限逐字一致（不许顺手放开或收紧）",
+    [tabRoles.ledger, tabRoles.dimensions, tabRoles.matrix],
+    [
+      ["技术管理员", "招生老师", "普通教师"],
+      ["技术管理员", "财务管理员", "招生老师"],
+      ["技术管理员", "财务管理员", "招生老师"],
+    ]);
+  const union = [...new Set(ADMIN_COURSE_TABS.flatMap((tab) => tab.roles))];
+  eq("路由权限 = 三个页签角色的并集（谁也不会因为合并少看到他本来能看的）",
+    [...(PAGE_ACCESS["/admin/courses"] ?? [])].sort(), [...union].sort());
+  ok("页面上按角色过滤页签（不是全部渲染再靠 CSS 藏）",
+    page.includes("ADMIN_COURSE_TABS.filter((tab) => canAccess(roles, tab.roles))"));
+  ok("锚点里的页签也要先过权限（否则拿到 #matrix 链接的教师会看到空壳）",
+    /hit !== undefined && tabs\.some\(\(item\) => item\.key === hit\.key\)/.test(page));
+  ok("四个页签锚点都是 ASCII（中文锚点会变成一长串百分号编码）",
+    ADMIN_COURSE_TABS.every((tab) => /^[a-z]+$/.test(tab.hash)));
+
+  // ④ 切走不丢草稿
+  ok("面板用 hidden 保活（卸载会把没保存的草稿悄悄丢掉）",
+    page.includes('hidden={tab !== "ledger"}') &&
+      page.includes('hidden={tab !== "dimensions"}') &&
+      page.includes('hidden={tab !== "matrix"}') &&
+      page.includes("mounted.has("));
+
+  // ⑤ 旧网址只留一个：那两条路由**不该**再存在（机构口径：网址只留一个，不做转发页）
+  const routeExists = (dir: string): boolean => {
+    try {
+      return (readdirSync(new URL(`../app/admin/(dashboard)/${dir}/`, import.meta.url)) as string[]).includes("page.tsx");
+    } catch {
+      // 整个目录都没了（这正是我们要的：路由与它的目录一起删）
+      return false;
+    }
+  };
+  eq("课程类型与开放矩阵的路由文件已经删掉（没有留转发页）",
+    [routeExists("catalog"), routeExists("offers")], [false, false]);
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

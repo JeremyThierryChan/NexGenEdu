@@ -21,20 +21,9 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
   { href: "/admin/classrooms", label: "教室", description: "教室占用状态与空档" },
   {
     href: "/admin/courses",
-    label: "课程库",
-    description: "课程台账：网站课程 + 机构自己加的课（围棋、书法），排课与教师科目都取自这里",
-  },
-  {
-    href: "/admin/catalog",
-    label: "课程类型",
+    label: "课程",
     description:
-      "课程由四个维度组合而成（学段 × 学科 / 项目 × 内容模块 × 班型）。这里是那四张维度表：加课、改名、排序、勾学段都在这一页",
-  },
-  {
-    href: "/admin/offers",
-    label: "开放矩阵",
-    description:
-      "哪些「学科 × 内容模块 × 班型」的组合真的开放：整行、整列、整个学段一次勾，供 AI 排课与诊断推荐判定",
+      "一页三个页签：课程台账（实际开的课、卡片、正文、报价）· 课程类型（学段 × 学科 / 项目 × 内容模块 × 班型这四个维度）· 开放矩阵（哪些组合真的开）。加课、改类型、勾开放都在这一页",
   },
   {
     href: "/admin/content",

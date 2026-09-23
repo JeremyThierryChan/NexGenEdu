@@ -405,7 +405,7 @@ export default function AdminPricingPage() {
       {classTypeIssues !== "" && (
         <p className="mt-3 rounded-md border border-warning-100 bg-warning-50 px-3 py-2 text-xs leading-relaxed text-warning-700">
           {classTypeIssues}{" "}
-          <Link href="/admin/catalog" className="underline">
+          <Link href="/admin/courses#dimensions" className="underline">
             去「课程类型」看看
           </Link>
         </p>

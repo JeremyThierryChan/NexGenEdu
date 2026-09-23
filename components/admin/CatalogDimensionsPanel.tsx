@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { CONTROL_CLASS, Panel } from "@/components/admin/AdminFields";
 import { DataNotice } from "@/components/admin/DataNotice";
@@ -78,7 +77,7 @@ function swap<T>(rows: readonly T[], from: number, to: number): T[] {
   return next;
 }
 
-export default function AdminCatalogPage() {
+export function CatalogDimensionsPanel() {
   const [saved, setSaved] = useState<Catalog | null>(null);
   const [draft, setDraft] = useState<Catalog | null>(null);
   const [loading, setLoading] = useState(true);
@@ -203,7 +202,6 @@ export default function AdminCatalogPage() {
   if (loading) {
     return (
       <>
-        <PageHeading title="课程类型" description="课程的四张维度表。" />
         <p className="mt-6 text-sm text-ink-400">加载中…</p>
       </>
     );
@@ -212,7 +210,6 @@ export default function AdminCatalogPage() {
   if (draft === null) {
     return (
       <>
-        <PageHeading title="课程类型" description="课程的四张维度表。" />
         {/* 重试走安静刷新：页面上已经有"读不到"这句话，不必再换成"加载中…" */}
         <LoadFailure error={loadError} onRetry={() => void load({ quiet: true })} />
       </>
@@ -226,10 +223,6 @@ export default function AdminCatalogPage() {
 
   return (
     <>
-      <PageHeading
-        title="课程类型"
-        description="课程由这四个维度组合而成：学段 × 学科 / 项目 × 内容模块 × 班型。"
-      />
 
       <div className="mt-4">
         <DataNotice onRefresh={() => void load({ quiet: true })} />

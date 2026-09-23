@@ -1,7 +1,6 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/admin/AdminFields";
 import { DataNotice } from "@/components/admin/DataNotice";
@@ -82,7 +81,7 @@ const keyOf = (row: OfferRow, column: OfferColumn): OfferKey => ({
   formatId: column.formatId,
 });
 
-export default function AdminOffersPage() {
+export function OffersMatrixPanel() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [saved, setSaved] = useState<CatalogOffer[] | null>(null);
   const [draft, setDraft] = useState<CatalogOffer[] | null>(null);
@@ -223,7 +222,6 @@ export default function AdminOffersPage() {
   if (loading) {
     return (
       <>
-        <PageHeading title="开放矩阵" description="哪些课程组合真的开放。" />
         <p className="mt-6 text-sm text-ink-400">加载中…</p>
       </>
     );
@@ -232,7 +230,6 @@ export default function AdminOffersPage() {
   if (catalog === null || draft === null || matrix === null) {
     return (
       <>
-        <PageHeading title="开放矩阵" description="哪些课程组合真的开放。" />
         {/* 重试走安静刷新：页面上已经写着"读不到"，不必再换成"加载中…" */}
         <LoadFailure error={loadError} onRetry={() => void load({ quiet: true })} />
       </>
@@ -244,10 +241,6 @@ export default function AdminOffersPage() {
 
   return (
     <>
-      <PageHeading
-        title="开放矩阵"
-        description="勾出本机构真正开的组合：行是学科与内容模块，列是班型。"
-      />
 
       <div className="mt-4">
         <DataNotice onRefresh={() => void load({ quiet: true })} />
