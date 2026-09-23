@@ -171,6 +171,13 @@ export const API_CONTRACT: ContractGroup[] = [
       "site.importFromContent",
       // 保存网站正文（整份覆盖：课程页正文 / 教师页标题 / 报价页文案）
       "site.saveContent",
+      /*
+       * 保存「课程正文以外」的网站内容块（目前是学生案例）。
+       *
+       * 为什么与 `site.saveContent` 分开：两块内容由两个页面维护、权限也不同
+       * （案例要给招生老师），合成一个方法只能整份放权 + 两个页面互相覆盖。
+       */
+      "site.saveBlocks",
     ],
   },
   {

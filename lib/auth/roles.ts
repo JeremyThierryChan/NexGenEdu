@@ -63,6 +63,15 @@ export const PAGE_ACCESS: Record<string, Role[]> = {
   "/admin/pricing": ["技术管理员", "财务管理员", "招生老师"],
   "/admin/data": ["技术管理员"],
   /*
+   * 网站内容（后台「网站内容」页）：学生案例这类**对外文案**。
+   *
+   * 为什么给招生老师：案例与对外文案是市场营销口径的活，招生老师天天在跟家长讲这些；
+   * 锁在技术管理员那一档的结果是"改一条案例要去找技术"。注意这一页**不含课程正文**
+   * （那个仍在「课程库」页，`site.saveContent` 仍是技术管理员专属）——
+   * 两个页面的分工写在 `docs/使用手册.md` 里。
+   */
+  "/admin/content": ["技术管理员", "招生老师"],
+  /*
    * 账号管理（后台「账号」页）：**只有技术管理员**。
    *
    * 它决定"谁能登录这个系统、各是什么角色"—— 给了别的角色等于把权限本身交出去，
@@ -194,6 +203,8 @@ export const METHOD_ACCESS: Record<string, Role[]> = {
   "site.publicContent": [...ROLES],
   "site.importFromContent": ["技术管理员"],
   "site.saveContent": ["技术管理员"],
+  // 学生案例这类对外文案：招生老师也要能改（见 PAGE_ACCESS 里 /admin/content 的说明）
+  "site.saveBlocks": ["技术管理员", "招生老师"],
 };
 
 /** 只读方法的判据（`crud` / `query` 里"只是看一眼"的那些）。 */

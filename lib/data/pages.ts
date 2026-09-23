@@ -1,4 +1,5 @@
 import { getPage, pageString, type PageBlock, type Section } from "@/lib/data/content";
+import { backendCasesContent, backendSnapshot } from "@/lib/site/backend-source";
 import type {
   CaseItem,
   CasesContent,
@@ -49,7 +50,26 @@ export function getFaqContent(): FaqContent {
 /** 案例的字段名（与 cases.md 里的 `#### 字段: 值` 对应）。 */
 const CASE_FIELDS = ["年级", "科目", "入学水平", "当前水平", "辅导周期", "主要问题"] as const;
 
+/**
+ * 学生案例（`/cases` 与首页那块案例区）。
+ *
+ * **两态取数**（与 `lib/data/site.ts` 同一套规则）：连上后端就用库里的案例，
+ * 否则解析 `data/site/cases.md`。案例是机构要经常更新的内容，因此从 v19 起以后端为主。
+ */
 export function getCasesContent(): CasesContent {
+  const snapshot = backendSnapshot();
+  if (snapshot !== null) return backendCasesContent(snapshot);
+  return getCasesContentFromTemplate();
+}
+
+/**
+ * 学生案例（**只读模版**，不看后端快照）。
+ *
+ * 为什么单独留这个出口：`lib/backend/site-content.ts` 属于
+ * **「内容文件 → 数据库」**这个方向（空库初始化、老库迁移、从网站导入），
+ * 它必须读模版 —— 否则就是把库里的案例再导一遍，绕成一个圈。
+ */
+export function getCasesContentFromTemplate(): CasesContent {
   const page = getPage("cases", "学生案例");
 
   const cases: CaseItem[] = page.groups.map((group) => {

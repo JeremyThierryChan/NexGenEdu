@@ -1,6 +1,11 @@
 import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createEmptyDatabase } from "./initial";
-import { emptySiteContent, validateSiteContent } from "./site-content";
+import {
+  emptySiteContent,
+  siteContentFromContent,
+  validateSiteBlocks,
+  validateSiteContent,
+} from "./site-content";
 import { importSiteContent } from "./site-import";
 import type { SiteContentImportReport } from "./site-import";
 import type { SiteContent } from "./types";
@@ -132,6 +137,8 @@ import type {
   Assessment,
   Classroom,
   CoursePartition,
+  SiteCase,
+  SiteCasesPage,
   LessonTransaction,
   Payment,
   ClassroomAvailability,
@@ -837,6 +844,25 @@ function migrate(db: Database): Database | null {
     db.version = 18;
   }
 
+  if (db.version === 18) {
+    /*
+     * v18 → v19：**学生案例进库**。
+     *
+     * ## 为什么这一次要读内容文件灌初值（与 v15 那次相反）
+     *
+     * v15 把网站正文搬进库时，迁移刻意**只补空结构、不读外部 Markdown** ——
+     * 因为那时空着是安全的：课程正文可以点一次「从网站导入内容」补上。
+     * 这次搬的是**已经发布出去的案例**：空着就等于升级完 `/cases` 与首页那块案例区
+     * 全部变空。那不是"诚实的空"，是事故。做法与 `createInitialDatabase()` 里
+     * "课程库与报价配置来自网站内容"同一条既有纪律：**内容文件是初值的来源**。
+     *
+     * 只写 `casesPage` 这一块：其余块（课程正文 / 教师页标题 / 报价文案）一个字都不动。
+     */
+    db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
+    db.siteContent.casesPage = siteContentFromContent().casesPage;
+    db.version = 19;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -853,6 +879,15 @@ function migrate(db: Database): Database | null {
   db.coursePartitions = Array.isArray(db.coursePartitions)
     ? db.coursePartitions.map((item) => normalizePartition(item))
     : [];
+
+  /*
+   * 收尾归一：网站内容的**块也要补齐**。
+   *
+   * 与分区表同一条理由：一份"自称 v19"却缺 `casesPage` 的文件（手改过的导出、
+   * 半份恢复、更早版本导出的 JSON）会让网站那侧读到 `undefined` ——
+   * 表现是案例区整块消失，而且不报错。缺块一律补**空结构**（不猜内容）。
+   */
+  db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
 
   return db.version === CURRENT_VERSION ? db : null;
 }
@@ -4425,6 +4460,15 @@ const localApi = {
         },
         teacherPage: { heading: { ...input.teacherPage.heading } },
         pricingPage: { labels: { ...input.pricingPage.labels } },
+        /*
+         * 学生案例**原样保留**（不从 `input` 取）。
+         *
+         * 这一条不是省事，是防覆盖：课程库页那份草稿里带着整个 `siteContent`
+         * （它读的是公开数据的整份快照），如果照 input 写回，那么"在课程库页保存一次课程正文"
+         * 就会把机构刚在「网站内容」页改好的案例冲回它读到的那一刻 —— 两个页面各改一块，
+         * 谁也不该动对方那一块。案例的写入口只有 `site.saveBlocks`。
+         */
+        casesPage: db.siteContent.casesPage,
       };
 
       const after = db.siteContent.coursePage;
@@ -4436,6 +4480,75 @@ const localApi = {
         summary:
           `网站内容：课程正文 ${after.subjects.length} 个学科 / ${bands} 个小节` +
           (after.subjects.length === before.subjects.length ? "（数量未变）" : `（原 ${before.subjects.length} 个学科）`),
+      });
+      persist(db);
+      return clone(db.siteContent);
+    },
+
+    /**
+     * **保存网站内容里「课程正文以外」的那些块**（目前只有学生案例）。
+     *
+     * ## 为什么与 `site.saveContent` 分开，而不是一个方法管全部
+     *
+     * 两块内容由**两个页面**维护、责任也不同：课程正文（学科 → 小节）在「课程库」页
+     * （它和卡片靶点、报价在同一张表单里，技术上招生老师），而学生案例在「网站内容」页
+     * （市场营销口径，招生老师也要改）。合成一个方法就有两个后果：
+     *
+     *   1. **权限没法分**：`site.saveContent` 是技术管理员专属（它改的是课程页主干），
+     *      除非把案例也锁进那一档，否则只能放宽整个方法 —— 那等于顺手给了
+     *      "改课程正文"的权限；
+     *   2. **互相覆盖**：两个页面的草稿都带着整份 `siteContent`，谁先保存谁就把对方
+     *      读到那一刻的旧值写回去。现在各写各的块：`saveContent` 原样保留案例，
+     *      本方法原样保留课程正文 / 教师页 / 报价文案。
+     *
+     * ## 只校验、只写这次交上来的块
+     *
+     * 校验用 `validateSiteBlocks`（**不含**"课程正文至少要有一个学科"那条）——
+     * 空库里课程正文还没导入时也必须能存案例，否则两个功能互相卡死。
+     *
+     * 返回**保存之后的整份网站内容**：页面拿它替换草稿（与 `site.saveContent` 一致），
+     * 免得页面上留着一份"我自己的"旧值。
+     */
+    async saveBlocks(
+      blocks: Partial<Pick<SiteContent, "casesPage">>,
+    ): Promise<SiteContent> {
+      await delay();
+      const db = load();
+      const problems = validateSiteBlocks(blocks);
+      if (problems.length > 0) throw new Error(problems.join("；"));
+
+      const beforeCases = db.siteContent.casesPage;
+      if (blocks.casesPage !== undefined) {
+        const incoming = blocks.casesPage;
+        db.siteContent = {
+          ...db.siteContent,
+          casesPage: {
+            heading: { ...incoming.heading },
+            notice: incoming.notice.trim(),
+            cases: incoming.cases.map((item) => ({
+              // id 为空 = 新加的案例：这里才生成，页面不需要知道 id 怎么来
+              id: item.id.trim() === "" ? nextId("case") : item.id.trim(),
+              title: item.title.trim(),
+              fields: item.fields.map((field) => ({
+                title: field.title.trim(),
+                value: field.value.trim(),
+              })),
+              story: item.story.trim(),
+            })),
+          },
+        };
+      }
+
+      const after = db.siteContent.casesPage;
+      writeLog(db, {
+        entity: "数据",
+        action: "保存网站内容",
+        targetId: "",
+        summary:
+          `网站内容：学生案例 ${after.cases.length} 条` +
+          (beforeCases.cases.length === after.cases.length
+            ? "（数量未变）"
+            : `（原 ${beforeCases.cases.length} 条）`),
       });
       persist(db);
       return clone(db.siteContent);
@@ -5040,6 +5153,8 @@ export type {
   CourseStatus,
   CourseSiteKind,
   CoursePartition,
+  SiteCase,
+  SiteCasesPage,
   PublicSite,
   SiteContentImportReport,
   SiteContent,

@@ -7,9 +7,11 @@
  * 于是「网站以后端为准」这件事无从谈起。v15 起这些正文进了数据库
  * （`db.siteContent.coursePage`），本模块负责两件事：
  *
- *   1. `siteContentFromContent()` —— 内容文件 → 库里的结构（首次初始化、导入用）；
- *   2. 反向导出由 `siteContentToContent()` 提供（`npm run site:snapshot` 用），
- *      两个方向共用同一份字段映射，避免"导进去一套、导出来另一套"。
+ *   1. `siteContentFromContent()` —— 内容文件 → 库里的结构（首次初始化、导入、迁移用）；
+ *   2. `emptySiteContent()` —— 空结构（老库补字段时用）。
+ *
+ * 反方向（库 → 文件）目前没有自动通道：两态口径下"没连后端就用模版"，
+ * 因此不需要把库导回文件（早先那条 `npm run site:snapshot` 已经删掉）。
  *
  * ## 与 `courses` 表的分工
  *
@@ -20,10 +22,13 @@
  */
 
 import { getCoursesPageFromTemplate, getTeachersPageFromTemplate } from "@/lib/data/site";
+import { getCasesContentFromTemplate } from "@/lib/data/pages";
 import { getPricingData } from "@/lib/data/pricing";
 import { coursesReferencingAnchor } from "./site-bands";
 import type {
   Course,
+  SiteCase,
+  SiteCasesPage,
   SiteContent,
   SiteCoursePage,
   SitePricingLabels,
@@ -96,7 +101,58 @@ export function siteContentFromContent(): SiteContent {
     // 同上：内容坏了就留空，页面标题会回落到模版
   }
 
-  return { coursePage, teacherPage: { heading: teacherHeading }, pricingPage: { labels } };
+  return {
+    coursePage,
+    teacherPage: { heading: teacherHeading },
+    pricingPage: { labels },
+    casesPage: casesFromContent(),
+  };
+}
+
+/**
+ * 学生案例（内容文件 → 库结构）。
+ *
+ * id 用**案例标题**：与内容文件里的分组名一一对应，因此反复导入不会漂、
+ * 后台改了标题也不会换 id（上移下移、日志都按 id 认人）。标题重复时后面那条加序号。
+ */
+function casesFromContent(): SiteCasesPage {
+  try {
+    const page = getCasesContentFromTemplate();
+    const seen = new Set<string>();
+    const cases: SiteCase[] = page.cases.map((item) => {
+      const base = item.title.trim();
+      let id = base;
+      let suffix = 2;
+      while (seen.has(id)) {
+        id = `${base}（${String(suffix)}）`;
+        suffix += 1;
+      }
+      seen.add(id);
+      return {
+        id,
+        title: base,
+        fields: item.fields.map((field) => ({ title: field.title, value: field.value })),
+        story: item.story,
+      };
+    });
+    return {
+      heading: {
+        eyebrow: page.eyebrow,
+        title: page.title,
+        description: page.description,
+      },
+      notice: page.notice,
+      cases,
+    };
+  } catch {
+    // 内容坏了就留空结构：后台照常能开，网站那侧会显示"暂时没有案例"
+    return { heading: { eyebrow: "", title: "", description: "" }, notice: "", cases: [] };
+  }
+}
+
+/** 学生案例的空结构。 */
+function emptyCasesPage(): SiteCasesPage {
+  return { heading: { eyebrow: "", title: "", description: "" }, notice: "", cases: [] };
 }
 
 /** 报价页文案的空值（键必须齐全：页面上少一个键就是一个空按钮）。 */
@@ -131,7 +187,56 @@ export function emptySiteContent(): SiteContent {
     },
     teacherPage: { heading: { eyebrow: "", title: "", description: "" } },
     pricingPage: { labels: emptyPricingLabels() },
+    casesPage: emptyCasesPage(),
   };
+}
+
+/**
+ * 案例的校验（**与课程正文分开**，见 `validateSiteBlocks` 的说明）。
+ *
+ * 三条规则各自对应一次真实的误操作：
+ *   - 标题为空 → 页面上出现一条点不开、也认不出的案例；
+ *   - 标题重复 → 两条案例在页面上长得一样，改哪一条都说不清（id 是从标题来的）；
+ *   - 字段没有名字 → 页面上渲染出一个只有值、没有标签的行。
+ *
+ * **允许一条案例都没有**：内容文件里就写着"不希望公开就把分组整段删掉，页面会自动适配"，
+ * 因此"暂时没有案例"是合法状态（页面会显示一句"案例整理中"之类的话，不报错）。
+ */
+export function validateCasesPage(page: SiteCasesPage): string[] {
+  const problems: string[] = [];
+  const titles = new Set<string>();
+  for (const item of page.cases) {
+    const title = item.title.trim();
+    if (title === "") problems.push("案例标题不能为空。");
+    if (titles.has(title)) {
+      problems.push(`案例「${title}」出现了两次：标题是案例的身份，重复了改哪一条都说不清。`);
+    }
+    titles.add(title);
+
+    const names = new Set<string>();
+    for (const field of item.fields) {
+      const name = field.title.trim();
+      if (name === "") problems.push(`案例「${title}」有一个字段没有名字（只有值）。`);
+      if (names.has(name)) problems.push(`案例「${title}」的字段「${name}」重复了。`);
+      names.add(name);
+    }
+  }
+  return problems;
+}
+
+/**
+ * **网站内容里「课程正文以外」那些块的校验**。
+ *
+ * 为什么不复用 `validateSiteContent`：那个函数的第一条是"课程正文至少要有一个学科"
+ * （因为课程页是网站的主体，空着等于告诉家长"我们没有课程"）。而科目/案例这些块的保存
+ * 与课程正文**不是同一次操作** —— 后台「网站内容」页保存案例时，把课程正文一起带上校验，
+ * 就会出现"课程正文还没导入的空库里，连一条案例都存不进去"这种荒唐的连锁失败。
+ * 两个入口各管各的块，校验也各管各的。
+ */
+export function validateSiteBlocks(blocks: { casesPage?: SiteCasesPage }): string[] {
+  const problems: string[] = [];
+  if (blocks.casesPage !== undefined) problems.push(...validateCasesPage(blocks.casesPage));
+  return problems;
 }
 
 

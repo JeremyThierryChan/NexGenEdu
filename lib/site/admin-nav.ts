@@ -24,6 +24,11 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     label: "课程库",
     description: "课程台账：网站课程 + 机构自己加的课（围棋、书法），排课与教师科目都取自这里",
   },
+  {
+    href: "/admin/content",
+    label: "网站内容",
+    description: "宣传网站上的对外文案：学生案例（/cases 与首页那块的来源）",
+  },
   { href: "/admin/lessons", label: "课程安排", description: "课程列表、排课与冲突检测" },
   { href: "/admin/calendar", label: "日历", description: "按日 / 周查看课程安排" },
   {

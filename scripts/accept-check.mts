@@ -126,6 +126,72 @@ await check("课程库", "修改课程", async () => (await api.courses.update(c
 await check("课程库", "从网站同步课程", async () => (await api.courses.syncFromSite()).total > 0);
 await check("课程库", "重复同步不重复添加", async () => (await api.courses.syncFromSite()).added.length === 0);
 
+/* ── 1.5 网站内容（学生案例）── */
+let casesPageId = "";
+await check("网站内容", "读案例（初始为空或已有内容）", async () => {
+  const content = await api.site.publicContent();
+  return Array.isArray(content.siteContent.casesPage.cases);
+});
+await check("网站内容", "新增一条案例", async () => {
+  const content = await api.site.publicContent();
+  const saved = await api.site.saveBlocks({
+    casesPage: {
+      ...content.siteContent.casesPage,
+      cases: [
+        ...content.siteContent.casesPage.cases,
+        {
+          id: "",
+          title: "验收·初三 王同学｜物理从 71 分到 88 分",
+          fields: [
+            { title: "年级", value: "初三" },
+            { title: "科目", value: "物理" },
+            { title: "入学水平", value: "71 分" },
+            { title: "当前水平", value: "88 分（中考）" },
+          ],
+          story: "验收用的一条案例。\n\n第二段。",
+        },
+      ],
+    },
+  });
+  const created = saved.casesPage.cases.at(-1);
+  casesPageId = created?.id ?? "";
+  return [created?.title ?? "", created?.id ?? ""];
+}, (value: string[]) => value[0] !== "" && value[1] !== "");
+await check("网站内容", "案例出现在网站那侧的数据里", async () => {
+  const content = await api.site.publicContent();
+  return content.siteContent.casesPage.cases.some((item) => item.id === casesPageId);
+});
+await check("网站内容", "标题为空被拒", async () => {
+  const content = await api.site.publicContent();
+  try {
+    await api.site.saveBlocks({
+      casesPage: {
+        ...content.siteContent.casesPage,
+        cases: [{ id: "", title: "  ", fields: [], story: "" }],
+      },
+    });
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("不能为空") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+await check("网站内容", "保存课程正文不会冲掉案例", async () => {
+  const content = await api.site.publicContent();
+  await api.site.saveContent(content.siteContent);
+  const after = await api.site.publicContent();
+  return after.siteContent.casesPage.cases.some((item) => item.id === casesPageId);
+});
+await check("网站内容", "删掉刚加的案例（收尾）", async () => {
+  const content = await api.site.publicContent();
+  const saved = await api.site.saveBlocks({
+    casesPage: {
+      ...content.siteContent.casesPage,
+      cases: content.siteContent.casesPage.cases.filter((item) => item.id !== casesPageId),
+    },
+  });
+  return saved.casesPage.cases.some((item) => item.id === casesPageId) === false;
+});
+
 /* ── 2 教室 ── */
 let classroomId = "";
 await check("教室", "新建教室（含可用时段）", async () => {

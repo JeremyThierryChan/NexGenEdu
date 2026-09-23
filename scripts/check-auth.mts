@@ -502,6 +502,7 @@ try {
       const admin = await asRole("技术甲", "pw-admin");
       const cashier = await asRole("财务甲", "pw-cashier");
       const teacher = await asRole("教师甲", "pw-teacher");
+      const marketing = await asRole("招生甲", "pw-marketing");
 
       equal("登录响应带回角色（技术管理员）", admin.roles, ["技术管理员"]);
       equal("登录响应带回角色（普通教师）", teacher.roles, ["普通教师"]);
@@ -538,6 +539,18 @@ try {
       equal("教师不能新建分区（课程库写入）", await attempt(teacher.token, "coursePartitions.create"), 403);
       equal("教师不能删分区", await attempt(teacher.token, "coursePartitions.remove"), 403);
       equal("教师不能把课移到别的分区", await attempt(teacher.token, "courses.setPartition"), 403);
+      /*
+       * 学生案例（v19，「网站内容」页）：**招生老师能改、教师不能**。
+       *
+       * 这两条一起钉住"权限分层真的落到了方法上"：案例是市场营销口径的活
+       * （机构要求"学生案例以后端为主"，改一条不该去找技术），而教师不需要它；
+       * 课程正文那一块（`site.saveContent`）仍然只有技术管理员 —— 两个方法分开的意义就在这里。
+       */
+      check("招生老师能改学生案例", (await attempt(marketing.token, "site.saveBlocks")) !== 403);
+      equal("教师不能改学生案例", await attempt(teacher.token, "site.saveBlocks"), 403);
+      equal("教师不能改课程正文（那是技术管理员的）", await attempt(teacher.token, "site.saveContent"), 403);
+      equal("招生老师不能改课程正文（课程页主干归技术）",
+        await attempt(marketing.token, "site.saveContent"), 403);
       equal("教师不能导出整库", await attempt(teacher.token, "exportDatabase"), 403);
 
       // 财务管理员：钱与报课能用（机构确认①），运维仍然不行
@@ -574,6 +587,7 @@ try {
           { username: "技术甲", password: "pw-admin", roles: ["技术管理员"] },
           { username: "财务甲", password: "pw-cashier", roles: ["财务管理员"] },
           { username: "教师甲", password: "pw-teacher", roles: ["普通教师"] },
+          { username: "招生甲", password: "pw-marketing", roles: ["招生老师"] },
         ]),
       },
     },

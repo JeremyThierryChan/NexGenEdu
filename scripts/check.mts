@@ -34,7 +34,7 @@ import {
   getTeachersPageFromTemplate,
 } from "@/lib/data/site";
 import { getPricingData, getPricingDataFromTemplate, parsePricingSource } from "@/lib/data/pricing";
-import { getCasesContent, getFaqContent, getScheduleContent } from "@/lib/data/pages";
+import { getCasesContent, getCasesContentFromTemplate, getFaqContent, getScheduleContent } from "@/lib/data/pages";
 import { findFeaturedCourse, getAllFeaturedCourses, getFeaturedContent } from "@/lib/data/featured";
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
 import { __removeFixture, __useStoreForTesting, api } from "@/lib/backend/api";
@@ -8053,6 +8053,195 @@ console.log("\n=== 25. 网站内容两态：要么全用后端，要么全用模
   eq("package.json 里不再有 site:snapshot 脚本",
     JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts["site:snapshot"],
     undefined);
+}
+
+console.log("\n=== 26. 学生案例进库（v19：机构要求「学生案例以后端为主」）===");
+
+/*
+ * 案例原先只在 `data/site/cases.md`：改一条分数要打开文件、改完还要重新构站，
+ * 招生老师在后台根本看不到。v19 把它搬进 `siteContent.casesPage`，后台「网站内容」页可维护。
+ *
+ * 这一节守四件事：
+ *   1. **迁移真的灌了初值**（不是留给机构重录一遍）—— 八块文案的搬家与 v15 那次不同，
+ *      空着就等于线上首页/案例页变空，因此这次必须读内容文件填初值；
+ *   2. **两态**：连上后端就用库里的案例（空就是空），连不上才用模版；
+ *   3. **写入口**只有 `site.saveBlocks`，而且它**只动案例这一块**（课程库页保存正文时
+ *      不许把案例冲回去 —— 两个页面各改一块，谁也不该动对方那一块）；
+ *   4. **校验**：标题空/重名、字段没名字都要拒。
+ */
+{
+  __useStoreForTesting(memory);
+
+  // ① 迁移：v18 老库（没有 casesPage）→ 案例从内容文件灌进来
+  const legacyCasesDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    siteContent: Record<string, unknown>;
+    version: number;
+  };
+  delete legacyCasesDb.siteContent.casesPage;
+  legacyCasesDb.version = 18;
+  eq("v18 老库（没有案例块）能升级导入", (await api.importDatabase(JSON.stringify(legacyCasesDb))).ok, true);
+  const afterCases = await api.exportDatabase();
+  eq("升级后版本号是当前版本", afterCases.version, CURRENT_VERSION);
+  const templateCases = getCasesContentFromTemplate().cases;
+  ok(`迁移把内容文件里的案例灌进了库（${String(afterCases.siteContent.casesPage.cases.length)} 条）`,
+    afterCases.siteContent.casesPage.cases.length === templateCases.length && templateCases.length > 0);
+  eq("案例标题与内容文件逐条一致（顺序也一致）",
+    afterCases.siteContent.casesPage.cases.map((item) => item.title),
+    templateCases.map((item) => item.title));
+  eq("案例的字段与过程描述一起搬了（不是只搬了标题）",
+    [
+      afterCases.siteContent.casesPage.cases[0]?.fields.length,
+      (afterCases.siteContent.casesPage.cases[0]?.story ?? "").length > 0,
+    ],
+    [templateCases[0]?.fields.length, true]);
+  ok("标题也搬了（页面头部与页脚提示）",
+    afterCases.siteContent.casesPage.heading.title !== "" &&
+    afterCases.siteContent.casesPage.notice !== "");
+  await api.restoreBackup();
+
+  // ② 两态：有快照就用库里的案例；没有快照就用模版
+  __useBackendSnapshotForTesting(null);
+  eq("没有快照时：案例来自模版",
+    getCasesContent().cases.map((item) => item.title),
+    templateCases.map((item) => item.title));
+  const emptyCasesSnapshot = buildPublicSite(seedDb);
+  __useBackendSnapshotForTesting({
+    ...emptyCasesSnapshot,
+    siteContent: {
+      ...emptyCasesSnapshot.siteContent,
+      // 库里一条案例都没有（机构把案例全删了）—— 页面显示空状态，不回模版
+      casesPage: { heading: { eyebrow: "", title: "库里没有案例", description: "" }, notice: "", cases: [] },
+    },
+  });
+  eq("快照在但案例是空的：按后端（空），不回模版",
+    [getCasesContent().cases.length, getCasesContent().title], [0, "库里没有案例"]);
+  __useBackendSnapshotForTesting(null);
+
+  // ③ 写入口：saveBlocks 只动案例这一块
+  const beforeBlocks = await api.exportDatabase();
+  const saved = await api.site.saveBlocks({
+    casesPage: {
+      heading: { eyebrow: "自检", title: "自检案例页", description: "说明" },
+      notice: "自检用，不发布",
+      cases: [
+        {
+          id: "",
+          title: "自检·初二 某同学",
+          fields: [
+            { title: "年级", value: "初二" },
+            { title: "科目", value: "数学" },
+          ],
+          story: "第一段。\n\n第二段。",
+        },
+      ],
+    },
+  });
+  eq("保存后案例是刚才那一条", saved.casesPage.cases.map((item) => item.title), ["自检·初二 某同学"]);
+  ok("新案例的 id 由服务端生成（页面不用知道 id 怎么来）",
+    (saved.casesPage.cases[0]?.id ?? "") !== "");
+  eq("保存案例**不动课程正文**（课程库页那一块一字未改）",
+    JSON.stringify(saved.coursePage), JSON.stringify(beforeBlocks.siteContent.coursePage));
+  eq("保存案例也不动教师页与报价文案",
+    [JSON.stringify(saved.teacherPage), JSON.stringify(saved.pricingPage)],
+    [JSON.stringify(beforeBlocks.siteContent.teacherPage), JSON.stringify(beforeBlocks.siteContent.pricingPage)]);
+
+  const refusalCase = async (page: Record<string, unknown>): Promise<string> => {
+    try {
+      await api.site.saveBlocks({ casesPage: page as never });
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+  const basePage = {
+    heading: { eyebrow: "", title: "t", description: "" },
+    notice: "",
+    cases: [],
+  };
+  ok("案例标题为空被拒",
+    (await refusalCase({ ...basePage, cases: [{ id: "", title: "  ", fields: [], story: "" }] })).includes("不能为空"));
+  ok("两条案例标题相同被拒",
+    (await refusalCase({
+      ...basePage,
+      cases: [
+        { id: "", title: "同名", fields: [], story: "" },
+        { id: "", title: "同名", fields: [], story: "" },
+      ],
+    })).includes("两次"));
+  ok("字段没有名字被拒",
+    (await refusalCase({
+      ...basePage,
+      cases: [{ id: "", title: "A", fields: [{ title: " ", value: "1" }], story: "" }],
+    })).includes("没有名字"));
+  ok("**一条案例都没有是允许的**（内容文件里就写着「不希望公开就把分组删掉」）",
+    (await refusalCase(basePage)) === "");
+
+  // ④ 课程正文那一侧不许把案例冲掉（两个页面各改一块）
+  const afterSaveBlocks = await api.exportDatabase();
+  const contentOnly = {
+    ...afterSaveBlocks.siteContent,
+    casesPage: { heading: { eyebrow: "", title: "被覆盖了", description: "" }, notice: "", cases: [] },
+  };
+  await api.site.saveContent(contentOnly);
+  eq("用 saveContent 保存课程正文后，案例**原样保留**",
+    (await api.exportDatabase()).siteContent.casesPage.cases.map((item) => item.title),
+    afterSaveBlocks.siteContent.casesPage.cases.map((item) => item.title));
+
+  /*
+   * ⑤ 后端「网站内容」页与权限
+   */
+  ok("案例页在导航里（否则机构找不到它）",
+    readFileSync(new URL("../lib/site/admin-nav.ts", import.meta.url), "utf8").includes('"/admin/content"'));
+  const roleSource = readFileSync(new URL("../lib/auth/roles.ts", import.meta.url), "utf8");
+  ok("案例页给了招生老师（市场营销口径的活）",
+    /"\/admin\/content": \["技术管理员", "招生老师"\]/.test(roleSource));
+  ok("保存案例的方法与保存课程正文的方法**分开**（权限与覆盖面都不同）",
+    /"site\.saveContent": \["技术管理员"\]/.test(roleSource) &&
+    /"site\.saveBlocks": \["技术管理员", "招生老师"\]/.test(roleSource));
+
+  /*
+   * ⑥ 一个真的踩过的坑：往 `api.ts` 的 `export type { ... }` 块里加名字**忘了 import** 时，
+   * 从 `@/lib/backend/api` 导入这个类型会**静默变成 any**（不报错），于是页面里
+   * `cases.map((item) => …)` 的 item 变成隐式 any 才报出来 —— 排查方向会被带偏。
+   * 这条断言直接盯着"导出的每个类型名都真的在 api.ts 里 import 过"。
+   */
+  const apiSource = readFileSync(new URL("../lib/backend/api.ts", import.meta.url), "utf8");
+  /** 名字清单：按逗号 / 换行切开，只留形如类型名的项（注释行与空行自然被滤掉）。 */
+  const namesIn = (block: string): string[] =>
+    block
+      .split(/[,\n]/)
+      .map((line) => line.trim())
+      .filter((line) => /^[A-Z][A-Za-z0-9]*$/.test(line));
+  /*
+   * 导出块要**精确定位**，而且不能用非贪婪正则从头找一个 `export type {`：
+   * 文件里还有 `export type { X } from "./export";` 这种单行块，从它开始找会一路吃到
+   * 后面某个 `};` —— 于是把 import 块和大半个文件都当成"导出块"，
+   * "删掉 import"这个变异照样通过（我在这儿踩了两次，因此改成从**后往前**定位）。
+   *
+   * 定位方式：先找值导出块 `export {`，再找它前面那个 `};`（类型块的结尾），
+   * 再往前找那个块的 `export type {`（开头）。
+   */
+  const valueExportIndex = apiSource.lastIndexOf("\nexport {");
+  const typeBlockEnd = apiSource.lastIndexOf("\n};", valueExportIndex);
+  const typeBlockStart = apiSource.lastIndexOf("export type {", typeBlockEnd);
+  const exportBlock =
+    typeBlockStart === -1 || typeBlockEnd === -1 ? "" : apiSource.slice(typeBlockStart, typeBlockEnd);
+  /** 导出块**之前**的内容（去掉注释：免得某个名字只是出现在说明文字里就算数）。 */
+  const beforeExport = apiSource.slice(0, typeBlockStart).replace(/\/\*[\s\S]*?\*\//g, "");
+  const exportedNames = namesIn(exportBlock);
+  ok("api.ts 的类型导出块非空（否则下面那条是空转的）", exportedNames.length > 20);
+  ok("导出块**之前**那一大段确实在（否则「名字必须在前面出现过」这条是空转的）",
+    beforeExport.length > 1000);
+  /*
+   * 判据是"名字必须出现在导出块**之前**"（被 import、或在本文件里声明过），
+   * 而不是去解析"哪些块算 import"：`import { a, type B } from "./x"` 与
+   * `export type { C } from "./y"` 让那份清单越写越长，而靠正则拼出来的清单很容易
+   * 把大段文件当成一个块 —— 我试过两版，两次都让"删掉 import"这个变异照样通过
+   * （断言成了摆设）。这条判据简单，又正好覆盖所有合法写法。
+   */
+  eq("api.ts 导出的每个类型都在前面出现过（忘了 import 会静默变成 any）",
+    exportedNames.filter((name) => !new RegExp(`\\b${name}\\b`).test(beforeExport)),
+    []);
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

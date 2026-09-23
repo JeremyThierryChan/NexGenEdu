@@ -165,6 +165,8 @@ export function publicSite(db: Database): PublicSite {
       coursePage: db.siteContent.coursePage,
       teacherPage: db.siteContent.teacherPage,
       pricingPage: db.siteContent.pricingPage,
+      // 学生案例（v19）：机构要求"以后端为主"，因此它要跟着公开数据一起出门
+      casesPage: db.siteContent.casesPage,
     },
     pricing: {
       rules: db.pricing.rules,

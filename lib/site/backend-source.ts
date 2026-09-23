@@ -49,7 +49,7 @@ import type {
   PublicSite,
   PublicTeacher,
 } from "@/lib/backend/public-site";
-import type { SiteHeading, SiteSubject } from "@/lib/backend/types";
+import type { SiteCase, SiteHeading, SiteSubject } from "@/lib/backend/types";
 import type {
   ClassType,
   LessonDuration,
@@ -64,6 +64,8 @@ import type {
   TrialLesson,
 } from "@/lib/data/pricing";
 import type {
+  CaseItem,
+  CasesContent,
   Course,
   CourseColumn,
   CourseColumnCard,
@@ -453,6 +455,46 @@ export function backendCoursesPage(snapshot: PublicSite): {
     columns: backendCourseColumns(snapshot),
     electiveTitle,
     electiveGroups: toElectiveGroups(electives, electiveTitle, snapshotPartitions(snapshot)),
+  };
+}
+
+/* ── 学生案例（`/cases` 与首页那块） ─────────────────────────────────────── */
+
+/**
+ * 案例块：库里的 `siteContent.casesPage` → 网站视图模型。
+ *
+ * 三处口径与模版路径对齐（`lib/data/pages.ts` 的 `getCasesContentFromTemplate`）：
+ *   - 字段值**空的丢掉**（模版那侧 `fields` 也是只留非空值：内容文件里没写的字段
+ *     本来就不产出条目），否则页面上会出现一行"入学水平：（空）"；
+ *   - `from` / `to` 取「入学水平 / 当前水平」两个字段（页顶的前后对比用它）；
+ *   - `story` 原样搬（段落之间已经用空行分隔，渲染层按空行切段）。
+ *
+ * 一条案例都没有时返回**空数组**（页面显示"案例整理中"这类空状态），不回模版 ——
+ * 两态口径见本文件头部：连上后端就以库为准，"暂时没有案例"是机构的真实状态。
+ */
+export function backendCasesContent(snapshot: PublicSite): CasesContent {
+  const page = snapshot.siteContent?.casesPage;
+  const field = (item: SiteCase | undefined, name: string): string =>
+    (item?.fields ?? []).find((entry) => text(entry.title).trim() === name)?.value ?? "";
+
+  const cases: CaseItem[] = (page?.cases ?? []).map((item: SiteCase) => ({
+    id: text(item.id).trim() === "" ? text(item.title) : text(item.id),
+    title: text(item.title),
+    fields: (item.fields ?? [])
+      .map((entry) => ({ title: text(entry.title), value: text(entry.value) }))
+      // 值为空的字段不渲染（与模版那条 `.filter(item => item.value !== "")` 同一口径）
+      .filter((entry) => entry.value !== ""),
+    from: text(field(item, "入学水平")),
+    to: text(field(item, "当前水平")),
+    story: text(item.story),
+  }));
+
+  return {
+    eyebrow: text(page?.heading?.eyebrow),
+    title: text(page?.heading?.title),
+    description: text(page?.heading?.description),
+    notice: text(page?.notice),
+    cases,
   };
 }
 
