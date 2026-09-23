@@ -35,7 +35,7 @@ import type {
  */
 export function createSeedDatabase(now: Date = new Date()): Database {
   // 课程库与分区一起落定（与空库起步同一处实现：`materializeSiteCourses`）
-  const siteCourses = materializeSiteCourses([]);
+  const siteCourses = materializeSiteCourses([], undefined, catalogFromSeed());
   const teachers: Teacher[] = getTeachersPageFromTemplate()
     .teachers.filter((teacher) => teacher.kind === "teacher")
     .map((teacher, index) => ({

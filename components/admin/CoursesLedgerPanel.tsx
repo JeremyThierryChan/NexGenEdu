@@ -12,12 +12,16 @@ import {
   api,
   COURSE_SITE_KINDS,
   COURSE_STATUSES,
+  type Catalog,
+  type CatalogOffer,
   type Course,
   type CoursePartition,
   type CourseSiteKind,
   type CourseSummary,
   type SiteContent,
 } from "@/lib/backend/api";
+import { isCourseLinked, opennessHint } from "@/lib/backend/course-dimensions";
+import { sortedStages } from "@/lib/backend/catalog";
 import {
   bandsForCard,
   cardTargets,
@@ -133,6 +137,20 @@ export function CoursesLedgerPanel() {
   /** 刷新中（页面上已有数据，因此不清空列表 —— 见 load 的说明）。 */
   const [refreshing, setRefreshing] = useState(false);
   const [keyword, setKeyword] = useState("");
+  /**
+   * 课程类型的维度表与开放矩阵（v28 起台账要用）：
+   * 维度表给"挂到哪个学段 / 学科 / 模块"的选择器，组合表给"这门课的组合开没开"的提示。
+   *
+   * 与课程分开取、失败静默降级：拿不到维度表时台账照旧能用（只是没有选择器与提示），
+   * 而不是整页打不开 —— 排课与报课都依赖课程台账，它比这两个更基础。
+   */
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [offers, setOffers] = useState<CatalogOffer[]>([]);
+  /** 只显示"还没挂到维度上"的课（那一块面板点进来的）。 */
+  const [onlyUnlinked, setOnlyUnlinked] = useState(false);
+  /** 按维度筛课（v28）：学段 / 学科，空串＝不筛。 */
+  const [stageFilter, setStageFilter] = useState("");
+  const [subjectFilter, setSubjectFilter] = useState("");
   const [originFilter, setOriginFilter] = useState("全部");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -233,6 +251,15 @@ export function CoursesLedgerPanel() {
   const [order, setOrder] = useState("");
   const [intro, setIntro] = useState("");
   const [siteKind, setSiteKind] = useState<CourseSiteKind>("不展示");
+  /**
+   * 表单里的**维度引用**（v28）：学段 / 学科 / 模块的 id 数组。
+   *
+   * 为什么不让人直接敲名字：它们是课程类型里那些行的 id（改名不影响挂在上面的课）。
+   * 空数组＝还没挂 —— 表单里能留空，台账会把它列在「还没挂到维度上的课程」里提示。
+   */
+  const [stageIds, setStageIds] = useState<string[]>([]);
+  const [subjectIds, setSubjectIds] = useState<string[]>([]);
+  const [moduleIds, setModuleIds] = useState<string[]>([]);
   /*
    * 报价（元 / 节）：机构要的是"**一门课一张卡片里改完所有东西**" —— 卡片字段、网站正文、报价。
    * 报价那侧的管线本来就有（纯函数 `addLibraryCourseToPricing` 做 upsert + `pricing.update` 落库，
@@ -402,6 +429,18 @@ export function CoursesLedgerPanel() {
         setContentStamp((value) => value + 1);
       }
     }
+    /*
+     * 维度表与组合表（v28）：与上面几个分开取、**失败静默降级**。
+     * 台账是排课与报课的地基，它自己必须照常能用 —— 拿不到维度表只是"暂时挂不了维度、
+     * 看不到矩阵提示"，不该让整页打不开（与报价、网站正文那两处同一个取舍）。
+     */
+    const [dimensions, offersList] = await Promise.all([
+      api.catalog.list().catch(() => null),
+      api.offers.list().catch(() => null),
+    ]);
+    setCatalog(dimensions);
+    setOffers(offersList ?? []);
+
     setLoading(false);
     setRefreshing(false);
   }, []);
@@ -412,6 +451,9 @@ export function CoursesLedgerPanel() {
 
   function resetForm() {
     setEditing(null);
+    setStageIds([]);
+    setSubjectIds([]);
+    setModuleIds([]);
     setName("");
     setPartitionId("");
     setForms([]);
@@ -442,6 +484,9 @@ export function CoursesLedgerPanel() {
     setOrder(course.order === 999 ? "" : String(course.order));
     setIntro(course.intro);
     setSiteKind(course.siteKind);
+    setStageIds(course.stageIds);
+    setSubjectIds(course.subjectIds);
+    setModuleIds(course.moduleIds);
     // 报价回填：从当前配置里找这门课（按 id 或名字），没配过就留空
     const status = pricingStatus.find((item) => item.courseId === course.id);
     setPriceStage(status?.stageName ?? "");
@@ -714,6 +759,10 @@ export function CoursesLedgerPanel() {
       order: order.trim() === "" || !Number.isFinite(Number(order)) ? 999 : Number(order),
       intro: intro.trim(),
       siteKind,
+      // 维度引用（v28）：表单里选出来的，空数组＝还没挂（台账会列出来提示）
+      stageIds,
+      subjectIds,
+      moduleIds,
     };
     const courseName = payload.name;
     /** 这次是新建还是改（`editing` 在后面会被换成刚写下去的那一版，因此先记下来）。 */
@@ -1234,16 +1283,35 @@ export function CoursesLedgerPanel() {
     }
   }
 
+  /**
+   * 筛出来的课程。
+   *
+   * v28 起多了两条**按维度**的筛法（机构口径：课程以维度法为主安排）：
+   *   - **学段 / 学科**：按这门课挂上的维度筛（名字比对，页面上选的就是名字）；
+   *   - **只看未挂维度**：那一块面板点进来用的（"这几门课还没挂上"）。
+   */
   const visible = useMemo(
     () =>
       (courses ?? []).filter((course) => {
         if (originFilter !== "全部" && course.origin !== originFilter) return false;
+        if (onlyUnlinked && isCourseLinked(course)) return false;
+        if (stageFilter !== "" || subjectFilter !== "") {
+          if (catalog === null) return false;
+          const labels = dimensionLabelsOf(course);
+          if (stageFilter !== "" && !labels.stages.includes(stageFilter)) return false;
+          if (subjectFilter !== "" && !labels.subjects.includes(subjectFilter)) return false;
+        }
         const key = keyword.trim();
-        // 搜索也认分区名（"高中课内"能把它下面的课都筛出来）—— 分区是清单的主结构，
-        // 只按课程名搜会让人以为那一区是空的
-        return key === "" || course.name.includes(key) || partitionLabelOf(course.partitionId).includes(key);
+        // 搜索也认分区名（"高中课内"能把它下面的课都筛出来）——
+        // 也认维度名（"语文"能把小学/初中/高中的语文都筛出来）
+        if (key === "") return true;
+        if (course.name.includes(key) || partitionLabelOf(course.partitionId).includes(key)) return true;
+        const labels = dimensionLabelsOf(course);
+        return labels.subjects.some((name) => name.includes(key)) || labels.stages.some((name) => name.includes(key));
       }),
-    [courses, keyword, originFilter, partitionLabelOf],
+    // dimensionLabelsOf 只读 catalog，随 catalog 变化即可
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [courses, keyword, originFilter, partitionLabelOf, onlyUnlinked, stageFilter, subjectFilter, catalog],
   );
 
   /** 还没配价格的课程（家长问价时答不上来的那些）。 */
@@ -1295,6 +1363,45 @@ export function CoursesLedgerPanel() {
    * 「未归类 / 分区已失效」。复制一份出来的话，卡片上的按钮与提示要改两处，
    * 而且"未归类那一片"会慢慢长成另一个样子（那种不一致没人会主动发现）。
    */
+  /**
+   * 一门课当前的维度（学段 / 学科 / 模块）→ 显示用的名字数组。
+   *
+   * 拿不到维度表时返回空数组并把 `unknown` 置真：页面上要能区分"这门课没挂维度"与
+   * "维度表没读到"—— 前者要去挂，后者是后端的问题，两句话不一样。
+   */
+  function dimensionLabelsOf(course: Course): {
+    stages: string[];
+    subjects: string[];
+    modules: string[];
+    unknown: boolean;
+  } {
+    if (catalog === null) return { stages: [], subjects: [], modules: [], unknown: true };
+    const stageName = (id: string): string =>
+      catalog.stages.find((item) => item.id === id)?.name ?? "";
+    const subjectName = (id: string): string =>
+      catalog.subjects.find((item) => item.id === id)?.name ?? "";
+    const moduleName = (id: string): string =>
+      catalog.modules.find((item) => item.id === id)?.name ?? "";
+    return {
+      stages: course.stageIds.map(stageName).filter((name) => name !== ""),
+      subjects: course.subjectIds.map(subjectName).filter((name) => name !== ""),
+      modules: course.moduleIds.map(moduleName).filter((name) => name !== ""),
+      unknown: false,
+    };
+  }
+
+  /** 未挂到维度的课（面板上那一块与筛选都用它）。 */
+  const unlinkedCourses = useMemo(
+    () => (courses ?? []).filter((course) => !isCourseLinked(course)),
+    [courses],
+  );
+
+  /** 这门课在开放矩阵里开没开（两层状态各管一层，这里只负责把话说明白）。 */
+  function hintOf(course: Course): { level: "ok" | "warn" | "unknown"; text: string } | null {
+    if (catalog === null) return null;
+    return opennessHint(course, offers);
+  }
+
   function renderCourseCard(course: Course): ReactNode {
     /*
      * 一门课 = 卡片那一格 + （正在编辑时）它下面那一格编辑器。
@@ -1351,6 +1458,67 @@ export function CoursesLedgerPanel() {
                         </span>
                       </span>
                     </div>
+
+                    {/*
+                      ── 维度（v28）──
+                      台账里的课是"枚举"出来的，而课程类型是维度；这一行把它们接起来：
+                      「小学 · 语文」这一类就是这门课挂上去的维度。空的时候明说"还没挂"，
+                      并给一个一键筛出所有未挂课程的入口（面板上那一块也指向它）。
+                    */}
+                    {(() => {
+                      const labels = dimensionLabelsOf(course);
+                      if (labels.unknown) return null;
+                      if (!isCourseLinked(course)) {
+                        return (
+                          <p className="mt-1 text-[11px] leading-relaxed text-warning-600">
+                            还没挂到课程类型上（不知道它属于哪个学科 / 学段）——
+                            点「编辑」在「所属学段 / 学科 / 内容模块」里挂上，之后就能按维度筛课。
+                          </p>
+                        );
+                      }
+                      return (
+                        <p className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-ink-500">
+                          <span>维度：</span>
+                          {labels.stages.map((name) => (
+                            <span key={`st-${name}`} className="rounded-sm border border-ink-200 bg-white px-1 py-0.5">
+                              {name}
+                            </span>
+                          ))}
+                          {labels.subjects.map((name) => (
+                            <span
+                              key={`sub-${name}`}
+                              className="rounded-sm border border-brand-200 bg-brand-50 px-1 py-0.5 text-brand-700"
+                            >
+                              {name}
+                            </span>
+                          ))}
+                          {labels.modules.map((name) => (
+                            <span key={`mod-${name}`} className="rounded-sm border border-ink-200 bg-ink-50 px-1 py-0.5">
+                              {name}
+                            </span>
+                          ))}
+                        </p>
+                      );
+                    })()}
+
+                    {/*
+                      两层开放状态互相提示（机构口径：都留、各管一层）：
+                      课程状态＝这门课整体上不上网站；开放矩阵＝它的某条组合能不能卖。
+                    */}
+                    {(() => {
+                      const hint = hintOf(course);
+                      if (hint === null || hint.level === "ok") return null;
+                      return (
+                        <p
+                          className={cn(
+                            "mt-1 text-[11px] leading-relaxed",
+                            hint.level === "warn" ? "text-warning-600" : "text-ink-400",
+                          )}
+                        >
+                          {hint.text}
+                        </p>
+                      );
+                    })()}
 
                     {course.forms.length > 0 && (
                       <p className="mt-1 text-[11px] text-ink-500">
@@ -1610,6 +1778,80 @@ export function CoursesLedgerPanel() {
               value={intro}
               onChange={(event) => setIntro(event.target.value)}
             />
+          </div>
+
+          {/*
+            ── 所属维度（v28）──
+            这一块把"枚举出来的课程"接回"课程类型的维度"：学段 / 学科 / 内容模块。
+            挂上之后台账能按维度筛课、组合开放能对上课程、以后的排课与诊断推荐按维度筛。
+            留空是允许的（还没挂），但台账里会有一块专门列出来提示 —— 不拦，只是提醒。
+          */}
+          <div className="mt-4 rounded-md border border-ink-200 bg-ink-50 px-3 py-3">
+            <p className="text-xs font-medium text-ink-700">
+              所属维度（对应「课程类型」页签里的行）
+              <span className="ml-2 font-normal text-ink-400">
+                按 id 引用，机构给学科改名不影响挂在上面的课
+              </span>
+            </p>
+            {catalog === null ? (
+              <p className="mt-2 text-xs text-ink-400">读不到课程类型（后端没在跑？）—— 维度暂时挂不了。</p>
+            ) : (
+              <div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <MultiSelect
+                  label="所属学段"
+                  options={sortedStages(catalog).map((stage) => ({ value: stage.name }))}
+                  value={stageIds.map(
+                    (id) => catalog.stages.find((stage) => stage.id === id)?.name ?? "",
+                  ).filter((name) => name !== "")}
+                  onChange={(names) =>
+                    setStageIds(
+                      names
+                        .map((name) => catalog.stages.find((stage) => stage.name === name)?.id ?? "")
+                        .filter((id) => id !== ""),
+                    )
+                  }
+                  placeholder="选择学段"
+                />
+                <MultiSelect
+                  label="所属学科 / 项目"
+                  hint="一张卡片可以覆盖多个学科（例如「高考外语」覆盖五个语种）"
+                  options={catalog.subjects.map((subject) => ({
+                    value: subject.name,
+                    group: subject.parentIds.length === 0 ? "" : "分组",
+                  }))}
+                  value={subjectIds.map(
+                    (id) => catalog.subjects.find((subject) => subject.id === id)?.name ?? "",
+                  ).filter((name) => name !== "")}
+                  onChange={(names) =>
+                    setSubjectIds(
+                      names
+                        .map((name) => catalog.subjects.find((subject) => subject.name === name)?.id ?? "")
+                        .filter((id) => id !== ""),
+                    )
+                  }
+                  placeholder="选择学科 / 项目"
+                />
+                <MultiSelect
+                  label="内容模块"
+                  hint="留空＝这门课不细分到模块（大多数卡片就是这样）"
+                  options={catalog.modules
+                    .filter((item) => subjectIds.includes(item.subjectId))
+                    .map((item) => ({ value: item.name }))}
+                  value={moduleIds.map(
+                    (id) => catalog.modules.find((item) => item.id === id)?.name ?? "",
+                  ).filter((name) => name !== "")}
+                  onChange={(names) =>
+                    setModuleIds(
+                      names
+                        .map((name) => catalog.modules.find((item) => item.name === name)?.id ?? "")
+                        .filter((id) => id !== ""),
+                    )
+                  }
+                  placeholder="留空＝不细分"
+                  emptyText="先选学科 / 项目（模块挂在学科下面）"
+                />
+              </div>
+            )}
           </div>
         </div>
 
@@ -2069,7 +2311,7 @@ export function CoursesLedgerPanel() {
       </Panel>
 
       {/* ── 列表 ── */}
-      <Panel className="mt-5 mb-8" title="课程清单" description="按分区（栏目 → 子栏目）分组。网站来源的课程跟着内容文件走，不能删除。">
+      <Panel className="mt-5 mb-8" title="课程清单" description="按分区（栏目 → 子栏目）分组，可再按维度（学段 / 学科）筛。网站来源的课程跟着内容文件走，不能删除。">
         <div className="flex flex-wrap items-center gap-3 border-b border-ink-100 px-4 py-3">
           <input
             type="search"
@@ -2099,6 +2341,94 @@ export function CoursesLedgerPanel() {
             {visible.length} 门{refreshing ? "（刷新中…）" : ""}
           </span>
         </div>
+
+        {/*
+          ── 按维度筛（v28）──
+          机构口径是"课程以不靠枚举的维度法为主安排"，因此除了分区之外，
+          还要能按**学段 / 学科**筛；再加上一个「只看未挂维度」的开关，
+          与上面那块面板配合：面板点一下 → 这里只剩那几门 → 逐个挂上。
+        */}
+        {catalog !== null && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-ink-100 px-4 py-2">
+            <span className="text-xs text-ink-500">按维度筛：</span>
+            <select
+              className="rounded-md border border-ink-200 bg-white px-2 py-1 text-xs"
+              value={stageFilter}
+              onChange={(event) => setStageFilter(event.target.value)}
+            >
+              <option value="">全部学段</option>
+              {sortedStages(catalog).map((stage) => (
+                <option key={stage.id} value={stage.name}>
+                  {stage.name}
+                </option>
+              ))}
+            </select>
+            <select
+              className="max-w-56 rounded-md border border-ink-200 bg-white px-2 py-1 text-xs"
+              value={subjectFilter}
+              onChange={(event) => setSubjectFilter(event.target.value)}
+            >
+              <option value="">全部学科 / 项目</option>
+              {catalog.subjects.map((subject) => (
+                <option key={subject.id} value={subject.name}>
+                  {subject.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => setOnlyUnlinked((value) => !value)}
+              className={cn(
+                "rounded-md border px-2.5 py-1 text-xs transition-colors",
+                onlyUnlinked
+                  ? "border-warning-100 bg-warning-50 text-warning-700"
+                  : "border-ink-200 text-ink-600 hover:border-ink-300",
+              )}
+            >
+              只看未挂维度{unlinkedCourses.length > 0 ? `（${String(unlinkedCourses.length)}）` : ""}
+            </button>
+            {(stageFilter !== "" || subjectFilter !== "" || onlyUnlinked) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setStageFilter("");
+                  setSubjectFilter("");
+                  setOnlyUnlinked(false);
+                }}
+                className="text-xs text-brand-700 hover:text-brand-800"
+              >
+                清掉维度筛选
+              </button>
+            )}
+          </div>
+        )}
+
+        {/*
+          ── 还没挂到维度上的课程 ──
+          迁移按名字对不上、或新加的课还没选，就会落在这里。**不拦**（它照样能排课报课），
+          但要显眼：挂上之后台账能按维度筛、组合开放能对上它、以后的排课与诊断推荐才认得它。
+        */}
+        {catalog !== null && unlinkedCourses.length > 0 && (
+          <div className="border-b border-ink-100 bg-warning-50 px-4 py-2.5 text-xs leading-relaxed text-warning-700">
+            <p className="font-medium">
+              有 {unlinkedCourses.length} 门课还没挂到课程类型上：
+              <span className="ml-1 font-normal">
+                {unlinkedCourses.map((course) => course.name).join("、")}
+              </span>
+            </p>
+            <p className="mt-1">
+              没挂的课照样能排课与报课，但「按维度筛课」、开放矩阵与以后的排课 / 诊断推荐都认不出它。
+              点下面的按钮只看这几门，再点各自卡片上的「编辑」把「所属维度」挂上即可。
+            </p>
+            <button
+              type="button"
+              onClick={() => setOnlyUnlinked(true)}
+              className="mt-1 rounded border border-warning-100 bg-white px-2 py-0.5 text-[11px] text-warning-700"
+            >
+              只看这几门
+            </button>
+          </div>
+        )}
 
         {/*
           正在编辑的那门课被搜索 / 来源筛选挡在清单外时，它的编辑器**不在页面上** ——

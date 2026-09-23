@@ -52,6 +52,24 @@ const iso = (offsetDays = 0, hour = 10) => {
 };
 
 /* ── 1 课程库（含分区）── */
+/*
+ * 维度引用（v28）：下面是「围棋」这门后台新增课程要挂的学段 / 学科。
+ * 取一次放在这里 —— 验收里多处要用，而每次调 `catalog.list()` 都是一次真实 HTTP。
+ */
+const acceptCatalog = await api.catalog.list();
+/*
+ * 刻意挑**成对的**（学段 ∩ 学科）：「语文」在小学 / 初中 / 高中都开。
+ * 第一版随手取了 `subjects[0]`（那是分组「外语等级考试」）+ `stages[0]`（小学），
+ * 服务端当场拒绝（学段与学科对不上）—— 校验是对的，是夹具取错了。
+ */
+const acceptStageId =
+  acceptCatalog.stages.find((stage) => stage.name === "小学")?.id ?? acceptCatalog.stages[0]?.id ?? "";
+const acceptSubjectId =
+  acceptCatalog.subjects.find(
+    (subject) => subject.name === "语文" && subject.stageIds.includes(acceptStageId),
+  )?.id ??
+  acceptCatalog.subjects.find((subject) => subject.stageIds.includes(acceptStageId))?.id ??
+  "";
 let courseId = "";
 /*
  * 分区先行：课程要挂在某一区上（v18 起课程只存 `partitionId`）。
@@ -86,6 +104,14 @@ await check("课程库", "新建课程（围棋，挂到子栏目）", async () 
   const created = await api.courses.create({
     name: "围棋", partitionId: subId, forms: ["一对一定制课"], origin: "后台",
     status: "开放", note: "验收用", createdAt: new Date().toISOString(),
+    /*
+     * 维度引用（v28）：新建课程**必须挂上**（机构口径："课程以维度法为主安排"）。
+     * 这里顺手验一次"新建时就带维度"，并把「围棋」挂到「其他类型 × 3D建模与3D打印」之外的
+     * 一个真实学科上 —— 它是后台新增的兴趣课，挂哪个学科由机构自己选，验收里挑第一个存在的。
+     */
+    stageIds: [acceptStageId],
+    subjectIds: [acceptSubjectId],
+    moduleIds: [],
   });
   courseId = created.id;
   return created;
@@ -359,6 +385,52 @@ await check("网站内容", "字段键重复被拒", async () => {
     return cause instanceof Error && cause.message.includes("出现了两次") ? "已拒绝" : cause;
   }
 }, (text: string) => text === "已拒绝");
+
+let acceptanceCourseId = "";
+/* ── 1.55 课程挂到维度上（v28）── */
+/*
+ * 台账里的课是枚举出来的，课程类型是维度 —— 这一节验两者在**真实 HTTP** 上接上了：
+ * 每门课都挂着学段与学科（迁移 / 新建 / 同步三条路都要挂上），挂悬空引用会被拒。
+ */
+await check("课程", "库里的课程都挂上了维度（学段 + 学科）", async () => {
+  const courses = await api.courses.list();
+  const unlinked = courses.filter((course) => (course.subjectIds ?? []).length === 0);
+  return [courses.length, unlinked.map((course) => course.name)];
+}, (value: unknown[]) => (value[0] as number) > 0 && (value[1] as unknown[]).length === 0);
+await check("课程", "挂的学科都是课程类型里存在的行", async () => {
+  const [courses, catalog] = [await api.courses.list(), await api.catalog.list()];
+  const ids = new Set(catalog.subjects.map((subject) => subject.id));
+  return courses.flatMap((course) => (course.subjectIds ?? []).filter((id) => !ids.has(id)));
+}, (value: unknown[]) => value.length === 0);
+await check("课程", "新建一门课并挂上维度（学段 + 学科）", async () => {
+  const catalog = await api.catalog.list();
+  const stage = catalog.stages[0];
+  const subject = catalog.subjects.find((item) => item.stageIds.includes(stage?.id ?? ""));
+  const created = await api.courses.create({
+    name: "验收·挂维度的课", partitionId: "", forms: [], status: "开放", note: "", path: "",
+    tags: [], target: "", order: 990, intro: "", siteKind: "不展示", origin: "后台", createdAt: "",
+    stageIds: [stage?.id ?? ""], subjectIds: [subject?.id ?? ""], moduleIds: [],
+  });
+  acceptanceCourseId = created.id;
+  return [created.stageIds.length, created.subjectIds.length];
+}, (value: number[]) => value[0] === 1 && value[1] === 1);
+await check("课程", "挂一个不存在的学科会被拒（不是静默保存）", async () => {
+  try {
+    await api.courses.create({
+      name: "验收·挂错维度", partitionId: "", forms: [], status: "开放", note: "", path: "",
+      tags: [], target: "", order: 991, intro: "", siteKind: "不展示", origin: "后台", createdAt: "",
+      stageIds: [], subjectIds: ["subj_不存在"], moduleIds: [],
+    });
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("不存在的学科") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+await check("课程", "收尾：删掉验收建的那门课", async () => {
+  if (acceptanceCourseId === "") return true;
+  await api.courses.remove(acceptanceCourseId);
+  return (await api.courses.list()).some((course) => course.id === acceptanceCourseId) === false;
+});
 
 /* ── 1.6 课程类型（五张维度表：加学段 / 加学科 / 加模块 / 加班型）── */
 /*

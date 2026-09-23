@@ -220,7 +220,7 @@ export function importSiteContent(
    * （见循环后的 `partitionsChanged`）—— 否则"内容文件里的栏目全都没变、
    * 只是名字被机构改过"这种情况会凭空多出一个空分区。
    */
-  const materialized = materializeSiteCourses(working.coursePartitions);
+  const materialized = materializeSiteCourses(working.coursePartitions, undefined, working.catalog);
   let partitionsChanged = false;
   for (const site of coursesFromSite()) {
     const existing = findCourse(working.courses, site);

@@ -3,6 +3,7 @@ import { createEmptyDatabase } from "./initial";
 import { catalogFromSeed, catalogSeedSummary } from "./catalog-seed";
 import { catalogSummary, validateCatalog } from "./catalog";
 import { syncClassTypes } from "./class-types";
+import { courseDimensionProblems, suggestCourseDimensions } from "./course-dimensions";
 import { validateVacations } from "./calendar-plan";
 import { danglingOffers, offerId, offersSummary, validateOffers, type OfferKey } from "./offers";
 import {
@@ -1025,6 +1026,29 @@ function migrate(db: Database): Database | null {
     db.version = 27;
   }
 
+  if (db.version === 27) {
+    /*
+     * v27 → v28：**把课程挂到课程类型上**（`stageIds` / `subjectIds` / `moduleIds`）。
+     *
+     * 机构口径：「课程可以完全按照…不靠枚举的方式为主安排」—— 台账里的课是"枚举"出来的
+     * （小学语文 / 高考外语…），而课程类型是维度；两者以前没有任何联系。
+     *
+     * 这一步只做**能确定的那部分**（`suggestCourseDimensions`：显式对应表 → 学段前缀 + 学科名 →
+     * 学科名本身），**对不上的留空**，由台账里「还没挂到维度上的课程」那一块列出来让人手选。
+     * 猜错的后果是排课与诊断按错的维度筛课，而页面上看起来一切正常。
+     */
+    db.courses = db.courses.map((course) => {
+      const suggestion = suggestCourseDimensions(course.name, db.catalog);
+      return normalizeCourse({
+        ...course,
+        stageIds: suggestion.stageIds,
+        subjectIds: suggestion.subjectIds,
+        moduleIds: suggestion.moduleIds,
+      });
+    });
+    db.version = 28;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1065,6 +1089,13 @@ function migrate(db: Database): Database | null {
    * 会让矩阵多出一整片不存在的列，而页面不会报错 —— 因此在这一层统一抹掉。
    */
   delete (db.catalog as Catalog & { deliveries?: unknown }).deliveries;
+
+  /*
+   * 收尾归一：课程上的**维度引用必须是数组**（与分区表、维度表同一条纪律）。
+   * 一份"自称 v28"却缺这三个字段的文件（手改过的导出、半份恢复）会让台账按维度分组时
+   * 读到 `undefined` —— 表现是"这门课哪一组都不属于"（它就此从清单里消失），不报错。
+   */
+  db.courses = db.courses.map((course) => normalizeCourse(course));
 
   /*
    * 收尾归一：**寒暑假段必须是一个数组**（与分区表、维度表、组合表同一条纪律）：
@@ -3155,7 +3186,10 @@ const localApi = {
       await delay();
       const db = load();
       const normalized = normalizeCourse(input);
-      const problems = validateCourse(normalized, db.courses, db.coursePartitions);
+      const problems = [
+        ...validateCourse(normalized, db.courses, db.coursePartitions),
+        ...courseDimensionProblems(normalized, db.catalog),
+      ];
       if (problems.length > 0) throw new Error(problems.join("；"));
 
       // 新记录从第 1 版开始；normalizeCourse 对没带版本的入参也会补 1，这里显式写出来
@@ -3203,7 +3237,11 @@ const localApi = {
        * normalizeCourse 会保留传进去的版本，因此必须在**进它之前**把版本钉住。
        */
       const next = normalizeCourse({ ...target, ...patch, version: target.version });
-      const problems = validateCourse(next, db.courses, db.coursePartitions, id);
+      const problems = [
+        ...validateCourse(next, db.courses, db.coursePartitions, id),
+        // 维度引用（v28）：挂错学科 / 模块会让"这门课属于哪"两说，必须在写之前拦住
+        ...courseDimensionProblems(next, db.catalog),
+      ];
       if (problems.length > 0) throw new Error(problems.join("；"));
 
       Object.assign(target, next);
@@ -3305,7 +3343,7 @@ const localApi = {
     async syncFromSite(): Promise<{ added: string[]; total: number }> {
       await delay();
       const db = load();
-      const materialized = materializeSiteCourses(db.coursePartitions);
+      const materialized = materializeSiteCourses(db.coursePartitions, undefined, db.catalog);
       const merged = mergeSiteCourses(db.courses, materialized.courses);
       if (merged.added.length > 0) {
         const before = new Set(db.coursePartitions.map((item) => item.id));

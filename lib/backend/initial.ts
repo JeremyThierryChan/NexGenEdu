@@ -36,7 +36,11 @@ export function createEmptyDatabase(now: Date = new Date()): Database {
    * 转换只有一处实现（`materializeSiteCourses`）—— 这里传空分区表起步，
    * 它会按内容文件的顺序把 6 个栏目与它们的子栏目录出来。
    */
-  const coursesFromContent = materializeSiteCourses([]);
+  /*
+   * 空库起步也把课程挂到维度上（传种子维度表）—— 否则新建的库一开就是
+   * "32 门课全都没挂维度"，而机构根本没有老库可迁移。
+   */
+  const coursesFromContent = materializeSiteCourses([], undefined, catalogFromSeed());
   return {
     version: CURRENT_VERSION,
     students: [],

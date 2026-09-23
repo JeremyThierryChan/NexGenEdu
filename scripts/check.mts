@@ -142,6 +142,12 @@ import {
 } from "@/lib/backend/catalog";
 import { catalogFromSeed, catalogId, catalogSeedSummary } from "@/lib/backend/catalog-seed";
 import {
+  courseDimensionProblems,
+  isCourseLinked,
+  opennessHint,
+  suggestCourseDimensions,
+} from "@/lib/backend/course-dimensions";
+import {
   applyDecision,
   buildMatrix,
   danglingOffers,
@@ -280,6 +286,7 @@ import {
   profileText,
 } from "@/lib/backend/student-profile";
 import { createSeedDatabase } from "@/lib/backend/seed";
+import { materializeSiteCourses } from "@/lib/backend/courses";
 import {
   ENTITY_SPECS,
   IMPORT_ENTITIES,
@@ -9990,6 +9997,197 @@ console.log("\n=== 37. 日历的月视图（v30）===");
     page.includes("min-h-[5.5rem]") && page.includes("{day.getDate()}") && page.includes("windowsHint(plan.windowGroup)"));
   ok("点开的是「不在本月」的那几天时页面上写明了",
     page.includes("（不在本月）"));
+}
+
+console.log("\n=== 38. 课程挂到维度上（v28：课程 ←→ 课程类型）===");
+
+/*
+ * 机构口径：「课程可以完全按照…**不靠枚举的方式为主安排**」，以及"状态两层都留、各管一层"。
+ *
+ * 课程台账里的课是**枚举**出来的（小学语文 / 高考外语…），课程类型是**维度**（学段 × 学科 × 模块），
+ * 两者以前没有任何联系：同一门「小学语文」两处各写一遍，改一处不会动另一处。
+ * 这一节守四件事：
+ *
+ *   1. **按名字对得上就对、对不上就说对不上**（不猜：猜错的后果是排课与诊断按错的维度筛课）；
+ *   2. **机构在卖的每一张卡片都能挂到维度上**（对不上的那几个"枚举尾巴"已经补进维度表）；
+ *   3. **引用要能校验**（悬空学段 / 悬空学科 / 模块跨学科 / 学段与学科对不上）；
+ *   4. **两层开放状态各管一层、互相提示**（课程状态 vs 开放矩阵）。
+ */
+{
+  __useStoreForTesting(memory);
+  const catalog = catalogFromSeed();
+
+  // ① 按名字挂
+  const linked = (name: string): { stages: string[]; subjects: string[] } => {
+    const hit = suggestCourseDimensions(name, catalog);
+    return {
+      stages: hit.stageIds.map((id) => catalog.stages.find((stage) => stage.id === id)?.name ?? ""),
+      subjects: hit.subjectIds.map((id) => catalog.subjects.find((subject) => subject.id === id)?.name ?? ""),
+    };
+  };
+  eq("「学段 + 学科」这种名字按前缀对上", linked("小学语文"), { stages: ["小学"], subjects: ["语文"] });
+  eq("「初中数学」同理", linked("初中数学"), { stages: ["初中"], subjects: ["数学"] });
+  eq("名字本身就是学科时按学科名对上（并带上它自己的学段）",
+    linked("雅思").subjects, ["雅思"]);
+  ok("「雅思」的学段来自学科自己（其他类型）", linked("雅思").stages.includes("其他类型"));
+  eq("一张卡片覆盖多个学科的（高考外语 → 五个语种）",
+    linked("高考外语").subjects, ["日语", "俄语", "德语", "法语", "西班牙语"]);
+  eq("「高考外语」的学段按对应表写的高中", linked("高考外语").stages, ["高中"]);
+  eq("名字只差一个连接符的（3D建模 & 3D打印）也对得上",
+    linked("3D建模 & 3D打印").subjects, ["3D建模与3D打印"]);
+  eq("别名（职场与商务英语 → 商务英语）", linked("职场与商务英语").subjects, ["商务英语"]);
+  eq("完全对不上的就**留空**（不猜）",
+    [suggestCourseDimensions("随便编的一门课", catalog).linked,
+      suggestCourseDimensions("随便编的一门课", catalog).subjectIds],
+    [false, []]);
+
+  // ② 机构在卖的每一张卡片都能挂上（这才是"不靠枚举"的前提）
+  {
+    const names = coursesFromSite().map((course) => course.name);
+    ok(`网站课程卡片有 ${String(names.length)} 张（否则下面那条是空转的）`, names.length >= 30);
+    const unmatched = names.filter((name) => !suggestCourseDimensions(name, catalog).linked);
+    eq("**每一张卡片都能挂到维度上**（对不上的那几个已补进维度表）", unmatched, []);
+  }
+
+  // ③ 引用校验
+  const stageId = catalogId("st", "小学");
+  const subjectId = catalogId("subj", "语文");
+  const moduleId = catalogId("mod", "语文·一年级");
+  const base = { name: "自检课程" };
+  eq("什么都不挂＝合法（还没挂是正常状态）", courseDimensionProblems(base, catalog), []);
+  eq("挂上存在的学段 / 学科 / 模块＝合法",
+    courseDimensionProblems({ ...base, stageIds: [stageId], subjectIds: [subjectId], moduleIds: [moduleId] }, catalog), []);
+  ok("悬空学段被拒",
+    courseDimensionProblems({ ...base, stageIds: ["st_不存在"] }, catalog).some((text) => text.includes("不存在的学段")));
+  ok("悬空学科被拒",
+    courseDimensionProblems({ ...base, subjectIds: ["subj_不存在"] }, catalog).some((text) => text.includes("不存在的学科")));
+  ok("悬空模块被拒",
+    courseDimensionProblems({ ...base, subjectIds: [subjectId], moduleIds: ["mod_不存在"] }, catalog)
+      .some((text) => text.includes("不存在的内容模块")));
+  ok("模块不属于挂着的学科被拒（模块不跨学科复用）", (() => {
+    const other = catalog.modules.find((item) => item.subjectId !== subjectId);
+    if (other === undefined) return false;
+    return courseDimensionProblems({ ...base, subjectIds: [subjectId], moduleIds: [other.id] }, catalog)
+      .some((text) => text.includes("不属于它挂着的学科"));
+  })());
+  ok("学段与学科对不上被拒（数学不开在大学）",
+    courseDimensionProblems(
+      { ...base, stageIds: [catalogId("st", "大学")], subjectIds: [catalogId("subj", "数学")] },
+      catalog,
+    ).some((text) => text.includes("对不上")));
+  eq("挂上了就算 linked（学段可以后补）",
+    [isCourseLinked({ subjectIds: [subjectId] }), isCourseLinked({ subjectIds: [] })], [true, false]);
+
+  // ④ 两层开放状态：各管一层，互相提示
+  const offerOf = (open: boolean) => [{ subjectId, moduleId: "", formatId: catalogId("fmt", "一对一"), open }];
+  eq("没挂维度 → 说「看不出开没开」（而不是硬给结论）",
+    opennessHint({ name: "自检课程", status: "开放", stageIds: [], subjectIds: [], moduleIds: [] }, []).level,
+    "unknown");
+  eq("挂了但矩阵里一条都没设过、课程却是开放 → 提醒（两层矛盾）",
+    opennessHint({ name: "自检课程", status: "开放", stageIds: [stageId], subjectIds: [subjectId], moduleIds: [] }, []).level,
+    "warn");
+  eq("矩阵里全关着、课程却开放 → 提醒",
+    opennessHint({ name: "自检课程", status: "开放", stageIds: [stageId], subjectIds: [subjectId], moduleIds: [] }, offerOf(false)).level,
+    "warn");
+  eq("矩阵里有关着的组合、课程暂未开放 → 一致（不再是警告）",
+    opennessHint({ name: "自检课程", status: "暂未开放", stageIds: [stageId], subjectIds: [subjectId], moduleIds: [] }, offerOf(false)).level,
+    "ok");
+  eq("矩阵里开着组合 → 一致",
+    opennessHint({ name: "自检课程", status: "开放", stageIds: [stageId], subjectIds: [subjectId], moduleIds: [] }, offerOf(true)).level,
+    "ok");
+  ok("提示里说得清「矩阵里开放着几条」",
+    opennessHint({ name: "自检课程", status: "开放", stageIds: [stageId], subjectIds: [subjectId], moduleIds: [] }, offerOf(true))
+      .text.includes("1 条"));
+
+  // ⑤ 迁移：老库升上来之后课程就挂好了
+  const legacy = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    version: number;
+    courses: Array<Record<string, unknown>>;
+  };
+  legacy.version = 27;
+  legacy.courses = legacy.courses.map((course) => {
+    const { stageIds, subjectIds, moduleIds, ...rest } = course;
+    void stageIds;
+    void subjectIds;
+    void moduleIds;
+    return rest;
+  });
+  eq("v27 老库（课程上没有维度字段）能升级导入",
+    (await api.importDatabase(JSON.stringify(legacy))).ok, true);
+  const afterLink = await api.exportDatabase();
+  eq("升级后版本号是当前版本", afterLink.version, CURRENT_VERSION);
+  const linkedCourses = afterLink.courses.filter((course) => (course.subjectIds ?? []).length > 0);
+  ok(`迁移把课程挂上了（${String(linkedCourses.length)}/${String(afterLink.courses.length)} 门）`,
+    linkedCourses.length === afterLink.courses.length);
+  ok("而且挂的是**存在**的学科（不是编出来的 id）",
+    afterLink.courses.every((course) =>
+      (course.subjectIds ?? []).every((id) => afterLink.catalog.subjects.some((subject) => subject.id === id))));
+  ok("学段也挂上了（用来按学段筛课）",
+    afterLink.courses.every((course) => (course.stageIds ?? []).length > 0));
+
+  // ⑥ API 闸门：挂悬空引用写不进去
+  const badCourse = {
+    name: "自检·挂错维度", partitionId: "", forms: [], status: "开放" as const, note: "", path: "",
+    tags: [], target: "", order: 999, intro: "", siteKind: "不展示" as const, origin: "后台" as const,
+    createdAt: "", stageIds: [], subjectIds: ["subj_不存在"], moduleIds: [],
+  };
+  const refusal = await (async () => {
+    try {
+      await api.courses.create(badCourse);
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  })();
+  ok("新建课程时挂悬空学科被拒（服务端也拦，不只是页面上）", refusal.includes("不存在的学科"));
+
+  /*
+   * ⑥.5 **新库与「从网站同步」也要挂上**（这一条是自查时发现的一个真漏：
+   * 第一版只在迁移里挂，于是"全新的库"与"从网站同步进来的课"全是没挂维度的 ——
+   * 而机构根本没有老库可迁移，等于这个功能对新装的系统完全不起作用）。
+   */
+  {
+    const seeded = createSeedDatabase();
+    eq("空库 / 示例数据起步时课程就挂好了",
+      [seeded.courses.filter((course) => (course.subjectIds ?? []).length > 0).length, seeded.courses.length],
+      [seeded.courses.length, seeded.courses.length]);
+    const withCatalog = materializeSiteCourses([], undefined, catalogFromSeed());
+    eq("materializeSiteCourses 拿到维度表就把名字换成维度",
+      withCatalog.courses.filter((course) => (course.subjectIds ?? []).length > 0).length, withCatalog.courses.length);
+    const withoutCatalog = materializeSiteCourses([]);
+    eq("没给维度表就留空（判据只有一处：谁有维度表谁负责挂）",
+      withoutCatalog.courses.filter((course) => (course.subjectIds ?? []).length > 0).length, 0);
+
+    // 「从网站同步」：把一门课从库里删掉，再同步回来 —— 回来的那门必须是挂好维度的
+    const target = afterLink.courses[0]!;
+    await api.importDatabase(JSON.stringify(afterLink));
+    await api.courses.remove(target.id).catch(() => null);
+    await api.courses.syncFromSite();
+    const afterSync = await api.exportDatabase();
+    const restored = afterSync.courses.find((course) => course.name === target.name);
+    ok("「从网站同步」补回来的课程也挂上了维度",
+      restored !== undefined && (restored.subjectIds ?? []).length > 0);
+  }
+
+  // ⑦ 页面接线
+  const ledger = readFileSync(new URL("../components/admin/CoursesLedgerPanel.tsx", import.meta.url), "utf8");
+  ok("台账页有维度的选择器（所属学段 / 学科 / 内容模块）",
+    ledger.includes('label="所属学段"') && ledger.includes('label="所属学科 / 项目"') && ledger.includes('label="内容模块"'));
+  ok("台账页能**按维度筛**（学段 / 学科 + 只看未挂维度）",
+    ledger.includes("按维度筛：") && ledger.includes("只看未挂维度"));
+  ok("台账页把「还没挂到维度上」的课单独列出来（迁移对不上的落在这里）",
+    ledger.includes("还没挂到课程类型上"));
+  ok("卡片上显示这门课的维度与两层开放的互相提示",
+    ledger.includes("维度：") && ledger.includes("opennessHint(course, offers)"));
+  ok("维度表 / 组合表各自静默降级（拿不到也不让台账打不开）",
+    ledger.includes("api.catalog.list().catch(() => null)") && ledger.includes("api.offers.list().catch(() => null)"));
+  for (const [label, pattern] of [
+    ["没挂维度 → 说看不出开没开", "还没挂到学科上，看不出矩阵里开没开"],
+    ["矩阵全关但课程开放 → 提醒矛盾", "矩阵里这门课的组合"],
+  ] as const) {
+    ok(`提示文案里保留了「${label}」这句（改文案时会被提醒）`,
+      readFileSync(new URL("../lib/backend/course-dimensions.ts", import.meta.url), "utf8").includes(pattern));
+  }
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

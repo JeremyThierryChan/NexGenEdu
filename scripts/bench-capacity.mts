@@ -47,6 +47,7 @@ import { createSqliteStore } from "../server/kv-store.mts";
 import { api, __useStoreForTesting, LOG_LIMIT } from "../lib/backend/api.ts";
 import { CURRENT_VERSION } from "../lib/backend/version.ts";
 import { materializeSiteCourses } from "../lib/backend/courses.ts";
+import { catalogFromSeed } from "../lib/backend/catalog-seed.ts";
 import { pricingConfigFromContent } from "../lib/backend/pricing.ts";
 
 /** 测量用的临时库：与真实库同目录但名字不同，跑完即删。 */
@@ -115,7 +116,7 @@ function buildDatabase(studentCount: number, lessonsPerStudent: number): Record<
     }
   }
 
-  const siteCourses = materializeSiteCourses([]);
+  const siteCourses = materializeSiteCourses([], undefined, catalogFromSeed());
   return {
     version: CURRENT_VERSION,
     students, teachers, classrooms, lessons,

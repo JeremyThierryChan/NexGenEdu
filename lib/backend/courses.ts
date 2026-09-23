@@ -39,6 +39,8 @@ import { versionOf } from "./concurrency";
 import { ensurePartitions, partitionPathLabel } from "./course-partitions";
 import { nextId } from "./ids";
 import type { Course, CourseOrigin, CoursePartition, CourseTag } from "./types";
+import { suggestCourseDimensions } from "./course-dimensions";
+import type { Catalog } from "./types";
 
 /** 下拉里的一项。 */
 export type CourseOption = {
@@ -86,7 +88,10 @@ function siteElectives(): Map<string, string> {
  * （每调一次造一批新的，导入/同步/自检各处还会各不相同）。
  * 因此这里如实用名字，由 `materializeSiteCourses()` 一次性换成 id。
  */
-export type SiteCourse = Omit<Course, "id" | "version" | "partitionId" | "order"> & {
+export type SiteCourse = Omit<
+  Course,
+  "id" | "version" | "partitionId" | "order" | "stageIds" | "subjectIds" | "moduleIds"
+> & {
   /** 栏目名（一级分区）。 */
   category: string;
   /** 子栏目名（二级分区）；空串＝直接挂在栏目上。 */
@@ -158,6 +163,14 @@ export function coursesFromSite(): SiteCourse[] {
 export function materializeSiteCourses(
   partitions: readonly CoursePartition[],
   site: readonly SiteCourse[] = coursesFromSite(),
+  /**
+   * 课程类型的维度表（可选）。
+   *
+   * 传了就**顺手把每门课挂到维度上**（`suggestCourseDimensions`：按名字对一次）——
+   * 空库起步、「从网站同步」、示例数据三条路都要这个结果，否则新建出来的课全是"没挂维度"，
+   * 只有老库（走迁移）才挂得上。不传就留空：判据只有一处 —— 谁手里有维度表，谁负责挂。
+   */
+  catalog?: Catalog,
 ): { partitions: CoursePartition[]; courses: Course[] } {
   const ensured = ensurePartitions(
     partitions,
@@ -166,13 +179,28 @@ export function materializeSiteCourses(
   );
   const courses: Course[] = site.map((course) => {
     const { category, subgroup, ...rest } = course;
-    return {
+    return normalizeCourse({
       ...rest,
       // 网站同步进来的课程也是一条新记录：从第 1 版开始（乐观锁，见 concurrency.ts）
       version: 1,
       id: `course-site-${course.path}`,
       partitionId: ensured.idOf(category, subgroup),
-    };
+      /*
+       * 维度引用（v28）：有维度表就按名字挂一次 —— `suggestCourseDimensions` 只做**能确定的**
+       * 那些（学段前缀 + 学科名 / 学科名本身 / 显式对应表），对不上就留空，
+       * 台账里会把它列在「还没挂到维度上」让人手选。没有维度表就留空。
+       */
+      ...(catalog === undefined
+        ? { stageIds: [], subjectIds: [], moduleIds: [] }
+        : (() => {
+            const suggestion = suggestCourseDimensions(course.name, catalog);
+            return {
+              stageIds: suggestion.stageIds,
+              subjectIds: suggestion.subjectIds,
+              moduleIds: suggestion.moduleIds,
+            };
+          })()),
+    });
   });
   return { partitions: ensured.partitions, courses };
 }
@@ -330,6 +358,22 @@ export function summarizeCourses(
  * 乐观锁悄悄关掉了（比较变成 `undefined !== 5`，每次保存都报假冲突）。
  * 用 `versionOf` 归一（缺失/非法一律当 1），口径与迁移、与集合的 update 完全一致。
  */
+/**
+ * 一组 id：数组化、去空白、去重（`normalizeCourse` 与后台表单都用它）。
+ *
+ * 去重不是洁癖：重复的 id 会让"这门课挂了几门学科"这种计数多算一次，
+ * 而页面上的表现只是"显示了两遍同一个标签"——不报错，但数字不对。
+ */
+function idList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const id = typeof item === "string" ? item.trim() : "";
+    if (id !== "") seen.add(id);
+  }
+  return [...seen];
+}
+
 export function normalizeCourse(input: Omit<Course, "id" | "version"> | Course): Course {
   const course = input as Course;
   return {
@@ -341,6 +385,10 @@ export function normalizeCourse(input: Omit<Course, "id" | "version"> | Course):
       ? course.tags.map((tag) => ({ label: String(tag.label ?? ""), target: String(tag.target ?? "") }))
       : [],
     target: typeof course.target === "string" ? course.target.trim() : "",
+    // 维度引用（v31）：数组、去空、去重 —— 老数据没有这三个字段，兜成空数组
+    stageIds: idList(course.stageIds),
+    subjectIds: idList(course.subjectIds),
+    moduleIds: idList(course.moduleIds),
     order: Number.isFinite(Number(course.order)) ? Number(course.order) : 999,
     intro: typeof course.intro === "string" ? course.intro : "",
     siteKind:
