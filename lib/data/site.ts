@@ -610,12 +610,18 @@ export function getAllCoursePageSlugs(): string[] {
 /**
  * 一张卡片的页面数据。
  *
- * 页面结构由三条规则决定：
- *   1. 卡片上的每个标签 = **同一页面内的一个阶段**（如 高中物理 → 学考 / 选考），
- *      不为标签单独建页面；
- *   2. 卡片没有标签时，「阶段」就是这门课自己在详情里那一段；
- *   3. 页面还要给出与其他阶段的关联：同一学科的其他学段（小学语文 → 初中语文 /
- *      高中语文），以及同栏目（同子栏目）的其他课程。
+ * ## 2026-09 起：一门课 = 一段正文，页面里不再有并列阶段
+ *
+ * 机构要求「课程全都按照课程库里的来」。于是课程正文改成**一门课一个小节、段名就是课程名**，
+ * 原来的级别 / 技能小节（高中物理的学考 / 选考、雅思的四项、日语的 N5–N3、A1–B2、
+ * 3D 建模的三个软件…）不再各占一个锚点，而是**降级成那门课正文里的 `### 小标题`**。
+ *
+ * 因此「阶段」的取法简化成一条，但三条分支都保留着（老库 / 老数据仍可能命中前两条）：
+ *   1. 卡片上的标签 = 同一页面内的一个阶段 —— 标签已经全部去掉，这条现在不会命中；
+ *   2. 卡片名与某个**学科分组**同名时（雅思 → 分组「雅思」），用它名下全部小节；
+ *   3. 否则取与卡片名同名的那个小节 —— 现在所有学科卡片走的都是这条。
+ * 页面还要给出与其他课程的关联：同一学科的其他学段（小学语文 → 初中语文 / 高中语文），
+ * 以及同栏目（同子栏目）的其他课程。
  */
 export function getCoursePageData(slug: string): CoursePageData | null {
   const columns = getCourseColumns();
@@ -655,15 +661,30 @@ export function getCoursePageData(slug: string): CoursePageData | null {
     if (hit !== undefined) stages.push(hit.stage);
   }
 
+  /*
+   * 简介按「学科导语 → 选修课介绍 → 小节导语 → 正文第一段」取。
+   *
+   * 最后一段兜底是 2026-09 加上的：课程页改成「以课程库为准」之后，一门课只有一个
+   * 小节、段名就是课程名，**多段合并出来的课（高中物理 / 日语 / 3D建模…）没有单独
+   * 可当导语的那半句**（它的小节标题就是课程名本身）—— 少了这一条，这些卡片页
+   * 的开头会没有一句说明。`getCourseColumnPageData` 的 `summaryOf` 一直是这么兜的，
+   * 两处口径本来就该一致。
+   */
   const intro =
-    index.subjects.get(card.title)?.lead ??
-    index.electives.get(card.title) ??
-    stages[0]?.lead ??
+    index.subjects.get(card.title)?.lead ||
+    index.electives.get(card.title) ||
+    stages[0]?.lead ||
+    firstParagraph(stages[0]?.body ?? "") ||
     "";
 
   /*
-   * 卡片自己有总览小节时（如「雅思｜按目标分数提分」），它不对应任何标签，
-   * 既不是阶段也不该被丢掉 —— 作为页面开头的「课程说明」渲染。
+   * 「课程总览」（页面开头那段课程说明）只在卡片带标签的老结构下才有意义：
+   * 那时「雅思」这张卡有个不对应任何标签的自家小节（雅思｜按目标分数提分），
+   * 它既不是阶段也不该被丢掉，于是单独渲染成开头的说明。
+   *
+   * 标签已经全部去掉，那一段现在是**课程正文自己的开头**（段名就是课程名），
+   * 因此 `overview` 恒为 null，页面上不会再重复渲染一遍。这条分支保留着：
+   * 卡片页组件与类型都还认它，老库（还没重排的内容）也仍然走得通。
    */
   const ownSection = index.bands.get(card.title)?.stage ?? null;
   const overview = card.tags.length > 0 ? ownSection : null;
@@ -711,20 +732,38 @@ export function getCoursePageData(slug: string): CoursePageData | null {
 /**
  * 能带这门课的教师。
  *
- * 判据是教师页的「科目」字段：只要教师的某个科目出现在卡片名或它的阶段名里，
+ * 判据是教师页的「科目」字段：只要教师的某个科目出现在卡片名或它的「阶段名」里，
  * 就认为这位教师可以带这门课（例如 陈老师 的「物理」命中「高中物理」，
- * 「德语」命中「高考外语」的阶段「德语B2」）。
+ * 「英语」命中「高考外语」那一节的标题「高考英语｜阅读深度与写作高度」）。
+ *
+ * 「阶段名」在 2026-09 之后由两部分组成：小节锚点（现在就是课程名）**以及正文里的小标题**
+ * —— 课程页改成「以课程库为准」之后，原来的级别 / 技能小节（学考 / 选考 / N5 / A1 /
+ * 听力 / 高考英语…）不再各占一个锚点，而是降级成正文里的 `### 小标题`。它们在机构眼里
+ * 仍然是「这门课有哪些阶段」，因此这里照旧把它们算进匹配范围，教师关联不会因为这次
+ * 结构重排而悄悄少掉（否则「德语」这类科目就匹配不到任何课程了）。
  *
  * 刻意不做「猜」：科目对不上就不显示，页面会给出「以咨询确认为准」的说明，
  * 而不是硬塞一位老师上去。
  */
 function teachersForCourse(card: CourseColumnCard, stages: CourseStage[]): Teacher[] {
-  const haystack = [card.title, ...stages.map((stage) => stage.anchor)].join(" ");
+  const haystack = [
+    card.title,
+    ...stages.map((stage) => stage.anchor),
+    ...stages.flatMap((stage) => bodyHeadings(stage.body)),
+  ].join(" ");
   return getTeachersPage().teachers.filter(
     (teacher) =>
       teacher.kind === "teacher" &&
       teacher.subjects.some((subject) => subject !== "" && haystack.includes(subject)),
   );
+}
+
+/** 正文里的小标题（`### 学考｜合格考基础`）—— 合并进正文后，它们就是这门课的「阶段名」。 */
+export function bodyHeadings(markdown: string): string[] {
+  return markdown
+    .split(/\r?\n/)
+    .map((line) => /^#{2,4}\s+(.+)$/.exec(line.trim())?.[1]?.trim() ?? "")
+    .filter((heading) => heading !== "");
 }
 
 /** 栏目（学段）页：该栏目下各科目的简介。 */

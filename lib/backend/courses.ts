@@ -41,6 +41,8 @@ import { ensurePartitions, partitionPathLabel } from "./course-partitions";
 import { nextId } from "./ids";
 import type { Course, CourseOrigin, CoursePartition, CourseTag } from "./types";
 import { suggestCourseDimensions } from "./course-dimensions";
+// 那十二门课的名字猜不出维度，口径写在 `extra-courses.ts` 那份清单里（与迁移同一个入口）
+import { extraCourseDimensions } from "./extra-courses";
 import type { Catalog } from "./types";
 
 /** 下拉里的一项。 */
@@ -188,13 +190,20 @@ export function materializeSiteCourses(
       id: `course-site-${course.path}`,
       partitionId: ensured.idOf(category, subgroup),
       /*
-       * 维度引用（v28）：有维度表就按名字挂一次 —— `suggestCourseDimensions` 只做**能确定的**
-       * 那些（学段前缀 + 学科名 / 学科名本身 / 显式对应表），对不上就留空，
-       * 台账里会把它列在「还没挂到维度上」让人手选。没有维度表就留空。
+       * 维度引用（v28）：有维度表就按名字挂一次。
+       *
+       * 顺序是**显式清单优先**：`extraCourses()` 那十二门课（小学奥数 / 中考冲刺 /
+       * 医学…）的名字里没有学科名，`suggestCourseDimensions` 猜不出来，而它们的口径
+       * 本来就写在那份清单里（`extraCourseDimensions`，与迁移走的是同一个入口）。
+       * 2026-09 这十二门课上网站之后，它们正是从这条路径进来建库的，因此这里必须认。
+       *
+       * 两条都落空就留空：台账里会把它列在「还没挂到维度上」让人手选。
        */
       ...(catalog === undefined
         ? { stageIds: [], subjectIds: [], moduleIds: [] }
         : (() => {
+            const explicit = extraCourseDimensions(course.name);
+            if (explicit !== null) return explicit;
             const suggestion = suggestCourseDimensions(course.name, catalog);
             return {
               stageIds: suggestion.stageIds,

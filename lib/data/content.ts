@@ -160,6 +160,24 @@ function buildTree(markdown: string): HeadingBlock[] {
   };
 
   for (const line of markdown.split(/\r?\n/)) {
+    /*
+     * 转义：`\### 听力｜题型拆解与听写训练` 是**正文里的一行字面文本**，不是标题。
+     *
+     * 用 CommonMark 本身就有的 `\#` 写法（不是新造的语法）。为什么需要它：
+     * 2026-09 课程页改成「一门课 = 一段正文，段名就是课程名」之后，级别 / 技能
+     * （学考 / 选考、N5–N3、A1–B2、雅思四项、三个软件…）从独立小节降级成正文里的
+     * `### 小标题`。不转义的话，这些行会被这里当成新的 `###` 分组，
+     * **把那门课的正文拦腰截断**（正文只剩小标题之前的那一段）。
+     *
+     * 与 `lib/backend/site-export.ts` 的 `bodyForFile()` 配对：导出时加 `\`，
+     * 这里读回来时去掉，两边是同一份内容的两个方向。
+     */
+    const escaped = /^\\(#{1,6}\s+.+)$/.exec(line);
+    if (escaped?.[1] !== undefined) {
+      plainLines.push(escaped[1]);
+      continue;
+    }
+
     const heading = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
     if (heading?.[1] === undefined || heading[2] === undefined) {
       plainLines.push(line);

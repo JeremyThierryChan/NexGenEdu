@@ -12,6 +12,8 @@
  * 运行：npm run check
  */
 import { parseDocument } from "@/lib/data/content";
+// `Section` 是**类型**：第 1 节要拿它标注「某个学科组下的小节」这个中间量
+import type { Section } from "@/lib/data/content";
 import { contentSource } from "@/data/site/content";
 import { pricingSource } from "@/data/site/pricing";
 import {
@@ -19,6 +21,7 @@ import {
   getContactContent,
   getHomeSectionHeadings,
   COLUMN_PATHS,
+  bodyHeadings,
   getAllCourseColumnSlugs,
   getAllCoursePageSlugs,
   getCardsForForm,
@@ -280,7 +283,7 @@ import {
   pricingStatusForCourses,
   syncLibraryLinks,
 } from "@/lib/backend/pricing";
-import { EXTRA_COURSE_NAMES, extraCourses } from "@/lib/backend/extra-courses";
+import { EXTRA_COURSE_NAMES, extraCourseDimensions, extraCourses } from "@/lib/backend/extra-courses";
 import {
   describeTeacherShare,
   sharePercentFor,
@@ -471,37 +474,74 @@ const courseNames = (coursesPage?.groups ?? []).map((g) => g.name);
 ok("学科名含「技术」", courseNames.includes("技术"));
 ok("学科名含「社会」", courseNames.includes("社会"));
 
-// 同一学科的不同学段放在同一分组内，学段数按学科不同（语文 3、科学 2、物理 1…）
-const bandCounts = Object.fromEntries(
-  (coursesPage?.groups ?? []).map((g) => [g.name, g.children.length]),
-);
-eq("语文含 3 个学段", bandCounts["语文"], 3);
-eq("数学含 3 个学段", bandCounts["数学"], 3);
-eq("英语含 3 个学段", bandCounts["英语"], 3);
-eq("科学含 2 个学段", bandCounts["科学"], 2);
-eq("社会含 1 个学段", bandCounts["社会"], 1);
-// 七选三的 7 科都拆成「学考」「选考」两段
-for (const subject of ["物理", "化学", "生物", "政治", "历史", "地理", "技术"]) {
-  eq(`高中${subject}含学考+选考两段`, bandCounts[subject], 2);
-  ok(`高中${subject}两段都点名学考/选考`,
-    (coursesPage?.groups.find((g) => g.name === subject)?.children ?? [])
-      .every((child) => child.name.includes("学考") || child.name.includes("选考")));
-}
-eq("日语含 N5–N3 三段", bandCounts["日语"], 3);
-eq("俄语含 A1–B2 四段", bandCounts["俄语"], 4);
-// 语言类课程按欧标 A1–B2 四段
-for (const lang of ["法语", "德语", "意大利语", "西班牙语"]) {
-  eq(`${lang}含 A1–B2 四段`, bandCounts[lang], 4);
-}
-// 雅思总览 + 听/说/读/写四个分项（数量随内容调整，只要求分项确实拆开了）
-ok("雅思拆出总览与听说读写分项", (bandCounts["雅思"] ?? 0) >= 5);
+/*
+ * 2026-09：课程正文改成「**一门课一个小节、段名就是课程名**」
+ * （机构原话：「课程全都按照课程库里的来，课程库以外的全部都应该删掉」，方案 B）。
+ *
+ * 因此这一节不再断言"某学科有几个学段"——「高中物理学考 / 选考」那种"一张卡多个阶段"
+ * 的形状已经不存在了。改断言两件事：
+ *   ① 每个学科组里的小节数 = 该组有几门课，且段名（「｜」之前那一段）= 课程名；
+ *   ② 原来那些级别 / 技能现在写在正文的 `### 小标题` 里 —— **结构变了，内容一个都没少**。
+ */
+const bandsOf = (name: string): Section[] =>
+  coursesPage?.groups.find((g) => g.name === name)?.children ?? [];
+/** 一组课正文里的小标题名（`### 学考｜合格考基础` → `学考`）。 */
+const headingNames = (name: string): string[] =>
+  bandsOf(name).flatMap((b) =>
+    bodyHeadings(b.body).map((h) => (h.split("｜")[0] ?? "").trim()),
+  );
+/** 一组课的小节段名（`#### 小学语文｜建立阅读与表达的基础` → `小学语文`）。 */
+const anchorsOfGroup = (name: string): string[] =>
+  bandsOf(name).map((b) => (b.name.split("｜")[0] ?? "").trim());
 
-// 学段标题检查：语言课必须是 A1/A2/B1/B2
-const french = (coursesPage?.groups ?? []).find((g) => g.name === "法语");
-eq("法语学段标题", french?.children.map((c) => c.name.split("｜")[0]),
-  ["法语A1", "法语A2", "法语B1", "法语B2"]);
-ok("法语各级都写了核心能力",
-  (french?.children ?? []).every((c) => c.body.includes("核心能力")));
+eq("语文组：三段正文，段名就是课程名", anchorsOfGroup("语文"), ["小学语文", "初中语文", "高中语文"]);
+eq("数学组：四段正文（含新增的小学奥数）", anchorsOfGroup("数学"),
+  ["小学数学", "初中数学", "高中数学", "小学奥数"]);
+eq("英语组：四段正文（高考英语 → 高考外语，含新增的小学英语竞赛）", anchorsOfGroup("英语"),
+  ["小学英语", "初中英语", "高考外语", "小学英语竞赛"]);
+eq("科学组：两段正文", anchorsOfGroup("科学"), ["小学科学", "初中科学"]);
+eq("社会组：一段正文", anchorsOfGroup("社会"), ["初中社会"]);
+// 七选三的 7 科：一段正文，学考 / 选考降级成正文里的两个小标题
+for (const subject of ["物理", "化学", "生物", "政治", "历史", "地理", "技术"]) {
+  eq(`高中${subject}只有一段正文（段名就是课程名）`, anchorsOfGroup(subject), [`高中${subject}`]);
+  eq(`高中${subject}的正文里有 学考 / 选考 两个小标题`, headingNames(subject), ["学考", "选考"]);
+}
+eq("日语：N5–N3 变成正文里的三个小标题", headingNames("日语"), ["N5", "N4", "N3"]);
+for (const lang of ["俄语", "法语", "德语", "意大利语", "西班牙语"]) {
+  eq(`${lang}：A1–B2 变成正文里的四个小标题`, headingNames(lang), ["A1", "A2", "B1", "B2"]);
+}
+// 雅思总览 + 听/说/读/写四个分项：总览是小节标题里那半句，分项是小标题
+eq("雅思只有一段正文（段名就是课程名）", anchorsOfGroup("雅思"), ["雅思"]);
+eq("雅思的正文里有 听力 / 口语 / 阅读 / 写作 四个小标题", headingNames("雅思"),
+  ["听力", "口语", "阅读", "写作"]);
+eq("3D建模的正文里有三个软件小标题", headingNames("3D建模 & 3D打印"),
+  ["Shapr3D", "OpenSCAD", "Bambu Studio"]);
+eq("编程与信息素养的正文里有四个方向小标题", headingNames("编程与信息素养"),
+  ["Python", "C/C++", "Java", "其它"]);
+// 新增的两个学科组（备考与冲刺那几门课原来只在后台用，机构要求一起上网）
+eq("新学科组「小升初与初升高」", anchorsOfGroup("小升初与初升高"), ["小升初"]);
+eq("新学科组「备考与冲刺」", anchorsOfGroup("备考与冲刺"),
+  ["中考冲刺", "提前招专项", "高考冲刺", "特殊计划专项"]);
+ok("学科组里没有任何一个空组（课程库以外的段落都删掉了）",
+  (coursesPage?.groups ?? []).every((g) => g.children.length > 0),
+  JSON.stringify((coursesPage?.groups ?? []).filter((g) => g.children.length === 0).map((g) => g.name)));
+
+// 段名就是课程名：每个小节名（「｜」之前那一段）都必须能在课程库里找到同名课程
+const libraryNames = new Set(
+  getCourseColumnsFromTemplate().flatMap((c) =>
+    c.subgroups.flatMap((g) => g.cards.map((card) => card.title)),
+  ),
+);
+eq("每个小节都对应课程库里的一门课（课程库以外的小节已经删掉）",
+  (coursesPage?.groups ?? [])
+    .flatMap((g) => g.children.map((c) => (c.name.split("｜")[0] ?? "").trim()))
+    .filter((anchor) => !libraryNames.has(anchor)),
+  []);
+
+// 语言 / 技能级别的正文都还写着「核心能力」（内容没在重排里丢）
+ok("每个语言组的正文都保留了核心能力清单",
+  ["法语", "德语", "意大利语", "西班牙语", "俄语", "日语"].every((lang) =>
+    bandsOf(lang).every((b) => b.body.includes("核心能力"))));
 
 const pricingDoc = parseDocument(pricingSource);
 const pricingPage = pricingDoc.pages.get("智能报价");
@@ -548,6 +588,12 @@ const { courses: allCourses, columns, electiveGroups: electiveGroupList } = getC
  *   - 每个栏目、每个子标题下都有卡片，卡片名不重复；
  *   - 卡片与标签的跳转目标都必须真实存在（这是「点了跳报错页」的根因）；
  *   - 课程页不能有「从任何入口都进不去」的孤立小节。
+ *
+ * 2026-09 起追加一条口径（机构：**课程全都按照课程库里的来**）：课程正文是
+ * **一门课一个小节、段名就是课程名**，卡片上的标签**全部去掉** ——
+ * 原来的级别 / 技能（学考 / 选考、N5–N3、A1–B2、雅思四项、三个软件…）
+ * 降级成那门课正文里的 `### 小标题`。因此下面那几条"每张卡都该带某组标签"的断言
+ * 换成了"这些级别必须出现在正文的小标题里"：**标签没了不等于级别没了**。
  */
 // 栏目结构只服务于课程页的「课程总览」（首页课程区改为按班型展示）
 eq("课程页栏目", columns.map((c) => c.title),
@@ -563,8 +609,21 @@ ok("班型含 一对一定制课 与 小组课",
   classTypes.some((n) => n.includes("一对一")) && classTypes.some((n) => n.includes("小组课")));
 
 const HIGH_SCHOOL_SUBGROUPS = ["必考科目", "外语", "七选三"];
-eq("高中课内的子标题", columns.find((c) => c.title === "高中课内")?.subgroups.map((g) => g.title),
-  HIGH_SCHOOL_SUBGROUPS);
+/*
+ * 子标题只看**有名字的那几个**：直接挂在栏目上的卡片（`subgroup === null`）
+ * 渲染成 `title: ""` 且页面上不渲染标题 —— 这是六个栏目共用的正常形状
+ * （小学课内 / 初中课内 / 外语 / 课外兴趣 / 成人课程 全都这样），
+ * 2026-09 起 `高中课内` 也有了这种卡片（高考冲刺 / 特殊计划专项 两门备考课，
+ * 它们不属于必考科目 / 外语 / 七选三 任何一档）。这里断言的是**命名子标题**的固定性。
+ */
+const subgroupTitles = (title: string): string[] =>
+  (columns.find((c) => c.title === title)?.subgroups ?? [])
+    .map((g) => g.title)
+    .filter((name) => name !== "");
+eq("高中课内的命名子标题", subgroupTitles("高中课内"), HIGH_SCHOOL_SUBGROUPS);
+// 一个栏目最多一个"无子标题"的桶：多了就是种混乱（同一栏目的卡片散在两处）
+eq("每个栏目最多一个无子标题的桶",
+  columns.filter((c) => c.subgroups.filter((g) => g.title === "").length > 1).map((c) => c.title), []);
 ok("每个栏目都有卡片", columns.every((c) => c.subgroups.some((g) => g.cards.length > 0)));
 ok("每个子标题都有卡片", columns.every((c) => c.subgroups.every((g) => g.cards.length > 0)));
 
@@ -578,18 +637,66 @@ ok("每张卡片都有跳转目标", allCards.every((c) => c.target !== ""));
 ok("标签都有文字与跳转目标", allCards.every((c) => c.tags.every((t) => t.target !== "" && t.label !== "")));
 ok("卡片内标签不重复", allCards.every((c) => new Set(c.tags.map((t) => t.label)).size === c.tags.length));
 
-// 七选三：每张卡都该有「学考」和「选考」两个标签（这是该子标题的定义）
-const xuanSan = columns.find((c) => c.title === "高中课内")?.subgroups.find((g) => g.title === "七选三");
-ok("七选三每张卡都带 学考 + 选考 标签",
-  (xuanSan?.cards ?? []).every((c) => {
-    const labels = c.tags.map((t) => t.label);
-    return labels.includes("学考") && labels.includes("选考");
-  }));
+/*
+ * 2026-09：卡片上的标签**全部去掉**（机构选定的方案 B ——「课程全都按照课程库里的来」）。
+ * 级别 / 技能不再是可点的独立小节，而是那门课正文里的 `### 小标题`。
+ *
+ * 因此原来那两条「七选三每张卡都带 学考 + 选考 标签」「外语栏目每张卡都有级别标签」
+ * 换成了下面这两条 —— **断言的对象从"标签"变成"正文的小标题"**，守的还是同一件事：
+ * 级别信息必须真的在页面上看得见。留标签只会让断言假绿。
+ */
+ok("卡片上不再有任何标签（方案 B：级别写在课程正文的小标题里，不做可点入口）",
+  allCards.every((c) => c.tags.length === 0),
+  JSON.stringify(allCards.filter((c) => c.tags.length > 0).map((c) => c.title)));
 
-// 外语栏目的语言课：每张卡都按级别挂标签（日语 N5–N3、其余 A1–B2）
+/** 一门课的页面正文（把所有阶段的正文拼起来）里的小标题。 */
+const headingsOf = (path: string): string[] =>
+  (getCoursePageData(path)?.stages ?? []).flatMap((stage) => bodyHeadings(stage.body));
+
+// 七选三：每张卡的正文里都必须有「学考」「选考」两个小标题（这是该子标题的定义）
+const xuanSan = columns.find((c) => c.title === "高中课内")?.subgroups.find((g) => g.title === "七选三");
+ok("七选三每张卡的正文里都有 学考 + 选考 两个小标题",
+  (xuanSan?.cards ?? []).every((c) => {
+    const heads = headingsOf(c.path).map((h) => (h.split("｜")[0] ?? "").trim());
+    return heads.includes("学考") && heads.includes("选考");
+  }),
+  JSON.stringify((xuanSan?.cards ?? []).map((c) => [c.title, headingsOf(c.path)])));
+
+// 外语栏目的语言课：每张卡的正文里都必须有该语种的全部级别小标题（日语 N5–N3、其余 A1–B2）
 const foreignCards = (columns.find((c) => c.title === "外语")?.subgroups ?? []).flatMap((g) => g.cards);
-ok("外语栏目每张语言卡都有级别标签",
-  foreignCards.filter((c) => c.title !== "雅思").every((c) => c.tags.length >= 3));
+const LEVEL_HEADS: Record<string, string[]> = {
+  日语: ["N5", "N4", "N3"],
+  俄语: ["A1", "A2", "B1", "B2"],
+  法语: ["A1", "A2", "B1", "B2"],
+  德语: ["A1", "A2", "B1", "B2"],
+  意大利语: ["A1", "A2", "B1", "B2"],
+  西班牙语: ["A1", "A2", "B1", "B2"],
+};
+const levelHeads = (path: string): string[] =>
+  headingsOf(path).map((h) => (h.split("｜")[0] ?? "").trim());
+eq("外语栏目的语种都在级别表里（新增语种要连级别一起写进来）",
+  foreignCards.filter((c) => !["雅思"].includes(c.title) && LEVEL_HEADS[c.title] === undefined).map((c) => c.title),
+  []);
+ok("外语栏目每张语言卡的正文里都有该语种的全部级别小标题",
+  foreignCards.every((c) => (LEVEL_HEADS[c.title] ?? []).every((level) => levelHeads(c.path).includes(level))),
+  JSON.stringify(foreignCards.map((c) => [c.title, levelHeads(c.path)])));
+// 雅思：四项技能 + 它自己的总览小节，都在正文的小标题里
+ok("雅思的正文里有 听力 / 口语 / 阅读 / 写作 四个小标题",
+  ["听力", "口语", "阅读", "写作"].every((skill) => levelHeads("ielts").includes(skill)),
+  JSON.stringify(levelHeads("ielts")));
+
+// 课外兴趣：软件名 / 语言名也是小标题，不是标签
+const interestCards = (columns.find((c) => c.title === "课外兴趣")?.subgroups ?? []).flatMap((g) => g.cards);
+eq("3D建模 的正文里有三个软件小标题",
+  ["Shapr3D", "OpenSCAD", "Bambu Studio"].filter(
+    (name) => !headingsOf("3d-printing").some((h) => (h.split("｜")[0] ?? "").trim() === name),
+  ), []);
+eq("编程与信息素养 的正文里有四个方向小标题",
+  ["Python", "C/C++", "Java", "其它"].filter(
+    (name) => !headingsOf("programming").some((h) => (h.split("｜")[0] ?? "").trim() === name),
+  ), []);
+ok("课外兴趣栏目的卡片确实有合并进来的小标题",
+  interestCards.every((c) => headingsOf(c.path).length >= 3));
 
 // 每张卡片一个页面：路径必须写全、不能重复，且每张卡片都能取到页面数据
 const slugs = allCards.map((c) => c.path);
@@ -657,7 +764,11 @@ const pages = allCards.map((card) => ({ card, data: getCoursePageData(card.path)
 eq("每张卡片都有页面数据", pages.filter((p) => p.data === null).map((p) => p.card.title), []);
 eq("卡片页路径清单与卡片一致", [...getAllCoursePageSlugs()].sort(), [...slugs].sort());
 
-// 卡片上的标签 = **同一页面内的阶段**：不单独建页面，而是必须能在本页取到内容
+/*
+ * 老口径「卡片上的标签 = 同一页面内的阶段」保留着：标签已经全部去掉，
+ * 因此 `missingStages` 必然为空 —— 这条现在是**方案 B 的守卫**：
+ * 哪天有人在卡片上重新挂标签，而那个目标在本页取不到阶段，这里会立刻红。
+ */
 const missingStages = pages.flatMap(({ card, data }) =>
   card.tags
     .filter((tag) => !(data?.stages ?? []).some((stage) => stage.anchor === tag.target))
@@ -665,31 +776,55 @@ const missingStages = pages.flatMap(({ card, data }) =>
 );
 eq("标签都能在本卡片页面里找到对应阶段", missingStages, []);
 
-// 没标签的卡片必须至少有一段正文或介绍，否则页面会只剩标题
-eq("无标签的卡片都有正文或介绍",
+// 卡片必须至少有一段正文或介绍，否则页面会只剩标题
+eq("每张卡片都有正文或介绍",
   pages
-    .filter(({ card, data }) =>
-      card.tags.length === 0 &&
+    .filter(({ data }) =>
       (data?.stages.length ?? 0) === 0 &&
       (data?.intro ?? "").trim() === "")
     .map(({ card }) => card.title),
   []);
 
-// 「与其他阶段的关联性」：学段课程应当能指出同学科的其他学段
+/*
+ * 方案 B 的核心：**一门课 = 一段正文，段名（锚点）= 课程名**。
+ *
+ * 这里不断言具体名单（改内容与自检应当互相兼容，见本节开头那段），只断言这个**关系**：
+ * 每张学科卡片点进去，取到的必须是「自己那一段」。原来「高中物理 → 学考 / 选考」
+ * 那种"一张卡多个阶段"的形状因此被固定成历史 —— 想再拆出去，这里立刻红。
+ * 反向（有正文却没有卡片 / 卡片却找不到正文）由下面那条「孤立小节」断言守住。
+ */
+const bandAnchors = allCourses.flatMap((c) => c.bands.map((b) => (b.title.split("｜")[0] ?? b.title)));
+const oneStagePerCard = pages
+  .filter(({ card, data }) =>
+    data !== null &&
+    !electiveGroupList.some((g) => g.items.some((i) => i.name === card.title)) &&
+    (data.stages.length !== 1 || data.stages[0]?.anchor !== card.title))
+  .map(({ card, data }) => `${card.title} → ${JSON.stringify((data?.stages ?? []).map((s) => s.anchor))}`);
+eq("每张学科卡片 = 一段正文，段名就是课程名", oneStagePerCard, []);
+ok("正文小节的数量与学科课程对得上（一门课一段）",
+  bandAnchors.length >= 30, String(bandAnchors.length));
+
+// 「与其他课程的关联性」：学段课程应当能指出同学科的其他学段
 const chinese = getCoursePageData("primary-chinese");
 eq("小学语文页面关联到初中 / 高中语文",
   chinese?.sameSubject.map((c) => c.title), ["初中语文", "高中语文"]);
 const physics = getCoursePageData("senior-physics");
-eq("高中物理页面的阶段是 学考 + 选考", physics?.stages.map((s) => s.anchor),
-  ["高中物理学考", "高中物理选考"]);
+// 学考 / 选考不再是独立阶段，而是高中物理这一节正文里的两个小标题
+eq("高中物理页面只有一个阶段（课程名）", physics?.stages.map((s) => s.anchor), ["高中物理"]);
+eq("高中物理的正文里有 学考 / 选考 两个小标题",
+  headingsOf("senior-physics").map((h) => (h.split("｜")[0] ?? "").trim()), ["学考", "选考"]);
 ok("高中物理页面关联到七选三的其他课程",
   (physics?.sameColumn.length ?? 0) >= 3);
 const ielts = getCoursePageData("ielts");
-// 阶段顺序跟随卡片上的标签顺序
-eq("雅思页面的阶段是四项分项", ielts?.stages.map((s) => s.anchor),
-  ["雅思口语", "雅思听力", "雅思阅读", "雅思写作"]);
-// 雅思自己的总览小节不属于任何标签，也不能丢内容
-eq("雅思页面保留了课程总览", ielts?.overview?.anchor, "雅思");
+eq("雅思页面只有一个阶段（课程名）", ielts?.stages.map((s) => s.anchor), ["雅思"]);
+// 雅思自己的总览小节现在是本节正文的开头，不再单独作为「课程说明」渲染
+eq("雅思页面不再单独渲染课程总览（总览已经是正文开头）", ielts?.overview, null);
+ok("雅思正文里保留了原来那条总览导语「按目标分数提分」",
+  (ielts?.stages[0]?.title ?? "").includes("按目标分数提分"),
+  ielts?.stages[0]?.title ?? "");
+eq("雅思的正文里有四项技能小标题",
+  headingsOf("ielts").map((h) => (h.split("｜")[0] ?? "").trim()),
+  ["听力", "口语", "阅读", "写作"]);
 
 /*
  * 反向：详情区的每一段内容都必须**在某个页面上看得见**——
@@ -720,7 +855,12 @@ ok("关联到的教师确实带这门科目",
   pages.every(({ data }) =>
     (data?.teachers ?? []).every((teacher) =>
       teacher.subjects.some((subject) => {
-        const haystack = [data?.card.title ?? "", ...(data?.stages ?? []).map((stage) => stage.anchor)].join(" ");
+        // 与 `teachersForCourse` 同一口径：课程名 + 阶段锚点 + 正文里的小标题
+        const haystack = [
+          data?.card.title ?? "",
+          ...(data?.stages ?? []).map((stage) => stage.anchor),
+          ...(data?.stages ?? []).flatMap((stage) => bodyHeadings(stage.body)),
+        ].join(" ");
         return subject !== "" && haystack.includes(subject);
       }),
     ),
@@ -764,7 +904,19 @@ ok("选修课程至少 1 门", electives.length >= 1);
 ok("选修课按栏目分节", electiveGroups.length >= 1 && electiveGroups.every((g) => g.title !== "" && g.items.length > 0));
 eq("选修课栏目不重复", electiveGroups.filter((g, i) => electiveGroups.findIndex((x) => x.title === g.title) !== i).map((g) => g.title), []);
 ok("选修课程都有介绍", electives.every((e) => e.description.length > 10));
-ok("选修课程当前全部未开放", electives.every((e) => !e.available));
+/*
+ * 选修课的判据是**每条都写了 `- · 状态:`**，而不是"当前都未开放"。
+ *
+ * `getCoursesPageFromTemplate` 认出"这一组是选修课"靠的正是"每个子项都有 `状态` 字段"
+ * （`isElectiveGroup`）—— 少写一条，整组会被读成学科，选修课会跑到学科网格里。
+ * 原来的断言是"当前全部标注暂未开放"：那是当时的内容状态；2026-09 有 44 门课上网之后
+ * 状态由课程库决定（机构在后台自己改，例如「成人旅游、出行」现在是开放的），
+ * 因此这里守住**判据**而不是**状态本身**，并把当前开放的那几门打印出来。
+ */
+ok("每条选修课都写了状态字段（否则整组会被读成学科）",
+  (coursesPage?.groups.find((g) => g.name === electiveTitle)?.children ?? []).every((child) =>
+    child.fields.some((field) => field.name === "状态")));
+console.log(`  （提示）当前开放的选修课：${electives.filter((e) => e.available).map((e) => e.name).join("、") || "无"}`);
 ok("选修课程未混入学科列表", courses.every((c) => !electives.some((e) => e.name === c.nameZh)));
 ok("每门选修课都归类到栏目", electives.every((e) => e.group !== ""));
 
@@ -791,7 +943,7 @@ eq("正文标了暂未开放的课，卡片上也标了（反方向不锁，见�
     .map((card) => card.title),
   []);
 ok("有课程标注了暂未开放", [...availability.values()].some(Boolean));
-ok("数学含 3 个学段且带核心能力", (() => { const m = courses.find((c) => c.nameZh === "数学"); return m?.bands.length === 3 && m.bands.every((b) => b.content.includes("核心能力")); })());
+ok("数学组每段正文都带核心能力", (() => { const m = courses.find((c) => c.nameZh === "数学"); return m?.bands.length === 4 && m.bands.every((b) => b.content.includes("核心能力")); })());
 
 const { teachers } = getTeachersPageFromTemplate();
 // 在职角色数应等于「教师页分组数 − 离职数」：漏解析或重复解析都会在这里露出来
@@ -4722,16 +4874,22 @@ const pbPartitionName = (id: string): string =>
   partitionPlace(pbPartitions, id).column?.name ?? "";
 ok(`课程库从网站内容播种（${pbLibrary.length} 门，至少 20 门）`, pbLibrary.length >= 20);
 /*
- * ⚠️ 清单里现在有**两类**课：网站卡片来的（32 门）与"报价里有、卡片上没有"的后台课（12 门，
- * 见 `extra-courses.ts`）。分区是**网站那侧的结构**，所以下面这几条只对网站卡片成立 ——
- * 不分青红皂白地要求"每门课都有分区"，等于要求后台课也必须挂在某个网站栏目下。
+ * ⚠️ 清单里的课**全部来自网站卡片**（2026-09 起那十二门"只在后台用"的课也上网了，
+ * 见 `extra-courses.ts` 与 PROJECT.md 的 E12）；来源字段仍然两态，因此下面按来源分组断言 ——
+ * 「网站」这一组必须都有分区，「后台」那一组（机构自己在后台加的课，如示例里的围棋）不带分区。
  */
 const pbSiteCourses = pbLibrary.filter((course) => course.origin === "网站");
 const pbAdminCourses = pbLibrary.filter((course) => course.origin === "后台");
 ok(`网站卡片来的课都标为「网站」来源（${pbSiteCourses.length} 门）`,
   pbSiteCourses.length >= 20 && pbSiteCourses.every((course) => course.origin === "网站"));
-eq("后台课也在同一个清单里（就是那十二门）",
-  pbAdminCourses.filter((course) => course.name !== "围棋").length, EXTRA_COURSE_NAMES.length);
+/*
+ * 那十二门 2026-09 全部上网，因此它们现在与其余卡片一样是「网站」来源 ——
+ * 这一条反过来钉住这件事：剔掉自检新加的围棋之后，**后台来源的课一门都不该有**。
+ */
+eq("十二门上过网之后，清单里没有「只在后台用」的课了",
+  pbAdminCourses.filter((course) => course.name !== "围棋").length, 0);
+ok("而且那十二门确实在「网站」这一组里（否则上一条是空转的）",
+  EXTRA_COURSE_NAMES.every((name) => pbSiteCourses.some((course) => course.name === name)));
 ok("每门网站课程都挂了分区（v18：不再是一串分类文字）",
   pbSiteCourses.every((course) => partitionPlace(pbPartitions, course.partitionId).leaf !== null));
 ok("网站课程的分区名非空（清单与网站要按它分组）",
@@ -8030,12 +8188,33 @@ console.log("\n=== 23. 课程分区：分区是数据，不是每门课上的一
   const courseRefusal = await refusalOf(() => api.coursePartitions.remove(withCourses.id));
   ok("有课的分区：拒绝删除，并说清先做什么",
     courseRefusal.includes("门课") && courseRefusal.includes("移"), courseRefusal.slice(0, 90));
-  const parentOfChild = (await api.coursePartitions.list()).find((item) => item.parentId !== "")!.parentId;
-  const childRefusal = await refusalOf(() => api.coursePartitions.remove(parentOfChild));
+  /*
+   * 子栏目护栏：**造一个临时的栏目 + 子栏目**来测，不再依赖现成的结构。
+   *
+   * 为什么不能像以前那样拿"第一个有子级的栏目"（高中课内）直接测：2026-09 起
+   * 高中课内 自己名下也有课了（高考冲刺 / 特殊计划专项 两门备考课不属于
+   * 必考科目 / 外语 / 七选三 任何一档），而护栏是**先看本区有没有课、再看有没有子栏目**
+   * —— 拿它会先命中"还有 N 门课"那条，子栏目那一条就测不到了。
+   * 造一个干净的临时结构，两条分支就各测各的。
+   */
+  const tempParent = await api.coursePartitions.create({ name: "自检·有子栏目的栏目" });
+  const tempChild = await api.coursePartitions.create({ name: "自检·子栏目", parentId: tempParent.id });
+  const childRefusal = await refusalOf(() => api.coursePartitions.remove(tempParent.id));
   ok("有子栏目的分区：拒绝删除，并点名是哪些子栏目",
-    childRefusal.includes("子栏目"), childRefusal.slice(0, 90));
-  const emptyColumn = await api.coursePartitions.create({ name: "自检·空栏目" });
-  eq("空栏目可以删（护栏不误伤）", await api.coursePartitions.remove(emptyColumn.id), true);
+    childRefusal.includes("子栏目") && childRefusal.includes("自检·子栏目"), childRefusal.slice(0, 90));
+  eq("清掉临时子栏目", await api.coursePartitions.remove(tempChild.id), true);
+  eq("空栏目可以删（护栏不误伤）", await api.coursePartitions.remove(tempParent.id), true);
+
+  /*
+   * 既有课又有子栏目时（高中课内就是这种形状）：**先提示把课移走**。
+   * 课会变成「未归类」是静默的数据错位，比"子栏目还在"更急，因此护栏的优先级如此。
+   */
+  const bothPartition = (await api.coursePartitions.list()).find((item) => item.name === "高中课内");
+  ok("高中课内 就是「既有子栏目、自己名下也有课」的那个栏目（否则下面那条是空转的）",
+    bothPartition !== undefined);
+  const bothRefusal = await refusalOf(() => api.coursePartitions.remove(bothPartition?.id ?? ""));
+  ok("本区既有课又有子栏目时：先提示把课移走（并说清会变成「未归类」）",
+    bothRefusal.includes("门课") && bothRefusal.includes("未归类"), bothRefusal.slice(0, 90));
 
   /* ── ⑥ 批量移课 + 未归类 ── */
   const movePartitions = await api.coursePartitions.list();
@@ -10303,8 +10482,20 @@ console.log("\n=== 38. 课程挂到维度上（v28：课程 ←→ 课程类型�
   {
     const names = coursesFromSite().map((course) => course.name);
     ok(`网站课程卡片有 ${String(names.length)} 张（否则下面那条是空转的）`, names.length >= 30);
-    const unmatched = names.filter((name) => !suggestCourseDimensions(name, catalog).linked);
-    eq("**每一张卡片都能挂到维度上**（对不上的那几个已补进维度表）", unmatched, []);
+    /*
+     * 两条路都算"挂上了"，与 `materializeSiteCourses` 的顺序一致：
+     *   ① 显式清单（`extraCourseDimensions`）—— 那十二门课（小学奥数 / 中考冲刺 / 医学…）
+     *      的名字里没有学科名，`suggestCourseDimensions` 猜不出来，口径写在那份清单里；
+     *   ② 按名字推断（`suggestCourseDimensions`）。
+     * 两条都落空才算"挂不上"，那种课会出现在台账的「还没挂到维度上」里。
+     */
+    const unmatched = names.filter(
+      (name) => !suggestCourseDimensions(name, catalog).linked && extraCourseDimensions(name) === null,
+    );
+    eq("**每一张卡片都能挂到维度上**（显式清单或按名字推断，两条都落空才算挂不上）", unmatched, []);
+    ok("那十二门只能靠显式清单挂上（按名字推断一定落空，因此那份清单不能丢）",
+      EXTRA_COURSE_NAMES.filter((name) => !suggestCourseDimensions(name, catalog).linked).length ===
+        EXTRA_COURSE_NAMES.length);
   }
 
   // ③ 引用校验
@@ -10654,17 +10845,32 @@ console.log("\n=== 41. 报价与课程清单对齐（v37）===");
       stage.courses.filter((course) => course.available === (course.price === null)).map((course) => course.name)),
     []);
 
-  // 十二门「只在后台用」的课：进得了台账、上不了网站
-  const extras = extraCourses();
-  eq("「报价里有、卡片上没有」的课一共十二门", extras.length, EXTRA_COURSE_NAMES.length);
-  eq("它们的名字都在报价里（否则又是「报价有、库里没有」）",
-    EXTRA_COURSE_NAMES.filter((name) => !templateCourses.includes(name)), []);
-  ok("它们都不上网（没有 path、siteKind 是不展示）",
-    extras.every((course) => course.path === "" && course.siteKind === "不展示"));
-  ok("它们的维度都挂好了（学段 + 学科，台账按维度分组时不会掉到「未挂」里）",
-    extras.every((course) => course.stageIds.length > 0 && course.subjectIds.length > 0));
-  ok("网站卡片数没变（还是那 32 张，加课不该让课程页多出空卡片）",
-    seedDb.courses.filter((course) => course.siteKind !== "不展示" && course.path !== "").length === 32);
+/*
+ * 去重后的合并：那十二门课（`extraCourses()` 的 `SPECS`）2026-09 **全部上网站了**，
+ * 因此它们现在由网站卡片这条路建出来 —— `extraCourses(网站卡片名)` 返回空，
+ * 库里不会有同名两条（报价与台账都按名字认领，重名一定认错一门）。
+ * 清单本身仍然有用：`extraCourseDimensions()` 是这十二门课的维度口径。
+ */
+const extras = extraCourses();
+eq("完整清单仍然是十二门（`SPECS` 没被删空，维度口径还靠它）", extras.length, EXTRA_COURSE_NAMES.length);
+eq("它们的名字都在报价里（否则又是「报价有、库里没有」）",
+  EXTRA_COURSE_NAMES.filter((name) => !templateCourses.includes(name)), []);
+eq("但它们已经全部在网站卡片上，因此没有任何一门还需要「只在后台用」地补一遍",
+  extraCourses(coursesFromSite().map((course) => course.name)), []);
+eq("这十二门确实都在网站卡片里（不然上一条就是空转的）",
+  EXTRA_COURSE_NAMES.filter((name) => !coursesFromSite().some((course) => course.name === name)), []);
+ok("它们都上网了（有 path、siteKind 是学科或选修）",
+  seedDb.courses
+    .filter((course) => EXTRA_COURSE_NAMES.includes(course.name))
+    .every((course) => course.path !== "" && course.siteKind !== "不展示"));
+eq("库里没有同名两条（重名会让报价与台账认错课）",
+  seedDb.courses.map((course) => course.name).filter((name, i, all) => all.indexOf(name) !== i), []);
+ok("它们的维度都挂好了（学段 + 学科，台账按维度分组时不会掉到「未挂」里）",
+  seedDb.courses
+    .filter((course) => EXTRA_COURSE_NAMES.includes(course.name))
+    .every((course) => course.stageIds.length > 0 && course.subjectIds.length > 0));
+ok("网站卡片数 = 课程库总数（44 门课全部上网，不再有「只在后台用」的课）",
+  seedDb.courses.filter((course) => course.siteKind !== "不展示" && course.path !== "").length === 44);
 
   // 打通机制现在真的能生效：整份配置一次认全
   const claimed = syncLibraryLinks(pricingConfigFromContent(), seedDb.courses);

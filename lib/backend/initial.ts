@@ -49,7 +49,15 @@ export function createEmptyDatabase(now: Date = new Date()): Database {
    * 能算出价），课程库里只有 32 门 —— 那 12 门"报价课"在台账里根本不存在，
    * 报课时选不到、也排不了课。它们从哪来、为什么不上网，见 `extra-courses.ts`。
    */
-  const courses = [...coursesFromContent.courses, ...extraCourses()];
+  /*
+   * 去重后合并：那十二门课 2026-09 全部上网站了，因此它们已经由
+   * `materializeSiteCourses()` 从网站卡片建出来（含分区、含维度）——
+   * 再补一遍就是同名两条，而报价与台账都按名字认领，重名一定认错一门。
+   */
+  const courses = [
+    ...coursesFromContent.courses,
+    ...extraCourses(coursesFromContent.courses.map((course) => course.name)),
+  ];
 
   return {
     version: CURRENT_VERSION,

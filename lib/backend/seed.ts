@@ -295,7 +295,15 @@ export function createSeedDatabase(now: Date = new Date()): Database {
      * 两段合起来才是"课程清单"：示例库与空库必须是同一份清单，
      * 否则自检断言的是示例库、机构装出来的是另一个名单。
      */
-    courses: [...siteCourses.courses, ...extraCourses()],
+    /*
+     * 去重后合并：那十二门课 2026-09 全部上网站了，因此它们已经由
+     * `materializeSiteCourses()` 从网站卡片建出来 —— 这里再补一遍就是同名两条
+     * （报价与台账都按名字认领，重名一定认错一门）。见 `extra-courses.ts`。
+     */
+    courses: [
+      ...siteCourses.courses,
+      ...extraCourses(siteCourses.courses.map((course) => course.name)),
+    ],
     coursePartitions: siteCourses.partitions,
     catalog: catalogFromSeed(),
     /*

@@ -33,11 +33,12 @@ import type { CourseColumnCard } from "@/lib/types/site";
  *
  * 课程卡片页：`/courses/<路径>`。
  *
- * 一张卡片 = 一个页面。卡片上的标签**不是**独立页面，而是同一页面内的阶段
- * （高中物理 → 学考 / 选考；雅思 → 口语 / 听力 / 阅读 / 写作），
- * 因此每个阶段在这里渲染成一个带锚点的小节，页面内的阶段导航互跳。
+ * 一张卡片 = 一个页面 = **一门课的一段正文**（2026-09 起，机构要求「课程全都按照课程库里的来」）。
+ * 正文里的级别 / 技能不再各占一个锚点，而是渲染成正文里的 `### 小标题`
+ * （高中物理 → 学考 / 选考；雅思 → 听力 / 口语 / 阅读 / 写作；日语 → N5 / N4 / N3；
+ * A1–B2；3D 建模的三个软件…），因此页面上只有「这门课」一个锚点，页内不再有阶段导航。
  *
- * 页面还要回答「这门课和其他阶段什么关系」，所以底部给出两组入口：
+ * 页面还要回答「这门课和其他课什么关系」，所以底部给出两组入口：
  * 同一学科的其他学段（小学语文 → 初中语文 / 高中语文），
  * 以及同栏目（同子栏目）的其他课程。
  */
@@ -45,12 +46,20 @@ type PageProps = {
   params: Promise<{ slug: string }>;
 };
 
-/** 课程正文的排版样式：Markdown 渲染出的 p / ul / li / strong 统一在此约束。 */
+/**
+ * 课程正文的排版样式：Markdown 渲染出的 p / ul / li / strong / h3 统一在此约束。
+ *
+ * `h3` 那几条是随「一门课一段正文」一起加的：正文里的小标题（`### 学考｜合格考基础`）
+ * 由 `renderMarkdown` 渲染成 `<h3>`，而 Tailwind 的 preflight 把 h1–h6 重置成
+ * `font-size: inherit; font-weight: inherit` —— 不在这里补样式，级别名跟正文长得
+ * 一模一样，看不出是小标题（也就等于"级别信息看不见了"）。
+ */
 const PROSE_CLASS =
   "mt-4 max-w-2xl leading-relaxed text-ink-600 " +
   "[&_li]:mt-1.5 [&_p]:mt-3 [&_p:first-child]:mt-0 " +
   "[&_strong]:font-medium [&_strong]:text-ink-800 " +
-  "[&_ul]:mt-3 [&_ul]:list-disc [&_ul]:pl-5";
+  "[&_ul]:mt-3 [&_ul]:list-disc [&_ul]:pl-5 " +
+  "[&_h3]:mt-7 [&_h3:first-child]:mt-0 [&_h3]:text-base [&_h3]:font-medium [&_h3]:text-ink-900";
 
 /**
  * 静态导出的路径清单：栏目页（primary / junior / …）与课程卡片页各一条。
@@ -161,7 +170,11 @@ export default async function CourseSlugPage({ params }: PageProps) {
       </PageHeader>
 
       <Container>
-        {/* 阶段导航：卡片上的标签即本页的几个阶段，页内互跳 */}
+        {/*
+          阶段导航：一门课有多个并列阶段时才需要（老结构下 高中物理 → 学考 / 选考）。
+          现在一门课只有一段正文、级别写在正文的小标题里，因此这块平时不渲染；
+          保留它是因为「卡片名与学科分组同名」的取法仍可能给出多个锚点。
+        */}
         {stages.length > 1 && (
           <Section compact className="border-b border-ink-100">
             <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
@@ -179,7 +192,7 @@ export default async function CourseSlugPage({ params }: PageProps) {
           </Section>
         )}
 
-        {/* 课程说明：卡片自带的总览小节（如雅思的总览），不属于任何标签 */}
+        {/* 课程说明：老结构下卡片自带的总览小节（如雅思的总览），现在恒为 null —— 见 getCoursePageData */}
         {overview !== null && (
           <Section compact className="border-b border-ink-100 pt-10">
             <article id={overview.anchor} className="scroll-mt-24 max-w-3xl">
@@ -192,7 +205,7 @@ export default async function CourseSlugPage({ params }: PageProps) {
           </Section>
         )}
 
-        {/* 阶段小节：每个标签一段，锚点用于页内跳转 */}
+        {/* 课程正文：一门课一段，锚点就是课程名；级别 / 技能是正文里的 `### 小标题` */}
         <Section>
           <div className="space-y-10">
             {stages.map((stage) => (

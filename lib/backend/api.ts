@@ -669,7 +669,10 @@ function migrate(db: Database): Database | null {
      * 在课程库里就不存在 —— 报课时选不到、也排不了课，与"以课程清单为准"正好相反。
      * 与空库起步、示例库用的是同一份定义。
      */
-    db.courses = db.courses ?? [...coursesFromSite(), ...extraCourses()];
+    db.courses = db.courses ?? [
+      ...coursesFromSite(),
+      ...extraCourses(coursesFromSite().map((course) => course.name)),
+    ];
     db.version = 12;
   }
 

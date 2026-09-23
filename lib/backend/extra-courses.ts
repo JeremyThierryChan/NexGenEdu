@@ -108,10 +108,11 @@ export const EXTRA_COURSE_NAMES: readonly string[] = SPECS.map((spec) => spec.na
 /**
  * 这门课该挂哪些维度（**按名字查这份清单**）；不在这份清单里返回 `null`。
  *
- * 迁移要用它：老的库升上来时，维度是按名字猜的（`suggestCourseDimensions`），
- * 而这份清单里的名字猜不出学科 ——「小学奥数」里没有学科名，「中考冲刺」横跨五科。
- * 猜不出来的后果是：升级上来的库把这十二门课全列进"还没挂到维度上的课程"，
- * 而它们本来就在这份清单里写清楚了。
+ * 两端都要用它：① 迁移时老库升上来，维度是按名字猜的（`suggestCourseDimensions`），
+ * 而这份清单里的名字猜不出学科 ——「小学奥数」里没有学科名，「中考冲刺」横跨五科；
+ * ② `materializeSiteCourses()`（空库 / 示例库）建网站卡片时同理。
+ * 猜不出来的后果是：这些课全被列进"还没挂到维度上的课程"，而它们的口径本来就在
+ * 这份清单里写清楚了 —— **判据只有这一处**。
  */
 export function extraCourseDimensions(
   name: string,
@@ -125,14 +126,9 @@ export function extraCourseDimensions(
   };
 }
 
-/**
- * 造出这十二门课。
- *
- * id 写成 `course-extra-<序号>`：**稳定且可读**（自检与夹具要靠它比对，
- * 随机 id 会让"同一份数据两次构造结果不同"，那样 `check` 就没法断"空库与示例库一致"）。
- */
-export function extraCourses(): Course[] {
-  return SPECS.map((spec, index) => ({
+/** `course-extra-<序号>`：**稳定且可读**（自检与夹具要靠它比对；随机 id 会让"同一份数据两次构造结果不同"）。 */
+function extraCourseOf(spec: ExtraCourseSpec, index: number): Course {
+  return {
     id: `course-extra-${index + 1}`,
     version: 1,
     name: spec.name,
@@ -152,5 +148,30 @@ export function extraCourses(): Course[] {
     stageIds: [catalogId("st", spec.stage)],
     subjectIds: spec.subjects.map((name) => catalogId("subj", name)),
     moduleIds: spec.modules.map((key) => catalogId("mod", key)),
-  }));
+  };
+}
+
+/**
+ * 造出这十二门课里**网站卡片还没覆盖的那些**。
+ *
+ * ## 2026-09：它们全部上网站了，这个函数因此变成"去重后的补漏"
+ *
+ * 机构这一轮说的是「课程全都按照课程库里的来」，那十二门"只在后台用"的课要一起上网
+ * （一门课一段正文，见 PROJECT.md 的 E12）。上网之后它们由
+ * `materializeSiteCourses()` 从**网站卡片**这条路建出来 ——
+ * 这里若再补一遍，就是**同名两条**：示例库 / 空库里会出现 56 门课
+ * （44 门真实 + 12 门重名），而报价与台账都是**按名字认领**的，重名一定会认错一门。
+ *
+ * 因此这里按名字去重：`coveredNames` 传"网站卡片已经有的那些名字"。
+ * 现在 `SPECS` 里的十二个名字**全都**在网站上了，于是返回空数组。
+ * 清单本身留着仍然有用：`extraCourseDimensions()` 是这十二门课的维度口径
+ * （迁移与建库都查它）。
+ *
+ * 不传 `coveredNames` 时返回全部十二门（自检与文档要看这份完整清单）。
+ */
+export function extraCourses(coveredNames: readonly string[] = []): Course[] {
+  const covered = new Set(coveredNames.map((name) => name.trim()).filter((name) => name !== ""));
+  return SPECS.map((spec, index) => ({ spec, index }))
+    .filter(({ spec }) => !covered.has(spec.name))
+    .map(({ spec, index }) => extraCourseOf(spec, index));
 }

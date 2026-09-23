@@ -550,20 +550,38 @@ function checkName(name: string, what: string, warnings: Warnings): void {
   }
 }
 
-/** 正文里不能出现的行（会被当成标题 / 字段，正文会被截断）。 */
-function checkBody(body: string, what: string, warnings: Warnings, allowFieldLines = true): void {
+/**
+ * 把一段正文变成**能写进 `.md` 的那一份**：会被解析器当成标题的行，转义掉。
+ *
+ * ## 为什么必须转义（2026-09 课程页「一门课一段正文」）
+ *
+ * 格式里 `#` 开头的行都是标题（层级即数据结构，见 `lib/data/content.ts` 的 `buildTree`）。
+ * 而课程正文现在自带 `### 小标题`：级别 / 技能（学考 / 选考、N5–N3、A1–B2、雅思四项、
+ * 3D 建模的三个软件、编程的四个方向）降级成了正文里的三级标题。
+ * 不转义就写文件，读回来时它们会变成**新的 `###` 分组**，那门课的正文被**拦腰截断**
+ * —— 而且不报错，页面上只是"少了一半内容"，正是最难查的那种。
+ *
+ * 用的是 CommonMark 本身就有的 `\#` 写法（不是新造的语法），
+ * 解析器那一侧认它（`buildTree` 里那段配对说明）。
+ *
+ * 仍然转义不了、只能报警告的：`- · 字段: 值` 那种字段行（写进文件就会被当成字段）。
+ *
+ * @returns 写进文件的那一份正文
+ */
+function bodyForFile(body: string, what: string, warnings: Warnings, allowFieldLines = true): string {
+  const lines: string[] = [];
   for (const line of body.split("\n")) {
-    if (/^#{1,6}\s/.test(line)) {
-      warnings.add(
-        `${what}里有一行以井号开头（\`${line.slice(0, 20)}…\`）：它会被当成标题，后面的正文会被截断。`,
-      );
-      return;
+    if (/^#{1,6}\s+.+$/.test(line)) {
+      lines.push(`\\${line}`);
+      continue;
     }
     if (!allowFieldLines && /^\s*[-*]\s*·\s*.+?\s*[:：]/.test(line)) {
       warnings.add(`${what}里有一行 \`- · 字段: 值\`：它会被当成字段，正文会被截掉。`);
-      return;
+      continue;
     }
+    lines.push(line);
   }
+  return lines.join("\n");
 }
 
 /* ── 七、content.md ───────────────────────────────────────────────────── */
@@ -685,20 +703,27 @@ function subjectBody(
   const leadText = text(lead).trim();
   if (unavailable) blocks.push("- · 状态: 暂未开放");
   if (leadText !== "") {
-    checkBody(leadText, `学科「${subjectName}」的导语`, warnings, false);
-    blocks.push(leadText);
+    blocks.push(bodyForFile(leadText, `学科「${subjectName}」的导语`, warnings, false));
   }
   for (const band of bands) {
-    // 小节名 = 「｜」之前那一段：没有「｜」又没有冒号时才是"小节"
-    if (!text(band.title).includes("｜")) {
+    /*
+     * 小节名的合法性：**不要求**有「｜」。
+     *
+     * `splitTitle` 对「既没有半角竖线、又没有冒号」的标题判定为内容小节
+     * （`isSection: true`），因此 `#### 高中物理` 这样的裸课程名是合法小节名 ——
+     * 旧的这条警告是误报（2026-09 做成「一门课一段正文」时实测确认：
+     * 解析回来 group=物理 / child=高中物理 / body 正常）。
+     * 真正会出事的是名字里的冒号或半角竖线（解析器会把标题切成「名称 | 值」）。
+     */
+    const title = text(band.title);
+    if (/[:：]/.test(title) || title.includes("|")) {
       warnings.add(
-        `学科「${subjectName}」的小节「${band.title}」标题里没有「｜」：` +
-          "解析器会把它读成字段条目而不是小节（小节名 = 「｜」之前那一段）。",
+        `学科「${subjectName}」的小节「${title}」名字里有冒号或半角竖线：` +
+          "解析器会把它切成「名称 | 值」的字段条目，而不是小节。",
       );
     }
-    const body = text(band.body).trim();
-    checkBody(body, `小节「${band.title}」的正文`, warnings);
-    blocks.push(`#### ${text(band.title)}\n\n${body}`);
+    const body = bodyForFile(text(band.body).trim(), `小节「${title}」的正文`, warnings);
+    blocks.push(`#### ${title}\n\n${body}`);
   }
   return blocks.join("\n\n");
 }
@@ -711,8 +736,7 @@ function electiveBlock(course: PublicSite["courses"][number], site: PublicSite, 
   const intro = text(course.intro).trim();
   if (group !== "") blocks.push(`- · 栏目: ${group}`);
   if (intro !== "") {
-    checkBody(intro, `选修课「${course.name}」的介绍`, warnings);
-    blocks.push(intro);
+    blocks.push(bodyForFile(intro, `选修课「${course.name}」的介绍`, warnings));
   }
   /*
    * ⚠️ `状态` **开放的也要写**：解析器认出"这一组是选修课"的判据是
@@ -794,8 +818,8 @@ function contentFile(site: PublicSite, source: string, warnings: Warnings, missi
           const line = itemLine(text(item.title), text(item.value), warnings, `分组「${group.title}」`);
           const body = text(item.body).trim();
           if (body === "") return line;
-          checkBody(body, `分组「${group.title}」里「${item.title}」的正文`, warnings);
-          return `${line}\n\n${body}`;
+          const safe = bodyForFile(body, `分组「${group.title}」里「${item.title}」的正文`, warnings);
+          return `${line}\n\n${safe}`;
         }),
       };
     });
@@ -855,8 +879,7 @@ function contentFile(site: PublicSite, source: string, warnings: Warnings, missi
           const blocks = ordered.map((key) => `#### ${key}: ${values.get(key) ?? ""}`);
           const bio = (teacher.bio ?? "").trim();
           if (bio !== "") {
-            checkBody(bio, `教师「${teacher.name}」的介绍`, warnings);
-            blocks.push(bio);
+            blocks.push(bodyForFile(bio, `教师「${teacher.name}」的介绍`, warnings));
           }
           return { heading: `### ${teacher.name}`, preserveHead: true, blocks };
         }),
@@ -1077,8 +1100,7 @@ function casesFile(site: PublicSite, source: string, warnings: Warnings, missing
         });
       const story = text(item.story).trim();
       if (story !== "") {
-        checkBody(story, `案例「${item.title}」的过程描述`, warnings);
-        blocks.push(story);
+        blocks.push(bodyForFile(story, `案例「${item.title}」的过程描述`, warnings));
       }
       return { heading: `### ${item.title}`, preserveHead: false, blocks };
     }),
@@ -1122,8 +1144,7 @@ function featuredCourseBlock(
   if (fieldLines.length > 0) blocks.push(fieldLines.join("\n"));
   const body = text(course.body).trim();
   if (body !== "") {
-    checkBody(body, `特色课程「${course.name}」的介绍`, warnings);
-    blocks.push(body);
+    blocks.push(bodyForFile(body, `特色课程「${course.name}」的介绍`, warnings));
   }
   let out = blocks.join("\n\n");
   for (const child of course.children ?? []) {
