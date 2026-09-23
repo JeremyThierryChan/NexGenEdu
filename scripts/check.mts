@@ -35,6 +35,8 @@ import {
   getTeachersPageFromTemplate,
 } from "@/lib/data/site";
 import { getPricingData, getPricingDataFromTemplate, parsePricingSource } from "@/lib/data/pricing";
+import type { PricingConfig } from "@/lib/backend/pricing";
+import { classTypeIssuesText, syncClassTypes } from "@/lib/backend/class-types";
 import {
   getCasesContent,
   getCasesContentFromTemplate,
@@ -139,7 +141,7 @@ import {
   resolveOffer,
   validateOffers,
 } from "@/lib/backend/offers";
-import type { CatalogOffer } from "@/lib/backend/types";
+import type { Catalog, CatalogOffer } from "@/lib/backend/types";
 import { validateFeaturedPage } from "@/lib/backend/site-content";
 import {
   childPartitions,
@@ -9262,6 +9264,176 @@ console.log("\n=== 31. 开放矩阵：本机构开哪些组合（v24）===");
     (await api.importDatabase(JSON.stringify(brokenOffersDb))).ok, true);
   ok("导入后被兜成空数组（矩阵页不会整页打不开）",
     Array.isArray((await api.exportDatabase()).offers));
+}
+
+console.log("\n=== 32. 报价的班型挂到课程类型的维度表上（v25）===");
+
+/*
+ * 「班型」以前写在两个地方：`pricing.md` 的班级类型（每个班型一个系数）与特色课程树的
+ * 二级课程名。v23 把班型收进维度表之后，报价那一份仍是**各存一个名字** ——
+ * 机构改个名，两边各显示一套，而且**不会报错**。这一节守四件事：
+ *
+ *   1. **名称只有一个真源**：报价读出来（`pricing.get`）、构站（`buildPublicSite`）、
+ *      导出 Markdown 三处都是维度表里的名字，改名之后一起变；
+ *   2. **身份是 id**：迁移把老数据的每一行对上 `formatId`，之后改名不影响它；
+ *   3. **对不上的两种情形都要说出来**：报价里有维度表里没有（orphans）、
+ *      维度表里有报价里没有（unpriced）；
+ *   4. **试算按名字查得到**：改名之后页面发过来的新名字必须能算（这是改名最容易漏的一处）。
+ */
+{
+  __useStoreForTesting(memory);
+
+  /** 跑一次"应当被拒绝"的写操作，把服务端的原话取回来（没抛错就返回空串，断言会因此报红）。 */
+  const refusalOf = async (run: () => Promise<unknown>): Promise<string> => {
+    try {
+      await run();
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+
+  /** 在一份报价配置的副本上改一处（不改原对象）。 */
+  const clonePricingWith = (
+    mutate: (config: PricingConfig) => void,
+    base: PricingConfig,
+  ): PricingConfig => {
+    const copy = JSON.parse(JSON.stringify(base)) as PricingConfig;
+    mutate(copy);
+    return copy;
+  };
+
+  // ① 迁移：老库（v24，报价里没有 formatId）升上来要对上 id
+  const legacyPricingDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    version: number;
+    pricing: { classTypes: Array<{ name: string; formatId?: string }> };
+  };
+  legacyPricingDb.version = 24;
+  /*
+   * 只**去掉** `formatId`（v24 及更早就是这个形状），系数与计价方式一律照原样保留 ——
+   * 第一版夹具把所有行的系数都写成 1，于是下面"一对三比一对一便宜"当场报红：
+   * 那种改法把夹具自己变成了另一份配置，验的就不是迁移了。
+   */
+  legacyPricingDb.pricing.classTypes = legacyPricingDb.pricing.classTypes.map((row) => {
+    const { formatId, ...rest } = row as { formatId?: string };
+    void formatId;
+    return rest;
+  });
+  eq("v24 老库（报价里没有班型 id）能升级导入",
+    (await api.importDatabase(JSON.stringify(legacyPricingDb))).ok, true);
+  const afterPricing = await api.exportDatabase();
+  eq("升级后版本号是当前版本", afterPricing.version, CURRENT_VERSION);
+  const linkedFormats = afterPricing.pricing.classTypes.map((row) => row.formatId);
+  ok("每一行班级类型都对上了课程类型里的班型 id",
+    linkedFormats.length > 0 && linkedFormats.every((id) => id !== ""));
+  eq("对上的就是维度表里那一份（同名同 id）",
+    afterPricing.pricing.classTypes.map((row) => row.name),
+    catalogFromSeed().formats.map((format) => format.name));
+
+  // ② 名称只有一个真源：改名之后报价读出来跟着变
+  const renamed = JSON.parse(JSON.stringify(catalogFromSeed())) as Catalog;
+  const target = renamed.formats.find((format) => format.name === "一对三");
+  ok("种子里有一对三（下面要改名的是它）", target !== undefined);
+  const originalName = target?.name ?? "";
+  if (target !== undefined) target.name = "一对三（小组课）";
+  await api.catalog.save(renamed);
+  const afterRename = await api.pricing.get();
+  ok("机构在课程类型里改了班型名，报价里读到的就是新名字",
+    afterRename.classTypes.some((row) => row.name === "一对三（小组课）"));
+  ok("而库里那一份也一起改了（不是只有读时视图变）",
+    (await api.exportDatabase()).pricing.classTypes.some((row) => row.name === "一对三（小组课）"));
+  eq("班型 id 没变（改的是名字，引用它的东西不受影响）",
+    afterRename.classTypes.find((row) => row.name === "一对三（小组课）")?.formatId,
+    target?.id);
+
+  // ③ 试算按新名字查得到（改名最容易漏的一处：页面发过来的是新名字）
+  const pricedStage = afterRename.stages.find((stage) => stage.courses.some((course) => course.available));
+  const pricedCourse = pricedStage?.courses.find((course) => course.available);
+  const pricedSubject = afterRename.subjects.find((row) => row.stageName === pricedStage?.name);
+  const quoteAfterRename = await api.pricing.quote({
+    courseName: pricedCourse?.name ?? "",
+    subjectName: pricedSubject?.name ?? "",
+    classTypeName: "一对三（小组课）",
+    durationName: afterRename.durations[0]?.name ?? "",
+    lessons: 10,
+    studentCount: 1,
+    classCost: 0,
+  });
+  eq("改名之后按新名字试算算得出来（不是「报价配置里没有班型」）", quoteAfterRename.ok, true);
+  ok("而且算出来的是那个班型的系数（0.6 那一档，比一对一便宜）",
+    (quoteAfterRename.unitPrice ?? 0) < ((await api.pricing.quote({
+      courseName: pricedCourse?.name ?? "",
+      subjectName: pricedSubject?.name ?? "",
+      classTypeName: "一对一",
+      durationName: afterRename.durations[0]?.name ?? "",
+      lessons: 10,
+      studentCount: 1,
+      classCost: 0,
+    })).unitPrice ?? 0));
+
+  // ④ 导出 Markdown 用维度表的名称（否则没连后端那一份会把旧名字带回去）
+  const exported = await api.pricing.exportMarkdown();
+  ok("导出的 pricing.md 片段里写的是课程类型里的名字",
+    exported.includes("名称: 一对三（小组课）") && !exported.includes("名称: 一对三\n"));
+  /*
+   * 导出的是**片段**（从「## 学习阶段」开始，替换进 data/site/pricing.md 的那几节），
+   * 不是整份文件 —— 因此这里不断言"能整份回读"，只断言它写着班级类型那一节。
+   */
+  ok("导出里带着班级类型那一节", exported.includes("## 班级类型"));
+
+  // ⑤ 构站那一侧（网站报价器）拿到的也是同一份名字
+  const publicSite = buildPublicSite(await api.exportDatabase());
+  ok("网站公开数据里的班型名同样是课程类型里那一份",
+    publicSite.pricing.classTypes.some((row) => row.name === "一对三（小组课）"));
+
+  // ⑥ 对不上的两种情形都要报出来（而不是各显示一套）
+  const catalogNow = await api.catalog.list();
+  const asIs = syncClassTypes(catalogNow.formats.map((format) => ({
+    name: format.name, formatId: format.id, mode: "coefficient" as const, coefficient: 1,
+  })), catalogNow);
+  eq("两边一致时没有任何差异", [asIs.orphans, asIs.unpriced], [[], []]);
+  const orphaned = syncClassTypes(
+    [{ name: "手写的班型", formatId: "", mode: "coefficient" as const, coefficient: 1 }],
+    catalogNow,
+  );
+  eq("报价里有、维度表里没有 → orphans",
+    [orphaned.orphans, orphaned.classTypes.length], [["手写的班型"], 1]);
+  ok("对不上的行**原样保留**（不静默丢掉一行价格）",
+    orphaned.classTypes[0]?.name === "手写的班型");
+  const missing = syncClassTypes(
+    catalogNow.formats.filter((format) => format.name !== "一对一").map((format) => ({
+      name: format.name, formatId: format.id, mode: "coefficient" as const, coefficient: 1,
+    })),
+    catalogNow,
+  );
+  eq("维度表里有、报价里没有 → unpriced（新班型还没定系数）", missing.unpriced, ["一对一"]);
+  ok("两种差异各有一句人话（报价页上显示的就是它）",
+    classTypeIssuesText(orphaned).includes("找不到了") &&
+      classTypeIssuesText(missing).includes("还没有系数"));
+  eq("没有差异时不产生任何文案（不要渲染一个空壳）", classTypeIssuesText(asIs), "");
+
+  // ⑦ 写入口要拦住"维度表里没有的班型"
+  const badPricing = clonePricingWith((config) => {
+    config.classTypes[0]!.formatId = "fmt_不存在";
+  }, afterRename);
+  const pricingRefusal = await refusalOf(async () => await api.pricing.update(badPricing));
+  ok("保存报价时拦住课程类型里不存在的班型，并指路「课程类型」页",
+    pricingRefusal.includes("已经不存在了") && pricingRefusal.includes("课程类型"));
+  const duplicated = clonePricingWith((config) => {
+    config.classTypes[1]!.formatId = config.classTypes[0]!.formatId;
+  }, afterRename);
+  ok("同一个班型挂两行系数被拒",
+    (await refusalOf(async () => await api.pricing.update(duplicated))).includes("只能有一行系数"));
+
+  // ⑧ 收尾：把班型名改回种子那一份（验收库是机构自己的库）
+  if (target !== undefined) {
+    const restored = JSON.parse(JSON.stringify(await api.catalog.list())) as Catalog;
+    const back = restored.formats.find((format) => format.id === target.id);
+    if (back !== undefined) back.name = originalName;
+    await api.catalog.save(restored);
+    eq("改回原名之后报价里也回到原名",
+      (await api.pricing.get()).classTypes.some((row) => row.name === originalName), true);
+  }
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

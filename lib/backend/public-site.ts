@@ -28,6 +28,7 @@ import type {
   PricingTrial,
 } from "./pricing";
 import type { Course, CourseTag, Database, SiteContent, Teacher } from "./types";
+import { syncClassTypes } from "./class-types";
 
 /** 公开的教师资料（**不含电话**）。 */
 export type PublicTeacher = {
@@ -178,7 +179,11 @@ export function publicSite(db: Database): PublicSite {
       rules: db.pricing.rules,
       stages: db.pricing.stages,
       subjects: db.pricing.subjects,
-      classTypes: db.pricing.classTypes,
+      /*
+       * 网站报价器上的班型名与报价页**同一份口径**（课程类型的维度表）：
+       * 机构改了班型名，构站出来的报价页跟着变，不必再去改 pricing.md。
+       */
+      classTypes: syncClassTypes(db.pricing.classTypes, db.catalog).classTypes,
       durations: db.pricing.durations,
       trial: db.pricing.trial,
       otherItems: db.pricing.otherItems,

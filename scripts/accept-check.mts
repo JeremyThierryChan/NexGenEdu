@@ -747,6 +747,65 @@ await check("报价", "教师课时费", async () => (await api.pricing.teacherF
   courseName: "围棋", classTypeName: "一对一", durationName: "1 小时", lessons: 5, students: 1,
 })).ok);
 await check("报价", "导出 Markdown", async () => (await api.pricing.exportMarkdown()).includes("学习阶段"));
+/*
+ * 班型的名称只有一个真源（课程类型的维度表，v25）：
+ * 在「课程类型」里改个名，报价读出来、按新名字试算、导出 Markdown 三处都要跟着变。
+ * 收尾把名字改回去（这是机构自己的库）。
+ */
+const formatRenamed = await (async () => {
+  const catalog = await api.catalog.list();
+  const target = catalog.formats.find((item) => item.name === "一对三");
+  if (target === undefined) return null;
+  const draft = JSON.parse(JSON.stringify(catalog)) as typeof catalog;
+  draft.formats.find((item) => item.id === target.id)!.name = "一对三（验收改名）";
+  await api.catalog.save(draft);
+  return { id: target.id, original: target.name };
+})();
+await check("报价", "班型改名之后报价里读到的是新名字（名称以课程类型为准）", async () => {
+  if (formatRenamed === null) return "没有一对三";
+  const pricing = await api.pricing.get();
+  return pricing.classTypes.map((item) => item.name);
+}, (names: string[]) => names.includes("一对三（验收改名）"));
+await check("报价", "按新名字试算算得出来（改名最容易漏的一处）", async () => {
+  if (formatRenamed === null) return false;
+  const pricing = await api.pricing.get();
+  const stage = pricing.stages.find((item) => item.courses.some((course) => course.available));
+  const course = stage?.courses.find((item) => item.available);
+  const quote = await api.pricing.quote({
+    courseName: course?.name ?? "",
+    subjectName: pricing.subjects.find((item) => item.stageName === stage?.name)?.name ?? "",
+    classTypeName: "一对三（验收改名）",
+    durationName: pricing.durations[0]?.name ?? "",
+    lessons: 10,
+    studentCount: 1,
+    classCost: 0,
+  });
+  return quote.ok;
+});
+await check("报价", "导出的 Markdown 用的是维度表里的名字", async () => {
+  if (formatRenamed === null) return false;
+  return (await api.pricing.exportMarkdown()).includes("一对三（验收改名）");
+});
+await check("报价", "只接受课程类型里存在的班型", async () => {
+  const current = await api.pricing.get();
+  const broken = JSON.parse(JSON.stringify(current)) as typeof current;
+  broken.classTypes[0]!.formatId = "fmt_不存在";
+  try {
+    await api.pricing.update(broken);
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("已经不存在了") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+await check("报价", "改回原名（收尾）", async () => {
+  if (formatRenamed === null) return false;
+  const catalog = await api.catalog.list();
+  const draft = JSON.parse(JSON.stringify(catalog)) as typeof catalog;
+  draft.formats.find((item) => item.id === formatRenamed.id)!.name = formatRenamed.original;
+  await api.catalog.save(draft);
+  const pricing = await api.pricing.get();
+  return pricing.classTypes.some((item) => item.name === formatRenamed.original);
+});
 
 /* ── 10 数据与备份 / 搜索 / 日志 ── */
 await check("数据与备份", "导出全部数据", async () => (await api.exportDatabase()).students.length > 0);

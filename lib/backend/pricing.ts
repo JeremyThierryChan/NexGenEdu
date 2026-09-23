@@ -43,6 +43,8 @@
  */
 
 import { pricingSource } from "@/data/site/pricing";
+import { catalogFromSeed } from "./catalog-seed";
+import { formatIdByName } from "./class-types";
 import {
   DEFAULT_PRICING_RULES,
   parsePricingSource,
@@ -99,7 +101,19 @@ export type PricingSubject = {
 
 /** 班级类型：系数模式 or 按人数分摊。 */
 export type PricingClassType = {
+  /**
+   * 名称**以课程类型的维度表为准**（v25）：这里是快照，读的时候会被 `syncClassTypes`
+   * 换成 `catalog.formats` 里那一份 —— 机构改了班型名，报价页与网站报价器跟着变。
+   */
   name: string;
+  /**
+   * 课程类型里的班型 id（`fmt_…`）。空串＝还没对上（老数据 / 名字对不上），
+   * 由 `syncClassTypes` 按名字再对一次并报出来。
+   *
+   * 为什么留着名字不直接删掉：它是**对不上时的线索**（人一眼能看出是哪一行），
+   * 也是导出 Markdown 那一份的形状；而"身份"已经是这个 id。
+   */
+  formatId: string;
   mode: ClassPricingMode;
   /** 系数模式下的系数；按人数分摊时为 null。 */
   coefficient: number | null;
@@ -646,6 +660,7 @@ export function validatePricingConfig(config: PricingConfig): string[] {
   }
 
   const classTypeNames = new Set<string>();
+  const classTypeFormatIds = new Set<string>();
   for (const classType of config.classTypes) {
     if (classType.name.trim() === "") {
       problems.push("存在没有名字的班型。");
@@ -653,6 +668,17 @@ export function validatePricingConfig(config: PricingConfig): string[] {
     }
     if (classTypeNames.has(classType.name)) problems.push(`班型「${classType.name}」重复了。`);
     classTypeNames.add(classType.name);
+    /*
+     * 班型 id 必须指向课程类型里存在的班型，且不能两条班级类型挂同一个班型 ——
+     * 挂重了会出现"这个班型算哪一行系数"两说（而家长看到的价格只有一个）。
+     */
+    const formatId = classType.formatId ?? "";
+    if (formatId !== "") {
+      if (classTypeFormatIds.has(formatId)) {
+        problems.push(`班型「${classType.name}」在报价里出现了两条（同一个班型只能有一行系数）。`);
+      }
+      classTypeFormatIds.add(formatId);
+    }
     if (classType.mode === "coefficient") {
       if (!Number.isFinite(classType.coefficient) || (classType.coefficient ?? 0) <= 0) {
         problems.push(`班型「${classType.name}」的系数必须大于 0。`);
@@ -703,6 +729,12 @@ export function configFromPricingData(data: PricingData, source: string): Pricin
     ),
     classTypes: data.classTypes.map((classType) => ({
       name: classType.name,
+      /*
+       * 站点内容里的班型名字**在这里就对一次维度表**（按名字）。
+       * 对不上时留空串 —— 不编一个 id 出来：那一行会被 `syncClassTypes` 报成
+       * "报价里有、维度表里没有"，机构去课程类型页确认是改名还是删除。
+       */
+      formatId: formatIdByName(classType.name, catalogFromSeed()),
       mode: classType.mode,
       coefficient: classType.coefficient,
     })),

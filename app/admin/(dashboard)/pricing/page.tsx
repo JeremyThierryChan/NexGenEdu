@@ -1,13 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useAuth, rolesOrAll } from "@/components/admin/AuthContext";
 import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { NumberInput, Panel, SelectInput, TextField } from "@/components/admin/AdminFields";
-import { api, type Course } from "@/lib/backend/api";
+import { api, type Catalog, type Course } from "@/lib/backend/api";
+import { classTypeIssuesText, syncClassTypes } from "@/lib/backend/class-types";
 import { MultiSelect } from "@/components/admin/MultiSelect";
 import {
   addLibraryCourseToPricing,
@@ -52,6 +54,13 @@ export default function AdminPricingPage() {
   const [exported, setExported] = useState("");
   /** 课程库：报价要跟着它走（改名跟随、停开跟随）。 */
   const [libraryCourses, setLibraryCourses] = useState<Course[]>([]);
+  /**
+   * 课程类型的维度表：**班型的名称与人数区间以它为准**（v25）。
+   *
+   * 报价这一份只存"这个班型多少钱"（系数 / 按人数分摊），名字跟着维度表走 ——
+   * 两边各显示一套名字是"不会报错的那类错"，因此这一页要拿维度表对一次并提示差异。
+   */
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
   /** 待定价的课程库课程（多选）。 */
   const [pickedCourses, setPickedCourses] = useState<string[]>([]);
   const [targetStage, setTargetStage] = useState("");
@@ -84,10 +93,15 @@ export default function AdminPricingPage() {
    */
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
     if (options.quiet !== true) setLoading(true);
-    const [config, courses] = await Promise.all([api.pricing.get(), api.courses.list()]);
+    const [config, courses, dimensions] = await Promise.all([
+      api.pricing.get(),
+      api.courses.list(),
+      api.catalog.list(),
+    ]);
     setSaved(config);
     setDraft(config);
     setLibraryCourses(courses);
+    setCatalog(dimensions);
     setTargetStage((current) => current || (config.stages[0]?.name ?? ""));
     setCourseName((current) => current || (config.stages[0]?.courses[0]?.name ?? ""));
     setClassTypeName((current) => current || (config.classTypes[0]?.name ?? ""));
@@ -112,6 +126,20 @@ export default function AdminPricingPage() {
   const dirty = useMemo(
     () => saved !== null && draft !== null && JSON.stringify(saved) !== JSON.stringify(draft),
     [draft, saved],
+  );
+
+  /**
+   * 班型与课程类型之间的差异（报价页顶部提示）。
+   *
+   * 用的是与保存路径**同一个**纯函数（`syncClassTypes`），所以"页面上提示的"
+   * 与"存下去会对齐成什么"必然一致 —— 不会出现"提示说没事、保存却改了名"。
+   */
+  const classTypeIssues = useMemo(
+    () =>
+      draft === null || catalog === null
+        ? ""
+        : classTypeIssuesText(syncClassTypes(draft.classTypes, catalog)),
+    [draft, catalog],
   );
 
   const stageOfCourse = useMemo(() => {
@@ -373,6 +401,16 @@ export default function AdminPricingPage() {
           {quoteError}
         </p>
       )}
+      {/* 班型与课程类型对不上时的提示（两类差异各有各的后果，分开说） */}
+      {classTypeIssues !== "" && (
+        <p className="mt-3 rounded-md border border-warning-100 bg-warning-50 px-3 py-2 text-xs leading-relaxed text-warning-700">
+          {classTypeIssues}{" "}
+          <Link href="/admin/catalog" className="underline">
+            去「课程类型」看看
+          </Link>
+        </p>
+      )}
+
       {problems.length > 0 && (
         <ul className="mt-2 list-disc space-y-1 rounded-md border border-red-300 bg-red-50 px-5 py-2.5 text-xs text-red-800">
           {problems.map((problem) => (
@@ -742,7 +780,12 @@ export default function AdminPricingPage() {
           })}
 
           <div>
-            <h3 className="mb-2 text-xs font-medium text-ink-500">班级系数</h3>
+            <h3 className="mb-2 text-xs font-medium text-ink-500">
+              班级系数
+              <span className="ml-2 font-normal text-ink-400">
+                班型的名称与人数区间以「课程类型」页为准，这里只填「这个班型多少钱」
+              </span>
+            </h3>
             <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
               {draft.classTypes.map((classType, index) => (
                 <div key={classType.name}>

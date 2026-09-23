@@ -2,6 +2,7 @@ import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createEmptyDatabase } from "./initial";
 import { catalogFromSeed, catalogSeedSummary } from "./catalog-seed";
 import { catalogSummary, validateCatalog } from "./catalog";
+import { syncClassTypes } from "./class-types";
 import { offerId, offersSummary, validateOffers } from "./offers";
 import {
   emptySiteContent,
@@ -947,6 +948,21 @@ function migrate(db: Database): Database | null {
     db.version = 24;
   }
 
+  if (db.version === 24) {
+    /*
+     * v24 → v25：**报价的班级类型挂到课程类型的班型上**（`formatId`）。
+     *
+     * 这一步只做一件事：按名字把每一行对上 `catalog.formats` 里的班型 id。
+     * 对不上的（机构在报价里手写过别的名字、或那个班型已经被删）**留空串**，
+     * 由 `syncClassTypes` 报成"报价里有、维度表里没有"——不编 id、不删行、不改系数。
+     */
+    db.pricing = {
+      ...db.pricing,
+      classTypes: syncClassTypes(db.pricing.classTypes, db.catalog).classTypes,
+    };
+    db.version = 25;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -988,6 +1004,19 @@ function migrate(db: Database): Database | null {
    * 空数组的含义是明确的（"还没设过"），而"照维度表铺满"是会覆盖机构决策的猜法。
    */
   if (!Array.isArray(db.offers)) db.offers = [];
+
+  /*
+   * 收尾归一：报价里的**班级类型名称以维度表为准**（与上面几条同一条纪律）。
+   *
+   * 为什么放在收尾而不是只留在 v25 那一步：班型的名字是会变的（机构在「课程类型」页改名），
+   * 而"自称 v25"的库未必真对齐过 —— 手改过的导出、只跑了一半的恢复、以及**导入**都长这样。
+   * 这里对齐的是读时视图（`cache`），下一次写入时落盘；名字对不上的行原样保留（由
+   * `syncClassTypes` 报出来），因此这一步不会悄悄改价、也不会丢行。
+   */
+  db.pricing = {
+    ...db.pricing,
+    classTypes: syncClassTypes(db.pricing.classTypes, db.catalog).classTypes,
+  };
 
   return db.version === CURRENT_VERSION ? db : null;
 }
@@ -1080,6 +1109,19 @@ function normalizeOffers(input: readonly CatalogOffer[]): CatalogOffer[] {
     });
   }
   return rows;
+}
+
+/**
+ * 报价配置的一份**读时视图**：班级类型的名称与 id 对齐到课程类型。
+ *
+ * 为什么不落库（只在读的时候对齐）：机构改一个班型名字，报价这一份存的名字就过期了；
+ * 而"两处存同一个名字"必然漂。这里的原则是**名字只有一个真源**（`catalog.formats`），
+ * 报价那一份存的是"这个班型多少钱"，落库时也对齐（`pricing.update`），
+ * 读的时候再对齐一次兜住导入 / 手改过的库。
+ */
+function withCatalogClassTypes(db: Database): PricingConfig {
+  const sync = syncClassTypes(db.pricing.classTypes, db.catalog);
+  return { ...clone(db.pricing), classTypes: sync.classTypes };
 }
 
 function persist(db: Database): void {
@@ -2859,6 +2901,15 @@ const localApi = {
       const before = catalogSummary(db.catalog);
       const after = catalogSummary(normalized);
       db.catalog = normalized;
+      /*
+       * 班型改名 / 删除要**跟着走**：报价里那一份班级类型存的还是旧名字的话，
+       * 库里就留下了一份过期数据（导出、导出的 Markdown、以及按名字查的地方都会用到它）。
+       * 读的时候还有一层对齐兜底（导入、手改过的库），这一层是让**落库的状态本身就是对的**。
+       */
+      db.pricing = {
+        ...db.pricing,
+        classTypes: syncClassTypes(db.pricing.classTypes, db.catalog).classTypes,
+      };
       writeLog(db, {
         entity: "课程类型",
         action: "保存",
@@ -4977,10 +5028,17 @@ const localApi = {
   },
 
   pricing: {
-    /** 当前报价配置。 */
+    /**
+     * 当前报价配置。
+     *
+     * **班型的名称以课程类型的维度表为准**（v25）：机构在「课程类型」页改了班型名，
+     * 报价页与网站报价器跟着变 —— 两边各显示一套名字是"不会报错的那类错"，
+     * 因此这一层读出来时就对齐（`syncClassTypes`，与构站、导出共用同一份实现）。
+     */
     async get(): Promise<PricingConfig> {
       await delay();
-      return clone(load().pricing);
+      const db = load();
+      return clone(withCatalogClassTypes(db));
     },
 
     /**
@@ -4996,9 +5054,27 @@ const localApi = {
         throw new Error(`报价配置不合法，未保存：${problems.join("；")}`);
       }
       const db = load();
+      /*
+       * 班型必须在课程类型里存在：不存在的话这一行系数**永远算不到**，而页面上
+       * 看起来一切正常（只是家长问那个班型时没有价）。因此在这一层拦下并说清去哪改。
+       */
+      const unknown = input.classTypes.filter(
+        (item) => (item.formatId ?? "") !== "" &&
+          !db.catalog.formats.some((format) => format.id === item.formatId),
+      );
+      if (unknown.length > 0) {
+        throw new Error(
+          `报价里有班型在「课程类型」里已经不存在了：${unknown.map((item) => item.name).join("、")}。` +
+            "请到「课程类型」页确认是改名还是删除，再回来改价。",
+        );
+      }
+
       const before = db.pricing;
+      const sync = syncClassTypes(clone(input).classTypes, db.catalog);
       db.pricing = {
         ...clone(input),
+        // 名称一律以维度表为准落库（否则库里会留着一份过期的名字，下一次导出就写回文件了）
+        classTypes: sync.classTypes,
         source: PRICING_SOURCE_ADMIN,
         updatedAt: nowIso(),
       };
@@ -5017,7 +5093,7 @@ const localApi = {
       await delay();
       const db = load();
       const before = db.pricing;
-      db.pricing = pricingConfigFromContent();
+      db.pricing = { ...pricingConfigFromContent(), classTypes: withCatalogClassTypes(db).classTypes };
       writeLog(db, {
         entity: "报价",
         action: "恢复默认",
@@ -5035,7 +5111,8 @@ const localApi = {
      */
     async quote(selection: QuoteSelection): Promise<QuoteResult> {
       await delay();
-      return quoteSelection(load().pricing, selection);
+      // 用对齐后的配置试算：班型改名之后，页面发过来的是**新名字**，而库里那一份可能还没跟上
+      return quoteSelection(withCatalogClassTypes(load()), selection);
     },
 
     /**
@@ -5046,13 +5123,19 @@ const localApi = {
      */
     async teacherFee(selection: TeacherFeeSelection): Promise<TeacherFeeResult> {
       await delay();
-      return teacherFeeForSelection(load().pricing, selection);
+      // 同上：按班型名查的那两处必须用对齐后的配置
+      return teacherFeeForSelection(withCatalogClassTypes(load()), selection);
     },
 
     /** 导出成可直接替换 `data/site/pricing.md` 的 Markdown 片段。 */
     async exportMarkdown(): Promise<string> {
       await delay();
-      return pricingConfigToMarkdown(load().pricing);
+      const db = load();
+      /*
+       * 导出的是要写回 `data/site/pricing.md` 的那一份 —— 班型名用维度表里的，
+       * 否则"没连后端那一份"会把旧名字带回去，下一次构站又漂了。
+       */
+      return pricingConfigToMarkdown(withCatalogClassTypes(db));
     },
   },
 
