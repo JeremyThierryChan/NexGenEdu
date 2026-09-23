@@ -25,7 +25,7 @@
 import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import path from "node:path";
+import path, { join } from "node:path";
 import { run, startServer, withTempServer } from "./temp-server.mts";
 import { login, prepareCredential } from "../server/auth.mts";
 import { createMemoryStore } from "../lib/backend/storage.ts";
@@ -1439,6 +1439,173 @@ try {
 } catch (cause) {
   failures += 1;
   console.error(`\n✗ 账号管理这一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
+}
+
+console.log("\n[11] 节假日表：登录即可看、只有技术管理员能抓、坏文件不许静默少一年");
+try {
+  /*
+   * 这一节全部在**临时目录**里跑（`NEXGENEDU_HOLIDAY_DIR`）：抓取会写盘，
+   * 若让它写到仓库的 `data/holidays/` 上，一次自检就能把机构的假日表换掉。
+   * 顺便这也是"读盘校验"唯一测得准的方式：先手写一份好的、一份坏的文件，再看接口怎么回。
+   */
+  const temp = mkdtempSync(join(tmpdir(), "nexgenedu-holidays-"));
+  const year = new Date().getFullYear();
+  const goodYear = year - 1;
+  const writeYearFile = (name: string, value: unknown): void => {
+    writeFileSync(join(temp, name), `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  };
+  const yearFile = (target: number, days: Array<{ date: string; name: string; kind: string }>): unknown => ({
+    year: target,
+    fetchedAt: "2026-01-01T00:00:00.000Z",
+    sources: [
+      { id: "apple", label: "Apple 日历", url: "https://example.invalid/a.ics", ok: true, days: days.length, fingerprint: "sha256:test", note: "" },
+      { id: "gov", label: "国务院口径", url: "https://example.invalid/g.json", ok: true, days: days.length, fingerprint: "sha256:test2", note: "" },
+    ],
+    verdict: { agree: true, blocking: [], notes: ["测试数据"], notPublished: false },
+    days,
+  });
+
+  writeYearFile(`${goodYear}.json`, yearFile(goodYear, [
+    { date: `${goodYear}-01-01`, name: "元旦", kind: "放假" },
+    { date: `${goodYear}-01-02`, name: "元旦", kind: "调休上班" },
+  ]));
+  // 坏文件：days 是空的（读盘校验必须拒绝，而不是当成"这一年没有假期"）
+  writeYearFile(`${year}.json`, { ...(yearFile(year, []) as Record<string, unknown>) });
+  // 一个文件名合规、内容根本不是 JSON 的文件
+  writeFileSync(join(temp, "2099.json"), "{ 这不是 JSON", "utf8");
+
+  await withTempServer(
+    async (base, info) => {
+      const request = async (
+        path: string,
+        options: { method?: string; token?: string | null; body?: unknown } = {},
+      ): Promise<{ status: number; body: Record<string, unknown> }> => {
+        const response = await fetch(`${base}${path}`, {
+          method: options.method ?? "GET",
+          headers: {
+            ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+            ...(options.token === undefined || options.token === null ? {} : { authorization: `Bearer ${options.token}` }),
+          },
+          ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+        });
+        const text = await response.text();
+        let body: Record<string, unknown> = {};
+        try {
+          body = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          body = {};
+        }
+        return { status: response.status, body };
+      };
+      const view = (body: Record<string, unknown>): Record<string, unknown> =>
+        (body.view ?? {}) as Record<string, unknown>;
+      const yearsOf = (body: Record<string, unknown>): Array<Record<string, unknown>> =>
+        ((view(body).years ?? []) as Array<Record<string, unknown>>);
+      const loginAs = async (username: string, password: string): Promise<string> => {
+        const response = await raw(base, "/api/login", { method: "POST", body: { username, password } });
+        if (response.status !== 200) {
+          throw new Error(`登录 ${username} 失败：HTTP ${response.status} ${JSON.stringify(response.body)}`);
+        }
+        return String(response.body.token ?? "");
+      };
+      const teacherId = String(((await call(base, await loginAs(info.username, info.password), "teachers.create", [{
+        name: "节假日自检教师", subjects: [], role: "", phone: "", active: true, years: "",
+        summary: "", bio: "", recommendation: "", order: 997, siteVisible: false, origin: "后台", kind: "教师",
+      }])).body.result as { id?: string } | undefined)?.id ?? "");
+
+      console.log("\n[11.1] 未登录：两条路由都是 401");
+      equal("未登录读节假日表 401", (await request("/api/holidays")).status, 401);
+      equal("未登录抓取 401", (await request("/api/holidays/refresh", { method: "POST", body: {} })).status, 401);
+
+      const adminToken = await loginAs(info.username, info.password);
+
+      console.log("\n[11.2] 技术管理员读表：读到的是临时目录里那份，且校验结论一起回");
+      const listed = await request("/api/holidays", { token: adminToken });
+      equal("读表成功", listed.status, 200);
+      const years = yearsOf(listed.body);
+      equal("有数据的年份就是刚才写进去的那一年", years.map((item) => item.year), [goodYear]);
+      equal("那一年带了两天（放假 / 调休上班各一天）",
+        (years[0]?.days as Array<{ date: string; kind: string }> | undefined)?.map((day) => day.kind),
+        ["放假", "调休上班"]);
+      check("回里带了数据目录（救人一命：知道文件在哪就能手工改）",
+        String(view(listed.body).dir ?? "").includes("nexgenedu-holidays-"), String(view(listed.body).dir ?? ""));
+
+      /*
+       * 坏文件必须**显式报出来**：两条断言分别是"空 days 被拒绝"与"不是 JSON 被拒绝"。
+       * 这是这一节最要紧的一组 —— 静默少一年，排课就会照着错的日历走。
+       */
+      const errors = ((view(listed.body).errors ?? []) as unknown[]).map((item) => String(item));
+      equal("两个坏文件都被报出来（而不是当成没有假期）", errors.length, 2);
+      check("其中一条说的是「没有任何一天的数据」", errors.some((line) => line.includes("没有任何一天")), errors.join(" / "));
+      check("另一条说的是「不是合法 JSON」", errors.some((line) => line.includes("不是合法 JSON")), errors.join(" / "));
+
+      console.log("\n[11.3] 权限：普通教师能看、不能抓");
+      await request("/api/accounts", {
+        method: "POST",
+        token: adminToken,
+        body: { username: "节假日自检老师", password: "pw-holiday-a1", roles: ["普通教师"], teacherId, note: "" },
+      });
+      const teacherToken = await loginAs("节假日自检老师", "pw-holiday-a1");
+      equal("普通教师读节假日表：200（排课时要看哪天是假期）",
+        (await request("/api/holidays", { token: teacherToken })).status, 200);
+      const denied = await request("/api/holidays/refresh", { method: "POST", token: teacherToken, body: {} });
+      equal("普通教师抓取：403", denied.status, 403);
+      check("403 的文案说清了需要什么角色",
+        String(denied.body.error ?? "").includes("技术管理员"), String(denied.body.error ?? ""));
+
+      console.log("\n[11.4] 参数：年份写错回 400（而不是去抓一个不存在的年份）");
+      equal("年份超范围 400",
+        (await request("/api/holidays/refresh", { method: "POST", token: adminToken, body: { years: [20255] } })).status, 400);
+      equal("年份不是整数 400",
+        (await request("/api/holidays/refresh", { method: "POST", token: adminToken, body: { years: ["2026"] } })).status, 400);
+      /*
+       * 类型写错不许被当成"没给"：`years: "2026"` 若走成缺省值，就会悄悄变成
+       * "抓今年与明年"，而请求看起来还是成功的（与账号管理里那条纪律同一条）。
+       */
+      const wrongType = await request("/api/holidays/refresh", {
+        method: "POST",
+        token: adminToken,
+        body: { years: "2026" },
+      });
+      equal("years 不是数组 → 400（不当成没给）", wrongType.status, 400);
+      check("400 的文案点明了要数组", String(wrongType.body.error ?? "").includes("数组"), String(wrongType.body.error ?? ""));
+      equal("空数组 400",
+        (await request("/api/holidays/refresh", { method: "POST", token: adminToken, body: { years: [] } })).status, 400);
+      equal("一次超过 12 年 400",
+        (await request("/api/holidays/refresh", {
+          method: "POST",
+          token: adminToken,
+          body: { years: [2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022] },
+        })).status, 400);
+
+      console.log("\n[11.5] 抓取：**永远不会 500**，每年一个结局，且没通过校验就不写盘");
+      /*
+       * 这里刻意**不要求网络可用**：抓不到时服务端应当回 200 + 每年一个 `rejected`
+       * （把"连不上"当成一次可解释的结果），而不是 500 —— 那种失败在界面上只剩一句
+       * "服务器内部错误"，而人需要看到的是"哪个源没连上"。
+       * 2100 年两个来源都不会有数据，因此**无论有没有网都不会写盘**。
+       */
+      const refreshed = await request("/api/holidays/refresh", {
+        method: "POST",
+        token: adminToken,
+        body: { years: [2100] },
+      });
+      equal("抓取回 200（不是 500）", refreshed.status, 200);
+      const results = (refreshed.body.results ?? []) as Array<{ year: number; status: string; written: boolean }>;
+      equal("结果里就是那一年", results.map((item) => item.year), [2100]);
+      check("结局是「还没有公布」或「没通过校验」二者之一（取决于本机能不能连上那两个来源）",
+        results[0]?.status === "not-published" || results[0]?.status === "rejected", String(results[0]?.status));
+      check("没有写盘（结局不是 written，且下面那条确认文件真的不存在）",
+        results[0]?.status !== "written", String(results[0]?.status));
+      equal("临时目录里没有被写进 2100.json", existsSync(join(temp, "2100.json")), false);
+      equal("原来那一年还在（抓取没把已有数据弄丢）",
+        yearsOf(refreshed.body).map((item) => item.year), [goodYear]);
+    },
+    { env: { NEXGENEDU_HOLIDAY_DIR: temp } },
+  );
+} catch (cause) {
+  failures += 1;
+  console.error(`\n✗ 节假日表这一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
 }
 
 console.log(

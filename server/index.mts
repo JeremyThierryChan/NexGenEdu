@@ -59,6 +59,7 @@ import {
   allowedRolesForMethod,
   canAccess,
   groupOfMethod,
+  HOLIDAY_ACTION_ACCESS,
   isPlainTeacher,
   scopeForAccount,
   teacherScopeDenial,
@@ -84,6 +85,16 @@ import {
   type PricingConfig,
 } from "../lib/backend/pricing.ts";
 import { mergeSiteCourses, summarizeCourses } from "../lib/backend/courses.ts";
+import { holidayCoverage } from "../lib/backend/holidays.ts";
+import {
+  defaultHolidayYears,
+  holidaysDir,
+  HOLIDAY_SOURCES,
+  holidayYearError,
+  readAllHolidayYears,
+  refreshHolidayYear,
+  type HolidayRefreshOutcome,
+} from "./holidays.mts";
 
 const PORT = Number(process.env.PORT ?? 4000);
 
@@ -1501,6 +1512,209 @@ if (serverStore.read(SNAPSHOT_KEY) === null) {
 
 __useStoreForTesting(serverStore);
 
+/* ── 节假日表（`/api/holidays`：查看；`/api/holidays/refresh`：抓取并写入）────────── */
+
+/**
+ * 能"抓取节假日数据"的角色：**只有技术管理员**。
+ *
+ * 判定数据在 `lib/auth/roles.ts` 的 `HOLIDAY_ACTION_ACCESS["holidays.refresh"]`，
+ * 这里**不另写一份**（前端那颗按钮读的也是同一份 —— 两边不会各说一套）。
+ *
+ * 为什么写操作只给技术管理员：它抓的是**外部数据源**、写的是**服务端机器上的文件**，
+ * 属于运维动作而不是教务动作（招生与财务每天都在用系统，但不该有人顺手把假日表换掉）。
+ * 查看（GET）则登录即可 —— 招生老师排课时要看哪天是假期。
+ *
+ * `?? []` 不是多余的：动作名写错时解析结果必须是**空角色列表**（谁都进不来），
+ * 而不是"没有限制" —— 失败方向必须是关门的那一个。
+ */
+const HOLIDAYS_REFRESH_ROLES: readonly Role[] = HOLIDAY_ACTION_ACCESS["holidays.refresh"] ?? [];
+
+/**
+ * 这次抓取请求该不该放行：`null` = 放行；字符串 = 拒绝（403）。
+ *
+ * 与 `accountsRouteDenial` 同一套做法（复用 `canAccess` 与同一句文案形状），
+ * 理由也一样：节假日表**不是服务层方法**（它读写的是服务端机器上的文件、
+ * 还要走网络，浏览器里那份 `api` 做不了），所以不走 `permissionError` 那条路。
+ * 但"哪个角色能做"这件事仍然只由 `lib/auth/roles.ts` 的 `canAccess` 判，
+ * 不在这个文件里另写一套规则。
+ */
+function holidaysRefreshDenial(roles: readonly Role[]): string | null {
+  if (canAccess(roles, HOLIDAYS_REFRESH_ROLES)) return null;
+  return (
+    `你的角色（${roleText(roles)}）不能做这件事：抓取节假日数据。` +
+    `这件事需要：${HOLIDAYS_REFRESH_ROLES.join(" 或 ")}。` +
+    "分工见 docs/使用手册.md 的「谁能做什么」。"
+  );
+}
+
+/**
+ * 抓取结果给界面看的形状（`days` 不重复塞进来 —— 抓完会回一份最新的整表）。
+ *
+ * `status` 原样带过去，界面据此决定"显示成一条说明还是一条红色错误"：
+ * `not-published`（还没公布）是**正常情形**，不该画成红的 ——
+ * 每年 11 月之前它都会出现，画红了就是在训练人忽略红色。
+ */
+type HolidayRefreshView = {
+  year: number;
+  status: HolidayRefreshOutcome["status"];
+  file: string;
+  dayCount: number;
+  error: string;
+  verdict: { agree: boolean; blocking: string[]; notes: string[]; notPublished: boolean } | null;
+  sources: unknown[];
+};
+
+function holidayRefreshView(outcome: HolidayRefreshOutcome): HolidayRefreshView {
+  if (outcome.status === "written" || outcome.status === "checked") {
+    return {
+      year: outcome.year,
+      status: outcome.status,
+      file: outcome.file,
+      dayCount: outcome.value.days.length,
+      error: "",
+      verdict: outcome.value.verdict,
+      sources: outcome.value.sources,
+    };
+  }
+  return {
+    year: outcome.year,
+    status: outcome.status,
+    file: "",
+    dayCount: 0,
+    error: outcome.error,
+    verdict: outcome.verdict,
+    sources: outcome.sources,
+  };
+}
+
+/** 节假日表的完整形状（GET 与 POST 都回这一份，界面只需一套渲染）。 */
+function holidayTableView(): Record<string, unknown> {
+  const { years, errors } = readAllHolidayYears();
+  const today = new Date();
+  return {
+    dir: holidaysDir(),
+    years,
+    errors,
+    coverage: holidayCoverage(
+      years.map((year) => year.year),
+      today,
+    ),
+    sources: HOLIDAY_SOURCES.map((source) => {
+      const urls = source.urls(today.getFullYear());
+      return {
+        id: source.id,
+        label: source.label,
+        // 主地址（实际会用第一个成功的；界面把备选数量也说出来，见 `mirrorCount`）
+        url: urls[0] ?? "",
+        mirrorCount: Math.max(0, urls.length - 1),
+      };
+    }),
+  };
+}
+
+/**
+ * 后台「节假日」页的两条路由。
+ *
+ *   1. `GET /api/holidays` —— 读表（登录即可）。**不碰数据库、不碰网络**：
+ *      它只读 `data/holidays/*.json`，因此后端断网时这一页照样打得开
+ *      （这很重要：查一张已经抓下来的表不该依赖外网）。
+ *   2. `POST /api/holidays/refresh` —— 抓两个来源、交叉校验、一致才写盘（技术管理员）。
+ *
+ * ## 为什么"抓取"不是 `/api/call` 里的一个方法
+ *
+ * 与账号管理同一个理由（见上面那一段）：`lib/backend/api.ts` 在**浏览器里也会跑**，
+ * 在那里放一个"抓外网并写服务端文件"的方法，要么在浏览器里必然失败，
+ * 要么被实现成一个假的成功 —— 而契约自检要求服务层每个方法都在契约里，
+ * 于是契约里会出现一个"只有服务端才有意义"的方法。
+ *
+ * ## 返回值的一处刻意的取舍
+ *
+ * 抓取**总是回 200**（只要请求本身合法），每个年份的成败写在 `results` 里。
+ * 理由：`ok: false` 在这套接口里表示"这次调用本身不成"（参数错、没权限、服务端炸了），
+ * 而"2027 年的安排还没公布，所以这一年的数据抓不到"**不是错误**，是正常结果 ——
+ * 用 4xx/5xx 表示它，界面就只能显示一句红色错误，而人真正需要看到的是
+ * "哪一年缺、为什么缺"。参数写错仍然回 400（那是客户端把请求写错了）。
+ */
+async function handleHolidaysRoute(
+  db: Database.Database,
+  request: IncomingMessage,
+  response: ServerResponse,
+  session: Session,
+): Promise<void> {
+  const method = (request.method ?? "GET").toUpperCase();
+
+  if (method === "GET") {
+    send(response, 200, { ok: true, view: holidayTableView() });
+    return;
+  }
+
+  const denial = holidaysRefreshDenial(session.roles);
+  if (denial !== null) {
+    send(response, 403, { ok: false, error: denial });
+    return;
+  }
+
+  const body = await readBody(request);
+  /*
+   * 要抓哪些年：不给就抓"今年 + 明年"（`defaultHolidayYears`，与界面上那颗按钮一致）。
+   * 年份逐个校验 —— 拿 `20255` 去抓会得到一个 404 页面并被当成"没有数据"，
+   * 那种失败方式最误导人（看起来像"这一年还没公布"）。
+   */
+  /*
+   * 类型写错（例如 `years: "2026"`）**一律 400**，不当成"没给"。
+   * 这条纪律与账号管理里那条一模一样：把写错的字段当成缺省值，会让"我要抓 2026"
+   * 悄悄变成"抓今年与明年"，而请求看起来是成功的 —— 那种失败最难查。
+   */
+  if (body.years !== undefined && !Array.isArray(body.years)) {
+    send(response, 400, {
+      ok: false,
+      error: `years 必须是一个数组（收到的是 ${typeof body.years}）。`,
+    });
+    return;
+  }
+  const rawYears = Array.isArray(body.years) ? body.years : defaultHolidayYears();
+  const years: number[] = [];
+  for (const item of rawYears) {
+    const year = typeof item === "number" ? item : Number.NaN;
+    const problem = holidayYearError(year);
+    if (problem !== null) {
+      send(response, 400, { ok: false, error: `要抓的年份不对：${problem}` });
+      return;
+    }
+    years.push(year);
+  }
+  if (years.length === 0) {
+    send(response, 400, { ok: false, error: "没有指定要抓哪一年。" });
+    return;
+  }
+  if (years.length > 12) {
+    send(response, 400, { ok: false, error: `一次最多抓 12 年（给了 ${years.length} 年）。` });
+    return;
+  }
+
+  const results: HolidayRefreshView[] = [];
+  for (const year of years) {
+    results.push(holidayRefreshView(await refreshHolidayYear(year)));
+  }
+
+  const written = results.filter((item) => item.status === "written").map((item) => item.year);
+  if (written.length > 0) {
+    /*
+     * 写一条操作日志：这张表会影响排课与家长沟通，事后要说得清"哪一年是什么时候导进来的"。
+     * 操作人由会话决定（`requireAuth` 每个请求开头设过 `currentOperator`），
+     * 因此这里不传、也传不了 —— 与 `/api/call` 的纪律一致。
+     */
+    writeLog(db, {
+      entity: "holidays",
+      action: "刷新",
+      targetId: written.join(","),
+      summary: `抓取节假日并写入：${written.join("、")} 年`,
+    });
+  }
+
+  send(response, 200, { ok: true, results, view: holidayTableView() });
+}
+
 /* ── 权限闸门（第 7 步：按角色拦接口）──────────────────────────────────── */
 
 /**
@@ -1678,6 +1892,17 @@ const REST_CONTRACT_METHODS: ReadonlyArray<{
   { http: "POST", pattern: /^\/api\/accounts$/, contract: null, note: "新建账号（技术管理员；路由内判定）" },
   { http: "PATCH", pattern: /^\/api\/accounts$/, contract: null, note: "改账号（技术管理员；路由内判定）" },
   { http: "DELETE", pattern: /^\/api\/accounts$/, contract: null, note: "删账号（技术管理员；路由内判定）" },
+
+  /*
+   * 节假日表（`/api/holidays`）：**登录即可过这道闸门**，抓取那条的角色判定在路由里
+   * （`holidaysRefreshDenial`，只有技术管理员）。不给契约方法名的理由与账号管理同一段
+   * （见上面）：它读写的是服务端机器上的文件 + 走外网，浏览器里那份 `api` 做不了。
+   *
+   * 与账号管理一样，**每条都得逐条列出来**：漏一条会落到下面的兜底（"没有登记归属"）
+   * 而被全拒 —— 那种 403 会让人以为是权限配错了，其实是路由表少了一行。
+   */
+  { http: "GET", pattern: /^\/api\/holidays$/, contract: null, note: "节假日表（登录即可；只读）" },
+  { http: "POST", pattern: /^\/api\/holidays\/refresh$/, contract: null, note: "抓取节假日（技术管理员；路由内判定）" },
 
   /* 读接口（ROUTES / READS）：按它读的东西对应的方法名翻译 */
   { http: "GET", pattern: /^\/api\/students$/, contract: "students.list", note: "学生列表" },
@@ -2097,6 +2322,33 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
        * 其余是服务端自己的问题 → 500。两者分开的理由与业务错误一样：
        * 400 表示"改一改再提交就行"，500 表示"这不是你的错，去看后端日志"。
        */
+      const syntax = cause instanceof SyntaxError;
+      send(response, syntax ? 400 : 500, {
+        ok: false,
+        error: syntax
+          ? `请求体不是合法 JSON：${cause instanceof Error ? cause.message : String(cause)}`
+          : cause instanceof Error
+            ? cause.message
+            : "服务器内部错误",
+      });
+    });
+    return;
+  }
+
+  /*
+   * ── 节假日表（查看 / 抓取）──────────────────────────────────────────────────
+   *
+   * 与账号管理同一处理由：排在统一闸门**之后**（未登录的 401 已经拦过），
+   * 角色判定交给 `handleHolidaysRoute`（抓取只有技术管理员，查看登录即可）。
+   * 它也是异步的（要读请求体、要走网络），因此一样用 `void … .catch` 收尾：
+   * 所有异常都要变成一个响应，绝不能让请求挂在那里。
+   */
+  if (url.pathname === "/api/holidays" || url.pathname === "/api/holidays/refresh") {
+    if (session === null) {
+      send(response, 401, { ok: false, error: "未登录或登录已过期，请先登录。" });
+      return;
+    }
+    void handleHolidaysRoute(db, request, response, session).catch((cause: unknown) => {
       const syntax = cause instanceof SyntaxError;
       send(response, syntax ? 400 : 500, {
         ok: false,

@@ -27,6 +27,12 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
   { href: "/admin/lessons", label: "课程安排", description: "课程列表、排课与冲突检测" },
   { href: "/admin/calendar", label: "日历", description: "按日 / 周查看课程安排" },
   {
+    href: "/admin/holidays",
+    label: "节假日",
+    description:
+      "法定节假日与调休上班日的年度表（两个公开来源逐日比对一致才写入）。只供查看与手动排课时参考 —— 排课不会自动跳过节假日",
+  },
+  {
     href: "/admin/timetable",
     label: "课表与占用",
     description: "按周查看教师课表与教室占用（谁什么时候上、哪间教室空着）",

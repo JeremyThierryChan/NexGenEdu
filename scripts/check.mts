@@ -63,6 +63,23 @@ import {
 } from "@/lib/admin/scroll-restore";
 import { dateKey } from "@/lib/backend/format";
 import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
+import {
+  checkHolidaySources,
+  combineHolidaySources,
+  holidayBlocks,
+  holidayCoverage,
+  holidayWeekday,
+  holidayWeekdayLabel,
+  isWeekendDate,
+  mergeHolidayDays,
+  parseAppleHolidays,
+  parseDateKey,
+  parseGovHolidays,
+  readHolidayYear,
+  summarizeHolidayYear,
+  toDateKey,
+  type HolidayDay,
+} from "@/lib/backend/holidays";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION } from "@/lib/backend/version";
 import { hasCoursePageContent } from "@/lib/backend/site-content";
@@ -98,6 +115,7 @@ import { ADMIN_NAV } from "@/lib/site/admin-nav";
 import {
   EMPTY_SCOPE_WARNING,
   GROUP_ACCESS,
+  HOLIDAY_ACTION_ACCESS,
   PAGE_ACCESS,
   ROLES,
   STUDENT_ACTION_ACCESS,
@@ -6169,6 +6187,405 @@ console.log("\n=== 15. 恢复型滚动：只许「把位置放回原处」，不
   ok("整页重载的记忆用的是纯函数判定", memorySource.includes("reloadRestoreTarget(") && memorySource.includes("restoreScrollY("));
   ok("后台外壳真的挂了 ScrollMemory（否则重载那一手没生效）",
     layoutSource.includes("<ScrollMemory"));
+}
+
+console.log("\n=== 16. 节假日表：两个来源逐日比对一致才写入 ===");
+
+/*
+ * 这一节守的是后台「节假日」页背后的那条链：
+ *
+ *   Apple 的 ics  →  解析（滤掉节气/固定节日的噪音）  ┐
+ *                                                     ├→ 交叉校验 → 一致才写 data/holidays/<年>.json
+ *   国务院公告口径的 JSON →  解析（只有安排日）        ┘
+ *
+ * 为什么值得这么多断言：这份数据一年只看一两次、没有人会去逐日核对，而它错了会直接影响
+ * 排课与家长沟通。所以这里用的是**真实抓下来的原文**（`scripts/fixtures/holidays/`，
+ * 就是那两个地址当时返回的内容），断言的是**实测数字**（2026 年 33 天放假 / 6 天调休，
+ * 最长连休 9 天…）—— 换个解析器实现、改一句过滤条件，这些数字都会动。
+ *
+ * 覆盖三类东西：
+ *   A/B  两个解析器（含噪音、CRLF、折行、DTEND 排他、坏数据必须拒绝）；
+ *   C    交叉校验的判定表（含"口径差异不算冲突"这条要紧的不对称规则）；
+ *   D/E  汇总与仓库里那几份数据的自洽（存下来的 == 解析出来的）；
+ *   F    接线（页面必须写明"不会自动改排课"、权限只有一份、外网只在服务端抓）。
+ */
+{
+  const fixtureUrl = new URL("./fixtures/holidays/", import.meta.url);
+  const fixture = (name: string) => readFileSync(new URL(name, fixtureUrl), "utf8");
+  const appleIcs = fixture("apple-cn_zh.ics");
+  const gov2024Text = fixture("gov-2024.json");
+  const gov2025Text = fixture("gov-2025.json");
+  const gov2026Text = fixture("gov-2026.json");
+  const gov2027Text = fixture("gov-2027-empty.json");
+
+  /** 解析并保证成功（失败时把原因一并塞进断言里，免得后面几十条断言读空数组读得莫名其妙）。 */
+  const parsed = <T,>(result: { ok: true; days: T[] } | { ok: false; error: string }): T[] => {
+    ok("解析成功（否则下面这一组断言读的是空数组）", result.ok, result.ok ? "" : result.error);
+    return result.ok ? result.days : [];
+  };
+
+  // ── A. Apple ics：真实响应（节选）───────────
+  const apple2026 = parseAppleHolidays(appleIcs, 2026);
+  const a26 = parsed(apple2026);
+  eq("2026 年解析出 39 天（放假 + 调休，实测值）", a26.length, 39);
+  eq("其中放假 33 天", a26.filter((day) => day.kind === "放假").length, 33);
+  eq("其中调休上班 6 天", a26.filter((day) => day.kind === "调休上班").length, 6);
+  eq(
+    "节气与固定节日的噪音一条都没混进来（小寒/立春/妇女节/儿童节/建党节/除夕）",
+    a26
+      .filter((day) => ["小寒", "立春", "妇女节", "儿童节", "建党节", "除夕"].includes(day.name))
+      .map((day) => day.name),
+    [],
+  );
+  ok(
+    "真实文件里有带 RRULE 的重复标记（噪音），而它们不会被当成放假",
+    appleIcs.includes("RRULE") && a26.length === 39,
+    "fixture 里必须留几条带 RRULE 的噪音事件，否则这条断言是空转的",
+  );
+  eq(
+    "DTEND 是排他的：春节那块 2/15–2/23 共 9 天（不含 2/24）",
+    a26.filter((day) => day.kind === "放假" && day.date >= "2026-02-15" && day.date <= "2026-02-24").length,
+    9,
+  );
+  ok(
+    "没有 DTEND 的事件按单日算（2026-02-14 是春节前调休上班）",
+    a26.some((day) => day.date === "2026-02-14" && day.kind === "调休上班"),
+  );
+  ok("节日名去掉了「（休）」「（班）」后缀", a26.every((day) => !day.name.includes("（")));
+  eq(
+    "同一天不会出现两条（2025-10-06 既是国庆又是中秋，属于 B 组那条断言）",
+    a26.length,
+    new Set(a26.map((day) => `${day.date}|${day.kind}`)).size,
+  );
+
+  // 折行：iCalendar 规定续行以空格开头（真实文件里没有被折的行，但格式允许，必须处理）
+  const folded =
+    "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nDTSTART;VALUE=\r\n DATE:20260103\r\nDTEND;VALUE=DATE:20260104\r\n" +
+    "SUMMARY;LANGUAGE=zh_CN:元旦（休）\r\nX-APPLE-SPECIAL-DAY:WORK-HOLIDAY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+  const foldedResult = parseAppleHolidays(folded, 2026);
+  eq(
+    "折行的属性（续行以空格开头）能正确展开",
+    foldedResult.ok ? foldedResult.days.map((day) => day.date) : [],
+    ["2026-01-03"],
+  );
+
+  // 必须拒绝的四类（宁可报错，也不要"少一天假"）
+  const rruleEvent =
+    "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nDTSTART;VALUE=DATE:20260215\r\nDTEND;VALUE=DATE:20260224\r\n" +
+    "SUMMARY;LANGUAGE=zh_CN:春节（休）\r\nRRULE:FREQ=YEARLY;COUNT=3\r\nX-APPLE-SPECIAL-DAY:WORK-HOLIDAY\r\n" +
+    "END:VEVENT\r\nEND:VCALENDAR\r\n";
+  const rruleResult = parseAppleHolidays(rruleEvent, 2026);
+  ok("带 RRULE 的放假事件必须拒绝（展开不了就不能装懂，那等于少一整段假期）", !rruleResult.ok);
+  ok("拒绝原因里点明了是 RRULE", !rruleResult.ok && rruleResult.error.includes("RRULE"));
+
+  const mismatchEvent =
+    "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nDTSTART;VALUE=DATE:20260101\r\nDTEND;VALUE=DATE:20260102\r\n" +
+    "SUMMARY;LANGUAGE=zh_CN:元旦（班）\r\nX-APPLE-SPECIAL-DAY:WORK-HOLIDAY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+  const mismatchResult = parseAppleHolidays(mismatchEvent, 2026);
+  ok("标记（放假日）与名字后缀（（班））对不上时拒绝，而不是挑一个信", !mismatchResult.ok);
+  ok(
+    "拒绝原因里说明了两个判据不一致",
+    !mismatchResult.ok && mismatchResult.error.includes("自相矛盾"),
+  );
+  ok("没有 DTSTART 的事件 → 拒绝", !parseAppleHolidays("BEGIN:VEVENT\r\nX-APPLE-SPECIAL-DAY:WORK-HOLIDAY\r\nEND:VEVENT\r\n", 2026).ok);
+  ok("根本不是 ics（没有任何事件）→ 拒绝", !parseAppleHolidays("<!doctype html><html>404</html>", 2026).ok);
+  eq(
+    "要哪一年就只回哪一年（同一份文件里 2024 与 2026 互不串）",
+    parsed(parseAppleHolidays(appleIcs, 2024)).every((day) => day.date.startsWith("2024")),
+    true,
+  );
+
+  // ── B. 国务院公告口径的 JSON ──────────────
+  const g24 = parsed(parseGovHolidays(gov2024Text, 2024));
+  const g25 = parsed(parseGovHolidays(gov2025Text, 2025));
+  const g26 = parsed(parseGovHolidays(gov2026Text, 2026));
+  eq("2026 年：国务院口径 39 天（与 Apple 同数）", g26.length, 39);
+  eq(
+    "2024 年：国务院口径 36 天、比 Apple 少 2 天（那是口径差异，见 C 组）",
+    [g24.length, parsed(parseAppleHolidays(appleIcs, 2024)).length],
+    [36, 38],
+  );
+  const g27 = parseGovHolidays(gov2027Text, 2027);
+  ok(
+    "「还没公布」（days 是空数组）不是错误，而是一句说明",
+    g27.ok && g27.days.length === 0 && g27.note.includes("还没有公布"),
+    g27.ok ? g27.note : g27.error,
+  );
+  ok("不是 JSON → 拒绝", !parseGovHolidays("<html>404</html>", 2026).ok);
+  ok("年份与本文件不符 → 拒绝", !parseGovHolidays(gov2026Text, 2025).ok);
+  ok(
+    "缺 isOffDay（不知道是放假还是调休）→ 拒绝",
+    !parseGovHolidays('{"year":2026,"days":[{"name":"元旦","date":"2026-01-01"}]}', 2026).ok,
+  );
+  ok(
+    "不存在的日子（2026-02-30）→ 拒绝",
+    !parseGovHolidays('{"year":2026,"days":[{"name":"元旦","date":"2026-02-30","isOffDay":true}]}', 2026).ok,
+  );
+  ok(
+    "没有节日名 → 拒绝",
+    !parseGovHolidays('{"year":2026,"days":[{"name":"","date":"2026-01-01","isOffDay":true}]}', 2026).ok,
+  );
+  ok(
+    "没有 days 数组（格式变了）→ 拒绝",
+    !parseGovHolidays('{"year":2026}', 2026).ok,
+  );
+
+  // ── C. 交叉校验：**不对称**的规则（口径差异 ≠ 数据打架）──
+  const apple24 = parsed(parseAppleHolidays(appleIcs, 2024));
+  const apple25 = parsed(parseAppleHolidays(appleIcs, 2025));
+  for (const [year, appleDays, govDays] of [
+    [2024, apple24, g24],
+    [2025, apple25, g25],
+    [2026, a26, g26],
+  ] as const) {
+    const verdict = checkHolidaySources(appleDays, govDays);
+    ok(`${year} 年两个真实来源能互证（允许写入）`, verdict.agree, verdict.blocking.join(" "));
+    ok(`${year} 年的结论里写了"两边一致"`, verdict.notes.some((note) => note.includes("两个来源一致")));
+  }
+  const v24 = checkHolidaySources(apple24, g24);
+  ok(
+    "2024 年：Apple 多标 6/08、6/09 但都是周末 → 判为口径差异，且把这两天点名说清",
+    v24.notes.some((note) => note.includes("2024-06-08") && note.includes("口径差异")),
+    v24.notes.join(" / "),
+  );
+
+  const empty = checkHolidaySources([], []);
+  ok("两个来源都空 = 还没公布（不是错误，也不是全年无假期）", !empty.agree && empty.notPublished);
+  const oneEmpty = checkHolidaySources(a26, []);
+  ok("只有一个来源空 = 那个源坏了（**不是**「还没公布」）", !oneEmpty.agree && !oneEmpty.notPublished);
+  ok(
+    "「源坏了」的理由里点明了「另一个源有数据」",
+    oneEmpty.blocking.some((line) => line.includes("另一个源有数据")),
+  );
+
+  const offDay = (date: string, name = "元旦"): HolidayDay => ({ date, name, kind: "放假" });
+  const workDay = (date: string, name = "元旦"): HolidayDay => ({ date, name, kind: "调休上班" });
+
+  const workMismatch = checkHolidaySources([workDay("2026-01-04")], [workDay("2026-01-05")]);
+  ok(
+    "调休上班日两边对不上 → 拒绝，并点出具体日期（这一项不允许有口径差异）",
+    !workMismatch.agree &&
+      workMismatch.blocking.some((line) => line.includes("2026-01-04") && line.includes("2026-01-05")),
+  );
+  const govExtra = checkHolidaySources([offDay("2026-01-01")], [offDay("2026-01-01"), offDay("2026-01-02")]);
+  ok(
+    "国务院列的放假日 Apple 缺了 → 拒绝并点名",
+    !govExtra.agree && govExtra.blocking.some((line) => line.includes("2026-01-02")),
+  );
+  // 2026-01-05 是周一：Apple 多出一个"工作日放假"就是真多
+  const appleExtraWeekday = checkHolidaySources([offDay("2026-01-01"), offDay("2026-01-05")], [offDay("2026-01-01")]);
+  ok(
+    "Apple 多出来的放假日不是周末 → 拒绝（这一条把「口径差异」与「数据错误」严格分开）",
+    !appleExtraWeekday.agree && appleExtraWeekday.blocking.some((line) => line.includes("2026-01-05")),
+  );
+  // 2026-01-03 是周六：多出来的是周末 → 允许，只记一句说明
+  const appleExtraWeekend = checkHolidaySources([offDay("2026-01-01"), offDay("2026-01-03")], [offDay("2026-01-01")]);
+  ok(
+    "Apple 多出来的放假日是周末 → 允许写入，并把差异记成说明",
+    appleExtraWeekend.agree && appleExtraWeekend.notes.some((note) => note.includes("2026-01-03")),
+  );
+  const contradictory = checkHolidaySources([offDay("2026-01-01"), workDay("2026-01-01")], [offDay("2026-01-01"), workDay("2026-01-01")]);
+  ok(
+    "同一天既放假又调休上班（自相矛盾）→ 拒绝",
+    !contradictory.agree && contradictory.blocking.some((line) => line.includes("既算放假又算调休上班")),
+  );
+
+  /*
+   * 用户可见的文案纪律：`blocking` / `notes` / 解析错误都会被后台界面**当纯文本**显示
+   * （`app/admin/(dashboard)/holidays/page.tsx` 里没有 markdown 渲染），
+   * 所以里面出现 `**` 就会原样显示成星号 —— 这一条是在实现时真犯过两次的错。
+   */
+  const messages = [
+    empty, oneEmpty, workMismatch, govExtra, appleExtraWeekday, appleExtraWeekend, contradictory, v24,
+  ].flatMap((verdict) => [...verdict.blocking, ...verdict.notes]);
+  const parseMessages = [
+    rruleResult,
+    mismatchResult,
+    parseAppleHolidays("<!doctype html>", 2026),
+    parseGovHolidays("<html>", 2026),
+    parseGovHolidays(gov2026Text, 2025),
+    parseGovHolidays('{"year":2026,"days":[{"name":"元旦","date":"2026-01-01"}]}', 2026),
+    parseGovHolidays('{"year":2026}', 2026),
+    g27,
+  ].flatMap((result) => (result.ok ? [result.note] : [result.error]));
+  eq(
+    "校验结论与错误文案里没有 markdown 星号（界面按纯文本显示它们）",
+    [...messages, ...parseMessages].filter((line) => line.includes("**")),
+    [],
+  );
+
+  // ── D. 汇总：一天一条、连休块不重叠 ──────────
+  const s26 = summarizeHolidayYear(a26);
+  eq("2026 年最长连休 9 天", s26.longestOff, 9);
+  eq("2026 年放假连休块 7 段（元旦 / 春节 / 清明 / 劳动 / 端午 / 中秋 / 国庆）", s26.offBlocks.length, 7);
+  eq("2026 年调休上班是 6 个单日", s26.workBlocks.length, 6);
+  eq(
+    "连休块的天数之和 = 放假日数（块与天对得上）",
+    s26.offBlocks.reduce((total, block) => total + block.days, 0),
+    s26.offDays,
+  );
+
+  const s25 = summarizeHolidayYear(apple25);
+  eq("2025 年放假 28 天（不是 29：10/06 只是一个日子）", s25.offDays, 28);
+  eq("2025 年最长连休 8 天（国庆 + 中秋连在一起）", s25.longestOff, 8);
+  eq(
+    "2025-10-06 只出现一条，名字是「国庆节、中秋节」（同一天两个节日要合起来）",
+    apple25.filter((day) => day.date === "2025-10-06").map((day) => day.name),
+    ["国庆节、中秋节"],
+  );
+  const s25Block = s25.offBlocks.find((block) => block.from === "2025-10-01");
+  eq(
+    "2025 年国庆那一块是一段 8 天连休、带两个节日名（不是两段重叠的块）",
+    s25Block === undefined ? null : [s25Block.to, s25Block.days, s25Block.names],
+    ["2025-10-08", 8, ["国庆节", "中秋节"]],
+  );
+  for (const [year, summary] of [
+    [2024, summarizeHolidayYear(apple24)],
+    [2025, s25],
+    [2026, s26],
+  ] as const) {
+    let overlapping = 0;
+    for (let i = 0; i < summary.offBlocks.length; i += 1) {
+      for (let j = i + 1; j < summary.offBlocks.length; j += 1) {
+        const a = summary.offBlocks[i];
+        const b = summary.offBlocks[j];
+        if (a !== undefined && b !== undefined && a.to >= b.from && b.to >= a.from) overlapping += 1;
+      }
+    }
+    eq(`${year} 年的连休块两两不重叠（重叠会让"连休几天"变得不可信）`, overlapping, 0);
+  }
+  eq("隔了一天的两天不算一段连休", holidayBlocks([offDay("2026-01-01"), offDay("2026-01-03")]).length, 2);
+  eq(
+    "跨节的连休按类型合并、名字都带上",
+    holidayBlocks([offDay("2026-10-01", "国庆节"), offDay("2026-10-02", "国庆节、中秋节")]).map((block) => block.names),
+    [["国庆节", "中秋节"]],
+  );
+  eq(
+    "同一天出现两条（同一类型）时合并成一条",
+    mergeHolidayDays([offDay("2026-10-06", "国庆节"), offDay("2026-10-06", "中秋节")]).map((day) => day.name),
+    ["国庆节、中秋节"],
+  );
+  eq(
+    "两个来源合起来时，名字用第一个来源的（避免「清明、清明节」这种废话）",
+    combineHolidaySources([offDay("2026-04-04", "清明")], [offDay("2026-04-04", "清明节")]).map((day) => day.name),
+    ["清明"],
+  );
+  eq(
+    "第二个来源里多出来的日子会被补进来（校验放宽时必须有明确行为）",
+    combineHolidaySources([offDay("2026-01-01")], [offDay("2026-01-02")]).map((day) => day.date),
+    ["2026-01-01", "2026-01-02"],
+  );
+
+  const coverage = holidayCoverage([2024, 2025, 2026], new Date(2026, 5, 1));
+  eq("该有数据的年份 = 今年与明年", coverage.expected, [2026, 2027]);
+  eq("其中没有数据的年份就是缺的那一个", coverage.missing, [2027]);
+  eq("有数据的年份按升序列出", coverage.available, [2024, 2025, 2026]);
+  eq("2026-02-15 是周日", holidayWeekdayLabel("2026-02-15"), "周日");
+  eq("2026-02-14 是周六（所以那天被调成上班日）", isWeekendDate("2026-02-14"), true);
+  eq("2026-02-16 是周一（工作日放假才是真放假）", isWeekendDate("2026-02-16"), false);
+  ok("坏日期不猜：解析不出来就回 null / 空串", holidayWeekday("2026-02-30") === null && holidayWeekdayLabel("随便") === "");
+  eq("日期与字符串互转是本地日历日（不经过 UTC）", toDateKey(parseDateKey("2026-02-15") ?? new Date()), "2026-02-15");
+
+  // ── E. 仓库里那几份数据本身 ────────────────
+  /*
+   * 这几条把"仓库里存下来的文件"与"从真实响应解析出来的结果"钉在一起：
+   * 谁改了写盘那一步（或者手改了文件），这里立刻报红。
+   */
+  for (const [year, appleDays] of [
+    [2024, apple24],
+    [2025, apple25],
+    [2026, a26],
+  ] as const) {
+    const file = `data/holidays/${year}.json`;
+    const stored = JSON.parse(readFileSync(new URL(`../${file}`, import.meta.url), "utf8")) as unknown;
+    const validated = readHolidayYear(stored, year);
+    ok(`${file} 通过校验（读盘校验不许放行坏数据）`, validated.ok, validated.ok ? "" : validated.error);
+    const value = validated.ok ? validated.value : null;
+    ok(`${file} 里记着"两个来源一致"`, value?.verdict.agree === true);
+    eq(`${file} 的逐日表与从真实 Apple 响应解析出来的一模一样`, value?.days, appleDays);
+  }
+  const stored2026 = JSON.parse(readFileSync(new URL("../data/holidays/2026.json", import.meta.url), "utf8")) as Record<string, unknown>;
+  ok("文件里留了抓取时间与两个来源的地址、指纹（事后要说得清数据从哪来）", (() => {
+    const sources = stored2026.sources;
+    if (!Array.isArray(sources) || sources.length !== 2) return false;
+    return sources.every((item) => {
+      const source = item as Record<string, unknown>;
+      return typeof source.url === "string" && source.url.startsWith("https://") &&
+        typeof source.fingerprint === "string" && source.fingerprint.startsWith("sha256:");
+    });
+  })());
+
+  ok("年份与文件名不符 → 拒绝", !readHolidayYear({ ...stored2026, year: 2030 }, 2026).ok);
+  ok("空 days → 拒绝（空表比没有文件更容易骗人）", !readHolidayYear({ ...stored2026, days: [] }, 2026).ok);
+  ok("缺 fetchedAt → 拒绝", !readHolidayYear({ ...stored2026, fetchedAt: "" }, 2026).ok);
+  ok(
+    "认不出来的类型 → 拒绝",
+    !readHolidayYear({ ...stored2026, days: [{ date: "2026-01-01", name: "元旦", kind: "放假啊" }] }, 2026).ok,
+  );
+  ok(
+    "坏日期 → 拒绝",
+    !readHolidayYear({ ...stored2026, days: [{ date: "2026-13-01", name: "元旦", kind: "放假" }] }, 2026).ok,
+  );
+  ok("整个文件不是对象 → 拒绝", !readHolidayYear("2026", 2026).ok);
+
+  // ── F. 接线：页面、权限、路由、外网只在一处 ──
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+  const page = read("app/admin/(dashboard)/holidays/page.tsx");
+  ok(
+    "页面上必须写明「不会自动改排课」（否则会有人以为排课已经识别假期了）",
+    page.includes("这张表只供查看，不会自动改排课"),
+  );
+  ok("并且写明手动处理的口径（与使用手册、recurrence.ts 那几处一致）", page.includes("手动处理"));
+  ok(
+    "「调休与节假日请手动处理」那四处口径没有被这次改动悄悄改掉",
+    read("lib/backend/recurrence.ts").includes("不处理调休、节假日、寒暑假") &&
+      read("components/admin/LessonSeriesForm.tsx").includes("调休、节假日、寒暑假不自动跳过") &&
+      read("docs/使用手册.md").includes("调休、节假日、寒暑假不自动跳过") &&
+      read("docs/后台API约定.md").includes("不处理调休、节假日、寒暑假"),
+  );
+  ok("页面读的是 roles.ts 那一份权限（前后端不会各说一套）", page.includes("HOLIDAY_ACTION_ACCESS"));
+  ok(
+    "服务端也读 roles.ts 那一份，而不是自己写死角色",
+    read("server/index.mts").includes("HOLIDAY_ACTION_ACCESS"),
+  );
+  eq("页面权限与「读」这个动作的权限是同一个答案", PAGE_ACCESS["/admin/holidays"], HOLIDAY_ACTION_ACCESS["holidays.read"]);
+  eq("抓取只有技术管理员", HOLIDAY_ACTION_ACCESS["holidays.refresh"], ["技术管理员"]);
+  ok("导航里有入口（否则这一页只能靠手敲网址）", read("lib/site/admin-nav.ts").includes('"/admin/holidays"'));
+
+  const serverHolidays = read("server/holidays.mts");
+  ok("抓外网确实发生在服务端的这一个文件里", serverHolidays.includes("await fetch("));
+  ok(
+    "国务院那个源配了镜像链（raw.githubusercontent.com 实测 6 次里 4 次超时）",
+    serverHolidays.includes("cdn.jsdelivr.net") && serverHolidays.includes("fastly.jsdelivr.net") &&
+      serverHolidays.includes("raw.githubusercontent.com"),
+  );
+  ok("写盘是「先写临时文件再改名」（中途失败不会留下半截 JSON）", serverHolidays.includes("renameSync"));
+  ok("写盘前必须过交叉校验（拒绝写入的分支真的在）", serverHolidays.includes("if (!verdict.agree)"));
+
+  /*
+   * 前端源码里不许直接抓外网：这张表要走后端（浏览器抓那些地址会撞 CORS，
+   * 而且"谁在访问外网"应该只有一处）。扫描 `app/`、`components/`、`lib/` 下的源码，
+   * 只允许 fetch 相对后端的地址（`${base}` 那种），不许出现 `fetch("http…")`。
+   */
+  const frontendFiles: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(new URL(dir, rootUrl), { withFileTypes: true })) {
+      const next = `${dir}${entry.name}`;
+      if (entry.isDirectory()) {
+        if (!["node_modules", ".next", "out"].includes(entry.name)) walk(`${next}/`);
+        continue;
+      }
+      if (/\.(ts|tsx)$/.test(entry.name)) frontendFiles.push(next);
+    }
+  };
+  for (const dir of ["app/", "components/", "lib/"]) walk(dir);
+  const externalFetch = frontendFiles.filter((file) => /fetch\(\s*["'`]https?:/.test(read(file)));
+  eq(
+    `前端源码里没有直接抓外网的地方（扫了 ${frontendFiles.length} 个文件）`,
+    externalFetch,
+    [],
+  );
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
