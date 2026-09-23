@@ -7345,10 +7345,17 @@ console.log("\n=== 18. P1：账目与审计一致性 ===");
   ok("阈值只有一个来源（FOLLOWUP_RULES.lowLessons），概览与待跟进都从它取",
     threshold === 5 && overviewRow !== undefined && overviewRow.remainingLessons <= threshold);
 
-  // 已取消的课不算课次、不算课时，但要单列出来
+  /*
+   * 已取消的课不算课次、不算课时，但要单列出来。
+   *
+   * ⚠️ 这里刻意**不用 `Date.now() + 1 小时`**：23:00 之后跑自检时它落到**明天**，
+   * `api.today()` 自然数不到这一节 —— 断言就变成"取消前后都是 0"。
+   * 这类"只在深夜红"的用例比没有用例更糟（`check:both` 会因此整轮不过，而原因看不出来），
+   * 所以时间一律锚在**今天的固定钟点**上（`todayAt`）。
+   */
   const cancelled = await api.lessons.create({
     subject: "数学", form: "", teacherId: teacher.id, classroomId: "", studentIds: [],
-    startsAt: new Date(Date.now() + 3_600_000).toISOString(), durationMinutes: 90, status: "已排", note: "",
+    startsAt: todayAt(14), durationMinutes: 90, status: "已排", note: "",
   } as never);
   const beforeCancel = await api.today(new Date());
   await api.lessons.update(cancelled.id, { status: "已取消" } as never);
@@ -8848,11 +8855,11 @@ console.log("\n=== 29. 页面文案块进库（v22：品牌 / 首页 / 关于 / 
     contentPage.includes("SiteCopyEditor"));
 }
 
-console.log("\n=== 30. 课程类型：五张维度表（v23）===");
+console.log("\n=== 30. 课程类型：四张维度表（v23，v26 去掉「交付形态」）===");
 
 /*
  * 机构给的那份课程清单铺开有四百多条叶子，但它们是**五个维度的乘积**：
- * 学段 × 学科 / 项目 × 内容模块 × 班型 × 交付形态。这一节守四件事：
+ * 学段 × 学科 / 项目 × 内容模块 × 班型。这一节守四件事：
  *
  *   1. **种子自洽**：id 不重复、引用不悬空、名字不重名 —— 灌进去的那一份必须
  *      **立刻**能通过 `catalog.save` 的同一道闸门（否则机构打开后台第一眼就是一片红字）；
@@ -8870,19 +8877,18 @@ console.log("\n=== 30. 课程类型：五张维度表（v23）===");
   const seedSummary = catalogSeedSummary();
   eq("种子的规模与 catalogSeedSummary 一致",
     [seedCatalog.stages.length, seedCatalog.subjects.length, seedCatalog.modules.length,
-      seedCatalog.formats.length, seedCatalog.deliveries.length],
-    [seedSummary.stages, seedSummary.subjects, seedSummary.modules, seedSummary.formats, seedSummary.deliveries]);
+      seedCatalog.formats.length],
+    [seedSummary.stages, seedSummary.subjects, seedSummary.modules, seedSummary.formats]);
   ok(`种子规模就是机构清单那一份（${catalogSummary(seedCatalog)}）`,
     seedCatalog.stages.length === 5 && seedCatalog.formats.length === 5 &&
     seedCatalog.subjects.length > 30 && seedCatalog.modules.length > 80);
   const duplicatesOf = (ids: string[]): string[] => ids.filter((id, index) => ids.indexOf(id) !== index);
-  eq("五张表的 id 都不重复",
+  eq("四张表的 id 都不重复",
     [duplicatesOf(seedCatalog.stages.map((item) => item.id)).length,
       duplicatesOf(seedCatalog.subjects.map((item) => item.id)).length,
       duplicatesOf(seedCatalog.modules.map((item) => item.id)).length,
-      duplicatesOf(seedCatalog.formats.map((item) => item.id)).length,
-      duplicatesOf(seedCatalog.deliveries.map((item) => item.id)).length],
-    [0, 0, 0, 0, 0]);
+      duplicatesOf(seedCatalog.formats.map((item) => item.id)).length],
+    [0, 0, 0, 0]);
   eq("种子**自己就能过闸门**（否则后台打开第一眼是一片红字）", validateCatalog(seedCatalog), []);
   eq("班型就是报价里的「班级类型」（一件事不再有两套写法）",
     seedCatalog.formats.map((format) => format.name), pricing.classTypes.map((item) => item.name));
@@ -9000,9 +9006,6 @@ console.log("\n=== 30. 课程类型：五张维度表（v23）===");
   ok("班型重名被拒",
     problemsOf((draft) => draft.formats.push({ ...draft.formats[0]!, id: "fmt_另一个" }))
       .some((text) => text.includes("出现了两次")));
-  ok("交付形态重名被拒",
-    problemsOf((draft) => draft.deliveries.push({ ...draft.deliveries[0]!, id: "dlv_另一个" }))
-      .some((text) => text.includes("出现了两次")));
   ok("学段删空被拒",
     problemsOf((draft) => { draft.stages = []; }).some((text) => text.includes("学段至少")));
   ok("班型删空被拒",
@@ -9020,13 +9023,11 @@ console.log("\n=== 30. 课程类型：五张维度表（v23）===");
     stageIds: [catalogId("st", "研究生")],
   });
   fresh.formats.push({ id: "", name: "一对六", minSize: 6, maxSize: 6, mode: "系数", order: 9 });
-  fresh.deliveries.push({ id: "", name: "录播", schedulable: true, order: 9 });
   assignCatalogIds(fresh, catalogId);
   eq("新加的行按名字派生 id（模块带学科名，两个学科的同名模块才不会撞）",
-    [fresh.stages.at(-1)?.id, fresh.subjects.at(-1)?.id, fresh.modules.at(-1)?.id,
-      fresh.formats.at(-1)?.id, fresh.deliveries.at(-1)?.id],
+    [fresh.stages.at(-1)?.id, fresh.subjects.at(-1)?.id, fresh.modules.at(-1)?.id, fresh.formats.at(-1)?.id],
     [catalogId("st", "研究生"), catalogId("subj", "统计"), catalogId("mod", "统计·回归"),
-      catalogId("fmt", "一对六"), catalogId("dlv", "录播")]);
+      catalogId("fmt", "一对六")]);
   eq("补完 id 之后整份仍然通过校验", validateCatalog(fresh), []);
   const freshBefore = JSON.stringify(fresh);
   assignCatalogIds(fresh, catalogId);
@@ -9092,7 +9093,7 @@ console.log("\n=== 31. 开放矩阵：本机构开哪些组合（v24）===");
  * 维度表回答"可以有哪些维度"，组合表回答"本机构开哪些组合"。
  * 这一节守五件事：
  *
- *   1. **矩阵的形状**：行 = 学科 + 它的模块（含"不分模块"那一行），列 = 班型 × 交付形态，
+ *   1. **矩阵的形状**：行 = 学科 + 它的模块（含"不分模块"那一行），列 = 班型，
  *      分组（"外语等级考试"这种桶）**不出现在行里**；
  *   2. **组合的身份**：四个维度 id 拼出来的 id 是确定的（可重复、不可能重复两行），
  *      而且**不按下标反解**（学科 / 模块 id 里本来就带 `·`）；
@@ -9115,8 +9116,8 @@ console.log("\n=== 31. 开放矩阵：本机构开哪些组合（v24）===");
     matrix.rows.length ===
       seedCatalogForOffers.subjects.filter((subject) => !groupIds.has(subject.id)).length +
         seedCatalogForOffers.modules.length);
-  eq("列 = 班型 × 交付形态（5 × 5 = 25）", matrix.columns.length,
-    seedCatalogForOffers.formats.length * seedCatalogForOffers.deliveries.length);
+  eq("列 = 班型（就是课程类型里那一份）", matrix.columns.length,
+    seedCatalogForOffers.formats.length);
   eq("分组（桶）自己不出现在行里",
     matrix.rows.some((row) => row.subjectName === "外语等级考试"), false);
   ok("而分组下面的学科在（雅思 / 日语…）",
@@ -9137,17 +9138,16 @@ console.log("\n=== 31. 开放矩阵：本机构开哪些组合（v24）===");
     subjectId: catalogId("subj", "语文"),
     moduleId: catalogId("mod", "语文·客观题"),
     formatId: catalogId("fmt", "一对一"),
-    deliveryId: catalogId("dlv", "网课"),
   };
   eq("组合 id 由四个维度 id 拼出来（确定性）",
     offerId(oneKey),
-    `off_${oneKey.subjectId}·${oneKey.moduleId}·${oneKey.formatId}·${oneKey.deliveryId}`);
+    `off_${oneKey.subjectId}·${oneKey.moduleId}·${oneKey.formatId}`);
   eq("同一个组合问两次得到同一个 id", offerId(oneKey), offerId({ ...oneKey }));
   ok("键里带 `·` 也不影响身份（模块 id 自己就带 `·`）",
     offerId(oneKey).includes("mod_语文·客观题"));
   eq("空模块（不分模块）也是合法的一条",
     offerId({ ...oneKey, moduleId: "" }),
-    `off_${oneKey.subjectId}··${oneKey.formatId}·${oneKey.deliveryId}`);
+    `off_${oneKey.subjectId}··${oneKey.formatId}`);
 
   // ③ 三种状态与批量勾选
   const now = "2026-09-23T00:00:00.000Z";
@@ -9159,7 +9159,7 @@ console.log("\n=== 31. 开放矩阵：本机构开哪些组合（v24）===");
   const openedIndex = offersByKey(opened);
   eq("解析：开的算 open", resolveOffer(openedIndex, oneKey), "open");
   eq("解析：没设过的算 unset",
-    resolveOffer(openedIndex, { ...oneKey, deliveryId: catalogId("dlv", "托管") }), "unset");
+    resolveOffer(openedIndex, { ...oneKey, formatId: catalogId("fmt", "班课（9-20）") }), "unset");
 
   const withClosed = applyDecision(opened, [oneKey], "closed", now);
   eq("改成明确关闭之后不是删行，而是 open: false",
@@ -9201,8 +9201,6 @@ console.log("\n=== 31. 开放矩阵：本机构开哪些组合（v24）===");
     badOffers((rows) => { rows[0]!.subjectId = "subj_不存在"; }).some((t) => t.includes("不存在的学科")));
   ok("引用不存在的班型被拒",
     badOffers((rows) => { rows[0]!.formatId = "fmt_不存在"; }).some((t) => t.includes("不存在的班型")));
-  ok("引用不存在的交付形态被拒",
-    badOffers((rows) => { rows[0]!.deliveryId = "dlv_不存在"; }).some((t) => t.includes("不存在的交付形态")));
   ok("引用不存在的内容模块被拒",
     badOffers((rows) => { rows[0]!.moduleId = "mod_不存在"; }).some((t) => t.includes("不存在的内容模块")));
   ok("模块挂在别的学科下被拒（模块不跨学科复用）", (() => {
@@ -9468,12 +9466,10 @@ console.log("\n=== 33. 删一个维度之后，引用它的组合怎么办（死
     targetFormat !== undefined && keepFormat !== undefined);
 
   const subject = catalogForDrop.subjects.find((item) => item.parentIds.length === 0);
-  const delivery = catalogForDrop.deliveries[0];
   const affectedKey = {
     subjectId: subject?.id ?? "",
     moduleId: "",
     formatId: targetFormat?.id ?? "",
-    deliveryId: delivery?.id ?? "",
   };
   const keptKey = { ...affectedKey, formatId: keepFormat?.id ?? "" };
   const fresh = applyDecision([], [affectedKey, keptKey], "open", "2026-09-23T00:00:00.000Z");
@@ -9519,6 +9515,109 @@ console.log("\n=== 33. 删一个维度之后，引用它的组合怎么办（死
   await api.catalog.save(restored);
   const reopened = await api.offers.save(applyDecision(await api.offers.list(), [affectedKey], "open", "2026-09-23T00:00:00.000Z"));
   eq("把班型加回来之后，那条组合可以重新勾上", reopened.length, 2);
+}
+
+/**
+ * **今天**的某个钟点（本地时间，ISO 字符串）。
+ *
+ * 自检里凡是要"这一天的课"的夹具都用它，而不用 `Date.now() ± 若干小时`：
+ * 后者在深夜（或凌晨）会跨到另一天，于是断言变成"数不到这一节"，
+ * 而失败信息完全看不出跟时间有关。
+ */
+function todayAt(hour: number, minute = 0): string {
+  const at = new Date();
+  at.setHours(hour, minute, 0, 0);
+  return at.toISOString();
+}
+
+console.log("\n=== 34. 删掉「交付形态」这一维（v26，机构更正）===");
+
+/*
+ * 我第一版把「面授 / 网课 / 网课+答疑 / 托管 / 全日托管」做成了第五个维度"交付形态"
+ * （"一门课可以面授，也可以网课+答疑"）。机构的口径是：**不对** ——
+ * 「网课」「网课+答疑」「网课+一对一针对性答疑」「小学托管」…是**独立的项目**，
+ * 与小学 / 初中 / 高中那些按学段的课程**没有任何组合关系**。
+ *
+ * 那一维的害处不只是"多记了一遍"：它凭空造出了"小学语文 × 网课"这种机构根本不卖的组合，
+ * 而矩阵是一张**要机构照着勾**的表 —— 多出来的格子会让人以为那些组合是存在的。
+ *
+ * 这一节钉三件事：
+ *   1. **维度只剩四个**（模型里、种子里、矩阵列里都没有"交付形态"）；
+ *   2. **那些项目没有丢**：它们本来就在 `subjects` 里（`kind: "项目"`，挂在「不分班型项目」下）；
+ *   3. **老库能升上来**：v25 的库里带着 `deliveries` 与 `offers[].deliveryId`，
+ *      导入之后维度被抹掉、只在交付形态上不同的组合**合并成一条**（开放优先）。
+ */
+{
+  __useStoreForTesting(memory);
+
+  const seed = catalogFromSeed();
+  eq("维度表里没有 deliveries 这个字段", Object.hasOwn(seed, "deliveries"), false);
+  eq("维度表的四个字段就是学段 / 学科 / 模块 / 班型",
+    Object.keys(seed).sort(), ["formats", "modules", "seededAt", "stages", "subjects"].sort());
+  eq("矩阵的列里没有「网课」这种交付形态（只有班型）",
+    buildMatrix(seed).columns.filter((column) =>
+      ["网课", "网课+答疑", "面授", "托管", "全日托管"].includes(column.formatName)),
+    []);
+
+  // ② 那些项目还在，而且是"独立项目"
+  const projectNames = ["网课", "网课+答疑", "网课+一对一针对性答疑", "小学托管", "假期全日托管"];
+  const projects = seed.subjects.filter((item) => projectNames.includes(item.name));
+  eq("网课 / 托管 这些**还在**学科与项目里（5 条）", projects.length, projectNames.length);
+  eq("它们的类别都是「项目」", [...new Set(projects.map((item) => item.kind))], ["项目"]);
+  const groupId = catalogId("subj", "不分班型项目");
+  eq("它们挂在「不分班型项目」分组下",
+    [...new Set(projects.map((item) => item.parentIds.join("|")))], [groupId]);
+  ok("而它们**不**出现在矩阵的列里（列是班型）",
+    buildMatrix(seed).columns.every((column) => !projectNames.includes(column.formatName)));
+  ok("它们在「其他类型」那一栏里（机构清单就是这么放的）",
+    projects.every((item) => item.stageIds.includes(catalogId("st", "其他类型"))));
+
+  // ③ v25 老库升上来：抹掉维度、合并只在交付形态上不同的组合
+  const legacyDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    version: number;
+    catalog: Record<string, unknown>;
+    offers: unknown[];
+  };
+  legacyDb.version = 25;
+  legacyDb.catalog.deliveries = [
+    { id: "dlv_面授", name: "面授", schedulable: true, order: 1 },
+    { id: "dlv_网课", name: "网课", schedulable: true, order: 2 },
+  ];
+  const legacySubject = catalogId("subj", "语文");
+  legacyDb.offers = [
+    {
+      id: `off_${legacySubject}···dlv_面授`, subjectId: legacySubject, moduleId: "",
+      formatId: catalogId("fmt", "一对一"), deliveryId: "dlv_面授", open: true, note: "寒暑假", updatedAt: "2026-09-01T00:00:00.000Z",
+    },
+    {
+      id: `off_${legacySubject}···dlv_网课`, subjectId: legacySubject, moduleId: "",
+      formatId: catalogId("fmt", "一对一"), deliveryId: "dlv_网课", open: false, note: "", updatedAt: "2026-09-02T00:00:00.000Z",
+    },
+  ];
+  eq("v25 老库（带交付形态与 deliveryId 的组合）能升级导入",
+    (await api.importDatabase(JSON.stringify(legacyDb))).ok, true);
+  const afterMigration = await api.exportDatabase();
+  eq("升级后版本号是当前版本", afterMigration.version, CURRENT_VERSION);
+  eq("库里那份维度表也没有 deliveries 了",
+    Object.hasOwn(afterMigration.catalog as unknown as object, "deliveries"), false);
+  eq("只在交付形态上不同的两条组合**合并成一条**", afterMigration.offers.length, 1);
+  eq("合并后的 id 是新的（三个维度）",
+    afterMigration.offers[0]?.id, `off_${legacySubject}··${catalogId("fmt", "一对一")}`);
+  eq("合并规则：有一条开放就算开放（那是更强的表态）", afterMigration.offers[0]?.open, true);
+  eq("备注保留非空的那一条", afterMigration.offers[0]?.note, "寒暑假");
+  eq("时间取较晚的那个（可重复执行、结果确定）",
+    afterMigration.offers[0]?.updatedAt, "2026-09-02T00:00:00.000Z");
+  eq("合并之后组合表能直接通过校验", validateOffers(afterMigration.offers, afterMigration.catalog), []);
+  eq("而且能再次保存（不是「导入进来了却谁也存不回去」）",
+    (await api.offers.save(afterMigration.offers)).length, 1);
+
+  // ④ 页面口径：课程类型页不该再有「交付形态」页签
+  const catalogPage = readFileSync(
+    new URL("../app/admin/(dashboard)/catalog/page.tsx", import.meta.url), "utf8");
+  ok("「课程类型」页没有「交付形态」页签了",
+    !catalogPage.includes('key: "deliveries"') && !catalogPage.includes('tab === "deliveries"'));
+  ok("而且页面上写明了那些是独立项目（避免以后又有人把它加回来）",
+    catalogPage.includes("独立的项目"));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

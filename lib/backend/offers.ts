@@ -9,31 +9,39 @@
  *   1. `api.offers.save` 的闸门（`validateOffers`）；
  *   2. 后台「开放矩阵」页（`buildMatrix` / `applyDecision` 的批量动作）；
  *   3. AI 排课与诊断推荐（`resolveOffer`：这条组合到底开不开）。
+ *
+ * ## 组合的三个维度（v26 更正）
+ *
+ * 一条组合 = **学科 × 内容模块 × 班型**（例如「语文 · 客观题 · 一对一」）。
+ *
+ * 曾经有过第四个维度"交付形态"（面授 / 网课 / 网课+答疑 / 托管 / 全日托管），那是错的：
+ * 机构的口径是「网课」「网课+答疑」「网课+一对一针对性答疑」「小学托管」…全都是**独立的项目**
+ * （它们本来就在 `catalog.subjects` 里，`kind: "项目"`），与按学段的课程**没有组合关系**。
+ * 那个维度既造出了"小学语文 × 网课"这种不存在的组合，又把同一件事记了两遍。
  */
 import type { Catalog, CatalogOffer } from "./types";
 
-/** 一条组合的四个维度取值（`moduleId` 空串＝不细分到模块）。 */
+/** 一条组合的三个维度取值（`moduleId` 空串＝不细分到模块）。 */
 export type OfferKey = {
   subjectId: string;
   moduleId: string;
   formatId: string;
-  deliveryId: string;
 };
 
 /**
- * 组合的**确定性 id**：四个维度 id 拼起来。
+ * 组合的**确定性 id**：三个维度 id 拼起来。
  *
- * 与课程类型的种子同一个理由（可重复执行、不会造出重复行）：组合的身份就是那四个 id，
+ * 与课程类型的种子同一个理由（可重复执行、不会造出重复行）：组合的身份就是那三个 id，
  * 因此"同一条组合两行"在结构上不可能出现，批量勾选也不必先查重。
  * 维度**改名不影响它**（id 不变）；删掉一个维度行会让引用它的组合变成悬空，
  * 由 `validateOffers` 拦下（那时机构要在矩阵里重新勾）。
  *
  * ⚠️ 这个字符串**只当键用，绝不反向解析**：学科 / 模块的 id 里本来就带 `·`
- * （`mod_语文·客观题`），按下标切分必然切错。要拿四个取值就从结构体上拿
+ * （`mod_语文·客观题`），按下标切分必然切错。要拿三个取值就从结构体上拿
  * （`OfferRow` / `OfferColumn` 里都存着）。
  */
 export function offerKey(key: OfferKey): string {
-  return `${key.subjectId}·${key.moduleId}·${key.formatId}·${key.deliveryId}`;
+  return `${key.subjectId}·${key.moduleId}·${key.formatId}`;
 }
 
 /** 组合行的 id（`off_` + 键）。 */
@@ -63,13 +71,13 @@ export function resolveOffer(index: Map<string, CatalogOffer>, key: OfferKey): O
 /*
  * ── 矩阵 ─────────────────────────────────────────────────────────────────────
  *
- * 组合有四个维度，而表格只有两维，因此矩阵的形状是**定下来的**：
+ * 组合有三个维度，而表格只有两维，因此矩阵的形状是**定下来的**：
  *
  *   行 = 学科（含它自己的模块；`moduleId` 空串那一行表示"不细分模块"）
- *   列 = 班型 × 交付形态
+ *   列 = 班型
  *
- * 不把班型与交付折成一个下拉（"先选班型再看交付"）：机构勾的时候心里想的是
- * "这门课这个班型能不能上网课"，两维同屏才看得出规律，也才好按列整片勾。
+ * 学段不进组合键，只用来筛行（学段 + 学科 + 模块已经唯一确定一门课，
+ * 因为模块各自挂在学科下：小学语文的一年级 ≠ 初中语文的一年级）。
  */
 
 /** 矩阵的一行：一个学科的一个模块（或"不细分模块"那一行）。 */
@@ -86,12 +94,10 @@ export type OfferRow = {
   groupId: string;
 };
 
-/** 矩阵的一列：一个班型 × 一种交付形态。 */
+/** 矩阵的一列：一个班型。 */
 export type OfferColumn = {
   formatId: string;
   formatName: string;
-  deliveryId: string;
-  deliveryName: string;
 };
 
 export type OfferMatrix = { rows: OfferRow[]; columns: OfferColumn[] };
@@ -104,8 +110,7 @@ export type OfferMatrix = { rows: OfferRow[]; columns: OfferColumn[] };
  *   1. **"不细分模块"是一行，不是一个缺省**：不指定模块的组合是合法的
  *      （"语文一对一"照样能开），诊断推荐才需要模块那一层。因此每个学科至少有这一行。
  *   2. **学段不进组合键**：同一条组合"同时在小学与初中开"在数据上是同一行 ——
- *      因为模块各自挂在学科下（小学语文的一年级 ≠ 初中语文的一年级），
- *      学段 + 学科 + 模块已经唯一确定了一门课。学段只用来**筛行**。
+ *      因为模块各自挂在学科下，学段 + 学科 + 模块已经唯一确定了一门课。学段只用来**筛行**。
  *   3. **分组不出现**：它是个桶（"外语等级考试"），不是一个能开课的学科。
  */
 export function buildMatrix(catalog: Catalog): OfferMatrix {
@@ -135,17 +140,10 @@ export function buildMatrix(catalog: Catalog): OfferMatrix {
     }
   }
 
-  const columns: OfferColumn[] = [];
-  for (const format of catalog.formats) {
-    for (const delivery of catalog.deliveries) {
-      columns.push({
-        formatId: format.id,
-        formatName: format.name,
-        deliveryId: delivery.id,
-        deliveryName: delivery.name,
-      });
-    }
-  }
+  const columns: OfferColumn[] = catalog.formats.map((format) => ({
+    formatId: format.id,
+    formatName: format.name,
+  }));
 
   return { rows, columns };
 }
@@ -176,17 +174,16 @@ export function applyDecision(
  * 校验整张组合表（`offers.save` 的闸门）。
  *
  * 规则与代价：
- *   - 四个引用**都必须指向存在的维度行**（悬空引用会让"这条组合到底开不开"两说：
+ *   - 三个引用**都必须指向存在的维度行**（悬空引用会让"这条组合到底开不开"两说：
  *     矩阵里它根本不显示，而解析时它又算"开放"）；
  *   - `moduleId` 必须属于那个 `subjectId`（跨学科挂会把 A 学科的模块算到 B 上）；
- *   - 同一条组合只能有一行（身份就是那四个 id，重复就是数据坏了）；
- *   - 行的 id 必须与四个 id 拼出来的那一份一致（对不上说明是手改过的行）。
+ *   - 同一条组合只能有一行（身份就是那三个 id，重复就是数据坏了）；
+ *   - 行的 id 必须与三个 id 拼出来的那一份一致（对不上说明是手改过的行）。
  */
 export function validateOffers(offers: readonly CatalogOffer[], catalog: Catalog): string[] {
   const problems: string[] = [];
   const subjectIds = new Set(catalog.subjects.map((item) => item.id));
   const formatIds = new Set(catalog.formats.map((item) => item.id));
-  const deliveryIds = new Set(catalog.deliveries.map((item) => item.id));
   const modules = new Map(catalog.modules.map((item) => [item.id, item] as const));
 
   const seen = new Set<string>();
@@ -196,7 +193,6 @@ export function validateOffers(offers: readonly CatalogOffer[], catalog: Catalog
 
     if (!subjectIds.has(offer.subjectId)) problems.push(`${label}引用了一个不存在的学科。`);
     if (!formatIds.has(offer.formatId)) problems.push(`${label}引用了一个不存在的班型。`);
-    if (!deliveryIds.has(offer.deliveryId)) problems.push(`${label}引用了一个不存在的交付形态。`);
 
     if (offer.moduleId !== "") {
       const item = modules.get(offer.moduleId);
@@ -212,7 +208,7 @@ export function validateOffers(offers: readonly CatalogOffer[], catalog: Catalog
 
     const expected = offerId(offer);
     if (offer.id.trim() !== "" && offer.id !== expected) {
-      problems.push(`${label}的 id 与它那四个维度对不上（矩阵会找不到这一行）。`);
+      problems.push(`${label}的 id 与它那三个维度对不上（矩阵会找不到这一行）。`);
     }
   }
 
@@ -226,7 +222,7 @@ export function offersSummary(offers: readonly CatalogOffer[]): string {
 }
 
 /**
- * **失效的组合**：引用了维度表里已经不存在的行（学科 / 模块 / 班型 / 交付形态）。
+ * **失效的组合**：引用了维度表里已经不存在的行（学科 / 模块 / 班型）。
  *
  * 什么时候会剩下这些行：机构在「课程类型」页删掉一个维度（`catalog.save` 会顺手清掉
  * 受影响的组合并把条数写进日志），以及**手改过的导出 / 半份恢复**这类从外部进来的数据。
@@ -239,35 +235,26 @@ export function danglingOffers(offers: readonly CatalogOffer[], catalog: Catalog
   const subjectIds = new Set(catalog.subjects.map((item) => item.id));
   const moduleIds = new Set(catalog.modules.map((item) => item.id));
   const formatIds = new Set(catalog.formats.map((item) => item.id));
-  const deliveryIds = new Set(catalog.deliveries.map((item) => item.id));
 
   return offers.filter(
     (offer) =>
       !subjectIds.has(offer.subjectId) ||
       (offer.moduleId !== "" && !moduleIds.has(offer.moduleId)) ||
-      !formatIds.has(offer.formatId) ||
-      !deliveryIds.has(offer.deliveryId),
+      !formatIds.has(offer.formatId),
   );
 }
 
 /**
- * 一条维度行被删 / 改名之后，组合表要跟着做什么（给后台的"删除前警告"用）。
+ * 一条维度行被删 / 改名之前，先看看有多少条组合引用它（后台的"删除前警告"用）。
  *
- * 返回引用它的组合（含条数）：矩阵里那些格子会变成悬空，`offers.save` 会拦住它们，
+ * 返回引用它的组合：矩阵里那些格子会变成悬空（`catalog.save` 会连带清掉它们），
  * 因此后台在删维度之前要能告诉人"这一删会牵动几条组合"。
  */
 export function offersOfDimension(
   offers: readonly CatalogOffer[],
-  dimension: "subject" | "module" | "format" | "delivery",
+  dimension: "subject" | "module" | "format",
   id: string,
 ): CatalogOffer[] {
-  const field =
-    dimension === "subject"
-      ? "subjectId"
-      : dimension === "module"
-        ? "moduleId"
-        : dimension === "format"
-          ? "formatId"
-          : "deliveryId";
+  const field = dimension === "subject" ? "subjectId" : dimension === "module" ? "moduleId" : "formatId";
   return offers.filter((offer) => offer[field] === id);
 }

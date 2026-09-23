@@ -3,7 +3,7 @@ import { createEmptyDatabase } from "./initial";
 import { catalogFromSeed, catalogSeedSummary } from "./catalog-seed";
 import { catalogSummary, validateCatalog } from "./catalog";
 import { syncClassTypes } from "./class-types";
-import { danglingOffers, offerId, offersSummary, validateOffers } from "./offers";
+import { danglingOffers, offerId, offersSummary, validateOffers, type OfferKey } from "./offers";
 import {
   emptySiteContent,
   siteContentFromContent,
@@ -148,7 +148,6 @@ import type {
   CatalogSubject,
   CatalogModule,
   CatalogFormat,
-  CatalogDelivery,
   CatalogOffer,
   SiteCopyBlock,
   SiteCopyGroup,
@@ -963,6 +962,55 @@ function migrate(db: Database): Database | null {
     db.version = 25;
   }
 
+  if (db.version === 25) {
+    /*
+     * v25 → v26：**删掉"交付形态"这一维**（机构更正）。
+     *
+     * 那一维（面授 / 网课 / 网课+答疑 / 托管 / 全日托管）是我加的，机构的口径是：
+     * 「网课」「网课+答疑」「网课+一对一针对性答疑」「小学托管」…都是**独立的项目**，
+     * 与按学段的课程没有组合关系 —— 它们本来就在 `subjects` 里（`kind: "项目"`）。
+     *
+     * 这一步做两件事：维度表里去掉 `deliveries`；组合表的 `deliveryId` 去掉并**合并重复**
+     * （原来"语文·一对一·网课"与"语文·一对一·面授"是两条，现在它们是同一条）。
+     * 合并规则：**有一条开放就算开放**（"我们开这条组合"是更强的表态），
+     * 备注取第一个非空的，时间取较晚的那个 —— 确定性、可重复执行。
+     */
+    const { deliveries: _dropped, ...restCatalog } = db.catalog as Catalog & {
+      deliveries?: unknown;
+    };
+    void _dropped;
+    db.catalog = restCatalog;
+
+    const merged = new Map<string, CatalogOffer>();
+    for (const offer of db.offers as Array<CatalogOffer & { deliveryId?: string }>) {
+      const key: OfferKey = {
+        subjectId: offer.subjectId,
+        moduleId: offer.moduleId,
+        formatId: offer.formatId,
+      };
+      const id = offerId(key);
+      const previous = merged.get(id);
+      if (previous === undefined) {
+        merged.set(id, {
+          id,
+          ...key,
+          open: offer.open,
+          note: offer.note ?? "",
+          updatedAt: offer.updatedAt ?? "",
+        });
+        continue;
+      }
+      merged.set(id, {
+        ...previous,
+        open: previous.open || offer.open,
+        note: previous.note !== "" ? previous.note : (offer.note ?? ""),
+        updatedAt: previous.updatedAt > (offer.updatedAt ?? "") ? previous.updatedAt : (offer.updatedAt ?? ""),
+      });
+    }
+    db.offers = [...merged.values()];
+    db.version = 26;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -996,6 +1044,13 @@ function migrate(db: Database): Database | null {
    * 缺了就从种子补一份（确定性 id，不会与人工改过的行混在一起）。
    */
   if (db.catalog === undefined || !Array.isArray(db.catalog.stages)) db.catalog = catalogFromSeed();
+
+  /*
+   * 收尾归一：维度表里**不该再有 `deliveries`**（v26 删掉的那一维）。
+   * 一份"自称 v26"却还带着它的文件（手改过的导出、半份恢复、更早版本导出的 JSON）
+   * 会让矩阵多出一整片不存在的列，而页面不会报错 —— 因此在这一层统一抹掉。
+   */
+  delete (db.catalog as Catalog & { deliveries?: unknown }).deliveries;
 
   /*
    * 收尾归一：**组合表必须是一个数组**（与分区表、维度表同一条纪律）。
@@ -1067,12 +1122,6 @@ function normalizeCatalog(input: Catalog): Catalog {
       mode: format.mode === "分摊" ? "分摊" : "系数",
       order: order(format.order, index + 1),
     })),
-    deliveries: (input.deliveries ?? []).map((delivery, index) => ({
-      id: text(delivery.id),
-      name: text(delivery.name),
-      schedulable: delivery.schedulable !== false,
-      order: order(delivery.order, index + 1),
-    })),
     seededAt: text(input.seededAt),
   };
 }
@@ -1094,7 +1143,6 @@ function normalizeOffers(input: readonly CatalogOffer[]): CatalogOffer[] {
       subjectId: text(item.subjectId),
       moduleId: text(item.moduleId),
       formatId: text(item.formatId),
-      deliveryId: text(item.deliveryId),
     };
     const id = offerId(key);
     // 交上来两条一样的组合时以后一条为准（而不是留着两行让校验去报重复）
@@ -5654,7 +5702,6 @@ export type {
   CatalogSubject,
   CatalogModule,
   CatalogFormat,
-  CatalogDelivery,
   CatalogOffer,
   SiteFeaturedCourse,
   SiteFeaturedPage,

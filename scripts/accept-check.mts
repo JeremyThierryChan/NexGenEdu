@@ -368,9 +368,9 @@ await check("网站内容", "字段键重复被拒", async () => {
  * 收尾**必须回到种子**：验收用的就是这个机构自己的库，留着「验收学段」会让后面每次构站
  * 都多出一截，而且下一次验收时 `subjects` 里会多一条重名的行（id 是写死的）。
  */
-await check("课程类型", "维度表读得到（五张表都在）", async () => {
+await check("课程类型", "维度表读得到（四张表都在）", async () => {
   const catalog = await api.catalog.list();
-  return [catalog.stages.length, catalog.formats.length, catalog.deliveries.length];
+  return [catalog.stages.length, catalog.formats.length, catalog.modules.length];
 }, (value: number[]) => value[0] > 0 && value[1] > 0 && value[2] > 0);
 await check("课程类型", "班型与报价里的班级类型是同一套（一件事只有一套写法）", async () => {
   const catalog = await api.catalog.list();
@@ -460,30 +460,26 @@ await check("开放矩阵", "批量开放两条组合（页面上的批量勾选
   const subject = catalog.subjects.find((item) => !groups.has(item.id));
   const firstModule = catalog.modules.find((item) => item.subjectId === subject?.id);
   const format = catalog.formats[0];
-  const delivery = catalog.deliveries[0];
-  if (subject === undefined || firstModule === undefined || format === undefined || delivery === undefined) return null;
+  if (subject === undefined || firstModule === undefined || format === undefined) return null;
   const keys = [
-    { subjectId: subject.id, moduleId: "", formatId: format.id, deliveryId: delivery.id },
-    { subjectId: subject.id, moduleId: firstModule.id, formatId: format.id, deliveryId: delivery.id },
+    { subjectId: subject.id, moduleId: "", formatId: format.id },
+    { subjectId: subject.id, moduleId: firstModule.id, formatId: format.id },
   ];
   const saved = await api.offers.save(applyDecision(offersBefore, keys, "open", new Date().toISOString()));
   return [saved.length, saved.every((offer) => offer.open)];
 }, (value: unknown[]) => value[0] === 2 && value[1] === true);
 
-await check("开放矩阵", "解析：开的算 open、另一条交付形态仍是没设过", async () => {
+await check("开放矩阵", "解析：开的算 open、另一个班型仍是没设过", async () => {
   const catalog = await api.catalog.list();
   const groups = groupIdsOf(catalog);
   const subject = catalog.subjects.find((item) => !groups.has(item.id));
   const format = catalog.formats[0];
-  const delivery = catalog.deliveries[0];
-  const other = catalog.deliveries.find((item) => item.id !== delivery?.id);
-  if (subject === undefined || format === undefined || delivery === undefined || other === undefined) {
-    return ["?", "?"];
-  }
+  const other = catalog.formats.find((item) => item.id !== format?.id);
+  if (subject === undefined || format === undefined || other === undefined) return ["?", "?"];
   const index = offersByKey(await api.offers.list());
   return [
-    resolveOffer(index, { subjectId: subject.id, moduleId: "", formatId: format.id, deliveryId: delivery.id }),
-    resolveOffer(index, { subjectId: subject.id, moduleId: "", formatId: format.id, deliveryId: other.id }),
+    resolveOffer(index, { subjectId: subject.id, moduleId: "", formatId: format.id }),
+    resolveOffer(index, { subjectId: subject.id, moduleId: "", formatId: other.id }),
   ];
 }, (value: string[]) => value[0] === "open" && value[1] === "unset");
 
@@ -495,7 +491,6 @@ await check("开放矩阵", "明确关闭是第三态（不是把行删掉）", 
     subjectId: subject?.id ?? "",
     moduleId: "",
     formatId: catalog.formats[0]?.id ?? "",
-    deliveryId: catalog.deliveries[0]?.id ?? "",
   };
   const current = await api.offers.list();
   const closed = await api.offers.save(applyDecision(current, [key], "closed", new Date().toISOString()));
@@ -531,7 +526,6 @@ await check("开放矩阵", "清除收尾（回到验收前的状态）", async 
       subjectId: offer.subjectId,
       moduleId: offer.moduleId,
       formatId: offer.formatId,
-      deliveryId: offer.deliveryId,
     }));
   const cleared = await api.offers.save(applyDecision(current, added, "unset", new Date().toISOString()));
   return cleared.length;

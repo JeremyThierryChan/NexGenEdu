@@ -15,7 +15,6 @@ import {
   CATALOG_MODULE_KINDS,
   CATALOG_SUBJECT_KINDS,
   type Catalog,
-  type CatalogDelivery,
   type CatalogFormat,
   type CatalogModule,
   type CatalogOffer,
@@ -28,22 +27,25 @@ import { catalogId, catalogSeedSummary } from "@/lib/backend/catalog-seed";
 import { cn } from "@/lib/utils/cn";
 
 /**
- * 课程类型（后台）—— 学段 / 学科 / 内容模块 / 班型 / 交付形态这五个**维度**。
+ * 课程类型（后台）—— 学段 / 学科与项目 / 内容模块 / 班型这四个**维度**。
  *
  * ## 为什么不是"课程清单"
  *
- * 机构那份清单铺开有 400 多条叶子，但它们全是这五个维度的**乘积**
- * （一门课 = 学段 × 学科 × 内容模块 × 班型 × 交付形态）。要是按"一门课一条记录"来存：
+ * 机构那份清单铺开有 400 多条叶子，但它们全是这四个维度的**乘积**
+ * （一门课 = 学段 × 学科 / 项目 × 内容模块 × 班型）。要是按"一门课一条记录"来存：
  *
  *   - 加一个语种 / 加一级等级，记录数就翻倍；
  *   - AI 排课与诊断推荐只能靠"一个诊断项硬绑几门课"来对付；
  *   - 改一次班型名字要在几百条记录里改一遍。
  *
- * 维度法把这件事反过来：**维度是数据，组合按需解析**。这一页管的就是那五张维度表。
+ * 维度法把这件事反过来：**维度是数据，组合按需解析**。这一页管的就是那四张维度表。
+ *
+ * **刻意没有"交付形态"这一维**（v26 更正）：网课 / 网课+答疑 / 托管 这些是**独立的项目**
+ * （在「学科与项目」里，类别选「项目」），与按学段的课程没有组合关系。
  *
  * ## 这一页能做什么（机构的要求：能加课、能设每一个组合的开放）
  *
- *   - 加 / 改名 / 排序 / 删除五个维度里的任意一行；
+ *   - 加 / 改名 / 排序 / 删除四个维度里的任意一行；
  *   - 内容模块带类别（教材进度 / 能力点 / 语言等级），诊断推荐按类别筛；
  *   - 学科挂在哪个学段开、属于哪个分组，都在行上勾。
  *
@@ -56,14 +58,13 @@ import { cn } from "@/lib/utils/cn";
  * "在这份草稿上改 → 一次保存"。整份写避免了"改了三处、只有两处落库"。
  * 因此校验（`validateCatalog`）在这一页上**实时显示**：红字出现时不要保存。
  */
-type TabKey = "stages" | "subjects" | "modules" | "formats" | "deliveries";
+type TabKey = "stages" | "subjects" | "modules" | "formats";
 
 const TABS: Array<{ key: TabKey; label: string; hint: string }> = [
   { key: "stages", label: "学段", hint: "机构清单的第一层：小学 / 初中 / 高中 / 大学 / 其他类型" },
   { key: "subjects", label: "学科与项目", hint: "语文、数学、雅思、托管项目…（学科与学段解耦，勾学段即可）" },
   { key: "modules", label: "内容模块", hint: "教材进度 / 能力点 / 语言等级（诊断推荐按类别筛）" },
   { key: "formats", label: "班型", hint: "全系统唯一口径 —— 报价的班级系数按它算" },
-  { key: "deliveries", label: "交付形态", hint: "课怎么上：面授 / 网课 / 网课+答疑 / 托管 / 全日托管" },
 ];
 
 /** 重排用的公共动作：把下标 `from` 与 `to` 换位（越界就原样返回）。 */
@@ -186,8 +187,7 @@ export default function AdminCatalogPage() {
     const ok = window.confirm(
       "恢复成机构那份清单的种子？后台改过的维度会全部丢失，恢复后是：" +
         `${String(seed.stages)} 个学段 / ${String(seed.subjects)} 个学科项目 / ` +
-        `${String(seed.modules)} 个内容模块 / ${String(seed.formats)} 个班型 / ` +
-        `${String(seed.deliveries)} 种交付形态。`,
+        `${String(seed.modules)} 个内容模块 / ${String(seed.formats)} 个班型。`,
     );
     if (!ok) return;
     await notice.run(
@@ -203,7 +203,7 @@ export default function AdminCatalogPage() {
   if (loading) {
     return (
       <>
-        <PageHeading title="课程类型" description="课程的五张维度表。" />
+        <PageHeading title="课程类型" description="课程的四张维度表。" />
         <p className="mt-6 text-sm text-ink-400">加载中…</p>
       </>
     );
@@ -212,7 +212,7 @@ export default function AdminCatalogPage() {
   if (draft === null) {
     return (
       <>
-        <PageHeading title="课程类型" description="课程的五张维度表。" />
+        <PageHeading title="课程类型" description="课程的四张维度表。" />
         {/* 重试走安静刷新：页面上已经有"读不到"这句话，不必再换成"加载中…" */}
         <LoadFailure error={loadError} onRetry={() => void load({ quiet: true })} />
       </>
@@ -228,7 +228,7 @@ export default function AdminCatalogPage() {
     <>
       <PageHeading
         title="课程类型"
-        description="课程由这五个维度组合而成：学段 × 学科 / 项目 × 内容模块 × 班型 × 交付形态。"
+        description="课程由这四个维度组合而成：学段 × 学科 / 项目 × 内容模块 × 班型。"
       />
 
       <div className="mt-4">
@@ -238,7 +238,7 @@ export default function AdminCatalogPage() {
       {/* 口径说明：为什么这里没有"一条条课程" */}
       <div className="mt-4 rounded-md border border-ink-200 bg-ink-50 px-3.5 py-2.5 text-xs leading-relaxed text-ink-700">
         <strong className="font-medium">这里维护的是「维度」，不是一条条课程。</strong>
-        一门课是上面五个维度的一次组合（例如「小学 · 语文 · 一年级 · 一对一 · 网课」）。
+        一门课是上面四个维度的一次组合（例如「小学 · 语文 · 一年级 · 一对一」）。
         组合不写在这里 —— 全铺开有四百多条，加一个语种就翻一倍。哪些组合开放、按什么价，
         在下一步的<span className="mx-1 rounded bg-white px-1">开放矩阵</span>里勾选。
       </div>
@@ -279,7 +279,7 @@ export default function AdminCatalogPage() {
         </ul>
       )}
 
-      {/* ── 五个维度用页签切换（一屏一个，避免五张长表堆在一起） ── */}
+      {/* ── 四个维度用页签切换（一屏一个，避免几张长表堆在一起） ── */}
       <div className="mt-5 flex flex-wrap gap-2">
         {TABS.map((item) => (
           <button
@@ -572,57 +572,7 @@ export default function AdminCatalogPage() {
           />
         )}
 
-        {tab === "deliveries" && (
-          <Table
-            headers={["名称", "能不能排进课表", "顺序", ""]}
-            rows={draft.deliveries.map((delivery, index) => ({
-              key: delivery.id === "" ? `new-delivery-${String(index)}` : delivery.id,
-              cells: [
-                <CellInput
-                  key="name"
-                  value={delivery.name}
-                  disabled={!canSave}
-                  placeholder="交付形态名"
-                  onChange={(value) => edit((next) => void (next.deliveries[index]!.name = value))}
-                />,
-                <CellSelect
-                  key="schedulable"
-                  value={delivery.schedulable ? "yes" : "no"}
-                  disabled={!canSave}
-                  options={[
-                    { value: "yes", label: "能（占用教师与教室）" },
-                    { value: "no", label: "不排课（只作为售卖形态）" },
-                  ]}
-                  onChange={(value) =>
-                    edit((next) => void (next.deliveries[index]!.schedulable = value === "yes"))
-                  }
-                />,
-                <Reorder
-                  key="order"
-                  index={index}
-                  total={draft.deliveries.length}
-                  disabled={!canSave}
-                  onMove={(delta) =>
-                    edit((next) => void (next.deliveries = swap(next.deliveries, index, index + delta)))
-                  }
-                />,
-                <RemoveButton
-                  key="remove"
-                  disabled={!canSave}
-                  label={`交付形态「${delivery.name}」`}
-                  onRemove={() =>
-                    confirmRemove(
-                      `交付形态「${delivery.name}」`,
-                      () => edit((next) => removeDelivery(next, index)),
-                      offersOfDimension(offers, "delivery", delivery.id).length,
-                    )
-                  }
-                />,
-              ],
-            }))}
-          />
-        )}
-      </Panel>
+              </Panel>
 
       <p className="mb-8 text-xs leading-relaxed text-ink-500">
         保存后，后台各处的「班型」下拉与课程库的「可开班型」立刻按这份表走；
@@ -667,8 +617,7 @@ function countOf(catalog: Catalog, tab: TabKey): number {
   if (tab === "stages") return catalog.stages.length;
   if (tab === "subjects") return catalog.subjects.length;
   if (tab === "modules") return catalog.modules.length;
-  if (tab === "formats") return catalog.formats.length;
-  return catalog.deliveries.length;
+  return catalog.formats.length;
 }
 
 /** 新增一行：id 留空，保存前由 `assignCatalogIds` 按名字补（见那里的注释）。 */
@@ -721,8 +670,6 @@ function addRow(
       next.formats.push(format);
       return;
     }
-    const delivery: CatalogDelivery = { id: "", name: "", schedulable: true, order: next.deliveries.length + 1 };
-    next.deliveries.push(delivery);
   });
 }
 
@@ -750,10 +697,6 @@ function removeModule(catalog: Catalog, index: number): void {
 
 function removeFormat(catalog: Catalog, index: number): void {
   catalog.formats.splice(index, 1);
-}
-
-function removeDelivery(catalog: Catalog, index: number): void {
-  catalog.deliveries.splice(index, 1);
 }
 
 /**

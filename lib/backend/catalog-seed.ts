@@ -22,8 +22,13 @@
  *    `能力点`（客观题 / 阅读 / 文言文 / 作文 / 听力）、`语言等级`（CEFR-A1…B2 / N5…N1 / CET-4·6）。
  *    这不是分类癖：诊断推荐要区分"**跟上进度**"（教材进度）与"**补能力短板**"（能力点），
  *    而等级是"考什么证"。混在一起就没法按需筛选。
- * 3. **交付形态独立**：网课 / 网课+答疑 / 托管 / 全日托管 不是"班型"，也不该硬塞进
- *    学科里 —— 一门课可以"面授"，也可以"网课+答疑"，它们可以组合。
+ * 3. **网课 / 托管这一支是独立项目，不是"交付形态"**（v26 更正，机构指出）：
+ *    清单里「其他类型 → 不分班型项目」下的「网课 / 网课+答疑 / 网课+一对一针对性答疑 /
+ *    小学托管 / 初中托管 / 学期全日托管 / 假期全日托管」是**单独卖的项目**，
+ *    与小学 / 初中 / 高中那些按学段的课程**没有任何组合关系**。
+ *    我第一版把它们当成第五个维度"交付形态"（"一门课可以面授，也可以网课+答疑"），
+ *    那是错的：既凭空造出"小学语文 × 网课"这种不存在的组合，又把同一件事记了两遍
+ *    （它们本来就在 `SUBJECTS` 里、`kind: "项目"`）。现在维度只有四个。
  *
  * ## 与机构原清单的三处差异（我按结构读出来的，若与原意不符请说）
  *
@@ -42,7 +47,6 @@
  */
 import type {
   Catalog,
-  CatalogDelivery,
   CatalogFormat,
   CatalogModule,
   CatalogModuleKind,
@@ -77,15 +81,6 @@ const FORMATS: Array<Pick<CatalogFormat, "name" | "minSize" | "maxSize" | "mode"
   { name: "一对三", minSize: 3, maxSize: 3, mode: "系数" },
   { name: "一对多（4-8）", minSize: 4, maxSize: 8, mode: "系数" },
   { name: "班课（9-20）", minSize: 9, maxSize: 20, mode: "分摊" },
-];
-
-/** 交付形态：怎么上，不是班型。 */
-const DELIVERIES: Array<Pick<CatalogDelivery, "name" | "schedulable">> = [
-  { name: "面授", schedulable: true },
-  { name: "网课", schedulable: true },
-  { name: "网课+答疑", schedulable: true },
-  { name: "托管", schedulable: true },
-  { name: "全日托管", schedulable: true },
 ];
 
 const GRADES_PRIMARY = ["一年级", "二年级", "三年级", "四年级", "五年级", "六年级"];
@@ -286,13 +281,6 @@ export function catalogFromSeed(now: string = new Date().toISOString()): Catalog
     order: index + 1,
   }));
 
-  const deliveries: CatalogDelivery[] = DELIVERIES.map((delivery, index) => ({
-    id: catalogId("dlv", delivery.name),
-    name: delivery.name,
-    schedulable: delivery.schedulable,
-    order: index + 1,
-  }));
-
   /*
    * 学段的并集：按 `STAGES` 的固定顺序去重（同一份清单灌两次必须给出同一份结果，
    * 否则 `catalogFromSeed` 就不再是"可重复执行"的了）。
@@ -376,17 +364,16 @@ export function catalogFromSeed(now: string = new Date().toISOString()): Catalog
     });
   }
 
-  return { stages, subjects, modules, formats, deliveries, seededAt: now };
+  return { stages, subjects, modules, formats, seededAt: now };
 }
 
 /** 种子里的规模（自检与日志用；让"搬了多少条"这件事可核对）。 */
-export function catalogSeedSummary(): { stages: number; subjects: number; modules: number; formats: number; deliveries: number } {
+export function catalogSeedSummary(): { stages: number; subjects: number; modules: number; formats: number } {
   const catalog = catalogFromSeed();
   return {
     stages: catalog.stages.length,
     subjects: catalog.subjects.length,
     modules: catalog.modules.length,
     formats: catalog.formats.length,
-    deliveries: catalog.deliveries.length,
   };
 }

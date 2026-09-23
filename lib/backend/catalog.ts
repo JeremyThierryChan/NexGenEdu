@@ -7,7 +7,6 @@
  */
 import type {
   Catalog,
-  CatalogDelivery,
   CatalogFormat,
   CatalogModule,
   CatalogStage,
@@ -89,13 +88,11 @@ export function childModules(catalog: Catalog, parentId: string): CatalogModule[
     .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, "zh"));
 }
 
-/** 按 order 排好的学段 / 班型 / 交付形态。 */
+/** 按 order 排好的学段 / 班型。 */
 export const sortedStages = (catalog: Catalog): CatalogStage[] =>
   [...catalog.stages].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, "zh"));
 export const sortedFormats = (catalog: Catalog): CatalogFormat[] =>
   [...catalog.formats].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, "zh"));
-export const sortedDeliveries = (catalog: Catalog): CatalogDelivery[] =>
-  [...catalog.deliveries].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, "zh"));
 
 /** 学科在哪些学段开（名字列表，按学段顺序）。 */
 export function stageNamesOf(catalog: Catalog, stageIds: readonly string[]): string[] {
@@ -163,12 +160,10 @@ export function validateCatalog(catalog: Catalog): string[] {
   checkNames(catalog.stages, "学段");
   checkNames(catalog.subjects, "学科 / 项目");
   checkNames(catalog.formats, "班型");
-  checkNames(catalog.deliveries, "交付形态");
   checkIds(catalog.stages, "学段");
   checkIds(catalog.subjects, "学科 / 项目");
   checkIds(catalog.modules, "内容模块");
   checkIds(catalog.formats, "班型");
-  checkIds(catalog.deliveries, "交付形态");
   checkKeys(
     catalog.modules.map((item) => {
       const parent = catalog.modules.find((candidate) => candidate.id === item.parentId);
@@ -232,8 +227,7 @@ export function catalogSummary(catalog: Catalog): string {
     `${String(catalog.stages.length)} 个学段 / ` +
     `${String(catalog.subjects.length)} 个学科项目 / ` +
     `${String(catalog.modules.length)} 个内容模块 / ` +
-    `${String(catalog.formats.length)} 个班型 / ` +
-    `${String(catalog.deliveries.length)} 种交付形态`
+    `${String(catalog.formats.length)} 个班型`
   );
 }
 
@@ -263,7 +257,6 @@ export function assignCatalogIds(catalog: Catalog, prefix: (kind: string, name: 
   fill(catalog.stages, "st");
   fill(catalog.subjects, "subj");
   fill(catalog.formats, "fmt");
-  fill(catalog.deliveries, "dlv");
 
   for (const item of catalog.modules) {
     if (item.id.trim() !== "") continue;

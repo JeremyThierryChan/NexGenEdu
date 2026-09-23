@@ -27,29 +27,32 @@ import { catalogSummary, sortedStages } from "@/lib/backend/catalog";
 import { cn } from "@/lib/utils/cn";
 
 /**
- * 开放矩阵（后台）—— 哪些「学科 × 内容模块 × 班型 × 交付形态」的组合真的开放。
+ * 开放矩阵（后台）—— 哪些「学科 × 内容模块 × 班型」的组合真的开放。
  *
  * ## 为什么这一页与「课程类型」分开
  *
- * 「课程类型」维护**维度**（可以有哪些学段 / 学科 / 模块 / 班型 / 交付），
+ * 「课程类型」维护**维度**（可以有哪些学段 / 学科 / 模块 / 班型），
  * 这一页回答**组合**（本机构开哪些）。维度是坐标系（几个月动一次），
  * 组合是经营决定（每次开新班都要看），而且两者的页面形态完全不同
- * （五张列表 vs 一张矩阵）。
+ * （几张列表 vs 一张矩阵）。
  *
- * ## 矩阵的形状（组合四个维度，表格只有两维）
+ * ## 矩阵的形状（组合三个维度，表格只有两维）
  *
  * ```
- *           一对一            一对二        …
- *         面授 网课 答疑 …    面授 网课 …
- * 语文         ✓    ✗
+ *            一对一   一对二   一对三   一对多（4-8）   班课（9-20）
+ * 语文         ✓        ✗
  * （不分模块）
- *   一年级     ✓    ✓
+ *   一年级     ✓        ✓
  * ```
  *
  *   行 = 学科 + 它的内容模块（`moduleId` 空的那一行＝"不细分模块"）
- *   列 = 班型 × 交付形态
+ *   列 = 班型
  *
  * 学段只用来**筛行**（不进组合键：学段 + 学科 + 模块已经唯一确定了一门课，见 `offers.ts`）。
+ *
+ * **没有"交付形态"这一维**（v26 更正）：网课 / 网课+答疑 / 托管 这些是**独立的项目**
+ * （在「学科与项目」里，类别是「项目」），与按学段的课程没有组合关系 ——
+ * 因此矩阵里不会出现"小学语文 × 网课"这种格子，那种课在系统里是另一个学科/项目。
  *
  * ## 三种格子状态
  *
@@ -77,7 +80,6 @@ const keyOf = (row: OfferRow, column: OfferColumn): OfferKey => ({
   subjectId: row.subjectId,
   moduleId: row.moduleId,
   formatId: column.formatId,
-  deliveryId: column.deliveryId,
 });
 
 export default function AdminOffersPage() {
@@ -144,7 +146,6 @@ export default function AdminOffersPage() {
         subjectId: offer.subjectId,
         moduleId: offer.moduleId,
         formatId: offer.formatId,
-        deliveryId: offer.deliveryId,
       })),
     [dangling],
   );
@@ -245,7 +246,7 @@ export default function AdminOffersPage() {
     <>
       <PageHeading
         title="开放矩阵"
-        description="勾出本机构真正开的组合：行是学科与内容模块，列是班型 × 交付形态。"
+        description="勾出本机构真正开的组合：行是学科与内容模块，列是班型。"
       />
 
       <div className="mt-4">
@@ -356,28 +357,6 @@ export default function AdminOffersPage() {
                 </span>
               ))}
             </div>
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-              <span className="text-xs text-ink-500">按交付形态整片勾：</span>
-              {catalog.deliveries.map((delivery) => (
-                <span key={delivery.id} className="flex items-center gap-1">
-                  <span className="text-xs text-ink-700">{delivery.name}</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => decide(keysFor((column) => column.deliveryId === delivery.id), "open")}
-                  >
-                    全开
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => decide(keysFor((column) => column.deliveryId === delivery.id), "closed")}
-                  >
-                    全关
-                  </Button>
-                </span>
-              ))}
-            </div>
           </div>
         ) : (
           <p className="px-4 py-3 text-xs text-ink-500">只读：批量勾选归 {methodOwnerText("offers.save")}。</p>
@@ -389,7 +368,7 @@ export default function AdminOffersPage() {
         <Panel
           className="mt-4"
           title={`失效的组合（${String(dangling.length)} 条）`}
-          description="它们引用的学段 / 学科 / 模块 / 班型 / 交付形态在课程类型里已经不在了，因此在下面的矩阵里看不见 —— 但只要还在，保存就会被拒。"
+          description="它们引用的学科 / 模块 / 班型在课程类型里已经不在了，因此在下面的矩阵里看不见 —— 但只要还在，保存就会被拒。"
           actions={
             canSave ? (
               <Button variant="outline" size="sm" onClick={() => decide(danglingKeys, "unset")}>
@@ -402,7 +381,7 @@ export default function AdminOffersPage() {
             {dangling.slice(0, 20).map((offer) => (
               <li key={offer.id} className="font-mono">
                 {offer.subjectId} · {offer.moduleId === "" ? "（不分模块）" : offer.moduleId} ·{" "}
-                {offer.formatId} · {offer.deliveryId} —— {offer.open ? "开放" : "明确关闭"}
+                {offer.formatId} —— {offer.open ? "开放" : "明确关闭"}
               </li>
             ))}
             {dangling.length > 20 && <li>还有 {dangling.length - 20} 条…</li>}
@@ -427,26 +406,12 @@ export default function AdminOffersPage() {
                   <th className="sticky left-0 z-10 bg-white px-4 py-2 text-left font-normal">
                     学科 / 模块
                   </th>
-                  {catalog.formats.map((format) => (
-                    <th
-                      key={format.id}
-                      colSpan={catalog.deliveries.length}
-                      className="border-l border-ink-100 px-2 py-2 text-center font-medium"
-                    >
-                      {format.name}
-                    </th>
-                  ))}
-                </tr>
-                <tr className="text-[11px] text-ink-400">
-                  <th className="sticky left-0 z-10 bg-white px-4 pb-2 text-left font-normal">
-                    交付形态 →
-                  </th>
                   {matrix.columns.map((column) => (
                     <th
-                      key={`${column.formatId}-${column.deliveryId}`}
-                      className="px-1.5 pb-2 text-center font-normal"
+                      key={column.formatId}
+                      className="border-l border-ink-100 px-3 py-2 text-center font-medium"
                     >
-                      {column.deliveryName}
+                      {column.formatName}
                     </th>
                   ))}
                 </tr>
@@ -496,10 +461,10 @@ export default function AdminOffersPage() {
                           const found = index.get(offerKey(keyOf(row, column)));
                           const decision: OfferDecision =
                             found === undefined ? "unset" : found.open ? "open" : "closed";
-                          const label = `${row.subjectName} ${row.moduleName === "" ? "不分模块" : row.moduleName} ${column.formatName} ${column.deliveryName}`;
+                          const label = `${row.subjectName} ${row.moduleName === "" ? "不分模块" : row.moduleName} ${column.formatName}`;
                           return (
                             <td
-                              key={`${row.moduleId}-${column.formatId}-${column.deliveryId}`}
+                              key={`${row.moduleId}-${column.formatId}`}
                               className="px-1 py-1 text-center"
                             >
                               <button
