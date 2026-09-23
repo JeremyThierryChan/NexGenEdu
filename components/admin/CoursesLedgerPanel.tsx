@@ -150,6 +150,20 @@ export function CoursesLedgerPanel() {
   /** 按维度筛课（v28）：学段 / 学科，空串＝不筛。 */
   const [stageFilter, setStageFilter] = useState("");
   const [subjectFilter, setSubjectFilter] = useState("");
+  /**
+   * **清单怎么分组**（v33）：`dimension`＝学段 → 学科（默认，机构口径"课程以维度法为主"）；
+   * `partition`＝栏目 → 子栏目（网站课程页的那棵树，分区改名 / 排序 / 删除 / 批量移课
+   * 那几个动作挂在它的表头上）。
+   *
+   * 为什么两种都留：分区**仍然是网站的展示结构**（课程页按栏目分组、
+   * 每个栏目 / 子栏目在网站上都有入口），因此那套管理动作不能没有落脚点；
+   * 而"以维度为主"要的是**默认按维度看**。等网站展示也由维度生成那一步做完
+   * （E2-C-B），分区这一种就可以整个撤掉。
+   *
+   * 没有维度表（后端没跑 / 拿不到）时强制用分区视图：维度视图在没有维度表时
+   * 会把所有课都归到"未挂维度"那一桶，看起来像清单坏了。
+   */
+  const [groupMode, setGroupMode] = useState<"dimension" | "partition">("dimension");
   const [originFilter, setOriginFilter] = useState("全部");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -1273,6 +1287,46 @@ export function CoursesLedgerPanel() {
    * 它们**不参与分组**（"没有分区"不是一个分区），单独列在清单最后。
    */
   const grouped = useMemo(() => groupByPartition(visible, partitions), [visible, partitions]);
+
+  /**
+   * 按维度分组的清单：**学段 → 学科 → 课程**。
+   *
+   * 三条口径：
+   *   - 一门课可能挂多个学段（暂时没有这种课，但形状允许）→ 在**每个**学段下都出现一次，
+   *     这样"按学段看"才是完整的；分区视图里它只出现一次（分区只有一个）。
+   *   - 一门课可能挂多个学科（「高考外语」覆盖五个语种）→ 归到该学段下的
+   *     **「多学科卡片」**那一桶，**不重复列出五次**（同一个 id 出现五次会让人以为有五门课）。
+   *   - 没挂维度的课**不进这个分组**：它们由上面那块黄色提示 + 「只看未挂维度」处理，
+   *     免得"未挂"变成一个看起来像学科的分组。
+   */
+  const dimensionGroups = useMemo(() => {
+    if (catalog === null) return [];
+    const subjectNameOf = (id: string): string =>
+      catalog.subjects.find((subject) => subject.id === id)?.name ?? "";
+
+    const stages = sortedStages(catalog);
+    return stages
+      .map((stage) => {
+        const mine = visible.filter((course) => course.stageIds.includes(stage.id));
+        const buckets = new Map<string, Course[]>();
+        for (const course of mine) {
+          const key =
+            course.subjectIds.length === 0
+              ? "（没挂学科）"
+              : course.subjectIds.length > 1
+                ? "多学科卡片"
+                : subjectNameOf(course.subjectIds[0] ?? "") || "（学科已失效）";
+          buckets.set(key, [...(buckets.get(key) ?? []), course]);
+        }
+        return {
+          stageId: stage.id,
+          stageName: stage.name,
+          buckets: [...buckets.entries()].sort((a, b) => a[0].localeCompare(b[0], "zh")),
+          total: mine.length,
+        };
+      })
+      .filter((section) => section.total > 0);
+  }, [catalog, visible]);
   /** 正在筛选（搜索框有字 / 来源不是「全部」）—— 空分区在筛选结果里不显示，见下面的渲染。 */
   const filtering = keyword.trim() !== "" || originFilter !== "全部";
   const unpartitioned = useMemo(
@@ -2295,6 +2349,42 @@ export function CoursesLedgerPanel() {
         )}
 
         {/*
+          ── 分组方式（v33）──
+          默认「按维度」（学段 → 学科），机构口径是"课程以维度法为主"；
+          「按分区」是网站课程页那棵树 —— 分区改名 / 排序 / 删除 / 批量移课那几个动作
+          挂在它的表头上，因此切回去就能用。
+        */}
+        <div className="flex flex-wrap items-center gap-2 border-b border-ink-100 px-4 py-2">
+          <span className="text-xs text-ink-500">分组方式：</span>
+          <div className="flex overflow-hidden rounded-md border border-ink-300">
+            {(
+              [
+                { key: "dimension", label: "按维度（学段 → 学科）" },
+                { key: "partition", label: "按分区（网站栏目）" },
+              ] as const
+            ).map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                disabled={item.key === "dimension" && catalog === null}
+                onClick={() => setGroupMode(item.key)}
+                className={cn(
+                  "px-2.5 py-1 text-xs transition-colors disabled:opacity-40",
+                  groupMode === item.key && catalog !== null
+                    ? "bg-brand-50 text-brand-700"
+                    : "bg-white text-ink-600 hover:bg-ink-50",
+                )}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          {catalog === null && (
+            <span className="text-xs text-ink-400">（读不到课程类型，只能按分区看）</span>
+          )}
+        </div>
+
+        {/*
           ── 还没挂到维度上的课程 ──
           迁移按名字对不上、或新加的课还没选，就会落在这里。**不拦**（它照样能排课报课），
           但要显眼：挂上之后台账能按维度筛、组合开放能对上它、以后的排课与诊断推荐才认得它。
@@ -2338,6 +2428,37 @@ export function CoursesLedgerPanel() {
           <p className="px-4 py-6 text-sm text-ink-400">加载中…</p>
         ) : visible.length === 0 ? (
           <p className="px-4 py-6 text-sm text-ink-500">没有匹配的课程。</p>
+        ) : groupMode === "dimension" && catalog !== null ? (
+          /*
+           * ── 按维度分组（默认）──
+           * 学段 → 学科 → 课程。与"分区"最大的不同：这里的分组**来自课程类型**，
+           * 而不是手写的栏目树 —— 因此加一个学科、改一个学科名，这一页跟着变。
+           * 分区的信息仍然在每张卡片上（卡片里的「分区」字段），只是不再当分组用。
+           */
+          <div className="divide-y divide-ink-100">
+            {dimensionGroups.map((section) => (
+              <div key={section.stageId} className="px-4 py-3">
+                <h3 className="mb-2 text-xs font-medium text-ink-700">
+                  {section.stageName}
+                  <span className="ml-2 font-normal text-ink-400">{section.total} 门</span>
+                </h3>
+                {section.buckets.map(([bucket, items]) => (
+                  <div key={`${section.stageId}-${bucket}`} className="mt-3 first:mt-0">
+                    <p className="mb-1.5 text-[11px] text-ink-500">
+                      {bucket}
+                      <span className="ml-1.5 text-ink-400">
+                        {items.length} 门
+                        {bucket === "多学科卡片" ? " · 一张卡片覆盖多个学科（例如「高考外语」）" : ""}
+                      </span>
+                    </p>
+                    <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      {items.map((course) => renderCourseCard(course))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
         ) : (
           <div className="divide-y divide-ink-100">
             {grouped.map(({ column, groups }) => {
@@ -2384,7 +2505,7 @@ export function CoursesLedgerPanel() {
               );
             })}
 
-            {unpartitioned.length > 0 && (
+            {groupMode === "partition" && unpartitioned.length > 0 && (
               <div className="px-4 py-3">
                 <h3 className="mb-2 text-xs font-medium text-warning-600">
                   未归类 / 分区已失效

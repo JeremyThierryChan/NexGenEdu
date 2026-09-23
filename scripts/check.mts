@@ -9561,6 +9561,64 @@ console.log("\n=== 35. 哪一天按哪一组时段（v27 寒暑假段 + 时段�
     Array.isArray((await api.exportDatabase()).vacations));
 }
 
+console.log("\n=== 35.5 没有「永远来自模版」的页面（这条口径漂过一次）===");
+
+/*
+ * `lib/site/backend-source.ts` 的文件头曾经写着"首页文案 / 关于 / 联系 / FAQ / 课表 /
+ * 特色课程 / 品牌与联系方式**不在库里**，永远来自 data/site/*.md" —— 那是 v19 之前的实情。
+ * v19–v22 把它们逐块搬进库之后这句话就错了，而**没有人会发现**：
+ * 注释不影响运行，页面也照常工作。直到有人照着它去改代码。
+ *
+ * 因此这一条把**事实**钉住：那些块的取数函数都必须走同一套三态判定
+ * （`siteContentSource()` + 后端快照），而不是直接读模版。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+
+  /** 一个取数函数体里必须出现的三态痕迹（截到下一个顶层 `export function` 之前）。 */
+  const bodyOf = (file: string, name: string): string => {
+    const source = read(file);
+    const start = source.indexOf(`${name.startsWith("copySourceFor") ? "export function " : "export function "}${name}(`);
+    if (start < 0) return "";
+    const next = source.indexOf("export function ", start + 10);
+    return source.slice(start, next < 0 ? undefined : next);
+  };
+  const gated = (file: string, name: string): boolean => {
+    const body = bodyOf(file, name);
+    return body.includes("siteContentSource()") && body.includes("backend");
+  };
+
+  /*
+   * 两组写法都要盯住，因为**它们是对的、但写法不同**：
+   *   - 案例 / FAQ / 特色课程：函数体里直接三态判定；
+   *   - 品牌 / 首页 / 关于 / 联系 / 时间安排：五块共用 `copySourceFor(key)`，
+   *     三态判定在**那一处**（这正是 v22 那次重构的成果 —— 一份映射两种来源）。
+   * 第一版断言把第二组也按"函数体里必须出现 siteContentSource()"来查，当场报红 ——
+   * 报的不是代码错了，是**我的判据没覆盖这种写法**。
+   */
+  for (const [file, name, label] of [
+    ["lib/data/pages.ts", "getFaqContent", "常见问题"],
+    ["lib/data/pages.ts", "getCasesContent", "学生案例"],
+    ["lib/data/featured.ts", "getFeaturedContent", "特色课程"],
+  ] as const) {
+    ok(`「${label}」的取数是三态（连上后端用库、连不上空白、显式才读模版）`, gated(file, name));
+  }
+  ok("页面文案块共用的取数入口 `copySourceFor` 是三态（五块都从它走）",
+    gated("lib/data/site.ts", "copySourceFor"));
+  for (const [name, label] of [
+    ["getSiteBrand", "品牌与联系方式"],
+    ["getHomeContent", "首页文案"],
+    ["getAboutContent", "关于我们"],
+    ["getContactContent", "联系我们"],
+  ] as const) {
+    ok(`「${label}」走的是那个共用的三态入口`, bodyOf("lib/data/site.ts", name).includes("copySourceFor("));
+  }
+
+  ok("文件头不再声称有「永远来自模版」的页面",
+    !read("lib/site/backend-source.ts").includes("它们**不在库里**，因此与后端连不连无关"));
+}
+
 console.log("\n=== 36. 课程一页三页签（v29：课程库 + 课程类型 + 开放矩阵合并）===");
 
 /*
@@ -9941,6 +9999,49 @@ console.log("\n=== 38. 课程挂到维度上（v28：课程 ←→ 课程类型�
     ok(`提示文案里保留了「${label}」这句（改文案时会被提醒）`,
       readFileSync(new URL("../lib/backend/course-dimensions.ts", import.meta.url), "utf8").includes(pattern));
   }
+}
+
+console.log("\n=== 39. 课程台账按维度分组（v33：默认按维度，分区视图保留）===");
+
+/*
+ * 机构：「课程可以完全按照…**不靠枚举的方式为主安排**」。E3 把课程挂到了维度上（能筛、能挂），
+ * 这一版把**分组**也换成维度 —— 但分区视图**保留**：分区仍然是网站的展示结构
+ * （课程页按栏目分组、每个栏目在网站上都有入口），分区改名 / 排序 / 删除 / 批量移课
+ * 那几个动作就挂在分区表头上。
+ *
+ * 这一节守四件事：
+ *   1. **默认按维度**（学段 → 学科），且**没有维度表时强制分区视图**（否则全被归到"未挂"）；
+ *   2. **多学科卡片不重复列**（「高考外语」覆盖五个语种，只出现一次，归到「多学科卡片」）；
+ *   3. **没挂维度的课不进维度分组**（由那块黄色提示 + 「只看未挂维度」处理）；
+ *   4. 分区视图与它的管理动作**都还在**（不是"换成维度就删了老路"）。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+  const ledger = read("components/admin/CoursesLedgerPanel.tsx");
+
+  ok("默认是「按维度」分组（机构口径：课程以维度法为主安排）",
+    /useState<"dimension" \| "partition">\("dimension"\)/.test(ledger));
+  ok("两种分组方式都能切，且分区那一种标明了它是「网站栏目」",
+    ledger.includes('{ key: "dimension", label: "按维度（学段 → 学科）" }') &&
+      ledger.includes('{ key: "partition", label: "按分区（网站栏目）" }'));
+  ok("没有维度表时维度那一个不可选（否则所有课都归到「未挂」里，像清单坏了）",
+    ledger.includes('disabled={item.key === "dimension" && catalog === null}') &&
+      ledger.includes("读不到课程类型，只能按分区看"));
+  ok("维度分组是学段 → 学科两层",
+    ledger.includes("const dimensionGroups = useMemo") && ledger.includes("section.buckets.map("));
+  ok("多学科卡片归到「多学科卡片」那一桶（不重复列 N 次）",
+    ledger.includes('"多学科卡片"') && ledger.includes("一张卡片覆盖多个学科"));
+  ok("没挂维度的课**不进**维度分组（它们由提示块与筛选处理）",
+    ledger.includes('course.subjectIds.length === 0') && ledger.includes('"（没挂学科）"'));
+  ok("分区视图与它的表头动作都还在（分区改名 / 排序 / 删除 / 批量移课）",
+    ledger.includes("groupByPartition(visible, partitions)") &&
+      ledger.includes("renderPartitionHeader(column, columnItems, 1)") &&
+      ledger.includes("renderPartitionHeader(group.subgroup, group.items, 2)"));
+  ok("「未归类 / 分区已失效」那一块只在分区视图里出现",
+    ledger.includes('groupMode === "partition" && unpartitioned.length > 0'));
+  ok("两种分组都复用同一张课程卡片（不是各画一套）",
+    (ledger.match(/renderCourseCard\(course\)/g) ?? []).length >= 3);
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
