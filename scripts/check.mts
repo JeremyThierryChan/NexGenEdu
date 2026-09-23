@@ -38,6 +38,16 @@ import { getPricingData, getPricingDataFromTemplate, parsePricingSource } from "
 import type { PricingConfig } from "@/lib/backend/pricing";
 import { classTypeIssuesText, syncClassTypes } from "@/lib/backend/class-types";
 import {
+  dayPlanFor,
+  validateVacations,
+  vacationOverlaps,
+  windowsFromSchedule,
+  type CalendarPlanInput,
+  type DayPlan,
+} from "@/lib/backend/calendar-plan";
+import type { HolidayDay } from "@/lib/backend/holidays";
+import type { VacationPeriod } from "@/lib/backend/types";
+import {
   getCasesContent,
   getCasesContentFromTemplate,
   getFaqContent,
@@ -6754,7 +6764,12 @@ console.log("\n=== 16. 节假日表：两个来源逐日比对一致才写入 ==
   // ── F. 接线：页面、权限、路由、外网只在一处 ──
   const rootUrl = new URL("../", import.meta.url);
   const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
-  const page = read("app/admin/(dashboard)/holidays/page.tsx");
+  /*
+   * v28 起节假日不再是独立的一页：它成了「日历」页「假期与作息」页签里的一块。
+   * 断言**内容一条不删**，只是指向新文件 —— 那两句口径（"只供查看、不会自动改排课"
+   * 与"手动处理"）仍然必须出现在用户看得到的地方。
+   */
+  const page = read("components/admin/HolidayTablePanel.tsx");
   ok(
     "页面上必须写明「不会自动改排课」（否则会有人以为排课已经识别假期了）",
     page.includes("这张表只供查看，不会自动改排课"),
@@ -6780,9 +6795,15 @@ console.log("\n=== 16. 节假日表：两个来源逐日比对一致才写入 ==
     "服务端也读 roles.ts 那一份，而不是自己写死角色",
     read("server/index.mts").includes("HOLIDAY_ACTION_ACCESS"),
   );
-  eq("页面权限与「读」这个动作的权限是同一个答案", PAGE_ACCESS["/admin/holidays"], HOLIDAY_ACTION_ACCESS["holidays.read"]);
+  eq("页面权限与「读」这个动作的权限是同一个答案", PAGE_ACCESS["/admin/calendar"], HOLIDAY_ACTION_ACCESS["holidays.read"]);
   eq("抓取只有技术管理员", HOLIDAY_ACTION_ACCESS["holidays.refresh"], ["技术管理员"]);
-  ok("导航里有入口（否则这一页只能靠手敲网址）", read("lib/site/admin-nav.ts").includes('"/admin/holidays"'));
+  ok("导航里有入口（否则这一页只能靠手敲网址）", read("lib/site/admin-nav.ts").includes('"/admin/calendar"'));
+  ok("而且**没有**第二个人口（节假日不再是一页：多一条导航就是两处入口）",
+    !read("lib/site/admin-nav.ts").includes('"/admin/holidays"') &&
+      PAGE_ACCESS["/admin/holidays"] === undefined);
+  ok("日历页把这一块挂上了「假期与作息」页签（不是搬走了却没人引用）",
+    read("app/admin/(dashboard)/calendar/page.tsx").includes("<HolidayTablePanel />") &&
+      read("app/admin/(dashboard)/calendar/page.tsx").includes("假期与作息"));
 
   const serverHolidays = read("server/holidays.mts");
   ok(
@@ -9618,6 +9639,191 @@ console.log("\n=== 34. 删掉「交付形态」这一维（v26，机构更正）
     !catalogPage.includes('key: "deliveries"') && !catalogPage.includes('tab === "deliveries"'));
   ok("而且页面上写明了那些是独立项目（避免以后又有人把它加回来）",
     catalogPage.includes("独立的项目"));
+}
+
+console.log("\n=== 35. 哪一天按哪一组时段（v27 寒暑假段 + 时段口径）===");
+
+/*
+ * 机构 2026-09 定的口径（原话）：
+ *   - **假期要上课**（法定假日照常排，假期正是旺季）；
+ *   - **寒暑假开始和结束的日期每次手动输入**（不推算）；
+ *   - **作息和现在的周末上课时间完全一样**（假期用周末那一组时段）；
+ *   - 寒暑假**按学段**录（实际上时间差不多）；
+ *   - 「先把时段分清楚，后续的排课再另外安排」。
+ *
+ * 这一节守四件事：
+ *   1. **判定只有一份**（`dayPlanFor`）：优先级 寒暑假 > 调休上班 > 法定假日 > 周末/工作日；
+ *   2. **时段从「时间安排」那一块读**，不另建一套配置（否则网站上公布的时间会与排课用的漂开）；
+ *   3. **寒暑假段手动录入的形状与校验**（起止合法、至少一个学段、重叠只提示不拦）；
+ *   4. **这一版不改排课**：`recurrence.ts` 的日期生成一行都没动（机构说排课另行安排）——
+ *      这条要**断言**，否则下一个人很容易顺手把它接上。
+ */
+{
+  __useStoreForTesting(memory);
+
+  const holidays: HolidayDay[] = [
+    { date: "2026-10-01", name: "国庆节", kind: "放假" },
+    { date: "2026-10-02", name: "国庆节", kind: "放假" },
+    { date: "2026-10-10", name: "国庆节", kind: "调休上班" },
+  ];
+  const stage = catalogId("st", "小学");
+  const vacations: VacationPeriod[] = [
+    { id: "v1", name: "寒假", kind: "寒假", stageIds: [stage], startDate: "2026-01-20", endDate: "2026-02-25", note: "" },
+    { id: "v2", name: "暑假", kind: "暑假", stageIds: [stage], startDate: "2026-07-06", endDate: "2026-08-31", note: "" },
+  ];
+
+  // ① 优先级与两组时段
+  const plan = (date: string, extra: Partial<CalendarPlanInput> = {}): DayPlan =>
+    dayPlanFor(date, { holidays, vacations, ...extra });
+  eq("普通工作日 → 工作日组",
+    [plan("2026-09-23").kind, plan("2026-09-23").windowGroup], ["workday", "工作日"]);
+  eq("普通周六 → 周末组",
+    [plan("2026-09-26").kind, plan("2026-09-26").windowGroup], ["weekend", "周末"]);
+  eq("法定假日 → **照常上课**，按周末组（白天能排）",
+    [plan("2026-10-01").kind, plan("2026-10-01").windowGroup, plan("2026-10-01").badge], ["holiday", "周末", "休"]);
+  eq("调休上班日（那个周六）→ 按工作日组（学生要上学）",
+    [plan("2026-10-10").kind, plan("2026-10-10").windowGroup, plan("2026-10-10").badge], ["makeup", "工作日", "班"]);
+  eq("寒暑假段内 → 按周末组（作息与周末相同）",
+    [plan("2026-08-03").kind, plan("2026-08-03").windowGroup, plan("2026-08-03").badge], ["vacation", "周末", "暑"]);
+  eq("寒假段内标「寒」", plan("2026-02-01").badge, "寒");
+  ok("判定都给出依据（页面上做 tooltip，不让人猜）",
+    ["workday", "weekend", "holiday", "makeup", "vacation"]
+      .map((kind) => [plan("2026-09-23"), plan("2026-09-26"), plan("2026-10-01"), plan("2026-10-10"), plan("2026-08-03")]
+        .find((item) => item.kind === kind))
+      .every((item) => (item?.reason ?? "").length > 8));
+
+  /*
+   * 优先级里最容易搞错的一条：**春节的调休上班日与法定假日落在寒假里**。
+   * 那时学校已经放假、学生不上学，因此寒暑假优先 —— 否则"寒假里的那个调休周六"
+   * 会被判成工作日组（只能排晚上），与机构"假期照排、白天也能排"的口径正好相反。
+   */
+  const springFestival: HolidayDay[] = [
+    { date: "2026-02-17", name: "春节", kind: "放假" },
+    { date: "2026-02-14", name: "春节", kind: "调休上班" },
+  ];
+  eq("寒假里的法定假日 → 仍然是假期作息（寒假优先于法定假日）",
+    dayPlanFor("2026-02-17", { holidays: springFestival, vacations }).kind, "vacation");
+  eq("寒假里的调休上班日 → 仍然是假期作息（寒假优先于调休）",
+    dayPlanFor("2026-02-14", { holidays: springFestival, vacations }).kind, "vacation");
+
+  // ② 按学段：别的学段的段不生效
+  const otherStage = catalogId("st", "初中");
+  eq("只看小学时，初中的假期段不算假期",
+    dayPlanFor("2026-08-03", { vacations, stageId: otherStage }).kind, "workday");
+  eq("只看小学时，小学的假期段算假期",
+    dayPlanFor("2026-08-03", { vacations, stageId: stage }).kind, "vacation");
+  eq("不给学段时，任意学段在假期里就算假期（页面上会写清是哪一段）",
+    dayPlanFor("2026-08-03", { vacations }).kind, "vacation");
+
+  // ③ 时段从「课程时间安排」那一块读（不另建配置）
+  const block = {
+    groups: [
+      { id: "g1", title: "工作日排课", description: "", items: [
+        { id: "i1", title: "晚第一节", value: "17:30–19:30", body: "" },
+        { id: "i2", title: "晚第二节", value: "19:30–21:30", body: "" },
+      ] },
+      { id: "g2", title: "周末排课", description: "", items: [
+        { id: "i3", title: "第一节", value: "08:00–10:00", body: "" },
+        { id: "i4", title: "第六节", value: "20:00–22:00", body: "" },
+      ] },
+      { id: "g3", title: "全日托", description: "", items: [
+        { id: "i5", title: "工作日", value: "08:00–17:00", body: "" },
+        { id: "i6", title: "周末", value: "按需预约", body: "" },
+      ] },
+      { id: "g4", title: "晚辅导", description: "", items: [
+        { id: "i7", title: "小学", value: "17:30–19:30", body: "" },
+      ] },
+    ],
+  };
+  const workdayWindows = windowsFromSchedule(block, "工作日");
+  const weekendWindows = windowsFromSchedule(block, "周末");
+  eq("工作日组读出两个时段（原样保留「17:30–19:30」这种写法）",
+    workdayWindows.windows.map((item) => `${item.label}=${item.raw}`), ["晚第一节=17:30–19:30", "晚第二节=19:30–21:30"]);
+  eq("周末组读出两个时段", weekendWindows.windows.map((item) => item.raw), ["08:00–10:00", "20:00–22:00"]);
+  ok("「全日托 / 晚辅导」那两组**不会**被当成排课时段（它们不含「排课 / 上课」）",
+    windowsFromSchedule({ groups: [block.groups[2]!, block.groups[3]!] }, "工作日").missing);
+  ok("分组名改成「工作日上课」也认得（按关键字匹配）",
+    windowsFromSchedule({ groups: [{ ...block.groups[0]!, title: "工作日上课" }] }, "工作日").windows.length === 2);
+  ok("「双休日排课」这种写法认得出是周末那一组",
+    !windowsFromSchedule({ groups: [{ ...block.groups[1]!, title: "双休日排课" }] }, "周末").missing);
+  ok("读不到那一组时 `missing` 为真（页面上会指路去「网站内容 → 时间安排」）",
+    windowsFromSchedule({ groups: [block.groups[2]!] }, "周末").missing &&
+      windowsFromSchedule(undefined, "工作日").missing);
+  ok("「按需预约」这种不能解析的值被跳过（不当成时段）",
+    windowsFromSchedule({ groups: [block.groups[2]!] }, "周末").windows.length === 0);
+
+  // ④ 寒暑假段：形状与校验
+  const catalogForVacations = catalogFromSeed();
+  eq("合法的一段通过校验", validateVacations(vacations, catalogForVacations), []);
+  ok("起止写反被拒（否则那一段永远不生效，而页面上看不出问题）",
+    validateVacations([{ ...vacations[0]!, startDate: "2026-03-01", endDate: "2026-02-01" }], catalogForVacations)
+      .some((text) => text.includes("早于开始日期")));
+  ok("日期不合法被拒",
+    validateVacations([{ ...vacations[0]!, startDate: "2026-2-1" }], catalogForVacations)
+      .some((text) => text.includes("不是合法日期")));
+  ok("2026-02-30 这种被拒（Date 会把它规整成 3 月 2 日）",
+    validateVacations([{ ...vacations[0]!, endDate: "2026-02-30" }], catalogForVacations)
+      .some((text) => text.includes("不是合法日期")));
+  ok("没勾学段被拒（机构口径：寒暑假按学段录）",
+    validateVacations([{ ...vacations[0]!, stageIds: [] }], catalogForVacations)
+      .some((text) => text.includes("没有勾学段")));
+  ok("勾了不存在的学段被拒",
+    validateVacations([{ ...vacations[0]!, stageIds: ["st_不存在"] }], catalogForVacations)
+      .some((text) => text.includes("不存在的学段")));
+  ok("没有名字被拒",
+    validateVacations([{ ...vacations[0]!, name: "  " }], catalogForVacations)
+      .some((text) => text.includes("没有名字")));
+  eq("一条都没有＝合法（还没录就是为了不录：那就按星期几判）",
+    validateVacations([], catalogForVacations), []);
+  eq("重叠**只提示不拦**（国庆集训套在暑假里是正常安排）",
+    [validateVacations([vacations[1]!, { ...vacations[0]!, id: "v3", startDate: "2026-08-01", endDate: "2026-08-10" }], catalogForVacations),
+      vacationOverlaps([vacations[1]!, { ...vacations[0]!, id: "v3", startDate: "2026-08-01", endDate: "2026-08-10" }]).length],
+    [[], 1]);
+  eq("不同学段的段不算重叠",
+    vacationOverlaps([vacations[1]!, { ...vacations[0]!, id: "v4", stageIds: [otherStage] }]), []);
+
+  // ⑤ 这一版**不改排课**（机构：后续的排课再另外安排）
+  const recurrenceSource = readFileSync(new URL("../lib/backend/recurrence.ts", import.meta.url), "utf8");
+  ok("recurrence.ts 没有引入 calendar-plan（排课生成仍然「按星期几往后数」）",
+    !recurrenceSource.includes("calendar-plan") && !recurrenceSource.includes("dayPlanFor"));
+  ok("planSeries 也没有拿假期去过滤日期",
+    !readFileSync(new URL("../lib/backend/api.ts", import.meta.url), "utf8")
+      .split("function planSeries(")[1]!
+      .slice(0, 4000)
+      .includes("dayPlanFor"));
+  ok("页面上写明了「录了寒暑假也不会自动改排课」（免得人以为已经接上了）",
+    readFileSync(new URL("../components/admin/VacationPanel.tsx", import.meta.url), "utf8").includes("这一版只把口径摆出来，不改排课"));
+
+  // ⑥ API：迁移与读写
+  const legacyDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & { version: number };
+  delete legacyDb.vacations;
+  legacyDb.version = 26;
+  eq("v26 老库（没有寒暑假段）能升级导入",
+    (await api.importDatabase(JSON.stringify(legacyDb))).ok, true);
+  const after = await api.exportDatabase();
+  eq("升级后版本号是当前版本", after.version, CURRENT_VERSION);
+  eq("迁移**不猜日期**：寒暑假段空着起步（机构每年手动输入）", after.vacations.length, 0);
+  eq("vacations.list 读出来的是库里的那一份", (await api.vacations.list()).length, 0);
+  const savedVacations = await api.vacations.save(vacations);
+  eq("保存两段之后读得回来", savedVacations.map((item) => item.name), ["寒假", "暑假"]);
+  eq("保存写了操作日志", (await api.logs.list())[0]?.entity, "寒暑假");
+  const vacationRefusal = await (async () => {
+    try {
+      await api.vacations.save([{ ...vacations[0]!, startDate: "2026-05-01", endDate: "2026-01-01" }]);
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  })();
+  ok("起止写反在服务端也被拒（不是只在页面上提示）", vacationRefusal.includes("早于开始日期"));
+  eq("被拒之后库里那一份没变", (await api.vacations.list()).length, 2);
+  const brokenDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & { version: number };
+  delete brokenDb.vacations;
+  brokenDb.version = CURRENT_VERSION;
+  eq("自称当前版本、却缺寒暑假段的文件也能导入",
+    (await api.importDatabase(JSON.stringify(brokenDb))).ok, true);
+  ok("导入后被兜成空数组（日历页不会整页打不开）",
+    Array.isArray((await api.exportDatabase()).vacations));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

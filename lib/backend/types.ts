@@ -245,6 +245,36 @@ export type CatalogFormat = {
   order: number;
 };
 
+/**
+ * 一段**寒暑假**（v27）—— 机构每年手动录入，不猜、不按农历算。
+ *
+ * ## 为什么要有它
+ *
+ * 寒暑假期间**每天都上课**，而且时段与周末一样（机构原话：「作息和现在的周末上课时间完全一样」）。
+ * 因此这段时间里的"星期几"不再是"能不能排课"的依据 —— 只在日历上体现为
+ * "这几天按周末那一组时段"。起止日期每年都不同（还跟农历有关），所以由机构自己录。
+ *
+ * ## 为什么带学段
+ *
+ * 机构口径：**寒暑假按学段录**（小学与初中的放假日期通常接近但不完全相同）。
+ * `stageIds` 引用课程类型里的学段（不是自由文本），因此学段改名/增删之后这一行仍然有效，
+ * 而"这个学段已经没有了"会在 `validateVacations` 里被拦下。勾多个学段是允许的
+ * —— 日期一致时一次录一条即可。
+ */
+export type VacationPeriod = {
+  id: string;
+  /** 名称（寒假 / 暑假 / 国庆集训…）。 */
+  name: string;
+  kind: "寒假" | "暑假" | "其他";
+  /** 适用学段（引用 `catalog.stages` 的 id；至少一个）。 */
+  stageIds: string[];
+  /** 起（含当天，`YYYY-MM-DD`）。 */
+  startDate: string;
+  /** 止（含当天，`YYYY-MM-DD`）。 */
+  endDate: string;
+  note: string;
+};
+
 /** 课程类型的全部维度（四个：学段 / 学科与项目 / 内容模块 / 班型）。 */
 export type Catalog = {
   stages: CatalogStage[];
@@ -1134,6 +1164,12 @@ export type Database = {
    * "可以有哪些维度、彼此怎么组织"。见上面的类型说明。
    */
   catalog: Catalog;
+  /**
+   * **寒暑假段**（v27）：手动录入的假期起止（按学段）。
+   *
+   * 它决定"哪几天按假期作息（= 周末那一组时段）"，见 `lib/backend/calendar-plan.ts`。
+   */
+  vacations: VacationPeriod[];
   /**
    * **开放的组合**（v24）：学科 × 内容模块 × 班型。
    *

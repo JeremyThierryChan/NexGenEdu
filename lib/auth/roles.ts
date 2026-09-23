@@ -93,11 +93,11 @@ export const PAGE_ACCESS: Record<string, Role[]> = {
    */
   "/admin/accounts": ["技术管理员"],
   /*
-   * 节假日表（后台「节假日」页）：**只是给人看的参考资料**，四个角色都能进
-   * （排课时要看哪天是假期、哪天是调休上班）。抓取那件事只有技术管理员，见下面的
-   * `HOLIDAY_ACTION_ACCESS`。
+   * 节假日表与寒暑假段**不再是独立的一页**（v28 起并进「日历」页的「假期与作息」页签）：
+   * 它只是给人看的参考资料（看周视图时要知道哪天是假期、哪天是调休上班），
+   * 因此权限跟着 `/admin/calendar` 走 —— 四个角色都能进。
+   * 抓取仍然只有技术管理员，见下面的 `HOLIDAY_ACTION_ACCESS`。
    */
-  "/admin/holidays": ["技术管理员", "财务管理员", "招生老师", "普通教师"],
 };
 
 /**
@@ -108,7 +108,10 @@ export const PAGE_ACCESS: Record<string, Role[]> = {
  * 判定数据只有一个来源，界面与接口不会各说一套。
  */
 export const HOLIDAY_ACTION_ACCESS: Record<string, Role[]> = {
-  /** 看这张表（与上面的页面权限同一个答案）。 */
+  /**
+   * 看这张表 —— 与 `/admin/calendar` 的页面权限**同一个答案**：表并进日历页之后，
+   * "能不能看这张表"就等于"能不能进日历页"（自检里有一条断言比对这两者）。
+   */
   "holidays.read": ["技术管理员", "财务管理员", "招生老师", "普通教师"],
   /**
    * 抓取数据（走外网、写服务端机器上的文件）—— 属于**运维动作**，只有技术管理员。
@@ -404,6 +407,12 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
    * 写方法 `offers.save` 同样**不登记**（`crud` 那一档本来就不给普通教师）。
    */
   "offers.list": "global",
+  /*
+   * 寒暑假段：与维度表、组合表同一条理由 —— 它是"本机构什么时候算假期"，
+   * 不含学生与金额信息；日历页要把它标出来，将来的排课也要问它。
+   * 写方法 `vacations.save` 不登记（`crud` 那一档本来就不给普通教师）。
+   */
+  "vacations.list": "global",
   "site.publicContent": "global",
 
   /* 我的课：列表、单条、按日期 / 区间 / 教室 / 学生 / 教师取 */

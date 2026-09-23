@@ -86,6 +86,12 @@ export const API_CONTRACT: ContractGroup[] = [
        * 不为"整行 / 整列 / 整个学段"各加一个接口，否则"批量"的口径会散在服务端好几处。
        */
       "offers.list", "offers.save",
+      /*
+       * 寒暑假段（v27）：手动录入的假期起止（按学段）。它决定"哪几天按假期作息
+       * （＝周末那一组时段）"，判定在 `lib/backend/calendar-plan.ts`。
+       * 同样只做"读整份 + 存整份"—— 一年两段，页面上的操作是加/改/删之后再保存。
+       */
+      "vacations.list", "vacations.save",
     ],
   },
   {

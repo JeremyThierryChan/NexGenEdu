@@ -64,6 +64,13 @@ export function createEmptyDatabase(now: Date = new Date()): Database {
      * 机构照着勾就行。
      */
     offers: [],
+    /*
+     * 寒暑假段（v27）：**空表起步**。
+     *
+     * 起止日期每年手动录入（不猜、不按农历算），因此这里不预置任何一段：
+     * 拼一份"看起来很像"的日期，机构会以为那是系统算出来的。
+     */
+    vacations: [],
     pricing: pricingConfigFromContent(),
     siteContent: siteContentFromContent(),
     updatedAt: now.toISOString(),

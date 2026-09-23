@@ -927,6 +927,54 @@ await check(
 await check("搜索", "全局搜索命中学生", async () => (await api.search("验收")).length > 0);
 await check("日志", "操作日志有记录", async () => (await api.logs.list(50)).length > 0);
 
+/* ── 11 寒暑假段（「日历」页「假期与作息」页签）── */
+/*
+ * 机构口径：寒暑假起止**每年手动录入**（按学段），落在段内的每一天按假期作息
+ * （＝周末那一组时段）。这一节走真实 HTTP：读 → 存两段 → 校验被拒 → 读回来一致 → 收尾清空。
+ */
+const vacationsBefore = await api.vacations.list();
+await check("寒暑假", "读寒暑假段（初始为空或已有）", async () => Array.isArray(vacationsBefore));
+await check("寒暑假", "存两段（寒假 + 暑假，按学段）", async () => {
+  const catalog = await api.catalog.list();
+  const stageId = catalog.stages[0]?.id ?? "";
+  const saved = await api.vacations.save([
+    { id: "vac-accept-1", name: "寒假", kind: "寒假", stageIds: [stageId], startDate: "2026-01-20", endDate: "2026-02-25", note: "验收用" },
+    { id: "vac-accept-2", name: "暑假", kind: "暑假", stageIds: [stageId], startDate: "2026-07-06", endDate: "2026-08-31", note: "验收用" },
+  ]);
+  return saved.map((item) => item.name);
+}, (names: string[]) => names.join("|") === "寒假|暑假");
+await check("寒暑假", "读回来一致（真的落库了）", async () => {
+  const rows = await api.vacations.list();
+  return rows.map((item) => `${item.name} ${item.startDate}~${item.endDate}`);
+}, (rows: string[]) => rows.length === 2 && rows[1] === "暑假 2026-07-06~2026-08-31");
+await check("寒暑假", "起止写反会被拒（不是静默保存）", async () => {
+  const catalog = await api.catalog.list();
+  const stageId = catalog.stages[0]?.id ?? "";
+  try {
+    await api.vacations.save([
+      { id: "vac-bad", name: "写反了", kind: "其他", stageIds: [stageId], startDate: "2026-05-01", endDate: "2026-01-01", note: "" },
+    ]);
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("早于开始日期") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+await check("寒暑假", "没勾学段也会被拒", async () => {
+  try {
+    await api.vacations.save([
+      { id: "vac-nostage", name: "没学段", kind: "其他", stageIds: [], startDate: "2026-01-01", endDate: "2026-01-10", note: "" },
+    ]);
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("没有勾学段") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+await check("寒暑假", "保存写了操作日志", async () => {
+  const logs = await api.logs.list();
+  return logs.some((item) => item.entity === "寒暑假");
+});
+await check("寒暑假", "收尾：回到验收前的状态", async () => api.vacations.save(vacationsBefore), (rows: unknown[]) => rows.length === vacationsBefore.length);
+
 /* ── 输出 ── */
 const byPage = new Map<string, Result[]>();
 for (const r of results) {

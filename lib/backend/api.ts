@@ -3,6 +3,7 @@ import { createEmptyDatabase } from "./initial";
 import { catalogFromSeed, catalogSeedSummary } from "./catalog-seed";
 import { catalogSummary, validateCatalog } from "./catalog";
 import { syncClassTypes } from "./class-types";
+import { validateVacations } from "./calendar-plan";
 import { danglingOffers, offerId, offersSummary, validateOffers, type OfferKey } from "./offers";
 import {
   emptySiteContent,
@@ -149,6 +150,7 @@ import type {
   CatalogModule,
   CatalogFormat,
   CatalogOffer,
+  VacationPeriod,
   SiteCopyBlock,
   SiteCopyGroup,
   SiteCopyItem,
@@ -1011,6 +1013,18 @@ function migrate(db: Database): Database | null {
     db.version = 26;
   }
 
+  if (db.version === 26) {
+    /*
+     * v26 → v27：**寒暑假段**（机构每年手动录入的假期起止，按学段）。
+     *
+     * 空表起步（不猜日期）：机构口径是"起止日期每次手动输入"，预置一段反而会让人
+     * 以为那是系统算出来的。它决定"哪几天按假期作息（= 周末那一组时段）"，
+     * 判定在 `lib/backend/calendar-plan.ts`。
+     */
+    db.vacations = [];
+    db.version = 27;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1051,6 +1065,12 @@ function migrate(db: Database): Database | null {
    * 会让矩阵多出一整片不存在的列，而页面不会报错 —— 因此在这一层统一抹掉。
    */
   delete (db.catalog as Catalog & { deliveries?: unknown }).deliveries;
+
+  /*
+   * 收尾归一：**寒暑假段必须是一个数组**（与分区表、维度表、组合表同一条纪律）：
+   * 一份"自称 v27"却缺它的文件会让「日历」页读 `db.vacations.filter` 直接 TypeError。
+   */
+  if (!Array.isArray(db.vacations)) db.vacations = [];
 
   /*
    * 收尾归一：**组合表必须是一个数组**（与分区表、维度表同一条纪律）。
@@ -1170,6 +1190,29 @@ function normalizeOffers(input: readonly CatalogOffer[]): CatalogOffer[] {
 function withCatalogClassTypes(db: Database): PricingConfig {
   const sync = syncClassTypes(db.pricing.classTypes, db.catalog);
   return { ...clone(db.pricing), classTypes: sync.classTypes };
+}
+
+/**
+ * 寒暑假段归一：去空白、补默认值、**丢掉不认识的字段**。
+ *
+ * 与 `normalizeOffers` 同一条纪律。`kind` 认不出来的按「其他」处理（不丢这一行 ——
+ * 日期才是它的主体，名字与类别是给人看的）。
+ */
+function normalizeVacations(input: readonly VacationPeriod[]): VacationPeriod[] {
+  const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+  const kinds: Array<VacationPeriod["kind"]> = ["寒假", "暑假", "其他"];
+
+  return (input ?? []).map((item) => ({
+    id: text(item.id),
+    name: text(item.name),
+    kind: kinds.includes(item.kind) ? item.kind : "其他",
+    stageIds: Array.isArray(item.stageIds)
+      ? item.stageIds.map((id) => String(id)).filter((id) => id !== "")
+      : [],
+    startDate: text(item.startDate),
+    endDate: text(item.endDate),
+    note: text(item.note),
+  }));
 }
 
 function persist(db: Database): void {
@@ -3052,6 +3095,44 @@ const localApi = {
       });
       persist(db);
       return clone(db.offers);
+    },
+  },
+
+  /**
+   * **寒暑假段**（v27）：哪几天按假期作息（= 周末那一组时段）。
+   *
+   * 与维度表同一套做法（整份读、整份写）：条数是个位数，页面上的操作就是
+   * "加一段 / 改起止 / 删一段 → 保存"，整份替换最省事。
+   */
+  vacations: {
+    /** 全部的寒暑假段。 */
+    async list(): Promise<VacationPeriod[]> {
+      await delay();
+      return clone(load().vacations);
+    },
+
+    /** 存整份（校验后整体替换）。 */
+    async save(input: readonly VacationPeriod[]): Promise<VacationPeriod[]> {
+      await delay();
+      const db = load();
+      const normalized = normalizeVacations(input);
+      const problems = validateVacations(normalized, db.catalog);
+      if (problems.length > 0) throw new Error(problems.join("；"));
+
+      db.vacations = normalized;
+      writeLog(db, {
+        entity: "寒暑假",
+        action: "保存",
+        targetId: "",
+        summary:
+          normalized.length === 0
+            ? "寒暑假段：清空"
+            : `寒暑假段：${String(normalized.length)} 段（${normalized
+                .map((item) => `${item.name} ${item.startDate}–${item.endDate}`)
+                .join("、")}）`,
+      });
+      persist(db);
+      return clone(db.vacations);
     },
   },
 
@@ -5703,6 +5784,7 @@ export type {
   CatalogModule,
   CatalogFormat,
   CatalogOffer,
+  VacationPeriod,
   SiteFeaturedCourse,
   SiteFeaturedPage,
   SiteCopyBlock,

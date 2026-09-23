@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/admin/AdminFields";
 import { DataNotice } from "@/components/admin/DataNotice";
@@ -23,7 +22,12 @@ import {
 } from "@/lib/backend/holidays-client";
 
 /**
- * 节假日（法定节假日与调休上班日的年度表）。
+ * 节假日表（法定节假日与调休上班日的年度表）—— 后台「日历」页「假期与作息」页签里的一块。
+ *
+ * v28 起它与「日历」合并在同一页（机构要求"这两个页面的功能应该放在一起"）：周视图看课、
+ * 这里看"哪一天是什么日子"，两件事本来就是一体的。组件化而不是继续当一个独立页面：
+ * 原来那个 500 行的页面整块搬进来会让日历页难以维护，而且这一块**与周视图无关**
+ * （它不读课程数据），单独一个组件边界更清楚。
  *
  * ## 这一页解决的是什么（以及**不**解决什么）
  *
@@ -75,7 +79,7 @@ function monthDay(date: string): string {
   return parsed === null ? date : formatMonthDay(parsed);
 }
 
-export default function AdminHolidaysPage() {
+export function HolidayTablePanel() {
   const auth = useAuth();
   const roles = rolesOrAll(auth);
   /** 能不能抓取：读的是 `lib/auth/roles.ts` 那一份（与后端同一个来源）。 */
@@ -186,7 +190,6 @@ export default function AdminHolidaysPage() {
   if (table === null) {
     return (
       <>
-        <PageHeading title="节假日" description="法定节假日与调休上班日的年度表。" />
         <Panel
           className="mt-6"
           title={loading ? "正在读取节假日表…" : "这一页打不开"}
@@ -226,11 +229,6 @@ export default function AdminHolidaysPage() {
 
   return (
     <>
-      <PageHeading
-        title="节假日"
-        description="法定节假日与调休上班日的年度表：两个公开来源逐日比对一致才写入。"
-      />
-
       {/*
         `DataNotice` 不接受 className（它的版式由自己那一份最小高度管着，见
         `lib/admin/notice-layout.ts`），所以间距由外面这层 div 给。

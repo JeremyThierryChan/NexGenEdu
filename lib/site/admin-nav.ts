@@ -42,12 +42,11 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     description: "宣传网站上的对外文案：学生案例（/cases 与首页那块的来源）",
   },
   { href: "/admin/lessons", label: "课程安排", description: "课程列表、排课与冲突检测" },
-  { href: "/admin/calendar", label: "日历", description: "按日 / 周查看课程安排" },
   {
-    href: "/admin/holidays",
-    label: "节假日",
+    href: "/admin/calendar",
+    label: "日历",
     description:
-      "法定节假日与调休上班日的年度表（两个公开来源逐日比对一致才写入）。只供查看与手动排课时参考 —— 排课不会自动跳过节假日",
+      "按周查看排课密度与空档；同页的「假期与作息」里是法定节假日年度表与寒暑假段（手动录入）—— 每天标出按工作日还是按周末时段排",
   },
   {
     href: "/admin/timetable",
