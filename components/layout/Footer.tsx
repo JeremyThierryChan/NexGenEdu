@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Logo } from "@/components/layout/Logo";
+import { SiteDataSourceBadge } from "@/components/layout/SiteDataSourceBadge";
 import { ButtonLink } from "@/components/ui/Button";
 import { Container } from "@/components/ui/Container";
 import { FOOTER_GROUPS } from "@/lib/site/nav";
@@ -17,7 +18,7 @@ type FooterProps = {
  * ```
  * 品牌 + 两个行动按钮 │ 选课与价格 │ 了解我们 │ 联系我们
  * ────────────────────────────────────────────────────────
- * © 版权                                          教务后台
+ * © 版权                        「内容来自哪」状态标 │ 教务后台
  * ```
  *
  * 三个刻意的处理：
@@ -113,9 +114,17 @@ export function Footer({ brand }: FooterProps) {
         <p>
           © {year} {brand.copyrightHolder}。保留所有权利。
         </p>
-        <Link href="/admin" className="transition-colors hover:text-brand-700">
-          教务后台
-        </Link>
+        {/*
+          「教务后台」旁边是**这一份网站的内容从哪来**的状态标（机构要求）：
+          网站是静态的，内容可能来自后台快照 / 内容文件 / 空，而三者长得一模一样 ——
+          没有它，"我后台改了前台怎么没变"只能靠猜。见那个组件的说明。
+        */}
+        <div className="flex flex-wrap items-center gap-3">
+          <SiteDataSourceBadge />
+          <Link href="/admin" className="transition-colors hover:text-brand-700">
+            教务后台
+          </Link>
+        </div>
       </Container>
     </footer>
   );
