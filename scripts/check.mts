@@ -209,6 +209,7 @@ import {
   HOLIDAY_ACTION_ACCESS,
   PAGE_ACCESS,
   ADMIN_COURSE_TABS,
+  pickInitialCourseTab,
   ROLES,
   canCallMethod,
   TEACHER_SCOPE_RULES,
@@ -9724,9 +9725,13 @@ console.log("\n=== 36. 课程一页三页签（v29：课程库 + 课程类型 + 
   eq("路由权限 = 三个页签角色的并集（谁也不会因为合并少看到他本来能看的）",
     [...(PAGE_ACCESS["/admin/courses"] ?? [])].sort(), [...union].sort());
   ok("页面上按角色过滤页签（不是全部渲染再靠 CSS 藏）",
-    page.includes("ADMIN_COURSE_TABS.filter((tab) => canAccess(roles, tab.roles))"));
+    /ADMIN_COURSE_TABS\.filter\(\(item\) => canAccess\(roles, item\.roles\)\)/.test(page) &&
+      page.includes("tabs.map((item) =>"));
   ok("锚点里的页签也要先过权限（否则拿到 #matrix 链接的教师会看到空壳）",
-    /hit !== undefined && tabs\.some\(\(item\) => item\.key === hit\.key\)/.test(page));
+    page.includes("pickInitialCourseTab(ADMIN_COURSE_TABS, tabs, window.location.hash)") &&
+      read("lib/auth/roles.ts").includes(
+        "if (hit !== undefined && allowed.some((item) => item.key === hit.key)) return hit.key;",
+      ));
   ok("四个页签锚点都是 ASCII（中文锚点会变成一长串百分号编码）",
     ADMIN_COURSE_TABS.every((tab) => /^[a-z]+$/.test(tab.hash)));
 
@@ -10124,6 +10129,54 @@ console.log("\n=== 39. 课程台账按维度分组（v33：默认按维度，分
     ledger.includes('groupMode === "partition" && unpartitioned.length > 0'));
   ok("两种分组都复用同一张课程卡片（不是各画一套）",
     (ledger.match(/renderCourseCard\(course\)/g) ?? []).length >= 3);
+}
+
+console.log("\n=== 40. 「课程」页点页签有反应（一个真 bug 的回归断言）===");
+
+/*
+ * 机构报的现象：「课程矩阵和课程类型为什么点了没反应」。
+ *
+ * 根因在合并三个页面的那一版（v29）：选页签的 effect 依赖写成了
+ * `[tabs]`，而 `tabs = ADMIN_COURSE_TABS.filter(...)` **每次渲染都是新数组** ——
+ * 于是那个 effect 每次渲染都跑一遍，刚点下去的页签立刻被重置回第一个
+ * （而且它与"把页签写进地址"的 effect 组成来回改状态的循环）。
+ *
+ * 这一节守两件事：**选页签的纯逻辑**逐条正确；**页面结构**不再犯那个错。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+  const page = read("app/admin/(dashboard)/courses/page.tsx");
+
+  // ① 纯逻辑
+  const all = ADMIN_COURSE_TABS.map((tab) => ({ key: tab.key, hash: tab.hash }));
+  const allTabs = ADMIN_COURSE_TABS.map((tab) => ({ key: tab.key }));
+  const onlyLedger = [{ key: "ledger" as const }];
+  eq("没有锚点时选第一个能进的页签", pickInitialCourseTab(all, allTabs, ""), "ledger");
+  eq("有锚点且允许 → 直接进那一个", pickInitialCourseTab(all, allTabs, "#matrix"), "matrix");
+  eq("锚点是 key 本身也认", pickInitialCourseTab(all, allTabs, "dimensions"), "dimensions");
+  eq("锚点不允许（教师拿到 #matrix）→ 退到第一个能进的，**不是**空壳",
+    pickInitialCourseTab(all, onlyLedger, "#matrix"), "ledger");
+  eq("锚点不认识 → 退到第一个", pickInitialCourseTab(all, allTabs, "#不存在的页签"), "ledger");
+  eq("一个都进不去 → null（页面上给说明，而不是空白）", pickInitialCourseTab(all, [], "#matrix"), null);
+  eq("带不带 # 都一样", [
+    pickInitialCourseTab(all, allTabs, "#offers"),
+    pickInitialCourseTab(all, allTabs, "offers"),
+  ], ["ledger", "ledger"]);
+
+  // ② 页面结构：不许再犯那个错
+  ok("页签列表是 useMemo 出来的（每次渲染新建数组会让「选页签」的 effect 每次都跑）",
+    /const tabs = useMemo\(/.test(page));
+  ok("选页签的 effect 只跑一次（依赖不是那个数组，而且有 picked 守卫）",
+    page.includes("const picked = useRef(false)") &&
+      /if \(picked\.current\) return;/.test(page) &&
+      !/\}, \[tabs\]\);\n\n  \/\*\n   \* 角色变化后/.test(page));
+  ok("选页签用的是那个纯函数（逻辑可断言，不是埋在 effect 里）",
+    page.includes("pickInitialCourseTab(ADMIN_COURSE_TABS, tabs, window.location.hash)"));
+  ok("角色变化导致当前页签不允许时会退到能进的第一个",
+    page.includes("if (tabs.some((item) => item.key === tab)) return;"));
+  ok("切页签不卸载已经打开过的面板（卸载会把没保存的草稿悄悄丢掉）",
+    page.includes("hidden={tab !== \"ledger\"}") && page.includes("mounted.has("));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

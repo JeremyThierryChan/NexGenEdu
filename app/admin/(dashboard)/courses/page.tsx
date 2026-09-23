@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { CoursesLedgerPanel } from "@/components/admin/CoursesLedgerPanel";
 import { CatalogDimensionsPanel } from "@/components/admin/CatalogDimensionsPanel";
 import { OffersMatrixPanel } from "@/components/admin/OffersMatrixPanel";
 import { rolesOrAll, useAuth } from "@/components/admin/AuthContext";
-import { ADMIN_COURSE_TABS, canAccess, type AdminCourseTab } from "@/lib/auth/roles";
+import { ADMIN_COURSE_TABS, canAccess, pickInitialCourseTab, type AdminCourseTab } from "@/lib/auth/roles";
 import { cn } from "@/lib/utils/cn";
 
 /**
@@ -50,23 +50,34 @@ import { cn } from "@/lib/utils/cn";
  */
 export default function AdminCoursesPage() {
   const roles = rolesOrAll(useAuth());
-  const tabs = ADMIN_COURSE_TABS.filter((tab) => canAccess(roles, tab.roles));
+  /*
+   * ⚠️ `useMemo` 不是优化，是**正确性**：`ADMIN_COURSE_TABS.filter(...)` 每次渲染都会
+   * 新建一个数组，而下面"选页签"的 effect 依赖过它 —— 于是那个 effect **每次渲染都跑一遍**，
+   * 刚点下去的页签立刻被它重置回第一个，表现就是「点课程类型 / 开放矩阵没反应」
+   * （而且它与"把页签写进地址"的 effect 组成了来回改状态的循环）。
+   * 自检第 40 节有一条断言盯着这里。
+   */
+  const tabs = useMemo(() => ADMIN_COURSE_TABS.filter((item) => canAccess(roles, item.roles)), [roles]);
   const [tab, setTab] = useState<AdminCourseTab | null>(null);
   /** 已经挂载过的页签（见上面"去过就留着"）。 */
   const [mounted, setMounted] = useState<Set<AdminCourseTab>>(new Set());
+  /** 只选一次页签（`roles` 之后可能变化，那不该把用户正在看的页签拽回去）。 */
+  const picked = useRef(false);
 
   /*
-   * 默认页签 = 这个角色能进的第一个。地址里的 `#矩阵` 这类锚点优先（可以直达 / 分享），
-   * 但**必须**先确认这个角色进得去 —— 否则一个教师拿到别人发的 `#矩阵` 链接，
+   * 首次进入时选页签（**只做一次**）。地址里的 `#dimensions` 这类锚点优先（可以直达 / 分享），
+   * 但**必须**先确认这个角色进得去 —— 否则一个教师拿到别人发的 `#matrix` 链接，
    * 会看到一个空壳页签（那比"看不到"更让人困惑）。
    */
   useEffect(() => {
-    const raw = window.location.hash.replace("#", "");
-    const hit = ADMIN_COURSE_TABS.find((item) => item.key === raw || item.hash === raw);
-    const initial = hit !== undefined && tabs.some((item) => item.key === hit.key) ? hit.key : (tabs[0]?.key ?? null);
-    setTab(initial);
+    if (picked.current) return;
+    picked.current = true;
+    setTab(pickInitialCourseTab(ADMIN_COURSE_TABS, tabs, window.location.hash));
+    const initial = pickInitialCourseTab(ADMIN_COURSE_TABS, tabs, window.location.hash);
     if (initial !== null) setMounted(new Set([initial]));
-  }, [tabs]);
+    // 依赖刻意留空：这里要的就是"挂载时那一次"（见 picked 与上面的说明）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (tab === null) return;
@@ -75,6 +86,16 @@ export default function AdminCoursesPage() {
     // 只改 hash：不触发导航、不重新挂载页面，但刷新与分享都能回到同一个页签
     window.history.replaceState(null, "", `#${hash}`);
   }, [tab]);
+
+  /*
+   * 角色变化后，正在看的页签可能已经不允许了（登录状态刚回来时就会发生一次）：
+   * 那时退到第一个能进的页签。只在**真的不允许**时才改状态，因此不会来回抖。
+   */
+  useEffect(() => {
+    if (tab === null) return;
+    if (tabs.some((item) => item.key === tab)) return;
+    setTab(tabs[0]?.key ?? null);
+  }, [tab, tabs]);
 
   if (tab === null) {
     return (

@@ -145,6 +145,32 @@ export const ADMIN_COURSE_TABS: Array<{
 ];
 
 /**
+ * **挂载时选哪一个课程页签**（纯函数）。
+ *
+ * 规则（顺序即优先级）：
+ *   1. 地址里的锚点（`#dimensions`）—— 但必须在**这个角色能进的**页签里；
+ *      否则退到第一条：教师拿到别人发的 `#matrix` 链接会看到一个空壳页签，
+ *      那比"看不到"更让人困惑；
+ *   2. 第一个能进的页签；
+ *   3. 一个都进不去 → `null`（页面上给一句说明，而不是空白）。
+ *
+ * 为什么放在这里、而不是页面文件里：Next 的页面只允许导出 default 与少量配置项
+ * （多导出一个函数会被 `next build` 的类型校验拒掉）；更重要的是**这段逻辑值得被断言** ——
+ * 它原先写在 effect 里，依赖写成了"每次渲染都新建的数组"，于是 effect 每次渲染都跑一遍、
+ * 把刚点的页签重置回去，表现就是「点课程类型 / 开放矩阵没反应」。
+ */
+export function pickInitialCourseTab(
+  all: readonly { key: AdminCourseTab; hash: string }[],
+  allowed: readonly { key: AdminCourseTab }[],
+  hash: string,
+): AdminCourseTab | null {
+  const wanted = hash.replace(/^#/, "").trim();
+  const hit = all.find((item) => item.key === wanted || item.hash === wanted);
+  if (hit !== undefined && allowed.some((item) => item.key === hit.key)) return hit.key;
+  return allowed[0]?.key ?? null;
+}
+
+/**
  * 节假日页内部的动作 → 允许的角色（页面级权限管不到这一层）。
  *
  * 与 `STUDENT_ACTION_ACCESS` 同一个做法：同一个页面里"读"与"抓取"是两个权限边界。
