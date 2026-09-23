@@ -226,6 +226,31 @@ export function offersSummary(offers: readonly CatalogOffer[]): string {
 }
 
 /**
+ * **失效的组合**：引用了维度表里已经不存在的行（学科 / 模块 / 班型 / 交付形态）。
+ *
+ * 什么时候会剩下这些行：机构在「课程类型」页删掉一个维度（`catalog.save` 会顺手清掉
+ * 受影响的组合并把条数写进日志），以及**手改过的导出 / 半份恢复**这类从外部进来的数据。
+ *
+ * 为什么不"读到就悄悄删掉"：组合的开放与否是机构的**经营决定**，静默丢弃等于替它做决定。
+ * 因此这里只把它们**认出来**，由后台「开放矩阵」页单独列一块（带一键清除）——
+ * 那一块就是"矩阵里看不见、却会让保存被拒"的那些格子的出口。
+ */
+export function danglingOffers(offers: readonly CatalogOffer[], catalog: Catalog): CatalogOffer[] {
+  const subjectIds = new Set(catalog.subjects.map((item) => item.id));
+  const moduleIds = new Set(catalog.modules.map((item) => item.id));
+  const formatIds = new Set(catalog.formats.map((item) => item.id));
+  const deliveryIds = new Set(catalog.deliveries.map((item) => item.id));
+
+  return offers.filter(
+    (offer) =>
+      !subjectIds.has(offer.subjectId) ||
+      (offer.moduleId !== "" && !moduleIds.has(offer.moduleId)) ||
+      !formatIds.has(offer.formatId) ||
+      !deliveryIds.has(offer.deliveryId),
+  );
+}
+
+/**
  * 一条维度行被删 / 改名之后，组合表要跟着做什么（给后台的"删除前警告"用）。
  *
  * 返回引用它的组合（含条数）：矩阵里那些格子会变成悬空，`offers.save` 会拦住它们，

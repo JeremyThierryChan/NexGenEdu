@@ -14,6 +14,7 @@ import { api, type Catalog, type CatalogOffer } from "@/lib/backend/api";
 import {
   applyDecision,
   buildMatrix,
+  danglingOffers,
   offerKey,
   offersByKey,
   offersSummary,
@@ -123,6 +124,30 @@ export default function AdminOffersPage() {
 
   const matrix = useMemo(() => (catalog === null ? null : buildMatrix(catalog)), [catalog]);
   const index = useMemo(() => offersByKey(draft ?? []), [draft]);
+
+  /**
+   * **失效的组合**：引用了维度表里已经不在的行。
+   *
+   * 正常路径下不会有（在「课程类型」页删维度时，`catalog.save` 会把受影响的组合一起清掉
+   * 并写进日志）；这些是**从外部进来的不一致数据**（手改过的导出、半份恢复）。
+   * 必须单独列出来：它们在矩阵里看不见（行或列已经没了），却会让保存整份被拒 ——
+   * 没有这一块，机构会卡在"一保存就报错、但找不到改哪一格"。
+   */
+  const dangling = useMemo(
+    () => (catalog === null ? [] : danglingOffers(draft ?? [], catalog)),
+    [catalog, draft],
+  );
+
+  const danglingKeys = useMemo(
+    () =>
+      dangling.map((offer) => ({
+        subjectId: offer.subjectId,
+        moduleId: offer.moduleId,
+        formatId: offer.formatId,
+        deliveryId: offer.deliveryId,
+      })),
+    [dangling],
+  );
 
   /** 当前筛选下要显示的行。 */
   const visibleRows = useMemo(() => {
@@ -358,6 +383,32 @@ export default function AdminOffersPage() {
           <p className="px-4 py-3 text-xs text-ink-500">只读：批量勾选归 {methodOwnerText("offers.save")}。</p>
         )}
       </Panel>
+
+      {/* 失效组合的出口：不列出来的话，它们会让保存整份被拒，而矩阵里看不到它们 */}
+      {dangling.length > 0 && (
+        <Panel
+          className="mt-4"
+          title={`失效的组合（${String(dangling.length)} 条）`}
+          description="它们引用的学段 / 学科 / 模块 / 班型 / 交付形态在课程类型里已经不在了，因此在下面的矩阵里看不见 —— 但只要还在，保存就会被拒。"
+          actions={
+            canSave ? (
+              <Button variant="outline" size="sm" onClick={() => decide(danglingKeys, "unset")}>
+                清除这些失效设置
+              </Button>
+            ) : undefined
+          }
+        >
+          <ul className="space-y-1 px-4 py-3 text-xs text-ink-600">
+            {dangling.slice(0, 20).map((offer) => (
+              <li key={offer.id} className="font-mono">
+                {offer.subjectId} · {offer.moduleId === "" ? "（不分模块）" : offer.moduleId} ·{" "}
+                {offer.formatId} · {offer.deliveryId} —— {offer.open ? "开放" : "明确关闭"}
+              </li>
+            ))}
+            {dangling.length > 20 && <li>还有 {dangling.length - 20} 条…</li>}
+          </ul>
+        </Panel>
+      )}
 
       <Panel
         className="mt-4 mb-8"

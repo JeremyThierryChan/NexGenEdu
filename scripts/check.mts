@@ -134,6 +134,7 @@ import { catalogFromSeed, catalogId, catalogSeedSummary } from "@/lib/backend/ca
 import {
   applyDecision,
   buildMatrix,
+  danglingOffers,
   offerId,
   offerKey,
   offersByKey,
@@ -9434,6 +9435,90 @@ console.log("\n=== 32. 报价的班型挂到课程类型的维度表上（v25）
     eq("改回原名之后报价里也回到原名",
       (await api.pricing.get()).classTypes.some((row) => row.name === originalName), true);
   }
+}
+
+console.log("\n=== 33. 删一个维度之后，引用它的组合怎么办（死角与出口）===");
+
+/*
+ * 这一节守的是一个**死角**（实现完第 31 节之后自己走了一遍才发现的）：
+ *
+ *   机构在「课程类型」页删掉一个班型 → 引用它的开放组合变成"悬空" →
+ *   ① 那些格子在矩阵里**根本不显示**（列已经不在维度表里）；
+ *   ② 而 `offers.save` 会因为"引用了不存在的行"**整份拒绝**。
+ *   两条合起来 = "一保存就报错，却找不到改哪一格"。
+ *
+ * 现在的两条出路：
+ *   - 删除维度时，服务层**连带清掉**受影响的组合，并把条数写进日志（明确的删除动作有明确后果）；
+ *   - 从外部进来的不一致数据（手改过的导出、半份恢复）由矩阵页单独列出来 + 一键清除
+ *     （`danglingOffers`），**不静默丢弃** —— 组合开不开是机构的经营决定。
+ */
+{
+  __useStoreForTesting(memory);
+
+  const catalogPageSource = readFileSync(
+    new URL("../app/admin/(dashboard)/catalog/page.tsx", import.meta.url), "utf8");
+  const offersPageSource = readFileSync(
+    new URL("../app/admin/(dashboard)/offers/page.tsx", import.meta.url), "utf8");
+  const apiSource = readFileSync(new URL("../lib/backend/api.ts", import.meta.url), "utf8");
+
+  const catalogForDrop = catalogFromSeed();
+  const targetFormat = catalogForDrop.formats.find((format) => format.name === "一对三");
+  const keepFormat = catalogForDrop.formats.find((format) => format.name === "一对一");
+  ok("种子里有一对三与一对一（下面要拿它们做对比）",
+    targetFormat !== undefined && keepFormat !== undefined);
+
+  const subject = catalogForDrop.subjects.find((item) => item.parentIds.length === 0);
+  const delivery = catalogForDrop.deliveries[0];
+  const affectedKey = {
+    subjectId: subject?.id ?? "",
+    moduleId: "",
+    formatId: targetFormat?.id ?? "",
+    deliveryId: delivery?.id ?? "",
+  };
+  const keptKey = { ...affectedKey, formatId: keepFormat?.id ?? "" };
+  const fresh = applyDecision([], [affectedKey, keptKey], "open", "2026-09-23T00:00:00.000Z");
+  eq("先勾两条组合（一条用要被删的班型，一条不用）", fresh.length, 2);
+
+  await api.importDatabase(JSON.stringify(seedDb));
+  await api.offers.save(fresh);
+  eq("库里有两条开放组合", (await api.offers.list()).length, 2);
+
+  // ① 删除维度：受影响的组合连带清掉，日志写清条数
+  const shrinkCatalog = JSON.parse(JSON.stringify(await api.catalog.list())) as Catalog;
+  shrinkCatalog.formats = shrinkCatalog.formats.filter((format) => format.id !== targetFormat?.id);
+  await api.catalog.save(shrinkCatalog);
+  const afterDrop = await api.offers.list();
+  eq("引用被删班型的那条组合被连带清掉，另一条留着",
+    [afterDrop.length, afterDrop[0]?.formatId], [1, keepFormat?.id]);
+  ok("日志里写清「删维度连带清掉几条组合」",
+    (await api.logs.list()).some((log) => log.entity === "开放矩阵" && log.summary.includes("失效")));
+
+  // ② 手改过的数据（悬空）会被认出来，而不是让保存永远被拒
+  const danglingRows = [
+    { ...fresh[0]!, id: "off_自己写的", formatId: "fmt_不存在" },
+    { ...fresh[1]!, id: "off_另一条" },
+  ];
+  const catalogAfterDrop = await api.catalog.list();
+  const dangling = danglingOffers(danglingRows, catalogAfterDrop);
+  eq("悬空的那条被认出来（另一条不算）", dangling.map((offer) => offer.id), ["off_自己写的"]);
+  eq("失效组合的条数就是「这一删会牵动几条」那个数（后台删除前的提示用它）",
+    offersOfDimension(danglingRows, "format", keepFormat?.id ?? "").length, 1);
+  ok("后台「课程类型」页在删除前会说出牵动几条组合",
+    catalogPageSource.includes("offersOfDimension(offers,") &&
+      catalogPageSource.includes("条开放组合引用着"));
+  ok("后台「开放矩阵」页把失效的组合单独列出来，并给了清除出口",
+    offersPageSource.includes("danglingOffers(draft ?? [], catalog)") &&
+      offersPageSource.includes("清除这些失效设置"));
+  ok("而读的时候只兜「必须是个数组」，**不偷偷清掉**失效组合（开不开是机构的经营决定）",
+    apiSource.includes("if (!Array.isArray(db.offers)) db.offers = [];") &&
+      apiSource.includes("danglingOffers(db.offers, normalized)"));
+
+  // ③ 恢复：把班型加回来，确认一切照常
+  const restored = JSON.parse(JSON.stringify(await api.catalog.list())) as Catalog;
+  restored.formats = catalogFromSeed().formats.map((format) => ({ ...format }));
+  await api.catalog.save(restored);
+  const reopened = await api.offers.save(applyDecision(await api.offers.list(), [affectedKey], "open", "2026-09-23T00:00:00.000Z"));
+  eq("把班型加回来之后，那条组合可以重新勾上", reopened.length, 2);
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

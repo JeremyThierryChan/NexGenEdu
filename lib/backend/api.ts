@@ -3,7 +3,7 @@ import { createEmptyDatabase } from "./initial";
 import { catalogFromSeed, catalogSeedSummary } from "./catalog-seed";
 import { catalogSummary, validateCatalog } from "./catalog";
 import { syncClassTypes } from "./class-types";
-import { offerId, offersSummary, validateOffers } from "./offers";
+import { danglingOffers, offerId, offersSummary, validateOffers } from "./offers";
 import {
   emptySiteContent,
   siteContentFromContent,
@@ -2900,7 +2900,30 @@ const localApi = {
 
       const before = catalogSummary(db.catalog);
       const after = catalogSummary(normalized);
+      /*
+       * 删掉一个维度（学段 / 学科 / 模块 / 班型 / 交付形态）时，**引用它的开放组合会变成悬空**。
+       *
+       * 为什么在这里清掉而不是留给矩阵页去报错：悬空的组合**在矩阵里根本不显示**
+       * （行或列已经不在维度表里），而 `offers.save` 会因为"引用了不存在的行"整份拒绝 ——
+       * 机构会卡在"打开就报错、却找不到那一格去改"的死角里。
+       * 因此删除维度（一个明确的、要确认的动作）的后果就是**一起清掉受影响的组合**，
+       * 并把条数写进日志（"删了什么、连带清掉几条"都查得到）。
+       *
+       * 反过来，**读的时候不偷偷清**（见 `danglingOffers` 的注释）：组合的开放与否是经营决定，
+       * 只有机构自己的删除动作才会连带影响它；从外部进来的不一致数据由矩阵页列出来让它自己处理。
+       */
+      const droppedOffers = danglingOffers(db.offers, normalized);
       db.catalog = normalized;
+      if (droppedOffers.length > 0) {
+        const droppedIds = new Set(droppedOffers.map((offer) => offer.id));
+        db.offers = db.offers.filter((offer) => !droppedIds.has(offer.id));
+        writeLog(db, {
+          entity: "开放矩阵",
+          action: "连带清除",
+          targetId: "",
+          summary: `删除维度让 ${String(droppedOffers.length)} 条开放组合失效，已一并清除`,
+        });
+      }
       /*
        * 班型改名 / 删除要**跟着走**：报价里那一份班级类型存的还是旧名字的话，
        * 库里就留下了一份过期数据（导出、导出的 Markdown、以及按名字查的地方都会用到它）。

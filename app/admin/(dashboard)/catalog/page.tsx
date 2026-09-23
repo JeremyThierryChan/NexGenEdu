@@ -18,10 +18,12 @@ import {
   type CatalogDelivery,
   type CatalogFormat,
   type CatalogModule,
+  type CatalogOffer,
   type CatalogStage,
   type CatalogSubject,
 } from "@/lib/backend/api";
 import { assignCatalogIds, catalogGroups, catalogSummary, validateCatalog } from "@/lib/backend/catalog";
+import { offersOfDimension } from "@/lib/backend/offers";
 import { catalogId, catalogSeedSummary } from "@/lib/backend/catalog-seed";
 import { cn } from "@/lib/utils/cn";
 
@@ -82,6 +84,8 @@ export default function AdminCatalogPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [tab, setTab] = useState<TabKey>("stages");
+  /** 开放组合（只用来算"删这一行会牵动几条"，编辑在「开放矩阵」页）。 */
+  const [offers, setOffers] = useState<CatalogOffer[]>([]);
   /** 「内容模块」只看一个学科：98 个模块平铺出来没法用（也拖慢这一页）。 */
   const [moduleSubjectId, setModuleSubjectId] = useState("");
   const notice = useActionNotice();
@@ -94,9 +98,14 @@ export default function AdminCatalogPage() {
     if (options.quiet === true) setRefreshing(true);
     else setLoading(true);
     try {
-      const data = await api.catalog.list();
+      /*
+       * 一起读组合表：**删除维度会让引用它的开放组合失效**，服务层会连带清掉它们
+       * （见 `catalog.save` 的注释），所以删除前要能说清"这一删会牵动几条"。
+       */
+      const [data, offers] = await Promise.all([api.catalog.list(), api.offers.list()]);
       setSaved(data);
       setDraft(data);
+      setOffers(offers);
       setLoadError("");
     } catch (cause) {
       setLoadError(cause instanceof Error ? cause.message : "读不到课程类型。");
@@ -411,6 +420,7 @@ export default function AdminCatalogPage() {
                               ? ""
                               : `（它下面还有 ${String(draft.modules.filter((item) => item.subjectId === subject.id).length)} 个内容模块，会一起删掉）`),
                           () => edit((next) => removeSubject(next, index)),
+                          offersOfDimension(offers, "subject", subject.id).length,
                         )
                       }
                     />,
@@ -486,7 +496,13 @@ export default function AdminCatalogPage() {
                       key="remove"
                       disabled={!canSave}
                       label={`模块「${item.name}」`}
-                      onRemove={() => confirmRemove(`模块「${item.name}」`, () => edit((next) => removeModule(next, index)))}
+                      onRemove={() =>
+                        confirmRemove(
+                          `模块「${item.name}」`,
+                          () => edit((next) => removeModule(next, index)),
+                          offersOfDimension(offers, "module", item.id).length,
+                        )
+                      }
                     />,
                   ],
                 }))}
@@ -543,7 +559,13 @@ export default function AdminCatalogPage() {
                   key="remove"
                   disabled={!canSave}
                   label={`班型「${format.name}」`}
-                  onRemove={() => confirmRemove(`班型「${format.name}」`, () => edit((next) => removeFormat(next, index)))}
+                  onRemove={() =>
+                    confirmRemove(
+                      `班型「${format.name}」`,
+                      () => edit((next) => removeFormat(next, index)),
+                      offersOfDimension(offers, "format", format.id).length,
+                    )
+                  }
                 />,
               ],
             }))}
@@ -589,7 +611,11 @@ export default function AdminCatalogPage() {
                   disabled={!canSave}
                   label={`交付形态「${delivery.name}」`}
                   onRemove={() =>
-                    confirmRemove(`交付形态「${delivery.name}」`, () => edit((next) => removeDelivery(next, index)))
+                    confirmRemove(
+                      `交付形态「${delivery.name}」`,
+                      () => edit((next) => removeDelivery(next, index)),
+                      offersOfDimension(offers, "delivery", delivery.id).length,
+                    )
                   }
                 />,
               ],
@@ -730,8 +756,19 @@ function removeDelivery(catalog: Catalog, index: number): void {
   catalog.deliveries.splice(index, 1);
 }
 
-function confirmRemove(label: string, remove: () => void): void {
-  if (window.confirm(`删除${label}？保存之后才生效。`)) remove();
+/**
+ * 删除前的确认。
+ *
+ * `affected` 是**引用这一行的开放组合条数**（「开放矩阵」页里勾过的那些）：
+ * 保存时会连同它们一起清掉（服务层做了这件事并把条数写进日志），
+ * 因此这里必须先说清 —— 删除一个班型顺带清掉 20 条组合，是机构要知道的代价。
+ */
+function confirmRemove(label: string, remove: () => void, affected = 0): void {
+  const tail =
+    affected === 0
+      ? ""
+      : `\n\n它还被 ${String(affected)} 条开放组合引用着（「开放矩阵」页里勾过的），保存后会连同那些设置一起清除。`;
+  if (window.confirm(`删除${label}？保存之后才生效。${tail}`)) remove();
 }
 
 /** 简易表格（后台这些表都是"一行若干控件"，不需要排序 / 分页）。 */
