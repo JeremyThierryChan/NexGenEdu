@@ -88,7 +88,7 @@ import {
   inPlaceScrollCorrection,
   reloadRestoreTarget,
 } from "@/lib/admin/scroll-restore";
-import { dateKey } from "@/lib/backend/format";
+import { dateKey, isSameMonth, monthGrid, shiftMonths } from "@/lib/backend/format";
 import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import { lessonBalance } from "@/lib/backend/enrollment";
 import { countLessons, describeLessonCounts } from "@/lib/backend/lesson-stats";
@@ -9921,6 +9921,75 @@ console.log("\n=== 36. 课程一页三页签（v29：课程库 + 课程类型 + 
   };
   eq("课程类型与开放矩阵的路由文件已经删掉（没有留转发页）",
     [routeExists("catalog"), routeExists("offers")], [false, false]);
+}
+
+console.log("\n=== 37. 日历的月视图（v30）===");
+
+/*
+ * 机构：「日历再加个月视图」。周视图与月视图是**同一件事的两个缩放级别**
+ * （同一条数据、同一个"点开某天看明细"），因此它不是一个新页签，而是看课那一块里的
+ * 周/月切换。这一节守四件事：
+ *
+ *   1. **月格子是"周 × 7"**（补齐到整周、从周一开始 —— 否则列对不上星期几）；
+ *   2. **翻月不跳月**（1 月 31 日的"下一月"是 2 月 1 日，不是 3 月 3 日）；
+ *   3. **读的区间与画的格子一致**（月视图要读整张格子含前后补齐的天，
+ *      否则那几格显示"0 节"，而那里其实有课）；
+ *   4. **切换级别不换页签**（选中的那天在周/月之间是同一个）。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+
+  // ① 格子形状
+  const jan = monthGrid(new Date(2026, 0, 15));
+  const feb = monthGrid(new Date(2026, 1, 15));
+  eq("格子数总是 7 的倍数（否则最后一行缺列，星期几对不上）",
+    [jan.length % 7, feb.length % 7], [0, 0]);
+  eq("从周一开始（与 weekDays 同一口径）", jan[0]?.getDay(), 1);
+  eq("到周日结束", jan[jan.length - 1]?.getDay(), 0);
+  ok("含整个月（1 月的 31 天都在格子里）",
+    [...Array(31).keys()].every((index) => {
+      const day = new Date(2026, 0, index + 1);
+      return jan.some((cell) => dateKey(cell) === dateKey(day));
+    }));
+  ok("也含前后补齐的天（1 月的格子从 2025-12-29 开始）",
+    dateKey(jan[0] ?? new Date()) === "2025-12-29");
+  /*
+   * 2027 年 2 月：2/1 是周一、一共 28 天 → 正好 4 整周，格子就该是 28 格
+   * （**不该**为了"看起来整齐"硬凑 5 行）。2026 年 2 月是周日开头，那才需要补齐到 35。
+   */
+  eq("2 月正好从周一开始时不做多余补齐（2027-02 = 28 格）",
+    [monthGrid(new Date(2027, 1, 15)).length, dateKey(monthGrid(new Date(2027, 1, 15))[0] ?? new Date())],
+    [28, "2027-02-01"]);
+  eq("而周日开头的那个 2 月（2026-02）补齐到 35 格",
+    monthGrid(new Date(2026, 1, 15)).length, 35);
+
+  // ② 翻月
+  eq("1 月 31 日的下一月 → 2 月 1 日（不是 3 月：直接加一个月会被 Date 规整掉 2 月）",
+    dateKey(shiftMonths(new Date(2026, 0, 31), 1)), "2026-02-01");
+  eq("12 月的下一月跨年 → 次年 1 月 1 日",
+    dateKey(shiftMonths(new Date(2026, 11, 15), 1)), "2027-01-01");
+  eq("上一月同样锚到 1 号", dateKey(shiftMonths(new Date(2026, 2, 31), -1)), "2026-02-01");
+  eq("是同一月就认得出（月视图用它给「隔壁月」的天淡显）",
+    [isSameMonth(new Date(2026, 8, 1), new Date(2026, 8, 30)), isSameMonth(new Date(2026, 7, 31), new Date(2026, 8, 1))],
+    [true, false]);
+
+  // ③ 页面接线
+  const page = read("app/admin/(dashboard)/calendar/page.tsx");
+  ok("看课那一块里有周 / 月切换（不是一个新页签）",
+    page.includes('{ key: "week", label: "周" }') && page.includes('{ key: "month", label: "月" }'));
+  ok("周视图与月视图共用「选中那一天」（同一个 selectedKey）",
+    (page.match(/setSelectedKey\(key\)/g) ?? []).length >= 2);
+  ok("读课程用的是**当前可见区间**（`range`），而不是写死那 7 天",
+    page.includes("api.lessons.listBetween(range.from, range.to)") && page.includes("}, [range]);"));
+  ok("月视图的 range 取的正是格子首尾（含前后补齐的天，否则那几格假空）",
+    /zoom === "month" && grid\.length > 0[\s\S]{0,160}grid\[0\][\s\S]{0,160}grid\[grid\.length - 1\]/.test(page));
+  ok("翻月 / 回到本月用的是 shiftMonths（不是手写 date.setMonth）",
+    page.includes("shiftMonths(anchor, -1)") && page.includes("shiftMonths(anchor, 1)"));
+  ok("月视图格子里有日号、节数与日子徽标，明细留给下面的「选中那天」",
+    page.includes("min-h-[5.5rem]") && page.includes("{day.getDate()}") && page.includes("windowsHint(plan.windowGroup)"));
+  ok("点开的是「不在本月」的那几天时页面上写明了",
+    page.includes("（不在本月）"));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

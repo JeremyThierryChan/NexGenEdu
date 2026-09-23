@@ -16,6 +16,9 @@ import {
   formatDayLabel,
   formatTimeRange,
   formatTime,
+  isSameMonth,
+  monthGrid,
+  shiftMonths,
   weekDays,
 } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
@@ -79,7 +82,32 @@ export default function AdminCalendarPage() {
   const [vacations, setVacations] = useState<VacationPeriod[]>([]);
   const [schedule, setSchedule] = useState<SiteCopyBlock | undefined>(undefined);
 
+  /**
+   * 看课页签里的**缩放级别**：周 / 月。
+   *
+   * 为什么不把它做成第三个页签：周视图与月视图是**同一件事的两个缩放级别**
+   * （同一条数据、同一个"选中某一天看明细"面板），页签留给"不同的事"
+   * （看课 / 假期与作息）。分开成页签的话，选中的那天在两个页签里会各记一份。
+   */
+  const [zoom, setZoom] = useState<"week" | "month">("week");
+
   const days = useMemo(() => weekDays(anchor), [anchor]);
+  /** 月视图的日期格子（含前后补齐的天，总是 7 的倍数）。 */
+  const grid = useMemo(() => (zoom === "month" ? monthGrid(anchor) : []), [zoom, anchor]);
+
+  /**
+   * 这次要读哪一段课程。
+   *
+   * 周视图读 7 天；月视图读**整张格子**（含前后补齐的几天）—— 不补齐的话，
+   * 格子右上角那几格会显示"0 节"，而那里其实是有课的（只是没读进来），
+   * 这种"看起来空着"比报错更难查。
+   */
+  const range = useMemo(() => {
+    if (zoom === "month" && grid.length > 0) {
+      return { from: grid[0] ?? anchor, to: grid[grid.length - 1] ?? anchor };
+    }
+    return { from: days[0] ?? anchor, to: days[6] ?? anchor };
+  }, [zoom, grid, days, anchor]);
 
   /**
    * 读数据。
@@ -91,14 +119,12 @@ export default function AdminCalendarPage() {
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
     if (options.quiet !== true) setLoading(true);
     try {
-      const from = days[0] ?? new Date();
-      const to = days[6] ?? new Date();
-      const [weekLessons, teacherList, classroomList] = await Promise.all([
-        api.lessons.listBetween(from, to),
+      const [rangeLessons, teacherList, classroomList] = await Promise.all([
+        api.lessons.listBetween(range.from, range.to),
         api.teachers.list(),
         api.classrooms.list(),
       ]);
-      setLessons(weekLessons);
+      setLessons(rangeLessons);
       setTeachers(teacherList);
       setClassrooms(classroomList);
       setLoading(false);
@@ -118,7 +144,7 @@ export default function AdminCalendarPage() {
     } finally {
       setLoading(false);
     }
-  }, [days]);
+  }, [range]);
 
   useEffect(() => {
     void load();
@@ -199,11 +225,15 @@ export default function AdminCalendarPage() {
   const selected = byDay.get(selectedKey) ?? [];
   const selectedPlan = planOf(selectedKey);
   const todayKey = dateKey(new Date());
-  /** 这一周里有几天是法定假日 / 调休上班日 / 寒暑假（页面上那句话用它）。 */
-  const weekSummary = days.map((day) => planOf(dateKey(day)));
-  const holidayDays = weekSummary.filter((plan) => plan.kind === "holiday").length;
-  const makeupDays = weekSummary.filter((plan) => plan.kind === "makeup").length;
-  const vacationDays = weekSummary.filter((plan) => plan.kind === "vacation").length;
+  /**
+   * 当前可见区间（周或月）里有几天是法定假日 / 调休上班日 / 寒暑假（页面上那句话用它）。
+   * 月视图用整张格子算 —— 与"读进来的课程"是同一个区间，数字不会对不上。
+   */
+  const visibleDays = zoom === "month" && grid.length > 0 ? grid : days;
+  const spanPlans = visibleDays.map((day) => planOf(dateKey(day)));
+  const holidayDays = spanPlans.filter((plan) => plan.kind === "holiday").length;
+  const makeupDays = spanPlans.filter((plan) => plan.kind === "makeup").length;
+  const vacationDays = spanPlans.filter((plan) => plan.kind === "vacation").length;
 
   return (
     <>
@@ -220,7 +250,7 @@ export default function AdminCalendarPage() {
       <div className="mt-4 flex flex-wrap gap-2">
         {(
           [
-            { key: "week", label: "周视图" },
+            { key: "week", label: "看课（周 / 月）" },
             { key: "policy", label: "假期与作息" },
           ] as const
         ).map((item) => (
@@ -263,28 +293,66 @@ export default function AdminCalendarPage() {
         />
       )}
 
-      {/* 周切换 */}
+      {/* 缩放级别 + 前后翻页 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => setAnchor(shiftWeeks(anchor, -1))}
-          className={navButtonClass}
-        >
-          ← 上一周
-        </button>
-        <button type="button" onClick={() => setAnchor(new Date())} className={navButtonClass}>
-          本周
-        </button>
-        <button
-          type="button"
-          onClick={() => setAnchor(shiftWeeks(anchor, 1))}
-          className={navButtonClass}
-        >
-          下一周 →
-        </button>
+        {/*
+          周 / 月是同一件事的两个缩放级别，因此放在**看课**这一块里，而不是各占一个页签
+          （页签留给"不同的事"：看课 / 假期与作息）。切换时锚点不动 ——
+          从"9月23日那一周"切到月，看到的就是 9 月。
+        */}
+        <div className="flex overflow-hidden rounded-md border border-ink-300">
+          {(
+            [
+              { key: "week", label: "周" },
+              { key: "month", label: "月" },
+            ] as const
+          ).map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => setZoom(item.key)}
+              className={cn(
+                "px-3 py-1 text-sm transition-colors",
+                zoom === item.key ? "bg-brand-50 text-brand-700" : "bg-white text-ink-600 hover:bg-ink-50",
+              )}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+
+        {zoom === "week" ? (
+          <>
+            <button type="button" onClick={() => setAnchor(shiftWeeks(anchor, -1))} className={navButtonClass}>
+              ← 上一周
+            </button>
+            <button type="button" onClick={() => setAnchor(new Date())} className={navButtonClass}>
+              本周
+            </button>
+            <button type="button" onClick={() => setAnchor(shiftWeeks(anchor, 1))} className={navButtonClass}>
+              下一周 →
+            </button>
+          </>
+        ) : (
+          <>
+            <button type="button" onClick={() => setAnchor(shiftMonths(anchor, -1))} className={navButtonClass}>
+              ← 上一月
+            </button>
+            <button type="button" onClick={() => setAnchor(new Date())} className={navButtonClass}>
+              本月
+            </button>
+            <button type="button" onClick={() => setAnchor(shiftMonths(anchor, 1))} className={navButtonClass}>
+              下一月 →
+            </button>
+          </>
+        )}
+
         <span className="text-xs text-ink-500">
-          {formatDayLabel(days[0] ?? new Date())} – {formatDayLabel(days[6] ?? new Date())} ·
-          本周 {countLessons(lessons).active} 节
+          {zoom === "week"
+            ? `${formatDayLabel(days[0] ?? new Date())} – ${formatDayLabel(days[6] ?? new Date())}`
+            : `${String((grid[0] ?? anchor).getFullYear())} 年 ${String(anchor.getMonth() + 1)} 月`}
+          {" · "}
+          {zoom === "week" ? "本周" : "本月"} {countLessons(lessons).active} 节
           {holidayDays > 0 && ` · 假日 ${String(holidayDays)} 天`}
           {makeupDays > 0 && ` · 调休上班 ${String(makeupDays)} 天`}
           {vacationDays > 0 && ` · 假期 ${String(vacationDays)} 天`}
@@ -292,7 +360,89 @@ export default function AdminCalendarPage() {
         </span>
       </div>
 
+      {/*
+        ── 月视图 ──
+        一张"周 × 7"的表：先看哪天忙、哪天有假日/调休/寒暑假，再点某天看明细。
+        格子里只放最必要的三样（日号、节数、日子徽标），课程标题放在 tooltip 里 ——
+        42 个格子都塞标题的话，这一屏会糊成一片（要看内容就点开那一天，下面就是明细）。
+      */}
+      {zoom === "month" && (
+        <div className="mt-4 rounded-lg border border-ink-200 bg-white">
+          <div className="grid grid-cols-7 border-b border-ink-100 text-center text-[11px] text-ink-500">
+            {["一", "二", "三", "四", "五", "六", "日"].map((label) => (
+              <span key={label} className="px-2 py-1.5">
+                {label}
+              </span>
+            ))}
+          </div>
+          <div className="grid grid-cols-7">
+            {grid.map((day) => {
+              const key = dateKey(day);
+              const dayLessons = byDay.get(key) ?? [];
+              const plan = planOf(key);
+              const inMonth = isSameMonth(day, anchor);
+              const isToday = key === todayKey;
+              const isSelected = key === selectedKey;
+              const badgeClass =
+                plan.kind === "holiday"
+                  ? "border-danger-100 bg-danger-50 text-danger-600"
+                  : plan.kind === "makeup"
+                    ? "border-warning-100 bg-warning-50 text-warning-700"
+                    : plan.kind === "vacation"
+                      ? "border-brand-200 bg-brand-50 text-brand-700"
+                      : "border-ink-200 bg-white text-ink-400";
+
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setSelectedKey(key)}
+                  title={[
+                    formatDayLabel(day),
+                    plan.label,
+                    windowsHint(plan.windowGroup),
+                    dayLessons.length === 0
+                      ? "没有排课"
+                      : dayLessons.map((lesson) => `${formatTime(lesson.startsAt)} ${lesson.subject}`).join("、"),
+                  ].join(" · ")}
+                  className={cn(
+                    "min-h-[5.5rem] border-b border-r border-ink-100 px-2 py-1.5 text-left transition-colors last:border-r-0",
+                    inMonth ? "bg-white" : "bg-ink-50",
+                    isSelected && "ring-1 ring-inset ring-brand-400",
+                    isToday && !isSelected && "bg-brand-50",
+                    "hover:bg-brand-50/60",
+                  )}
+                >
+                  <span className="flex items-baseline justify-between gap-1">
+                    <span
+                      className={cn(
+                        "text-xs font-medium",
+                        inMonth ? (isToday ? "text-brand-700" : "text-ink-700") : "text-ink-400",
+                      )}
+                    >
+                      {day.getDate()}
+                    </span>
+                    {plan.kind !== "workday" && plan.kind !== "weekend" && (
+                      <span className={cn("rounded-sm border px-1 text-[10px]", badgeClass)}>{plan.badge}</span>
+                    )}
+                  </span>
+                  {dayLessons.length > 0 && (
+                    <span className="mt-1 block text-[11px] text-ink-600">
+                      {dayLessons.length} 节
+                      <span className="ml-1 text-ink-400">
+                        {Math.round(dayLessons.reduce((sum, lesson) => sum + lesson.durationMinutes, 0) / 6) / 10} 小时
+                      </span>
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* 周视图 */}
+      {zoom === "week" && (
       <div className="mt-4 grid gap-2 lg:grid-cols-7">
         {days.map((day) => {
           const key = dateKey(day);
@@ -390,12 +540,16 @@ export default function AdminCalendarPage() {
           );
         })}
       </div>
+      )}
 
       {/* 选中那天的明细 */}
       <section className="mt-6 rounded-lg border border-ink-200 bg-white">
         <header className="flex flex-wrap items-center justify-between gap-2 border-b border-ink-100 px-4 py-3">
           <h2 className="text-sm font-medium text-ink-900">
             {formatDayLabel(new Date(`${selectedKey}T00:00:00`))}
+            {zoom === "month" && !isSameMonth(new Date(`${selectedKey}T00:00:00`), anchor) && (
+              <span className="ml-2 text-[11px] font-normal text-ink-400">（不在本月）</span>
+            )}
             <span className="ml-2 rounded-sm border border-ink-200 px-1.5 py-0.5 text-[11px] font-normal text-ink-600">
               {selectedPlan.label} · {windowsHint(selectedPlan.windowGroup)}
             </span>

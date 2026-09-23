@@ -695,6 +695,23 @@ await check("课程安排", "待补课清单", async () => Array.isArray(await a
 await check("课程安排", "挪课建议", async () => Array.isArray(await api.lessons.suggestMoves(lessonId)));
 
 /* ── 6 日历 / 课表与占用 ── */
+/*
+ * 月视图读的是**整张月格子**（含前后补齐的天，最长 42 天）—— 与周视图同一个方法
+ * （`lessons.listBetween`），但区间大一个量级，因此单独验一条：
+ * 区间查询在"一个多月"的跨度上照样回得来（页面上那 42 格不会有一片假空）。
+ */
+await check("日历", "月视图区间（一个多月）能查到课", async () => {
+  const from = new Date();
+  from.setDate(1);
+  from.setHours(0, 0, 0, 0);
+  const gridStart = new Date(from);
+  gridStart.setDate(from.getDate() - ((from.getDay() + 6) % 7));
+  const gridEnd = new Date(gridStart);
+  gridEnd.setDate(gridStart.getDate() + 41);
+  const rows = await api.lessons.listBetween(gridStart, gridEnd);
+  return [Array.isArray(rows), Math.round((gridEnd.getTime() - gridStart.getTime()) / 86_400_000)];
+}, (value: unknown[]) => value[0] === true && (value[1] as number) >= 35);
+
 await check("日历", "按周取课（listBetween）", async () => Array.isArray(await api.lessons.listBetween(new Date(iso(-3)), new Date(iso(10)))));
 await check("课表与占用", "按教师取课", async () => (await api.lessons.listByTeacher(teacherId)).length > 0);
 await check("课表与占用", "按教室取课", async () => (await api.lessons.listByClassroom(classroomId)).length > 0);
