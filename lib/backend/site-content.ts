@@ -134,18 +134,6 @@ export function emptySiteContent(): SiteContent {
   };
 }
 
-/**
- * 这份网站内容是不是**有内容**。
- *
- * 判定标准刻意取"至少有一个学科且至少有一个小节"：只要有一个学科就能撑起
- * 课程页正文；一条都没有说明后端还没导入过内容 —— 此时网站必须回落到模版，
- * 否则线上会出现一个**空白课程页**（比显示旧模版糟糕得多）。
- */
-export function hasCoursePageContent(content: SiteContent | undefined): boolean {
-  if (content === undefined) return false;
-  return content.coursePage.subjects.some((subject: SiteSubject) => subject.bands.length > 0);
-}
-
 
 /**
  * 删除护栏要看的两样东西（都不是"内容本身"，因此单独一个参数）。

@@ -24,13 +24,16 @@ import {
   getFormSubjectGroups,
   getCourseColumnPageData,
   getCourseColumns,
+  getCourseColumnsFromTemplate,
   getCoursePageData,
   getCoursesPage,
+  getCoursesPageFromTemplate,
   getHomeContent,
   getSiteBrand,
   getTeachersPage,
+  getTeachersPageFromTemplate,
 } from "@/lib/data/site";
-import { getPricingData, parsePricingSource } from "@/lib/data/pricing";
+import { getPricingData, getPricingDataFromTemplate, parsePricingSource } from "@/lib/data/pricing";
 import { getCasesContent, getFaqContent, getScheduleContent } from "@/lib/data/pages";
 import { findFeaturedCourse, getAllFeaturedCourses, getFeaturedContent } from "@/lib/data/featured";
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
@@ -84,7 +87,6 @@ import {
 } from "@/lib/backend/holidays";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION, VERSION_NOTES } from "@/lib/backend/version";
-import { hasCoursePageContent } from "@/lib/backend/site-content";
 import {
   bandsForTargets,
   cardTargets,
@@ -92,6 +94,7 @@ import {
   uniqueBandAnchor,
 } from "@/lib/backend/site-bands";
 import { publicSite as buildPublicSite } from "@/lib/backend/public-site";
+import type { PublicSite } from "@/lib/backend/public-site";
 import { __useBackendSnapshotForTesting, backendSnapshot } from "@/lib/site/backend-source";
 import { siteTeachers as siteTeachersFromContent } from "@/lib/backend/site-import";
 import { coursesFromSite } from "@/lib/backend/courses";
@@ -2200,8 +2203,15 @@ eq("降级夹具：课程没有卡片字段（v14 的样子）",
 // 升级进库（v14 → v15 迁移会补默认值），此时网站内容仍是空的
 eq("v14 文件可以升级导入", (await api.importDatabase(JSON.stringify(v14Db))).ok, true);
 const afterUpgrade = await api.exportDatabase();
+/*
+ * 「课程正文有没有内容」的判据就写在断言里（原先它是 `site-content.ts` 的一个导出，
+ * 唯一的读者是这里 —— 两态之后网站那一侧不再靠它决定"用不用后端"，
+ * 一个只给自检用的导出就是死代码，删掉了）。
+ */
+const hasBands = (content: { coursePage: { subjects: Array<{ bands: unknown[] }> } }): boolean =>
+  content.coursePage.subjects.some((subject) => subject.bands.length > 0);
 ok("老库升级后课程正文是空的（迁移不读外部文件，只补结构）",
-  !hasCoursePageContent(afterUpgrade.siteContent));
+  !hasBands(afterUpgrade.siteContent));
 ok("老库升级后课程行有了卡片字段的默认值",
   afterUpgrade.courses.every((course) => course.siteKind === "不展示" && course.path === ""));
 
@@ -2232,7 +2242,7 @@ ok("写入了课程正文（学科与小节）",
 ok("写入了教师页标题（否则教师页会没有标题）",
   (await api.exportDatabase()).siteContent.teacherPage.heading.title !== "");
 const afterImport = await api.exportDatabase();
-ok("写完之后网站那侧能看到内容", hasCoursePageContent(afterImport.siteContent));
+ok("写完之后网站那侧能看到内容", hasBands(afterImport.siteContent));
 eq("小节数与网站的锚点数量一致",
   afterImport.siteContent.coursePage.subjects.reduce((sum, item) => sum + item.bands.length, 0),
   written.counts.bandsWritten);
@@ -7915,6 +7925,134 @@ console.log("\n=== 24. 后台外壳：滚动时顶栏与侧栏不动（且不破
     !/lg:border-r/.test(sidebar) && /lg:border-l lg:border-ink-200/.test(shell));
   ok("移动端仍是横向滚动条（小屏不钉，只占一行）",
     /max-lg:overflow-x-auto/.test(sidebar) && /max-lg:border-b/.test(sidebar));
+}
+
+console.log("\n=== 25. 网站内容两态：要么全用后端，要么全用模版 ===");
+
+/*
+ * 机构的要求是「连上后端就全按库里的数据；没连上就只显示模版」——**两个状态，没有中间态**。
+ *
+ * 以前是三层来源（后端 → 仓库快照 → 模版）且**逐块回落**，于是有两个说不清的现象：
+ *   1. 同一页一半来自库、一半来自文件（教师页是库里的、课程卡片却是文件里的）；
+ *   2. 「数据不全」伪装成「没连上」：后端好好的，只因为课程正文还没导入，整站就换成了模版。
+ *
+ * 这一节把两态钉死：**判据只有"快照在不在"**；快照在就四块全用后端（空就空着），
+ * 不在就四块全用模版。四块 = 教师页 / 课程栏目卡片 / 课程正文 / 报价。
+ */
+{
+  /** 一份"结构合法但各块都是空的"快照：用来证明"空"不等于"回模版"。 */
+  const emptySnapshot = {
+    version: CURRENT_VERSION,
+    generatedAt: new Date().toISOString(),
+    teachers: [],
+    courses: [],
+    partitions: [],
+    siteContent: {
+      coursePage: {
+        heading: { eyebrow: "空的眉题", title: "空的课程页标题", description: "" },
+        subjects: [],
+        electiveTitle: "",
+      },
+      teacherPage: { heading: { eyebrow: "", title: "空的教师页标题", description: "" } },
+      pricingPage: { labels: { result: "空的报价结果" } },
+    },
+    pricing: {
+      rules: { singleLessonFeePercent: 0, freeTrialMinLessons: 0, chargeTrialWhenNotFree: false },
+      stages: [],
+      subjects: [],
+      classTypes: [],
+      durations: [],
+      trial: null,
+      otherItems: [],
+    },
+  } as unknown as PublicSite;
+
+  __useBackendSnapshotForTesting(null);
+  const noSnapshot = {
+    columns: getCourseColumns(),
+    courses: getCoursesPage(),
+    teachers: getTeachersPage(),
+    pricing: getPricingData(),
+  };
+  ok("没有快照时：四块全来自模版（有内容才算数）",
+    noSnapshot.columns.length > 0 &&
+    noSnapshot.courses.courses.length > 0 &&
+    noSnapshot.teachers.teachers.length > 0 &&
+    noSnapshot.pricing.stages.length > 0);
+  eq("没有快照时：与「只读模版」那几个出口逐项一致",
+    [
+      JSON.stringify(noSnapshot.columns) === JSON.stringify(getCourseColumnsFromTemplate()),
+      JSON.stringify(noSnapshot.courses) === JSON.stringify(getCoursesPageFromTemplate()),
+      JSON.stringify(noSnapshot.teachers) === JSON.stringify(getTeachersPageFromTemplate()),
+      JSON.stringify(noSnapshot.pricing) === JSON.stringify(getPricingDataFromTemplate()),
+    ],
+    [true, true, true, true]);
+
+  __useBackendSnapshotForTesting(emptySnapshot);
+  const withEmptySnapshot = {
+    columns: getCourseColumns(),
+    courses: getCoursesPage(),
+    teachers: getTeachersPage(),
+    pricing: getPricingData(),
+  };
+  /*
+   * 关键一条：**空就空着**，不许回模版。
+   * 早先这四块会各自返回 null、由调用方回落到模版 —— 于是"库是空的"这件事
+   * 会被伪装成"这次没连上后端"，机构看到的是模版还以为在用库。
+   */
+  eq("快照在但四块都是空的：一律按后端（空），不回模版",
+    [
+      withEmptySnapshot.columns.length,
+      withEmptySnapshot.courses.courses.length,
+      withEmptySnapshot.teachers.teachers.length,
+      withEmptySnapshot.pricing.stages.length,
+    ],
+    [0, 0, 0, 0]);
+  eq("空块里的**标题**也来自后端（不是模版抄一份）",
+    [
+      withEmptySnapshot.courses.heading.title,
+      withEmptySnapshot.teachers.heading.title,
+      withEmptySnapshot.pricing.labels.result,
+    ],
+    ["空的课程页标题", "空的教师页标题", "空的报价结果"]);
+  ok("空块的标题确实与模版不同（否则上面那条是空转的）",
+    withEmptySnapshot.courses.heading.title !== getCoursesPageFromTemplate().heading.title);
+  __useBackendSnapshotForTesting(null);
+
+  /*
+   * 源码级：不许再出现"逐块回落"的写法。
+   * `backendX() ?? getXFromTemplate()` 正是混合态的来路 —— 它让每一块各自决定来源。
+   */
+  const dataSource = (file: string): string =>
+    readFileSync(new URL(`../${file}`, import.meta.url), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+  eq("取数层里没有 `?? 模版` 这种逐块回落",
+    ["lib/data/site.ts", "lib/data/pricing.ts"].filter((file) =>
+      /backend[A-Za-z]*\([^)]*\)\s*\?\?/.test(dataSource(file))),
+    []);
+  ok("判据只有一处（backendSnapshot()）",
+    /const snapshot = backendSnapshot\(\);/.test(dataSource("lib/data/site.ts")) &&
+    /const snapshot = backendSnapshot\(\);/.test(dataSource("lib/data/pricing.ts")));
+
+  /*
+   * 构站脚本那一侧：两态、且旧模式要**明确报错**（照着旧文档敲 `=snapshot` 的人
+   * 必须当场看到"这个模式已经删掉"，而不是悄悄走了模版还以为在用快照）。
+   */
+  const syncScript = dataSource("scripts/sync-site-data.mjs");
+  ok("构站脚本：模式只剩 auto / backend / template",
+    /\["auto", "backend", "template"\]/.test(syncScript) && !/readRepoSnapshot/.test(syncScript));
+  ok("构站脚本：旧模式 snapshot 会明确报错",
+    /mode === "snapshot"/.test(syncScript) && /已经删掉/.test(syncScript));
+  ok("构站脚本：连不上时只剩「模版」一条出口（没有第二层可回落）",
+    /write\(null, `模版/.test(syncScript) && !/仓库快照/.test(syncScript));
+  ok("构站脚本：空块在日志里点名（两态之后这是唯一线索）",
+    /在库里是空的，网站会照空显示/.test(syncScript) && /reportBlocks/.test(syncScript));
+  eq("仓库里不再有 site-snapshot.json",
+    existsSync(new URL("../data/site/site-snapshot.json", import.meta.url)), false);
+  eq("package.json 里不再有 site:snapshot 脚本",
+    JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts["site:snapshot"],
+    undefined);
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

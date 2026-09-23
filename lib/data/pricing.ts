@@ -1,5 +1,5 @@
 import { pricingSource } from "@/data/site/pricing";
-import { backendPricingData } from "@/lib/site/backend-source";
+import { backendPricingData, backendSnapshot } from "@/lib/site/backend-source";
 import { parseDocument, type PageBlock, type Section } from "@/lib/data/content";
 
 /**
@@ -406,7 +406,10 @@ export function parsePricingSource(source: string): PricingData {
  * `parsePricingSource` 仍然导出给自检用：等价性断言要能单独跑模版这一条路。
  */
 export function getPricingData(): PricingData {
-  return backendPricingData() ?? getPricingDataFromTemplate();
+  // 两态取数：连上后端就用库里的报价配置，否则解析 data/site/pricing.md（见 lib/data/site.ts 文件头）
+  const snapshot = backendSnapshot();
+  if (snapshot !== null) return backendPricingData(snapshot);
+  return getPricingDataFromTemplate();
 }
 
 /**

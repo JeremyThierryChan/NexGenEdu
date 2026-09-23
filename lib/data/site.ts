@@ -11,6 +11,7 @@ import { COURSES_HREF } from "@/lib/site/featured-routes";
 import {
   backendCourseColumns,
   backendCoursesPage,
+  backendSnapshot,
   backendTeachersPage,
 } from "@/lib/site/backend-source";
 import type {
@@ -33,6 +34,20 @@ import type {
 
 /**
  * 数据访问层：页面获取内容的唯一入口。
+ *
+ * ## 两态取数：这里的每个函数只做一次选择
+ *
+ * ```ts
+ * const snapshot = backendSnapshot();
+ * if (snapshot !== null) return backendX(snapshot);   // 连上后端了 → 这一块用库里的
+ * return getXFromTemplate();                          // 没连上 → 这一块用模版
+ * ```
+ *
+ * **判据只有一个**：这次构站有没有拿到后端的公开数据（`backendSnapshot()`）。
+ * 有就**整站**用后端（某一块为空就显示为空，不再回落）；没有就**整站**用模版。
+ * 刻意不写 `backendX() ?? getXFromTemplate()`：那种写法让每一块各自决定，
+ * 于是同一页会一半来自库、一半来自文件，而页面上看不出来
+ * （详见 `lib/site/backend-source.ts` 的文件头）。
  *
  * 全部内容都来自单文件 data/site/content.md，按页面分段（见 lib/data/content.ts）。
  * 页面只能调用本文件的函数，不得直接读文件或解析 Markdown。
@@ -158,14 +173,15 @@ function courseSectionNames(): Set<string> {
  */
 export function getCourseColumns(): CourseColumn[] {
   /*
-   * **两条来源，先问后端**（见 docs/技术架构.md §5.1）。
-   *
-   * 构站时如果连得上后端，`data/site/.backend-snapshot.ts` 里就有库里的课程卡片，
-   * 这里直接把它映射成同一套 `CourseColumn` 结构；取不到（GitHub Pages 那种
-   * 没有后端的环境）就照原样解析 Markdown。**返回结构完全一样**，
-   * 因此页面组件一行都不用改，全站的下游（栏目页、卡片页、班型页）自动跟着切。
+   * 两条来源二选一（见本文件头的「两态取数」）。构站时连得上后端，
+   * `data/site/.backend-snapshot.ts` 里就有库里的课程卡片，这里直接映射成同一套
+   * `CourseColumn` 结构；连不上（GitHub Pages 那种没有后端的环境）就解析 Markdown。
+   * **返回结构完全一样**，因此页面组件一行都不用改，全站的下游（栏目页、卡片页、
+   * 班型页）自动跟着切。
    */
-  return backendCourseColumns() ?? getCourseColumnsFromTemplate();
+  const snapshot = backendSnapshot();
+  if (snapshot !== null) return backendCourseColumns(snapshot);
+  return getCourseColumnsFromTemplate();
 }
 
 /**
@@ -337,8 +353,10 @@ export function getCoursesPage(): {
   /** 选修课按栏目（外语 / 课外兴趣 / 成人课程）分组。 */
   electiveGroups: Array<{ title: string; items: ElectiveCourse[] }>;
 } {
-  // 同上：后端可用就用库里的学科正文与选修课，否则解析 Markdown
-  return backendCoursesPage() ?? getCoursesPageFromTemplate();
+  // 同上：连上后端就用库里的学科正文与选修课，否则解析 Markdown（同一次构建里全站同源）
+  const snapshot = backendSnapshot();
+  if (snapshot !== null) return backendCoursesPage(snapshot);
+  return getCoursesPageFromTemplate();
 }
 
 /** 课程页内容（**只读模版**，不看后端快照）—— 理由同 `getCourseColumnsFromTemplate`。 */
@@ -742,8 +760,10 @@ export function getTeachersPage(): {
   heading: SectionHeading;
   teachers: Teacher[];
 } {
-  // 同上：后端可用就用库里的教师档案（含"是否在网站展示"的过滤）
-  return backendTeachersPage() ?? getTeachersPageFromTemplate();
+  // 同上：连上后端就用库里的教师档案（含"是否在网站展示"的过滤），否则解析 Markdown
+  const snapshot = backendSnapshot();
+  if (snapshot !== null) return backendTeachersPage(snapshot);
+  return getTeachersPageFromTemplate();
 }
 
 /** 教师页（**只读模版**，不看后端快照）—— 理由同 `getCourseColumnsFromTemplate`。 */

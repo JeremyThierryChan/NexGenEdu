@@ -29,7 +29,6 @@
     "bench:capacity": "node --experimental-strip-types --import ./server/loader.mjs scripts/bench-capacity.mts",
     "sync-site-data": "node scripts/sync-site-data.mjs",
     "holidays:fetch": "node --experimental-strip-types --import ./server/loader.mjs scripts/fetch-holidays.mts",
-    "site:snapshot": "node scripts/site-snapshot.mjs",
     "site:diff": "node --experimental-strip-types --import ./server/loader.mjs scripts/diff-site-content.mts"
   },
   "dependencies": {

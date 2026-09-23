@@ -7,27 +7,32 @@
  * 这类只有静态文件的地方 —— 那种环境里**没有后端**，也不该让每个访客为了看课程介绍
  * 去请求一台机器。构建时取一次数据，页面照旧是纯静态产物：SEO、首屏、离线可用性都不变。
  *
- * 于是判断只有一个问题：**这次构建所在的环境能不能连上后端**。
- *   - 本机开发 / 正式部署（后端在这台机器或内网里）→ 能连上 → 用库里的数据生成页面；
- *   - GitHub Actions 构 Pages（那台机器上没有后端）→ 连不上 → 整体回落到模版文件。
+ * ## 两态：要么全用后端，要么全用模版
  *
- * ## 三种模式
+ * 判断只有一个问题：**这次构建所在的环境能不能连上后端**。
+ *   - 能（拿到一份结构合法的公开数据）→ 整站用库里的数据；
+ *   - 不能（没起后端 / 超时 / 非 200 / 结构不对）→ 整站用 `data/site/*.md` 模版。
+ *
+ * **没有第三种状态**：早先还有一层"仓库快照"（`npm run site:snapshot` 导出的
+ * `data/site/site-snapshot.json`）—— 它带来的是一个很难解释的现象：明明没起后端，
+ * 页面上却是上次从库里导出的内容。那一层已经删掉（机构确认：没连上就是模版）。
+ * 判定与页面的取数规则一致（见 `lib/site/backend-source.ts` 的文件头）。
  *
  * | 环境变量 | 行为 |
  * | --- | --- |
  * | `SITE_CONTENT_SOURCE=auto`（默认） | 能连上就用后端，连不上用模版 |
  * | `SITE_CONTENT_SOURCE=backend` | 必须用后端；连不上就**让构建失败** |
- * | `SITE_CONTENT_SOURCE=template` | 强制用模版（想验证模版长相时用） |
- * | `SITE_API_STRICT=1` | `auto` 模式下连不上也**让构建失败**（防止"以为用了后端，其实是模版"） |
+ * | `SITE_CONTENT_SOURCE=template` | 强制用模版（GitHub Pages 走这条，本地想验证模版长相也用） |
+ * | `SITE_API_STRICT=1` | `auto` 模式下连不上也**让构建失败**（正式部署建议打开，免得悄悄发一版模版） |
  * | `SITE_API_BASE` | 后端地址（默认 `http://127.0.0.1:4000`，也会读 `NEXT_PUBLIC_API_BASE`） |
  *
- * 生成的东西：`data/site/.backend-snapshot.ts`（未纳入版本库，与 `.sync-stamp.ts` 同一套做法），
- * 内容是后端那一份 `PublicSite` 或 `null`。
+ * ## 空块要在**日志里**说出来
  *
- * 每次都会打印一行"本次网站数据来源"—— 这是这类功能最容易出的隐形故障：
- * 以为在用后端，其实是模版，而且页面上看不出来。
+ * 连上后端之后，某一块为空（没人勾「网站上展示」、课程库没有卡片、课程正文还没导入…）
+ * 一律**按空渲染**，不再回落模版 —— 但构站日志会逐块打印条数，空的那些直接写明。
+ * "这一块为什么是空的"必须能在日志里看到，否则机构只会看到空页面然后来问。
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -35,8 +40,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const target = path.join(root, "data", "site", ".backend-snapshot.ts");
 
 const mode = (process.env.SITE_CONTENT_SOURCE ?? "auto").trim() || "auto";
-/** 上一次 `npm run site:snapshot` 导出的那份（提交进版本库，Pages 就靠它）。 */
-const snapshotFile = path.join(root, "data", "site", "site-snapshot.json");
 const base = (
   process.env.SITE_API_BASE ??
   process.env.NEXT_PUBLIC_API_BASE ??
@@ -44,27 +47,14 @@ const base = (
 ).replace(/\/+$/, "");
 const strict = process.env.SITE_API_STRICT === "1";
 
-if (!["auto", "backend", "snapshot", "template"].includes(mode)) {
-  console.error(
-    `[site-data] SITE_CONTENT_SOURCE 只能是 auto / backend / snapshot / template（收到「${mode}」）`,
-  );
-  process.exit(1);
-}
-
-/** 读仓库里的快照（`npm run site:snapshot` 导出的那份）；没有就不能用。 */
-function readRepoSnapshot() {
-  if (!existsSync(snapshotFile)) return { ok: false, reason: "仓库里没有 site-snapshot.json" };
-  try {
-    const data = JSON.parse(readFileSync(snapshotFile, "utf8"));
-    const bands = (data.siteContent?.coursePage?.subjects ?? []).reduce(
-      (sum, subject) => sum + (subject.bands?.length ?? 0),
-      0,
+if (!["auto", "backend", "template"].includes(mode)) {
+  console.error(`[site-data] SITE_CONTENT_SOURCE 只能是 auto / backend / template（收到「${mode}」）`);
+  if (mode === "snapshot") {
+    console.error(
+      "[site-data] `snapshot` 模式已经删掉：网站内容只有两态 —— 连上后端就用库，连不上就用模版。",
     );
-    if (bands === 0) return { ok: false, reason: "快照里没有课程正文" };
-    return { ok: true, data, bands };
-  } catch (cause) {
-    return { ok: false, reason: `快照读不出来：${cause instanceof Error ? cause.message : String(cause)}` };
   }
+  process.exit(1);
 }
 
 /** 写快照并打印结果。`data` 为 null 表示用模版。 */
@@ -93,20 +83,6 @@ if (mode === "template") {
   process.exit(0);
 }
 
-if (mode === "snapshot") {
-  const snapshot = readRepoSnapshot();
-  if (!snapshot.ok) {
-    console.error(`[site-data] 要求用仓库快照，但用不了：${snapshot.reason}`);
-    console.error("[site-data] 先跑一次 npm run site:snapshot（后端要在跑）把快照导出来。");
-    process.exit(1);
-  }
-  write(snapshot.data, "仓库快照 data/site/site-snapshot.json");
-  console.log(
-    `[site-data] 本次网站数据来源：**仓库快照** —— ${snapshot.data.siteContent.coursePage.subjects.length} 个学科 / ${snapshot.bands} 个小节`,
-  );
-  process.exit(0);
-}
-
 /** 拉一次公开数据；超时或非 200 都算"连不上"。 */
 async function fetchPublic() {
   const controller = new AbortController();
@@ -120,24 +96,27 @@ async function fetchPublic() {
     }
     const data = body.data;
     /*
-     * 三道体检。宁可判成"连不上"而回落模版，也不要把一份半截数据烤进页面：
-     * 线上出现空课程页比显示旧模版糟糕得多。
+     * 体检只看**结构**，不看"内容多不多"。
+     *
+     * 这是两态的关键：结构不对（拿到的不是这个接口该给的东西）＝"连不上"；
+     * 而"连上了但某一块是空的"（没人勾网站展示、课程库没卡片、正文还没导入）
+     * **不再是回落理由** —— 那属于机构自己的数据状态，页面如实显示为空，
+     * 构站日志逐块报数（见下面的 `reportBlocks`）。早先这里把"没有课程正文"
+     * 判成"连不上"，于是机构看到的是模版，却以为在用库里的数据。
      */
     if (!Array.isArray(data.teachers) || !Array.isArray(data.courses)) {
       return { ok: false, reason: "缺 teachers / courses" };
     }
+    if (!Array.isArray(data.partitions)) {
+      return { ok: false, reason: "缺 partitions（后端版本太旧？）" };
+    }
     if (!data.siteContent?.coursePage || !Array.isArray(data.siteContent.coursePage.subjects)) {
       return { ok: false, reason: "缺 siteContent.coursePage" };
     }
-    const bands = data.siteContent.coursePage.subjects.reduce(
-      (sum, subject) => sum + (subject.bands?.length ?? 0),
-      0,
-    );
-    if (bands === 0) {
-      // 后端还没导入过课程正文 → 用模版（并在下面把这句原因打出来，别让人猜）
-      return { ok: false, reason: "后端还没有课程正文（可在后台「课程库 → 从网站导入内容」补）" };
+    if (!data.pricing || !Array.isArray(data.pricing.stages)) {
+      return { ok: false, reason: "缺 pricing.stages" };
     }
-    return { ok: true, data, bands };
+    return { ok: true, data };
   } catch (cause) {
     return { ok: false, reason: cause instanceof Error ? cause.message : String(cause) };
   } finally {
@@ -147,18 +126,48 @@ async function fetchPublic() {
 
 const result = await fetchPublic();
 
-if (result.ok) {
-  const cards = result.data.courses.filter((course) => course.path !== "" && course.siteKind !== "不展示");
-  const subjects = result.data.siteContent.coursePage.subjects.length;
-  const note = `后端 ${base}（${new Date().toISOString()}）`;
-  write(result.data, note);
+/**
+ * 逐块报数（并挑出空块）。
+ *
+ * 为什么必须在**构建日志**里做这件事：两态之后"这一块是空的"就照空渲染，
+ * 页面上不会再有"悄悄换成模版"的痕迹 —— 那正是它该有的样子，但也意味着
+ * 机构唯一的线索就是这行日志。空块要单独列出来，并说清大概去哪补。
+ */
+function reportBlocks(data) {
+  // 口径与教师页、课程卡片一致：日志说 7、页面显示 4 会让人怀疑日志
+  const teachers = data.teachers.filter((teacher) => teacher.active && teacher.siteVisible).length;
+  const cards = data.courses.filter((course) => course.path !== "" && course.siteKind !== "不展示").length;
+  const electiveCards = data.courses.filter((course) => course.siteKind === "选修").length;
+  const subjects = data.siteContent.coursePage.subjects.length;
+  const bands = data.siteContent.coursePage.subjects.reduce(
+    (sum, subject) => sum + (subject.bands?.length ?? 0),
+    0,
+  );
+  const stages = data.pricing.stages.length;
+
   console.log(
     `[site-data] 本次网站数据来源：**后端** ${base} —— ` +
-      // 口径与教师页一致（在职 **且** 允许在网站展示）：日志说 7、页面显示 4 会让人怀疑日志
-      `${result.data.teachers.filter((teacher) => teacher.active && teacher.siteVisible).length} 位网站教师 / ` +
-      `${cards.length} 张课程卡片 / ${subjects} 个学科 / ${result.bands} 个小节 / ` +
-      `${result.data.pricing.stages.length} 个报价阶段`,
+      `${teachers} 位网站教师 / ${cards} 张课程卡片 / ${data.partitions.length} 个课程分区 / ` +
+      `${subjects} 个学科 / ${bands} 个小节 / ${stages} 个报价阶段 / ${electiveCards} 门选修课`,
   );
+
+  const empty = [];
+  if (teachers === 0) empty.push("教师页（后台「教师」里勾上「在宣传网站展示」）");
+  if (cards === 0) empty.push("课程卡片（课程库里给课填「卡片路径」，或点一次「从网站同步课程」）");
+  if (subjects === 0) empty.push("课程正文（后台「课程库 → 从网站导入内容」）");
+  if (stages === 0) empty.push("报价（后台「报价」里配阶段与价格）");
+  if (empty.length > 0) {
+    console.log(
+      "[site-data] ⚠ 上面这些块**在库里是空的，网站会照空显示**（两态口径：连上后端就不再回落模版）：" +
+        empty.join("；"),
+    );
+  }
+  return { teachers, cards, subjects, bands, stages };
+}
+
+if (result.ok) {
+  write(result.data, `后端 ${base}（${new Date().toISOString()}）`);
+  reportBlocks(result.data);
   process.exit(0);
 }
 
@@ -173,21 +182,8 @@ if (mode === "backend" || strict) {
 }
 
 /*
- * `auto` 模式的回落顺序：后端 → 仓库快照 → 模版。
- *
- * 中间这一层就是给 GitHub Pages 准备的：Actions 上连不上后端，但仓库里如果有
- * `npm run site:snapshot` 导出的那份，Pages 就能显示**库里的内容**而不是手写的模版。
- * 三层都取不到才退回模版（那时候仓库本来就只有模版）。
+ * 连不上 → **整站模版**。没有第二层可回落（"仓库快照"那一层已删）：
+ * 两态的意思就是"要么库、要么文件"，中间态会让人分不清页面上看到的到底是什么。
  */
-const repoSnapshot = readRepoSnapshot();
-if (repoSnapshot.ok) {
-  write(repoSnapshot.data, `仓库快照（${why}）`);
-  console.log(
-    `[site-data] 本次网站数据来源：**仓库快照**（${why}）—— ` +
-      `${repoSnapshot.data.siteContent.coursePage.subjects.length} 个学科 / ${repoSnapshot.bands} 个小节`,
-  );
-  process.exit(0);
-}
-
-write(null, `模版（${why}；${repoSnapshot.reason}）`);
-console.log(`[site-data] 本次网站数据来源：**模版** —— ${why}；${repoSnapshot.reason}`);
+write(null, `模版（${why}）`);
+console.log(`[site-data] 本次网站数据来源：**模版** —— ${why}`);

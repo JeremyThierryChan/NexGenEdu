@@ -1,31 +1,35 @@
 /**
  * **后端公开数据 → 网站视图模型** 的唯一映射层。
  *
- * ## 为什么需要这个模块
+ * ## 两态：要么全用后端，要么全用模版（没有第三种状态）
  *
- * 宣传网站的内容有两条来源：
+ * 宣传网站的内容有两条来源，而且**只在这两条之间二选一**：
  *
- *   1. **模版**：`data/site/*.md`，由 `lib/data/site.ts` / `lib/data/pricing.ts` 解析；
- *   2. **后端**：构站那一刻 `scripts/sync-site-data.mjs` 取回来的公开数据快照
- *      （`data/site/.backend-snapshot.ts`，形状见 `lib/backend/public-site.ts`）。
+ *   1. **后端**：构站那一刻 `scripts/sync-site-data.mjs` 取回来的公开数据
+ *      （`data/site/.backend-snapshot.ts`，形状见 `lib/backend/public-site.ts`）；
+ *   2. **模版**：`data/site/*.md`，由 `lib/data/site.ts` / `lib/data/pricing.ts` 解析。
  *
- * 两条路径的**出口必须是同一套视图模型**（`lib/types/site.ts` 的 `Teacher` /
- * `CourseColumn` / `Course` … 与 `lib/data/pricing.ts` 的 `PricingData`）：
- * 页面组件只认这些类型，因此「以后端为准」这件事不该让 `app/(site)/**` 改任何一行。
- * 本模块只做一件事：把快照里的字段**兜底、改名、分组、排序**成视图模型要的形状。
+ * 判据只有一条：**快照存不存在**（`backendSnapshot() !== null`）。存在就整站用后端，
+ * 不存在就整站用模版 —— 判定发生在 `lib/data/*.ts` 的取数函数里，每个函数一个 `if`，
+ * 没有 `?? 模版`。
  *
- * ## `null` 的语义：这次用不了后端，请回落到模版
+ * ## 为什么把"逐块回落"删掉（这是 2026-10 那次重构的核心）
  *
- * 每个导出函数都可能返回 `null`，它的含义**不是「出错了」而是「请用模版」**：
+ * 以前这里的每个函数在"这一块后端没东西"时各自返回 `null`，由调用方 `?? 模版` 兜住。
+ * 于是出现了三种状态（后端 / 仓库快照 / 模版）与**同一页里一半来自后端、一半来自模版**
+ * 的混合页面 —— 机构看到的怪现象是"教师页是库里的、课程卡片却是文件里的"，
+ * 而且没人能从页面上看出来。更糟的是"数据不全"伪装成"没连上"：
+ * 后端连得好好的，只因为课程正文还没导入，整站就悄悄换成了模版。
  *
- *   - 没有快照（这次构站没连上后端）；
- *   - 后端还没导入过课程正文（`coursePage.subjects` 为空，或所有学科加起来一个小节都没有）
- *     —— 照后端渲染会在线上产出**空课程页**，比显示旧模版糟糕得多；
- *   - 这个函数负责的那一块本身是空的（没有在职教师 / 没有卡片 / 没有报价阶段）。
+ * 现在口径是：
+ *   - **连上就用**：快照在，就以后的为准 —— 某一块为空就**显示为空**
+ *     （"我们没有课程"是真实状态，比偷偷换成另一份数据诚实）；
+ *   - **连不上才换**：拿不到结构合法的公开数据 → 快照为 `null` → 整站模版；
+ *   - **空不空不由这里判断**：`scripts/sync-site-data.mjs` 会在构站日志里
+ *     逐块打印条数，哪一块是空的会明说 —— 让"空"发生在日志里，而不是在页面上变成另一种数据。
  *
- * 三件事**各函数各自判断**（谁需要哪块内容就查哪块），并且刻意**不做模块级缓存**：
- * 一旦缓存一个「这次能用后端」，某一块其实是空的就会漏判 —— 那正是上面那条
- * 「空课程页」事故的成因。
+ * 下面每个 `backendX(snapshot)` 都**显式接收快照**（自己不去取），
+ * 这样"这一块到底走哪条路"在调用处一眼可见，也不可能出现"两块各走一条路"。
  *
  * ## 两条路径必须产出同样的结构
  *
@@ -151,30 +155,11 @@ function toHeading(heading: SiteHeading | undefined): SectionHeading {
   };
 }
 
-/* ── 判定：这一块能不能用后端数据 ───────────────────────────────────────── */
+/* ── 读取快照里各块（老库 / 空库一律兜底成空数组，不在这里判断"空不空"） ──── */
 
 /** 课程页正文（老库 / 空库可能整块是空的，读取时统一兜底成空数组）。 */
 function courseSubjects(snapshot: PublicSite): SiteSubject[] {
   return snapshot.siteContent?.coursePage?.subjects ?? [];
-}
-
-/**
- * 课程页那一块能不能用后端数据；`null` = 回落到模版。
- *
- * 判定标准与 `lib/backend/site-content.ts` 的 `hasCoursePageContent()` 完全一致
- * （至少一个学科、且至少有一个小节），但**刻意不 import 它**：那个模块在顶层就
- * import 了 `lib/data/site.ts`（模版解析），引进来等于让"用后端数据"这条路径
- * 也把 Markdown 拉进构建里 —— 两条路径就缠上了。
- *
- * 为什么必须拦这一条：`scripts/sync-site-data.mjs` 在"后端还没有课程正文"时
- * 根本不会生成快照，但快照也可能是自检注入的、或同步之后后端被清空的；
- * 那时用后端数据会在线上产出**空白课程页**（家长看到的是"我们没有课程"）。
- */
-function coursePageSource(): PublicSite | null {
-  const snapshot = backendSnapshot();
-  if (snapshot === null) return null;
-  const ready = courseSubjects(snapshot).some((subject) => (subject.bands?.length ?? 0) > 0);
-  return ready ? snapshot : null;
 }
 
 /**
@@ -224,19 +209,21 @@ function toTeacher(teacher: PublicTeacher): Teacher {
 }
 
 /**
- * 教师页（后端可用时）；不可用返回 `null`。
+ * 教师页（快照在就用它，**一位教师都没有也照返回**）。
  *
- * 「不可用」= 没有快照，或一位能上台的教师都没有 —— 判据见下面的两个条件
- * （离职档案、机构内部老师都会让页面变成一个没有教师的教师页，那不如回落到模版）。
+ * 两种情况都会让 `teachers` 为空，各自的原因都写在构站日志里（不在这里换成模版）：
+ *   - `active`（在职）：离职教师保留档案但不在页面展示；
+ *   - `siteVisible`（v16 起的显式开关）：机构内部老师默认**不**展示 ——
+ *     少了这一条，网站切到"以库为准"的当天，宣传页上就会多出几位内部老师。
  *
  * `heading` 直接取 `teacherPage.heading`；它为空就**原样返回空标题**，
  * 不去读模版 —— 否则"标题来自文件、教师来自库"的半截状态又回来了，
  * 而那正是 `SiteContent.teacherPage` 被搬进后端要解决的事。
  */
-export function backendTeachersPage(): { heading: SectionHeading; teachers: Teacher[] } | null {
-  const snapshot = backendSnapshot();
-  if (snapshot === null) return null;
-
+export function backendTeachersPage(snapshot: PublicSite): {
+  heading: SectionHeading;
+  teachers: Teacher[];
+} {
   /*
    * 两个条件都要满足才上台：
    *   - `active`（在职）：离职教师保留档案但不在页面展示；
@@ -248,8 +235,6 @@ export function backendTeachersPage(): { heading: SectionHeading; teachers: Teac
     (snapshot.teachers ?? []).filter((teacher) => teacher.active === true && teacher.siteVisible === true),
     (teacher) => sortOrder(teacher.order),
   ).map(toTeacher);
-
-  if (teachers.length === 0) return null;
 
   return {
     heading: toHeading(snapshot.siteContent?.teacherPage?.heading),
@@ -332,7 +317,7 @@ function snapshotPartitions(snapshot: PublicSite): CoursePartition[] {
 }
 
 /**
- * 课程栏目（栏目 → 子栏目 → 卡片）；不可用返回 `null`。
+ * 课程栏目（栏目 → 子栏目 → 卡片）。
  *
  * ## 结构现在来自**分区表**，不再从卡片反推
  *
@@ -348,16 +333,13 @@ function snapshotPartitions(snapshot: PublicSite): CoursePartition[] {
  *     子栏目**过滤掉**（子栏目全空的栏目也一并去掉）；
  *   - **没有子标题的那一组先渲染**：直接挂在栏目上的卡片 `subgroup === null`，
  *     它渲染成 `title: ""`（页面上不渲染标题）—— 不要在这里编一个"默认子栏目名"；
- *   - **一张卡片都没有 → `null`**（返回空数组意味着"后端有栏目，只是都空着"，
- *     页面会渲染一个空骨架，因此一律 `null`）。
+ *   - **一张卡片都没有就返回空数组**（页面渲染成"这块没有内容"），
+ *     不再像以前那样返回 `null` 让调用方回落到模版 —— 那正是"半个页面来自文件"的来路。
  */
-export function backendCourseColumns(): CourseColumn[] | null {
-  const snapshot = coursePageSource();
-  if (snapshot === null) return null;
-
+export function backendCourseColumns(snapshot: PublicSite): CourseColumn[] {
   const anchors = bandAnchors(snapshot);
   const partitions = snapshotPartitions(snapshot);
-  if (partitions.length === 0) return null;
+  if (partitions.length === 0) return [];
 
   const cards = (snapshot.courses ?? []).filter(isSiteCard);
   const columns: CourseColumn[] = [];
@@ -376,7 +358,7 @@ export function backendCourseColumns(): CourseColumn[] | null {
     columns.push({ title: text(entry.column.name).trim(), subgroups });
   }
 
-  return columns.length > 0 ? columns : null;
+  return columns;
 }
 
 /* ── 课程页 ─────────────────────────────────────────────────────────────── */
@@ -424,7 +406,7 @@ function toElectiveGroups(
 }
 
 /**
- * 课程页（学科 + 选修课 + 栏目）；不可用返回 `null`。
+ * 课程页（学科 + 选修课 + 栏目）。
  *
  * 与 `lib/data/site.ts` 的 `getCoursesPage()` **同形状**，因此课程页组件一行都不用改：
  *   - 学科：`id` 用学科名（后端就是这么存的，与模版 `id: group.name` 同一口径）；
@@ -432,23 +414,20 @@ function toElectiveGroups(
  *     而不是搬运，改名写漏一边，页面上就是"小节标题在、正文没了"；
  *   - 选修课是课程库里的行（`siteKind === "选修"`），与模版"选修课也是一个分组"的结果一致，
  *     但来源不同（模版里它写在正文里，后端里它是一行课程）；
- *   - `columns` 直接复用 `backendCourseColumns()`，取不到就用空数组：
- *     学科正文有、栏目数据坏掉时，页面该显示课程正文而不是整页回落模版。
+ *   - `columns` 直接复用 `backendCourseColumns(snapshot)`：同一份快照算出来的一棵树，
+ *     不存在"正文有、栏目没有"这种需要各自兜底的状态。
  *
  * `orders`：学科按 `order` 升序（稳定）。站点 `Course` 类型里没有 order 字段，
  * 页面只能按数组顺序渲染，因此顺序信息必须在映射时就落到数组上
  * （后端导入时 order = 数组下标，因此这一步对导入数据是恒等的）。
  */
-export function backendCoursesPage(): {
+export function backendCoursesPage(snapshot: PublicSite): {
   heading: SectionHeading;
   courses: Course[];
   columns: CourseColumn[];
   electiveTitle: string;
   electiveGroups: Array<{ title: string; items: ElectiveCourse[] }>;
-} | null {
-  const snapshot = coursePageSource();
-  if (snapshot === null) return null;
-
+} {
   const courses = byOrder(courseSubjects(snapshot), (subject) => sortOrder(subject.order)).map<Course>(
     (subject) => ({
       id: text(subject.name),
@@ -462,8 +441,6 @@ export function backendCoursesPage(): {
     }),
   );
 
-  if (courses.length === 0) return null;
-
   const electiveTitle = text(snapshot.siteContent?.coursePage?.electiveTitle);
   const electives = byOrder(
     (snapshot.courses ?? []).filter((course) => course.siteKind === "选修"),
@@ -473,7 +450,7 @@ export function backendCoursesPage(): {
   return {
     heading: toHeading(snapshot.siteContent?.coursePage?.heading),
     courses,
-    columns: backendCourseColumns() ?? [],
+    columns: backendCourseColumns(snapshot),
     electiveTitle,
     electiveGroups: toElectiveGroups(electives, electiveTitle, snapshotPartitions(snapshot)),
   };
@@ -620,21 +597,17 @@ function toPricingLabels(labels: BackendPricingLabels | undefined): PricingData[
 }
 
 /**
- * 报价页数据；不可用返回 `null`。
+ * 报价页数据（快照在就用它，**一个阶段都没有也照返回**）。
  *
- * 「不可用」= 没有快照，或**一个报价阶段都没有**（那种配置下报价页会变成一个
- * 连阶段都选不了的空白表单，不如整体回落模版）。
+ * 空阶段列表意味着"报价还没配"，页面会显示成一份选不了阶段的表单 ——
+ * 那是真实状态，构站日志里会明说这一块是空的；不再像以前那样整体回落模版
+ * （那样机构会以为"价格已经按库里的走了"，其实看到的是文件里的旧价目）。
  *
- * 刻意**不看课程正文**：报价来自 `pricing` 配置，与"后端有没有导入过课程页正文"
- * 无关 —— 后端刚建好、只配了价时，报价页用后端数据是**对的**。
+ * 也刻意**不看课程正文**：报价来自 `pricing` 配置，与"后端有没有导入过课程页正文"无关。
  */
-export function backendPricingData(): PricingData | null {
-  const snapshot = backendSnapshot();
-  if (snapshot === null) return null;
-
+export function backendPricingData(snapshot: PublicSite): PricingData {
   const pricing = snapshot.pricing;
   const stages = (pricing.stages ?? []).map(toStage);
-  if (stages.length === 0) return null;
 
   return {
     labels: toPricingLabels(snapshot.siteContent?.pricingPage?.labels),
