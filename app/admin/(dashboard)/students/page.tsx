@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
+import { ActionNoticeView } from "@/components/admin/ActionNotice";
+import { useActionNotice } from "@/components/admin/useActionNotice";
 import { Panel } from "@/components/admin/AdminFields";
 import { BulkImport } from "@/components/admin/BulkImport";
 import { StudentForm } from "@/components/admin/StudentForm";
@@ -29,6 +31,8 @@ export default function AdminStudentsPage() {
   const [importing, setImporting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
+  /** 写操作的提示（删除被护栏拦下时，把服务端那句原话显示出来）。 */
+  const notice = useActionNotice();
 
   /**
    * 读数据。
@@ -84,11 +88,28 @@ export default function AdminStudentsPage() {
     return counts;
   }, [lessons]);
 
+  /**
+   * 删除学生。
+   *
+   * **服务端会拦下"名下有账"的学生**（收款、课时流水、课堂记录、测评、作业、排课 ——
+   * 见 `lib/backend/api.ts` 的 `studentDeleteRefusal`），拦下时会把"还有哪些记录、该怎么办"
+   * 写在错误里。所以这里：① 确认框里先说清"有账就删不掉"；② 走 `notice.run` 把服务端那句
+   * **原话显示出来**（裸 `await` 会让它变成无人接的拒绝，用户只看到"点了没反应"）。
+   */
   async function remove(student: Student) {
     const count = lessonCountByStudent.get(student.id) ?? 0;
-    const extra = count > 0 ? `\nTA 还有 ${count} 节排课，删除后这些课的学生名单里也会消失。` : "";
-    if (!window.confirm(`删除「${student.name}」？${extra}`)) return;
-    await api.students.remove(student.id);
+    const extra = count > 0 ? `\nTA 还有 ${count} 节排课。` : "";
+    if (
+      !window.confirm(
+        `删除「${student.name}」？${extra}\n` +
+          "名下有收款、课时流水、课堂记录、测评或作业时，系统不会删，并会告诉你先做什么" +
+          "（那些记录删掉之后会失去主人）。只是不再来上课的话，把状态改成「结课」更合适。",
+      )
+    ) {
+      return;
+    }
+    const removed = await notice.run(() => api.students.remove(student.id));
+    if (removed === null) return;
     setOpenId((current) => (current === student.id ? null : current));
     await load({ quiet: true });
   }
@@ -106,6 +127,9 @@ export default function AdminStudentsPage() {
           await load({ quiet: true });
         }}
       />
+      {/* 一次写操作的结果（删除被护栏拦下时，服务端那句原话显示在这里） */}
+      <ActionNoticeView notice={notice} className="mt-4" />
+
 
       {/* 新增表单 */}
 

@@ -50,7 +50,15 @@ export const API_CONTRACT: ContractGroup[] = [
       "lessonRecords.list", "lessonRecords.get", "lessonRecords.create", "lessonRecords.update", "lessonRecords.remove",
       "homework.list", "homework.get", "homework.create", "homework.update", "homework.remove",
       "assessments.list", "assessments.get", "assessments.create", "assessments.update", "assessments.remove",
-      "payments.list", "payments.get", "payments.create", "payments.update", "payments.remove",
+      /*
+       * 收款**只有读的通用方法**：`create` / `update` / `remove` 已删除。
+       *
+       * 理由见 `lib/backend/api.ts` 的 `payments` 那一节：它们是工厂白送的三个写方法，
+       * 页面一处都没用过，却既不写日志、又绕过「实收 = 收款 − 退款」这条不变式
+       * （收款记录被塞进去时，报课记录上的实收累计并不会跟着变）。
+       * 收款的唯一写入口是 `payments.record`（见「三、业务动作」）。
+       */
+      "payments.list", "payments.get",
       "courses.list", "courses.get", "courses.create", "courses.update", "courses.remove",
     ],
   },

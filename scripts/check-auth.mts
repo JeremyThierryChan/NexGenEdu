@@ -1578,6 +1578,20 @@ try {
           body: { years: [2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022] },
         })).status, 400);
 
+      console.log("\n[11.4.1] 测试钩子：夹具收尾入口只在该开的时候存在");
+      /*
+       * 自检要在两种后端上都能收尾夹具，因此服务端有一个"绕过删除护栏"的入口。
+       * 它**默认不存在**（回 404），只有测试后端（`NEXGENEDU_TEST_HOOKS=1`）才有；
+       * 这条断言钉的就是"默认关"这件事 —— 生产后端上它必须打不开。
+       */
+      const fixtureHook = await request("/api/test-hooks/remove-fixture", {
+        method: "POST",
+        token: adminToken,
+        body: { entity: "students", id: "s_不存在" },
+      });
+      equal("测试后端开着钩子时，路由存在（这条库是临时库，摘一条不存在的记录回 removed:false）",
+        [fixtureHook.status, fixtureHook.body.removed], [200, false]);
+
       console.log("\n[11.5] 抓取：**永远不会 500**，每年一个结局，且没通过校验就不写盘");
       /*
        * 这里刻意**不要求网络可用**：抓不到时服务端应当回 200 + 每年一个 `rejected`
@@ -1606,6 +1620,32 @@ try {
 } catch (cause) {
   failures += 1;
   console.error(`\n✗ 节假日表这一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
+}
+
+console.log("\n[11.6] 测试钩子默认关：没有 NEXGENEDU_TEST_HOOKS=1 的后端上，它必须打不开");
+try {
+  await withTempServer(
+    async (base, info) => {
+      const loginResponse = await raw(base, "/api/login", {
+        method: "POST",
+        body: { username: info.username, password: info.password },
+      });
+      const token = String(loginResponse.body.token ?? "");
+      const response = await fetch(`${base}/api/test-hooks/remove-fixture`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ entity: "students", id: "s_x" }),
+      });
+      const body = (await response.json().catch(() => ({}))) as { error?: unknown };
+      equal("没有那个环境变量时：404（而不是 200）", response.status, 404);
+      check("而且说清了这是测试专用入口",
+        String(body.error ?? "").includes("NEXGENEDU_TEST_HOOKS"), String(body.error ?? ""));
+    },
+    { env: { NEXGENEDU_TEST_HOOKS: "" } },
+  );
+} catch (cause) {
+  failures += 1;
+  console.error(`\n✗ 测试钩子那一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
 }
 
 console.log(

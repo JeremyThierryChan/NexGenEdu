@@ -54,7 +54,17 @@ export function formatMoney(value: number): string {
 export type RefundInput = {
   totalLessons: number;
   usedLessons: number;
+  /** 约定应缴（标价 − 优惠）。 */
   agreedAmount: number;
+  /**
+   * **实收**（实际到账累计）。
+   *
+   * 退费必须按它算，不能按 `agreedAmount`：家长欠着钱来退课时，
+   * 按"约定应缴"算会**退出没收到过的钱**。审计发现两条策略都在用 `agreedAmount`，
+   * 而名字、说明与公式字符串里写的都是"实付 / 实收" —— 也就是说，
+   * 一个欠费 900 元的报课退课时，界面会告诉家长"实付 ¥2800"，而实收只有 ¥1900。
+   */
+  paidAmount: number;
   unitPrice: number;
 };
 
@@ -86,13 +96,14 @@ export const REFUND_POLICIES: RefundPolicy[] = [
     id: "prorata",
     name: "按实付比例退（默认）",
     description: "未上的课时按实付单价退回；已上的课时按实付单价收取。对家长最直观。",
-    calculate({ totalLessons, usedLessons, agreedAmount }) {
+    calculate({ totalLessons, usedLessons, paidAmount }) {
       if (totalLessons <= 0) return { refund: 0, formula: "总课时为 0，无可退" };
       const remaining = Math.max(0, totalLessons - usedLessons);
-      const unitPaid = agreedAmount / totalLessons;
+      // 单价按**实收**摊（名字与说明都写着"实付单价"，早先算的是"约定应缴单价"）
+      const unitPaid = paidAmount / totalLessons;
       return {
         refund: round2(unitPaid * remaining),
-        formula: `实付 ${formatMoney(agreedAmount)} ÷ ${totalLessons} 节 × 剩余 ${remaining} 节`,
+        formula: `实收 ${formatMoney(paidAmount)} ÷ ${totalLessons} 节 × 剩余 ${remaining} 节`,
       };
     },
   },
@@ -101,13 +112,14 @@ export const REFUND_POLICIES: RefundPolicy[] = [
     name: "追回已上课时的标价",
     description:
       "已上的课时按标价（原价）扣，剩余部分才退。适合给过较大折扣、需要防止「上完就退」的情况。",
-    calculate({ totalLessons, usedLessons, agreedAmount, unitPrice }) {
+    calculate({ totalLessons, usedLessons, paidAmount, unitPrice }) {
       const used = Math.min(usedLessons, totalLessons);
       const clawback = round2(used * unitPrice);
-      const refund = round2(Math.max(0, agreedAmount - clawback));
+      // 同样按**实收**算：已经上掉的课按标价追回，剩下的才是能退的（欠费的不会退成负数）
+      const refund = round2(Math.max(0, paidAmount - clawback));
       return {
         refund,
-        formula: `实付 ${formatMoney(agreedAmount)} − 已上 ${used} 节 × 标价 ${formatMoney(unitPrice)}`,
+        formula: `实收 ${formatMoney(paidAmount)} − 已上 ${used} 节 × 标价 ${formatMoney(unitPrice)}`,
       };
     },
   },
@@ -126,6 +138,7 @@ export function calculateRefund(enrollment: Enrollment, policyId: string): Refun
     totalLessons: enrollment.totalLessons,
     usedLessons: enrollment.usedLessons,
     agreedAmount: enrollment.agreedAmount,
+    paidAmount: enrollment.paidAmount,
     unitPrice: enrollment.unitPrice,
   });
 }

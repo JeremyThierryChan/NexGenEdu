@@ -217,7 +217,14 @@ export async function withTempServer<T>(
   const handle = await startServer({
     dbPath,
     port,
-    env: { NEXGENEDU_NO_BACKUP: "1", ...(options.env ?? {}) },
+    /*
+     * `NEXGENEDU_TEST_HOOKS=1`：打开"夹具收尾"入口（`/api/test-hooks/remove-fixture`）。
+     *
+     * 为什么必须开：自检要在**两种后端**上跑同一套断言（`npm run check:both`），
+     * 而产品层的删除有护栏（有账就不许删）—— 夹具造的正是"有账"的数据，
+     * 因此需要一条只能由测试后端提供的收尾入口。生产后端不设这个变量，该路径回 404。
+     */
+    env: { NEXGENEDU_NO_BACKUP: "1", NEXGENEDU_TEST_HOOKS: "1", ...(options.env ?? {}) },
   });
   try {
     return await body(handle.base, {

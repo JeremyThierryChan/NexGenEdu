@@ -202,12 +202,17 @@ export default function AdminFinancePage() {
                 <p className="text-sm text-ink-800">{policy.name}</p>
                 <p className="mt-0.5 text-xs text-ink-500">{policy.description}</p>
                 <p className="mt-1 font-mono text-[11px] text-ink-400">
-                  示例：报课 10 节、单价 ¥200、约定 ¥1800、已上 3 节 → 退{" "}
+                  {/*
+                    示例里的"实收"刻意与"约定"不同（1800 约定、1600 实收）：
+                    退费按**实收**算 —— 欠着钱的报课退课时，不能退出没收到过的钱。
+                  */}
+                  示例：报课 10 节、单价 ¥200、约定 ¥1800、实收 ¥1600、已上 3 节 → 退{" "}
                   {formatMoney(
                     policy.calculate({
                       totalLessons: 10,
                       usedLessons: 3,
                       agreedAmount: 1800,
+                      paidAmount: 1600,
                       unitPrice: 200,
                     }).refund,
                   )}
@@ -217,6 +222,7 @@ export default function AdminFinancePage() {
                       totalLessons: 10,
                       usedLessons: 3,
                       agreedAmount: 1800,
+                      paidAmount: 1600,
                       unitPrice: 200,
                     }).formula
                   }

@@ -17,7 +17,7 @@ import { openDatabase, DB_PATH } from "./db.mts";
 import { acquireDbLock } from "./db-lock.mts";
 import { createSqliteStore, snapshotSize } from "./kv-store.mts";
 // 伪后端的**同一份实现**：服务端只是换了一个 KeyValueStore，业务口径一行都不用重写
-import { api, __useStoreForTesting } from "../lib/backend/api.ts";
+import { api, __removeFixture, __useStoreForTesting } from "../lib/backend/api.ts";
 /*
  * 版本冲突的类型：接口层要靠**类型**把它翻成 409。
  * 不按错误文字匹配是有意的（见下面 /api/call 的错误分支）——
@@ -1905,6 +1905,12 @@ const REST_CONTRACT_METHODS: ReadonlyArray<{
   { http: "POST", pattern: /^\/api\/holidays$/, contract: null, note: "不存在的用法：路由内回 405 并说清该用哪个路径（登记它是为了别落进「没登记归属」的 403）" },
   { http: "POST", pattern: /^\/api\/holidays\/refresh$/, contract: null, note: "抓取节假日（技术管理员；路由内判定）" },
 
+  /*
+   * 测试钩子（只有 `NEXGENEDU_TEST_HOOKS=1` 时才存在，否则 404）：
+   * 自检要在两种后端（内存 / 真实 HTTP）上都能收尾夹具，因此需要一条能到达服务端库的入口。
+   */
+  { http: "POST", pattern: /^\/api\/test-hooks\/remove-fixture$/, contract: null, note: "夹具收尾（默认关：路径存在但回 404）" },
+
   /* 读接口（ROUTES / READS）：按它读的东西对应的方法名翻译 */
   { http: "GET", pattern: /^\/api\/students$/, contract: "students.list", note: "学生列表" },
   { http: "GET", pattern: /^\/api\/students\/get$/, contract: "students.get", note: "单个学生" },
@@ -2344,6 +2350,45 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
    * 它也是异步的（要读请求体、要走网络），因此一样用 `void … .catch` 收尾：
    * 所有异常都要变成一个响应，绝不能让请求挂在那里。
    */
+  /*
+   * ── 测试钩子：夹具收尾（**只在测试后端上开着**）─────────────────────────────
+   *
+   * 自检为了给后面的断言腾地方，经常要收尾掉"刚刚造过账"的夹具；
+   * 而产品层的删除现在有护栏（有账就不许删，见 lib/backend/api.ts 的 `DeleteGuard`）——
+   * 那种夹具按产品规矩本来就删不掉。
+   *
+   * 因此给**测试后端**开一个入口：`NEXGENEDU_TEST_HOOKS=1` 时才存在，
+   * 否则一律 404（默认关，生产后端上这个路径等于不存在）。
+   * 它不写操作日志、不进契约（`contract: null`），只做一件事：把一条记录摘掉。
+   *
+   * 为什么不做成"产品方法放行"：那等于给护栏开后门。护栏必须对所有人一致，
+   * 需要绕过的只有"造夹具然后收尾"这一件事 —— 那件事只发生在测试里。
+   */
+  if (url.pathname === "/api/test-hooks/remove-fixture") {
+    if (process.env.NEXGENEDU_TEST_HOOKS !== "1") {
+      send(response, 404, {
+        ok: false,
+        error: "这个入口只在测试后端上存在（需要 NEXGENEDU_TEST_HOOKS=1）：它绕过删除护栏，生产环境不开。",
+      });
+      return;
+    }
+    if (session === null) {
+      send(response, 401, { ok: false, error: "未登录或登录已过期，请先登录。" });
+      return;
+    }
+    void readBody(request)
+      .then((body) => {
+        const entity = typeof body.entity === "string" ? body.entity : "";
+        const id = typeof body.id === "string" ? body.id : "";
+        const removed = __removeFixture(entity, id);
+        send(response, 200, { ok: true, removed });
+      })
+      .catch((cause: unknown) => {
+        send(response, 500, { ok: false, error: cause instanceof Error ? cause.message : String(cause) });
+      });
+    return;
+  }
+
   if (url.pathname === "/api/holidays" || url.pathname === "/api/holidays/refresh") {
     if (session === null) {
       send(response, 401, { ok: false, error: "未登录或登录已过期，请先登录。" });

@@ -173,12 +173,18 @@ export function EnrollmentPanel({
                   }),
                 )
               }
+              /*
+               * 退课的金额**由服务端重算**：这里传的是 `policyId`（人选的退费口径）
+               * 加上界面上那份预览金额。服务端按同一个策略算一遍，**对不上就拒绝**
+               * 并要求刷新 —— 那说明这条报课在你看这一页之后被改过，照旧写入会退错钱。
+               * （早先这里传的是"算好的金额"，服务端原样落账，实测能退 999999。）
+               */
               onRefund={(refundAmount, method, policyId) =>
                 run(() =>
                   api.students.refundEnrollment(student.id, enrollment.id, "退课", {
-                    amount: refundAmount,
+                    policyId,
                     method,
-                    policyName: REFUND_POLICIES.find((item) => item.id === policyId)?.name ?? "",
+                    amount: refundAmount,
                   }),
                 )
               }

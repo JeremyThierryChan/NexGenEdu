@@ -88,6 +88,9 @@ export type { CourseOption, CourseSummary } from "./courses";
 export type { ExportDataset, ExportFormat, ExportResult } from "./export";
 export { EXPORT_DATASETS, EXPORT_FORMATS, FORMAT_META } from "./export";
 import {
+  REFUND_POLICIES,
+  calculateRefund,
+  findRefundPolicy,
   monthRange,
   outstandingAmount,
   round2,
@@ -226,17 +229,48 @@ function load(): Database {
 
   const raw = store.read(STORAGE_KEY);
   if (raw !== null) {
+    /*
+     * ## 有内容却读不出来时，**绝不能覆盖**（审计抓到的一条"整库清零"路径）
+     *
+     * 早先这里的写法是"读不出来就当首次访问"：`migrate()` 返回 null（版本比当前新、
+     * 或某个分支卡住）或 JSON 解析失败时，直接 `createEmptyDatabase()` 并**落盘覆盖**
+     * —— 一次读就把数据清空，而且不可逆。实测过的场景：一份结构正常、只是版本号
+     * 写着 1 或 2 的库，读一次就变成空库（根因见 v2 分支那段注释）。
+     *
+     * 现在分三种情况，各自说清：
+     *   1. 存储里**没有**内容 → 空库起步（正常，见 `initial.ts`）；
+     *   2. 有内容且能迁移 → 迁移并（必要时）落盘；
+     *   3. 有内容但解析/迁移失败 → **抛错、什么都不改**，让人用备份恢复。
+     * 第 3 条是这次改动的全部意义：宁可整个后台打不开（并说清为什么），
+     * 也不要静默把数据抹掉 —— 抹掉之后连"发生过什么"都查不到了。
+     */
+    let parsedJson: unknown = null;
     try {
-      const parsed = migrate(JSON.parse(raw) as Database);
-      if (parsed !== null) {
-        cache = parsed;
-        // 迁移过就立刻落盘，避免每次打开都迁移一遍
-        if (parsed.version !== JSON.parse(raw).version) persist(cache);
-        return cache;
-      }
-    } catch {
-      // 数据损坏：当作首次访问处理
+      parsedJson = JSON.parse(raw);
+    } catch (cause) {
+      throw new Error(
+        `库里的数据不是合法 JSON（${cause instanceof Error ? cause.message : String(cause)}）。` +
+          "**本次没有改动任何数据** —— 请用「数据与备份」里的导入、或用备份文件恢复，" +
+          "或联系开发处理；不要清空数据库。",
+      );
     }
+    const version =
+      typeof parsedJson === "object" && parsedJson !== null
+        ? (parsedJson as { version?: unknown }).version
+        : undefined;
+    const parsed = migrate(parsedJson as Database);
+    if (parsed !== null) {
+      cache = parsed;
+      // 迁移过就立刻落盘，避免每次打开都迁移一遍
+      if (parsed.version !== version) persist(cache);
+      return cache;
+    }
+    throw new Error(
+      `库里的数据版本是 ${String(version)}，本版本（v${CURRENT_VERSION}）迁移不了它 —— ` +
+        "这通常意味着数据来自更老的版本、或来自更新的版本。" +
+        "**本次没有改动任何数据**：请用服务器备份（server/backups/）或导出的 JSON 恢复，" +
+        "或联系开发处理；不要清空数据库。",
+    );
   }
 
   // 空库起步，**不是**示例数据：见 lib/backend/initial.ts 的说明。
@@ -254,8 +288,13 @@ function load(): Database {
  * 迁到 v3 就停了（v3 分支已经执行过、不会再执行），migrate 返回 null，
  * 调用方直接把数据重新灌成了示例数据 —— 用户看到的是「我的数据没了」。
  *
- * 返回 null 表示这份数据没法用（版本比当前还新，或结构不认识）——
- * 调用方会重新灌入示例数据，而不是带着缺字段的数据继续跑。
+ * 返回 null 表示这份数据没法用（版本比当前还新，或结构不认识）。
+ *
+ * ## 返回 null 之后调用方**不再**清库（2026-09 审计改的）
+ *
+ * 这段注释原先写的是"调用方会重新灌入示例数据" —— 那正是"我的数据没了"的成因：
+ * 一次迁移失败就把整库换成一份新的。现在 `load()` 对"有内容但迁移不了"一律**抛错**、
+ * 什么都不改（见那里的说明），`importDatabase` / `restoreBackup` 本来就会拦 null。
  */
 /** 是否是 v2 及更早的学生结构（课时挂在学生身上的总数）。 */
 function isLegacyStudent(student: Student): boolean {
@@ -286,7 +325,29 @@ function migrate(db: Database): Database | null {
    * 或「没有 enrollments 数组」。只比较版本号是不够的 —— 曾因为 seed 写错版本
    * 让新数据被当成旧数据迁移，把报课记录压成了一条。数据迁移宁可少做不可做错。
    */
-  if (db.version === 2 && db.students.some(isLegacyStudent)) {
+  /*
+   * v2 → v3。
+   *
+   * ## 这里改过一次（2026-09 审计抓到的"整库清零"）
+   *
+   * 早先写成 `if (db.version === 2 && db.students.some(isLegacyStudent)) { … db.version = 3; }`
+   * —— 也就是说**结构已经是新版、但版本号还写着 1 或 2** 时，分支体不执行、版本号**不推进**，
+   * 后面每个 `if (db.version === N)` 全部跳过 → `migrate()` 返回 null →
+   * 调用方（`load()`）把它当成"首次访问"，**整库被清空并落盘**。
+   * 实测：一份 8 名学生 / 18 条收款的库，只因为版本号写着 2，读一次就变成 0/0，且不可逆。
+   *
+   * 那些守卫（`isLegacyStudent`）本意是"防止把新数据当旧数据迁错"，方向是对的；
+   * 但"要不要做结构变换"与"版本号推进到哪"是**两件事**，混在一个条件里就会卡住。
+   * 现在分开：变换按守卫决定，版本号**无条件推进**。
+   */
+  if (db.version === 2) {
+    if (!db.students.some(isLegacyStudent)) {
+      /*
+       * 结构已经是 v3+ 的样子：什么都不用做，只把版本号补上（见上面的说明）。
+       * 这种情况实测来自"老库的版本号没跟着结构走"（历史上 seed 写过旧版本号）。
+       */
+      db.version = 3;
+    } else {
     /*
      * v2 的学生是 { subjects, remainingLessons }；v3 改为档案 + 按科目记账。
      * 折算规则：剩余课时变成一条「未指定科目」的报课记录（total = 剩余、used = 0），
@@ -344,6 +405,7 @@ function migrate(db: Database): Database | null {
       } as Student;
     });
     db.version = 3;
+    }
   }
 
   if (db.version === 3) {
@@ -971,12 +1033,37 @@ function describeTarget(value: unknown): string {
   return "";
 }
 
+/**
+ * **删除护栏**：返回一句拒绝理由，或 `null` 表示可以删。
+ *
+ * ## 为什么删除必须有这道闸
+ *
+ * 删除是**真删**（`splice`），而档案类记录被别的东西引用着：学生的收款、课时流水、
+ * 测评、作业、排课名单；教师/教室的排课；排课的考勤记录与课时流水。
+ * 删掉档案之后那些引用就变成**孤儿**：收款还在、本月收入还计着，但人已经没了；
+ * 排课还在，但教师/教室那两栏是空的；考勤记录指向一节不存在的课。
+ *
+ * 这个坑踩过一次（`server/index.mts` 里那段注释自陈："之前就是因为删档案不连带清账，
+ * 留下了 18 条没有主人的收费记录"），但当时的护栏写在**老 REST 接口**上，
+ * 而界面走的是 `/api/call` —— 那道护栏对产品而言是装饰。
+ * 因此现在把它放到**唯一的入口**（`collection.remove`）：两条路都会经过这里。
+ *
+ * ## 为什么是"拒绝"而不是"连带清理"
+ *
+ * 连带清理等于"删一个人顺手删掉他的收款记录"——那是在毁账。机构要的语义是
+ * **有账就不许删**（机构确认）：想删就先走正常流程（退课结清、取消排课），
+ * 或者把档案改成「暂停 / 结课」（那是软处理，数据都还在）。
+ */
+export type DeleteGuard<T> = (db: Database, item: T) => string | null;
+
 /** 通用集合：把「取数组 → 改 → 存」的重复代码在一处。 */
 function collection<T extends { id: string }>(
   pick: (db: Database) => T[],
   prefix: string,
   /** 日志里显示的对象类别（如「学生」）。传空串表示不记日志。 */
   label = "",
+  /** 删除护栏（见 `DeleteGuard`）：返回理由就拒绝删除。 */
+  guardDelete: DeleteGuard<T> | null = null,
 ) {
   return {
     async list(): Promise<T[]> {
@@ -1029,6 +1116,13 @@ function collection<T extends { id: string }>(
       const list = pick(db);
       const index = list.findIndex((item) => item.id === id);
       if (index === -1) return false;
+      /*
+       * 护栏在**删之前**判：拒绝时抛错（不是静默返回 false）——
+       * 界面上必须看到"为什么删不掉"，否则人会以为是自己没点到。
+       */
+      const item = list[index];
+      const refusal = guardDelete === null || item === undefined ? null : guardDelete(db, item);
+      if (refusal !== null) throw new Error(refusal);
       const [removed] = list.splice(index, 1);
       if (label !== "") {
         writeLog(db, {
@@ -1063,8 +1157,9 @@ function versionedCollection<T extends { id: string; version: number }>(
   pick: (db: Database) => T[],
   prefix: string,
   label = "",
+  guardDelete: DeleteGuard<T> | null = null,
 ) {
-  const base = collection<T>(pick, prefix, label);
+  const base = collection<T>(pick, prefix, label, guardDelete);
   return {
     list: base.list,
     get: base.get,
@@ -1148,7 +1243,89 @@ export function dateKey(value: string | Date): string {
  * 排课表单是整份覆盖"这节课排给谁/什么时候"，两类都是最不能被静默盖掉的东西。
  * 咨询线索仍是普通集合：它是"还没落定的口头咨询"，改它不会毁掉别人的一份档案。
  */
-const studentCollection = versionedCollection<Student>((db) => db.students, "s", "学生");
+// ── 删除护栏的具体口径 ────────────────────────────────────────────────────────
+/*
+ * 四类档案的护栏判据（都返回"拒绝理由"，`null` 表示可以删）：
+ *
+ *   学生：有收款 / 课时流水 / 考勤 / 测评 / 作业，或出现在任何一节课的名单里 → 拒绝。
+ *         前五样是**历史**（删了就成无主账），排课是**将来**（先取消或删掉那些课）。
+ *   教师：任何一节课挂在他名下 → 拒绝（建议改成「停用」，那是不丢历史的做法）。
+ *   教室：任何一节课用它 → 拒绝（同上）。
+ *   课程：任何一节课或任何一条报课用这个科目名 → 拒绝（建议改成「暂未开放」）。
+ *   排课：已经扣过课时（有未撤销的「上课」流水）或已有考勤记录 → 拒绝
+ *         （先撤销「已上」，否则课时被静默吃掉、流水指向一节不存在的课）。
+ *
+ * 每一条都把"该怎么办"写进理由里 —— 只说"不能删"是最让人恼火的拒绝方式。
+ */
+const studentDeleteRefusal: DeleteGuard<Student> = (db, student) => {
+  const payments = db.payments.filter((item) => item.studentId === student.id);
+  const money = round2(payments.reduce((sum, item) => sum + (item.kind === "退款" ? -item.amount : item.amount), 0));
+  const transactions = db.transactions.filter((item) => item.studentId === student.id);
+  const records = db.lessonRecords.filter((item) => item.studentId === student.id);
+  const homework = db.homeworkRecords.filter((item) => item.studentId === student.id);
+  const assessments = db.assessments.filter((item) => item.studentId === student.id);
+  const lessons = db.lessons.filter((item) => item.studentIds.includes(student.id));
+
+  const parts: string[] = [];
+  if (payments.length > 0) parts.push(`${payments.length} 条收款记录（合计 ¥${money}）`);
+  if (transactions.length > 0) parts.push(`${transactions.length} 条课时流水`);
+  if (records.length > 0) parts.push(`${records.length} 条课堂记录`);
+  if (assessments.length > 0) parts.push(`${assessments.length} 条阶段测评`);
+  if (homework.length > 0) parts.push(`${homework.length} 条作业记录`);
+  if (lessons.length > 0) parts.push(`${lessons.length} 节排课`);
+  if (parts.length === 0) return null;
+
+  return (
+    `「${student.name}」名下还有 ${parts.join("、")}，不能直接删除 —— ` +
+    "删掉之后这些记录会失去主人（钱还在账上、课还在课表上，但找不到人）。" +
+    "请先结清并退课、取消或删掉 TA 的排课；如果只是不再来上课，" +
+    "把状态改成「结课」或「暂停」更合适（数据都留着，随时能查）。"
+  );
+};
+
+const teacherDeleteRefusal: DeleteGuard<Teacher> = (db, teacher) => {
+  const lessons = db.lessons.filter((item) => item.teacherId === teacher.id);
+  if (lessons.length === 0) return null;
+  return (
+    `「${teacher.name}」名下还有 ${lessons.length} 节排课，不能直接删除 —— ` +
+    "删掉之后那些课查不到老师，课时费也没法核算。" +
+    "离职请改成「停用」（在教师页那一行的开关上），历史记录与课时统计都留着。"
+  );
+};
+
+const classroomDeleteRefusal: DeleteGuard<Classroom> = (db, classroom) => {
+  const lessons = db.lessons.filter((item) => item.classroomId === classroom.id);
+  if (lessons.length === 0) return null;
+  return (
+    `「${classroom.name}」还有 ${lessons.length} 节排课，不能直接删除 —— ` +
+    "删掉之后那些课查不到教室，教室利用率也没法算。请先取消或改掉这些课，或者改成「停用」。"
+  );
+};
+
+const courseDeleteRefusal: DeleteGuard<Course> = (db, course) => {
+  const lessons = db.lessons.filter((item) => item.subject.trim() === course.name.trim());
+  const enrollments = db.students.flatMap((student) => student.enrollments).filter((item) => item.subject.trim() === course.name.trim());
+  if (lessons.length === 0 && enrollments.length === 0) return null;
+  return (
+    `「${course.name}」还被 ${enrollments.length} 条报课、${lessons.length} 节排课引用着，不能直接删除 —— ` +
+    "删掉之后那些记录里的科目名就成了无主字符串。不再开的课请把状态改成「暂未开放」。"
+  );
+};
+
+const lessonDeleteRefusal: DeleteGuard<Lesson> = (db, lesson) => {
+  const charged = db.transactions.filter((item) => item.lessonId === lesson.id && item.reversedAt === "");
+  const records = db.lessonRecords.filter((item) => item.lessonId === lesson.id);
+  if (charged.length === 0 && records.length === 0) return null;
+  const parts: string[] = [];
+  if (charged.length > 0) parts.push(`${charged.length} 条未撤销的课时流水（已经扣过课时）`);
+  if (records.length > 0) parts.push(`${records.length} 条课堂记录`);
+  return (
+    `这节课还有 ${parts.join("、")}，不能直接删除 —— ` +
+    "删掉之后课时白扣了、考勤记录指向一节不存在的课。请先撤销「已上」（退回课时）并处理考勤记录。"
+  );
+};
+
+const studentCollection = versionedCollection<Student>((db) => db.students, "s", "学生", studentDeleteRefusal);
 const inquiryCollection = collection<Inquiry>((db) => db.inquiries, "iq", "咨询");
 
 /** 按周批量排课的入参（见 lib/backend/recurrence.ts 与 lessons.planSeries）。 */
@@ -1486,7 +1663,7 @@ function planSeries(db: Database, input: SeriesInput): SeriesPlan {
  * 单独存一份，是为了在 `lessons` 组里**覆盖 create**（排课要过"课时够不够"这一关），
  * 而覆盖之后仍然能调用通用实现（不像直接展开那样丢掉原方法）。
  */
-const lessonCollection = versionedCollection<Lesson>((db) => db.lessons, "l", "排课");
+const lessonCollection = versionedCollection<Lesson>((db) => db.lessons, "l", "排课", lessonDeleteRefusal);
 
 /**
  * 把「建档时一并报课」的宽松入参补全成一条正式的报课入参。
@@ -1987,16 +2164,52 @@ const localApi = {
       enrollmentId: string,
       note = "",
       /**
-       * 退款信息：金额由退费策略算出后传进来（服务层不自己挑策略 ——
-       * 换策略是业务决策，应该由操作的人在界面上确认）。
+       * 退款信息。
+       *
+       * ## 金额**由服务端重算**（2026-09 审计改的一处真问题）
+       *
+       * 早先这里收的是前端算好的 `amount`，原样落账 —— 而 `lib/backend/finance.ts` 的
+       * 退费策略只在浏览器里跑了一遍用来**预览**。实测：把 `amount` 写成 999999 也照收
+       * （HTTP 200），于是任何能调 `/api/call` 的角色都能退任意金额。
+       * 而同一仓库的老 REST 那条路的注释写着"金额一律由服务端算，不接受前端传来的退款额"
+       * —— 护栏在没人走的那条路上，正是"信任模型两条路相反"。
+       *
+       * 现在：只认 `policyId`，金额服务端按策略重算；前端传的 `amount` 只用于**对账**
+       * （它来自界面上的预览）。对不上就拒绝并要求刷新 —— 那说明期间这条报课被改过，
+       * 照旧写入会退错钱，而"是界面过期了"这件事必须让人知道（与乐观锁同一套取舍）。
        */
-      refund?: { amount: number; method: PaymentMethod; policyName: string },
+      refund?: { policyId: string; method: PaymentMethod; amount?: number; policyName?: string },
     ): Promise<Student | null> {
       await delay();
       const db = load();
       const student = db.students.find((item) => item.id === studentId);
       const enrollment = student?.enrollments.find((item) => item.id === enrollmentId);
       if (student === undefined || enrollment === undefined) return null;
+
+      /*
+       * 服务端自己算一遍（唯一权威）。`calculateRefund` 是 `finance.ts` 里那份策略实现 ——
+       * 界面调的是同一个函数（预览），因此两边口径天然一致。
+       */
+      const policy = findRefundPolicy(refund?.policyId ?? REFUND_POLICIES[0]!.id);
+      const computed = calculateRefund(enrollment, policy.id);
+      if (refund !== undefined && refund.amount !== undefined && round2(refund.amount) !== computed.refund) {
+        throw new Error(
+          `退款金额对不上：界面算的是 ¥${round2(refund.amount)}，服务端按「${policy.name}」重算是 ¥${computed.refund}` +
+            `（${computed.formula}）。这条报课在你看这一页之后被改过 —— 请刷新这一页，重新确认退款金额。`,
+        );
+      }
+      /*
+       * 退款不能超过实收：`paidAmount` 是"实际到账累计"，退超了账本会变成负数
+       * （`recordPayment` 里的钳位会把它压到 0，于是"实收"与账本永久分叉 —— 审计里那一条）。
+       * 因此这里提前拒绝，让人先去核对该学生的收款流水。
+       */
+      if (computed.refund > round2(enrollment.paidAmount)) {
+        throw new Error(
+          `按「${policy.name}」应退 ¥${computed.refund}，而这条报课的实收只有 ¥${round2(enrollment.paidAmount)} —— ` +
+            "退款不能超过实收。请先核对该学生的收款流水（收款可能是分期、也可能记在别的报课上）。",
+        );
+      }
+      const refundAmount = computed.refund;
 
       enrollment.status = "已退课";
       enrollment.endedAt = nowIso();
@@ -2005,8 +2218,8 @@ const localApi = {
         kind: "退课",
         lessons: 0,
         note:
-          refund !== undefined && refund.amount > 0
-            ? `${note.trim()}${note.trim() !== "" ? " · " : ""}按「${refund.policyName}」退款 ${refund.amount} 元`
+          refund !== undefined && refundAmount > 0
+            ? `${note.trim()}${note.trim() !== "" ? " · " : ""}按「${policy.name}」退款 ${refundAmount} 元（${computed.formula}）`
             : note.trim(),
       });
       /*
@@ -2021,15 +2234,22 @@ const localApi = {
         note: note.trim() === "" ? "退课" : `退课 · ${note.trim()}`,
       });
 
-      if (refund !== undefined && refund.amount > 0) {
-        recordPayment(db, {
+      if (refund !== undefined && refundAmount > 0) {
+        const refunded = recordPayment(db, {
           studentId: student.id,
           enrollmentId: enrollment.id,
-          amount: round2(refund.amount),
+          amount: refundAmount,
           kind: "退款",
           method: refund.method,
           at: nowIso(),
-          note: `退课退款 · ${refund.policyName}`,
+          note: `退课退款 · ${policy.name}`,
+        });
+        // 钱必须留痕（与 payments.record 同一条纪律）
+        writeLog(db, {
+          entity: "收款",
+          action: "退款",
+          targetId: refunded.id,
+          summary: `${student.name} 退课退款 ¥${refundAmount}（${refund.method}）· ${policy.name}：${computed.formula}`,
         });
       }
 
@@ -2163,7 +2383,7 @@ const localApi = {
    * 注意边界：这里加课程**不会**让宣传网站上多出一张卡片 —— 网站是静态内容。
    */
   courses: {
-    ...versionedCollection<Course>((db) => db.courses, "course", "课程"),
+    ...versionedCollection<Course>((db) => db.courses, "course", "课程", courseDeleteRefusal),
 
     /**
      * 新建课程（先校验再落库）。
@@ -2304,7 +2524,7 @@ const localApi = {
    * 被别人静默盖掉就会出现"排了节不该排的课，却没人知道为什么"。
    */
   teachers: {
-    ...versionedCollection<Teacher>((db) => db.teachers, "t", "教师"),
+    ...versionedCollection<Teacher>((db) => db.teachers, "t", "教师", teacherDeleteRefusal),
     /**
      * 在职**教师**，排课下拉用。
      *
@@ -2320,11 +2540,37 @@ const localApi = {
     },
   },
 
-  classrooms: versionedCollection<Classroom>((db) => db.classrooms, "c", "教室"),
+  classrooms: versionedCollection<Classroom>((db) => db.classrooms, "c", "教室", classroomDeleteRefusal),
 
-  /** 收款流水（钱的账本）。 */
+  /**
+   * 收款流水（钱的账本）：**只读 + 一条正规入口 `record`**。
+   *
+   * ## 为什么这里刻意不用通用集合（这是审计抓出来的一个真洞）
+   *
+   * 早先这里是 `...collection<Payment>((db) => db.payments, "pay")` —— 通用集合一次给出
+   * `create` / `update` / `remove` 三个写方法，而它们：
+   *
+   *   1. **不写操作日志**（那个集合建的时候没给"日志标签"，而 `collection` 的约定是
+   *      "标签为空串就不记日志"）—— 钱的动向一条都不留痕；
+   *   2. **绕过金额不变式**：`recordPayment` 会同步改报课记录的"实收累计"，
+   *      而通用集合的 `create` 只是把对象塞进数组。实测：塞一笔 ¥7000 之后
+   *      收费页显示本月收入 ¥1,001,499，而那条报课的实收还停在 ¥1500 ——
+   *      自检守着的那条「实收 = 收款 − 退款」当场不成立；
+   *   3. 页面里**一处都没调用**（它们是工厂白送的），却对 `POST /api/call` 开放，
+   *      技术/财务/招生三个角色都能调。
+   *
+   * 所以这里把读方法显式列出来，写入口只保留 `record`（它走 `recordPayment`
+   * 同步实收、并且现在会写日志）。"少一条路 = 少一处不一致"。
+   */
   payments: {
-    ...collection<Payment>((db) => db.payments, "pay"),
+    async list(): Promise<Payment[]> {
+      await delay();
+      return clone(load().payments);
+    },
+    async get(id: string): Promise<Payment | null> {
+      await delay();
+      return clone(load().payments.find((item) => item.id === id) ?? null);
+    },
     listByStudent: async (studentId: string): Promise<Payment[]> => {
       await delay();
       return clone(
@@ -2371,6 +2617,17 @@ const localApi = {
       });
       // 收款会改报课记录的"实收累计"，因此这条学生记录也被写过（见 touchStudent 的说明）
       touchStudent(db, student.id);
+      /*
+       * **钱必须留痕**（审计抓到的另一处）：`recordPayment` 只写收款表、不写操作日志，
+       * 于是"谁在什么时候给谁记了多少钱"在日志里查不到，而 README 一直宣称
+       * "收款/退款…每次改动留操作日志"。金额写进摘要 —— 只说"记了一笔收款"等于没说。
+       */
+      writeLog(db, {
+        entity: "收款",
+        action: created.kind === "退款" ? "退款" : "收款",
+        targetId: created.id,
+        summary: `${student.name} ${created.kind} ¥${created.amount}（${created.method}）${created.note === "" ? "" : ` · ${created.note}`}`,
+      });
       persist(db);
       return clone(created);
     },
@@ -4170,6 +4427,33 @@ function runImport(
  * 仅供自检使用：把服务切到指定的存储实现（Node 里用内存存储）。
  * 页面代码不应调用它。
  */
+/**
+ * **只给自检 / 演示脚本的夹具收尾用**：不经过删除护栏，直接把一条记录摘掉。
+ *
+ * ## 为什么需要它（以及为什么它不挂在 `api` 上）
+ *
+ * 产品层的删除现在有护栏（有账就不许删，见 `DeleteGuard`）—— 那是给**机构**用的规矩。
+ * 而自检为了给后面的断言腾地方，经常要收尾掉"刚刚造过账"的夹具：
+ * 那种夹具按产品规矩本来就**删不掉**（账还在），于是自检会被自己的护栏挡住。
+ *
+ * 两条出路都不好：放宽护栏（把产品规矩改松）或者让自检绕过它（假装护栏不存在）。
+ * 这里的取舍是：**护栏照旧严格**，给自检一个名字里就写着"这是夹具钩子"的入口，
+ * 而且**刻意不挂在 `api` 对象上** —— 它不进契约、不进远端代理，页面看不到它，
+ * 因此不会有任何产品代码误用它。
+ *
+ * 删掉一条夹具**不写操作日志**：它不是一次业务动作。
+ */
+export function __removeFixture(entity: string, id: string): boolean {
+  const db = load() as unknown as Record<string, unknown>;
+  const list = db[entity];
+  if (!Array.isArray(list)) return false;
+  const index = (list as Array<{ id: string }>).findIndex((item) => item.id === id);
+  if (index === -1) return false;
+  (list as Array<{ id: string }>).splice(index, 1);
+  persist(db as unknown as Database);
+  return true;
+}
+
 export function __useStoreForTesting(backing: KeyValueStore): void {
   store = backing;
   cache = null;

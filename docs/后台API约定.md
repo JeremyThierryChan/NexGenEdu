@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 115 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 112 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -42,7 +42,7 @@ lib/backend/api.ts        服务层实现（当前 115 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 115 个方法）
+## 二、接口分组（当前 112 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -58,10 +58,11 @@ lib/backend/api.ts        服务层实现（当前 115 个方法）；数据一�
 页面走的是路线 B —— 一个通用分发入口 `POST /api/call`，服务端复用整份 `api.ts`。
 两条路线都要登录；加接口时别把参考实现当成唯一标准。）
 
-### 1. 通用 CRUD（9 个资源 × 5 个方法）
+### 1. 通用 CRUD（8 个资源 × 5 个方法 + 收款的 2 个读方法）
 
-九个资源（学生 / 教师 / 教室 / 排课 / 课堂记录 / 作业记录 / 阶段测评 / 收款记录 / 课程库），
-每个都有 `list` / `get` / `create` / `update` / `remove` 五个方法：
+八个资源（学生 / 教师 / 教室 / 排课 / 课堂记录 / 作业记录 / 阶段测评 / 课程库），
+每个都有 `list` / `get` / `create` / `update` / `remove` 五个方法；**收款记录是例外** ——
+它只有 `list` / `get` 两个读方法，写入口只有一个动作：`payments.record`（见「三、业务动作」）。
 
 | 资源 | 方法 |
 | --- | --- |
@@ -72,12 +73,22 @@ lib/backend/api.ts        服务层实现（当前 115 个方法）；数据一�
 | 课堂记录 | `lessonRecords.list` · `lessonRecords.get` · `lessonRecords.create` · `lessonRecords.update` · `lessonRecords.remove` |
 | 作业记录 | `homework.list` · `homework.get` · `homework.create` · `homework.update` · `homework.remove` |
 | 阶段测评 | `assessments.list` · `assessments.get` · `assessments.create` · `assessments.update` · `assessments.remove` |
-| 收款记录 | `payments.list` · `payments.get` · `payments.create` · `payments.update` · `payments.remove` |
+| 收款记录 | `payments.list` · `payments.get`（**没有**通用写方法：见下面那条） |
 
 - 服务端用一套 REST 即可：`GET` 列表、`GET` 单项、`POST` 新建、`PATCH` 修改、`DELETE` 删除；
 - **id 由服务端生成**，前端只读；
 - 删除要分清楚：课时流水（`transactions`）、收款（`payments`）、退课记录
   **一律留痕不删**（否则「这些课时/钱去哪了」说不清）；只有档案类允许真删。
+- **收款为什么没有通用写方法**（2026-09 审计后删掉的三个）：`payments.create/update/remove`
+  是集合工厂白送的，页面一处都没调用，却有两个真问题 —— ① 它们不写操作日志（钱不留痕）；
+  ② 它们绕过「实收 = 收款 − 退款」：`payments.record` 会同步改报课记录上的实收累计，
+  而把一条收款直接塞进数组不会。实测塞一笔 ¥7000 之后，收费页显示本月收入 ¥1,001,499、
+  那条报课的实收仍停在 ¥1500。收款的唯一写入口是 `payments.record`。
+- **删除档案有护栏**（同一次审计加的）：学生的收款 / 课时流水 / 课堂记录 / 测评 / 作业 / 排课，
+  教师与教室的排课，课程的报课与排课，排课的已扣课时与考勤记录 —— 任何一样存在就**拒绝删除**
+  并说明"先做什么"（想离职/停用就改状态，别删档案）。判据在 `lib/backend/api.ts` 的
+  `DeleteGuard`（`studentDeleteRefusal` / `teacherDeleteRefusal` / `classroomDeleteRefusal` /
+  `courseDeleteRefusal` / `lessonDeleteRefusal`）。
 
 **课程库**（`courses.list`、`courses.get`、`courses.create`、`courses.update`、`courses.remove`）：
 课程名是**引用键** —— 排课科目、教师可带科目、报课科目都按名字记它，因此服务端必须
@@ -540,7 +551,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 2. 它会进入 `API_CONTRACT` —— 而自检要求"服务层每个方法都必须在契约里"，
    于是契约里出现一个"只有服务端才有意义"的方法，契约就不再是"页面对服务层的形状"了。
 
-**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 115 个方法，
+**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 112 个方法，
 这四条路由**刻意不登记**（它们不是服务层方法）；页面的客户端是 `lib/auth/accounts.ts`，
 与 `lib/auth/session.ts` 调 `/api/login`、`/api/session` 是同一个做法。
 自检里对它们的要求写在 `scripts/check-auth.mts` 的 [10] 节（真实 HTTP、真实写盘），

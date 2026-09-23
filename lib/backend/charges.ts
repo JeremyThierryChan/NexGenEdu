@@ -55,9 +55,25 @@ export function recordPayment(db: Database, input: Omit<Payment, "id">): Payment
     .flatMap((student) => student.enrollments)
     .find((item) => item.id === input.enrollmentId);
   if (enrollment !== undefined) {
-    enrollment.paidAmount = round2(
-      Math.max(0, enrollment.paidAmount + (input.kind === "退款" ? -input.amount : input.amount)),
-    );
+    /*
+     * ## 退款超过实收 → **拒绝**，不是把实收钳到 0（2026-09 审计改的）
+     *
+     * 早先这里是 `Math.max(0, paidAmount - amount)`：退了比收的还多时，收款表里记着
+     * 一笔更大的退款，而报课记录上的"实收"停在 0 —— 于是「实收 = 收款 − 退款」
+     * 这条不变式（自检守着的那条）**永久分叉**，而且无声：自检只在"没人多退"的窄场景下通过。
+     *
+     * 钱上的不一致要当场拦住，不能靠钳位把它藏起来。所以现在：
+     * 退超了就抛错，让人先去核对这个学生的收款流水（可能是分期、也可能记在别的报课上）。
+     */
+    const next = round2(enrollment.paidAmount + (input.kind === "退款" ? -input.amount : input.amount));
+    if (next < 0) {
+      throw new Error(
+        `这笔 ${input.kind} ¥${round2(input.amount)} 会让这条报课的「实收」变成 ¥${next} —— ` +
+          `退款不能超过实收（现在是 ¥${round2(enrollment.paidAmount)}）。` +
+          "请先核对该学生的收款流水：可能收款记在别的报课上，或者这笔是多退的。",
+      );
+    }
+    enrollment.paidAmount = next;
   }
 
   return created;

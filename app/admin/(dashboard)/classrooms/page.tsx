@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
+import { ActionNoticeView } from "@/components/admin/ActionNotice";
+import { useActionNotice } from "@/components/admin/useActionNotice";
 import { NumberInput, Panel, TextField } from "@/components/admin/AdminFields";
 import { BulkImport } from "@/components/admin/BulkImport";
 import { Button } from "@/components/ui/Button";
@@ -43,6 +45,8 @@ export default function AdminClassroomsPage() {
   const [importing, setImporting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
+  /** 写操作的提示（删除被护栏拦下时，把服务端那句原话显示出来）。 */
+  const notice = useActionNotice();
   const [kindFilter, setKindFilter] = useState<"全部" | ClassroomKind>("全部");
 
   /**
@@ -85,11 +89,21 @@ export default function AdminClassroomsPage() {
     return map;
   }, [lessons]);
 
+  /** 删除教室：有排课时服务端会拦下（见 `classroomDeleteRefusal`），并建议改用「停用」。 */
   async function remove(room: Classroom) {
     const count = lessons.filter((lesson) => lesson.classroomId === room.id).length;
-    const extra = count > 0 ? `\n该场地还有 ${count} 节课，删除后这些课会查不到场地。` : "";
-    if (!window.confirm(`删除「${room.name}」？${extra}`)) return;
-    await api.classrooms.remove(room.id);
+    const extra = count > 0 ? `\n该场地还有 ${count} 节课。` : "";
+    if (
+      !window.confirm(
+        `删除「${room.name}」？${extra}\n` +
+          "还有排课时系统不会删（那些课会查不到场地、利用率也没法算）——\n" +
+          "不再使用的话，建议改成「停用」而不是删除。",
+      )
+    ) {
+      return;
+    }
+    const removed = await notice.run(() => api.classrooms.remove(room.id));
+    if (removed === null) return;
     setOpenId((current) => (current === room.id ? null : current));
     await load({ quiet: true });
   }
@@ -107,6 +121,9 @@ export default function AdminClassroomsPage() {
           await load({ quiet: true });
         }}
       />
+
+      {/* 一次写操作的结果（删除被护栏拦下时，服务端那句原话显示在这里） */}
+      <ActionNoticeView notice={notice} className="mt-4" />
 
       {creating && (
         <Panel

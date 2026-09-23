@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
+import { ActionNoticeView } from "@/components/admin/ActionNotice";
+import { useActionNotice } from "@/components/admin/useActionNotice";
 import { Panel, SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { BulkImport } from "@/components/admin/BulkImport";
 import { MultiSelect } from "@/components/admin/MultiSelect";
@@ -30,6 +32,8 @@ export default function AdminTeachersPage() {
   const [importing, setImporting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
+  /** 写操作的提示（删除被护栏拦下时，把服务端那句原话显示出来）。 */
+  const notice = useActionNotice();
 
   /**
    * 读数据。
@@ -72,11 +76,27 @@ export default function AdminTeachersPage() {
     await load({ quiet: true });
   }
 
+  /**
+   * 删除教师。
+   *
+   * **服务端会拦下"名下有排课"的教师**（见 `lib/backend/api.ts` 的 `teacherDeleteRefusal`），
+   * 并建议改用「停用」——离职不等于抹掉历史，课时费还要按记录核算。
+   * 这里走 `notice.run` 把服务端那句原话显示出来（裸 `await` 会让它变成没人接的拒绝）。
+   */
   async function remove(teacher: Teacher) {
     const count = load_.get(teacher.id)?.total ?? 0;
-    const extra = count > 0 ? `\nTA 还有 ${count} 节课记录，删除后这些课会查不到老师。` : "";
-    if (!window.confirm(`删除教师「${teacher.name}」？${extra}\n如果只是不带课了，建议把「在职」关掉而不是删除。`)) return;
-    await api.teachers.remove(teacher.id);
+    const extra = count > 0 ? `\nTA 还有 ${count} 节课记录。` : "";
+    if (
+      !window.confirm(
+        `删除教师「${teacher.name}」？${extra}\n` +
+          "名下有排课时系统不会删（那些课会查不到老师、课时费也没法核算）——\n" +
+          "如果只是不带课了，建议把「在职」关掉而不是删除。",
+      )
+    ) {
+      return;
+    }
+    const removed = await notice.run(() => api.teachers.remove(teacher.id));
+    if (removed === null) return;
     setOpenId((current) => (current === teacher.id ? null : current));
     await load({ quiet: true });
   }
@@ -94,6 +114,9 @@ export default function AdminTeachersPage() {
           await load({ quiet: true });
         }}
       />
+
+      {/* 一次写操作的结果（删除被护栏拦下时，服务端那句原话显示在这里） */}
+      <ActionNoticeView notice={notice} className="mt-4" />
 
       {creating && (
         <Panel className="mt-6" title="新增教师" description="科目请与课程名用同一套叫法，便于排课与前台一致。">

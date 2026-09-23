@@ -41,7 +41,16 @@ export default function AdminLessonsPage() {
   const [series, setSeries] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [recordId, setRecordId] = useState<string | null>(null);
-  const [notice, setNotice] = useState("");
+  /**
+   * 一次写操作的结果。
+   *
+   * 早先只有"成功"这一种说法（`{ text }`），于是**失败根本没地方显示** ——
+   * 实测：普通教师点「取消 / 恢复 / 编辑 / 删除」时服务端 403，而调用是裸 `await`，
+   * 异常无人接 → 点了没反应、按钮永久停在「处理中…」。
+   * 现在两种分开：`tone` 决定它是绿条还是红条，失败时显示**服务端那句原话**
+   * （它写了"这件事归谁做"，比界面自己编一句准）。
+   */
+  const [notice, setNotice] = useState<{ text: string; tone: "ok" | "error" } | null>(null);
 
   /**
    * 读数据。
@@ -81,34 +90,72 @@ export default function AdminLessonsPage() {
   const studentNames = (ids: string[]) =>
     ids.map((id) => students.find((item) => item.id === id)?.name ?? "—").join("、");
 
-  async function markCompleted(lesson: Lesson) {
-    const result = await api.lessons.markCompleted(lesson.id);
-    if (result.alreadyCompleted) {
-      setNotice("这节课之前已经标记过「已上」，没有重复扣课时。");
-    } else {
-      const detail = result.deducted
-        .map((item) => `${students.find((s) => s.id === item.studentId)?.name ?? item.studentId} 剩 ${item.remainingLessons} 节`)
-        .join("、");
-      setNotice(`已标记「已上」，扣课时：${detail !== "" ? detail : "无学生"}`);
+  /** 一次写操作的公共收尾：失败就把服务端原话显示出来（绝不静默）。 */
+  async function attempt(action: () => Promise<void>): Promise<boolean> {
+    try {
+      await action();
+      return true;
+    } catch (cause) {
+      setNotice({
+        tone: "error",
+        text:
+          cause instanceof Error && cause.message.trim() !== ""
+            ? cause.message
+            : `操作没有成功（${String(cause)}）—— 请刷新这一页再试。`,
+      });
+      return false;
     }
+  }
+
+  async function markCompleted(lesson: Lesson) {
+    const result = await attempt(async () => {
+      const value = await api.lessons.markCompleted(lesson.id);
+      if (value.alreadyCompleted) {
+        setNotice({ tone: "ok", text: "这节课之前已经标记过「已上」，没有重复扣课时。" });
+      } else {
+        const detail = value.deducted
+          .map((item) => `${students.find((s) => s.id === item.studentId)?.name ?? item.studentId} 剩 ${item.remainingLessons} 节`)
+          .join("、");
+        setNotice({ tone: "ok", text: `已标记「已上」，扣课时：${detail !== "" ? detail : "无学生"}` });
+        return;
+      }
+      setNotice({ tone: "ok", text: "这节课之前已经标记过「已上」，没有重复扣课时。" });
+    });
+    if (!result) return;
     await load({ quiet: true });
   }
 
   async function setStatus(lesson: Lesson, status: Lesson["status"]) {
     const wasCompleted = lesson.status === "已上";
-    await api.lessons.update(lesson.id, { status });
-    // 状态从「已上」改回去时，服务层会按流水把课时退回，这里如实告知
-    if (wasCompleted && status !== "已上") {
-      setNotice("已撤销「已上」状态，这节课扣掉的课时已按流水退回。");
-    }
+    const ok = await attempt(async () => {
+      await api.lessons.update(lesson.id, { status });
+      // 状态从「已上」改回去时，服务层会按流水把课时退回，这里如实告知
+      if (wasCompleted && status !== "已上") {
+        setNotice({ tone: "ok", text: "已撤销「已上」状态，这节课扣掉的课时已按流水退回。" });
+      } else {
+        setNotice(null);
+      }
+    });
+    if (!ok) return;
     await load({ quiet: true });
   }
 
+  /** 删除一节课：已扣过课时或已有考勤记录的课**服务端会拦下**（先撤销「已上」）。 */
   async function remove(lesson: Lesson) {
-    if (!window.confirm(`删除 ${lesson.subject}（${formatTimeRange(lesson.startsAt, lesson.durationMinutes)}）？`)) {
+    if (
+      !window.confirm(
+        `删除 ${lesson.subject}（${formatTimeRange(lesson.startsAt, lesson.durationMinutes)}）？\n` +
+          "这节课已经扣过课时或记过考勤时，系统不会删，并会告诉你要先做什么" +
+          "（删掉之后课时白扣了、考勤记录指向一节不存在的课）。",
+      )
+    ) {
       return;
     }
-    await api.lessons.remove(lesson.id);
+    const ok = await attempt(async () => {
+      await api.lessons.remove(lesson.id);
+      setNotice(null);
+    });
+    if (!ok) return;
     await load({ quiet: true });
   }
 
@@ -198,12 +245,19 @@ export default function AdminLessonsPage() {
         </Panel>
       )}
 
-      {notice !== "" && (
-        <p className="mt-4 flex items-start justify-between gap-3 rounded-md border border-success-100 bg-success-50 px-3 py-2 text-sm text-success-600">
-          <span>{notice}</span>
+      {notice !== null && (
+        <p
+          role={notice.tone === "error" ? "alert" : "status"}
+          className={`mt-4 flex items-start justify-between gap-3 rounded-md border px-3 py-2 text-sm ${
+            notice.tone === "error"
+              ? "border-danger-100 bg-danger-50 text-danger-600"
+              : "border-success-100 bg-success-50 text-success-600"
+          }`}
+        >
+          <span>{notice.text}</span>
           <button
             type="button"
-            onClick={() => setNotice("")}
+            onClick={() => setNotice(null)}
             className="shrink-0 text-xs underline"
           >
             知道了

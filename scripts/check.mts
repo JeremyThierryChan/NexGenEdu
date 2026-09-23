@@ -34,8 +34,8 @@ import { getPricingData, parsePricingSource } from "@/lib/data/pricing";
 import { getCasesContent, getFaqContent, getScheduleContent } from "@/lib/data/pages";
 import { findFeaturedCourse, getAllFeaturedCourses, getFeaturedContent } from "@/lib/data/featured";
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
-import { __useStoreForTesting, api } from "@/lib/backend/api";
-import { isRemoteMode } from "@/lib/backend/remote";
+import { __removeFixture, __useStoreForTesting, api } from "@/lib/backend/api";
+import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
 import { createMemoryStore } from "@/lib/backend/storage";
 import {
   __useConnectionStoreForTesting,
@@ -186,6 +186,8 @@ import {
   summarizeFollowUps,
 } from "@/lib/backend/followup";
 import {
+  REFUND_POLICIES,
+  calculateRefund,
   discountAmount,
   findRefundPolicy,
   formatMoney,
@@ -830,6 +832,42 @@ console.log("\n=== 6. 教务后台服务层（同一套断言对两种后端都�
 const memory = createMemoryStore();
 __useStoreForTesting(memory);
 
+/**
+ * **夹具收尾**（两种后端都要能用）。
+ *
+ * 产品层的删除现在有护栏（有账就不许删），而自检经常要收尾"刚造过账"的夹具 ——
+ * 那些夹具按产品规矩本来就删不掉。因此走这条专用通道：
+ *   - 内存后端：直接摘掉本地存储里那条（`__removeFixture`）；
+ *   - **HTTP 后端**：数据在服务端进程里、本地那份是空的，因此要请服务端摘
+ *     （`/api/test-hooks/remove-fixture`，只在测试后端上开着，见 scripts/temp-server.mts）。
+ *
+ * 这正是"两种后端跑同一套断言"要保住的东西：收尾也算断言的一部分 ——
+ * 只在一个后端上收得掉，另一个后端就会从这里开始一路红到底（`check:both` 抓过这一次）。
+ */
+let fixtureToken: string | null = null;
+async function dropFixture(entity: string, id: string): Promise<boolean> {
+  if (!isRemoteMode()) return __removeFixture(entity, id);
+  if (fixtureToken === null) {
+    const login = await fetch(`${remoteBase()}/api/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        username: process.env.NEXGENEDU_ADMIN_USER ?? "",
+        password: process.env.NEXGENEDU_ADMIN_PASSWORD ?? "",
+      }),
+    });
+    const body = (await login.json().catch(() => ({}))) as { token?: unknown };
+    fixtureToken = typeof body.token === "string" ? body.token : "";
+  }
+  const response = await fetch(`${remoteBase()}/api/test-hooks/remove-fixture`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${fixtureToken}` },
+    body: JSON.stringify({ entity, id }),
+  });
+  const body = (await response.json().catch(() => ({}))) as { removed?: unknown };
+  return body.removed === true;
+}
+
 const emptyAtStart = await api.students.list();
 eq("空库起步：新库没有学生", emptyAtStart.length, 0);
 ok("空库起步：课程库仍有网站课程", (await api.courses.list()).length > 0);
@@ -972,8 +1010,8 @@ const plain = await api.students.create({
 eq("不传 enrollments 时就是只建档（没有报课记录）", plain.enrollments.length, 0);
 eq("只建档的学生报读科目为空", plain.subjects.length, 0);
 
-ok("删除多门报课的学生", (await api.students.remove(multi.id)) === true);
-ok("删除只建档的学生", (await api.students.remove(plain.id)) === true);
+ok("收尾：摘掉多门报课的夹具（它带账，按产品规矩删不掉 —— 见 __removeFixture）", await dropFixture("students", multi.id));
+ok("收尾：摘掉只建档的夹具", await dropFixture("students", plain.id));
 
 // 今日概览：统计口径
 const todayLessons = await api.lessons.listByDate(new Date());
@@ -1231,7 +1269,7 @@ const noStudentLesson = await api.lessons.create({
   studentIds: [], startsAt: slot(18, 0).start, durationMinutes: 60, status: "已排", note: "",
 });
 eq("没有学生的课可以建（没有课时可欠）", noStudentLesson.studentIds, []);
-await api.lessons.remove(noStudentLesson.id);
+await dropFixture("lessons", noStudentLesson.id);
 /*
  * 拦的必须是「排课这件事」，而不是 `create` 这一个入口。
  *
@@ -1294,9 +1332,9 @@ try {
 ok("课时不够时把「已取消」翻回「已排」→ 被拒", editMessage.includes("课时不足"), editMessage);
 
 // 收尾：把这个学生的课与档案删掉，别影响后面的断言
-await api.lessons.remove(editLesson.id);
-await api.lessons.remove(editSecond.id);
-await api.students.remove(editStudent.id);
+await dropFixture("lessons", editLesson.id);
+await dropFixture("lessons", editSecond.id);
+await dropFixture("students", editStudent.id);
 eq("自检改课学生已清理", await api.students.get(editStudent.id), null);
 
 // 先建一节（此时有课时），再退掉这门课的报课记录 → 标记已上时就没有对应报课记录了
@@ -1312,7 +1350,7 @@ const orphanResult = await api.lessons.markCompleted(orphanLesson.id);
 eq("无对应报课记录时不扣课时", orphanResult.deducted.length, 0);
 eq("并且说明原因", orphanResult.skipped.length, 1);
 ok("原因里点名了科目", (orphanResult.skipped[0]?.reason ?? "").includes(anchorSubject));
-await api.lessons.remove(orphanLesson.id);
+await dropFixture("lessons", orphanLesson.id);
 
 /*
  * 兜底：**超用必须被上报**（而不是静默）。
@@ -1340,9 +1378,9 @@ eq("课时已被调到 0 时仍能记录上课（不因为欠费就记不了）"
 eq("但要**明确上报超用**（不是静默截断成 0）",
   overflowResult.overused.map((item) => [item.name, item.subject, item.over]),
   [["自检超用学生", "自检超用科目", 1]]);
-await api.lessons.remove(overflowLesson.id);
+await dropFixture("lessons", overflowLesson.id);
 
-await api.lessons.remove(anchorLesson.id);
+await dropFixture("lessons", anchorLesson.id);
 eq("删除排课后查不到", await api.lessons.get(anchorLesson.id), null);
 
 // ── 日历用的区间查询 ──────────────────────────────────────────────────
@@ -1691,8 +1729,8 @@ eq("老档案读不到的新多选字段返回空数组", profileList(seeded[1]!
   }
 
   // 收尾：删掉这两条自检记录，别影响后面的断言
-  await api.students.remove(lockStudent.id);
-  await api.teachers.remove(lockTeacher.id);
+  await dropFixture("students", lockStudent.id);
+  await dropFixture("teachers", lockTeacher.id);
   eq("自检记录已清理（学生）", await api.students.get(lockStudent.id), null);
   eq("自检记录已清理（教师）", await api.teachers.get(lockTeacher.id), null);
 }
@@ -1804,7 +1842,7 @@ eq("重新标记已上会再扣 1 节",
   remainingOf((await api.students.get(ledgerStudent.id))!.enrollments
     .find((item) => item.id === ledgerEnrollment.id)!),
   remainingOf(beforeRevert));
-await api.lessons.remove(ledgerLesson.id);
+await dropFixture("lessons", ledgerLesson.id);
 
 // ── 动态追踪：课堂记录 / 作业记录 / 阶段测评 ──────────────────────────
 __useStoreForTesting(memory);
@@ -1826,7 +1864,7 @@ eq("一课一生只有一条记录", (await api.lessonRecords.listByLesson(track
 eq("保存内容被更新", (await api.lessonRecords.listByLesson(trackLesson.id))[0]?.attendance, "请假");
 ok("按学生能查到自己的记录",
   (await api.lessonRecords.listByStudent(trackStudent)).some((item) => item.id === firstRecord.id));
-await api.lessonRecords.remove(firstRecord.id);
+await dropFixture("lessonRecords", firstRecord.id);
 eq("删除课堂记录后查不到", (await api.lessonRecords.listByLesson(trackLesson.id)).length, 0);
 
 // 作业记录
@@ -2257,7 +2295,7 @@ if (hiddenTeacher !== undefined) {
   await api.site.importFromContent({ write: true, overwrite: true });
   eq("导入不会把机构关掉展示的教师翻回来（内容文件里没有他）",
     (await api.teachers.get(handmade.id))?.siteVisible, false);
-  await api.teachers.remove(handmade.id);
+  await dropFixture("teachers", handmade.id);
 }
 await api.restoreBackup();
 
@@ -2565,7 +2603,7 @@ await api.restoreBackup();
     afterEdit.coursePage.subjects[subjectIndex]!.bands.length, afterFresh.coursePage.subjects[subjectIndex]!.bands.length);
 
   // 收尾：删掉自检用的卡片，正文存回原样（后面的用例还要用这份内容）
-  await api.courses.remove(card.id);
+  await dropFixture("courses", card.id);
   await api.site.saveContent(before);
   eq("正文已还原（学科 / 小节数与开头一致）",
     (await api.site.publicContent()).siteContent.coursePage.subjects.map((item) => item.bands.length),
@@ -2700,13 +2738,13 @@ await api.restoreBackup();
   ok("负数金额被拒", negative.includes("不能是负数"), negative);
 
   // 收尾
-  await api.lessons.remove(conflicting.id);
-  await api.lessons.remove(futureLesson.id);
-  await api.lessons.remove(pastOpen.id);
-  await api.lessons.remove(pastDone.id);
-  await api.students.remove(editStudent.id);
-  await api.teachers.remove(teacherA.id);
-  await api.teachers.remove(teacherB.id);
+  await dropFixture("lessons", conflicting.id);
+  await dropFixture("lessons", futureLesson.id);
+  await dropFixture("lessons", pastOpen.id);
+  await dropFixture("lessons", pastDone.id);
+  await dropFixture("students", editStudent.id);
+  await dropFixture("teachers", teacherA.id);
+  await dropFixture("teachers", teacherB.id);
   eq("自检改报课学生已清理", await api.students.get(editStudent.id), null);
   eq("自检用的两位老师也清理了", (await api.teachers.get(teacherA.id)) === null && (await api.teachers.get(teacherB.id)) === null, true);
 }
@@ -2816,29 +2854,47 @@ ok("实收与收款流水一致（全部报课）", await (async () => {
 })());
 
 // 退费策略：两种口径必须给出不同结果，且公式能解释
+/*
+ * 退费样本刻意让"约定应缴"与"实收"**不同**（1800 约定、1500 实收）：
+ * 退费必须按**实收**算 —— 家长欠着钱来退课时，按约定算会退出没收到过的钱。
+ * 早先两条策略都在用 `agreedAmount`，而名字、说明、公式里写的都是"实付/实收"。
+ */
 const refundSample = {
-  totalLessons: 10, usedLessons: 3, agreedAmount: 1800, unitPrice: 200,
+  totalLessons: 10, usedLessons: 3, agreedAmount: 1800, paidAmount: 1500, unitPrice: 200,
 };
 const prorata = findRefundPolicy("prorata").calculate(refundSample);
 const clawback = findRefundPolicy("list-clawback").calculate(refundSample);
-eq("按实付比例退：剩 7 节 × 实付单价", prorata.refund, 1260);
-eq("追回标价：实付 − 已上 3 节 × 标价", clawback.refund, 1200);
+ok("退费口径只有一处实现（界面与服务端都从 REFUND_POLICIES 取）",
+  REFUND_POLICIES.length >= 2 && REFUND_POLICIES.every((policy) => policy.id !== "" && policy.description !== ""));
+eq("按实付比例退：剩 7 节 × **实收**单价（1500 ÷ 10 × 7）", prorata.refund, 1050);
+eq("追回标价：**实收** − 已上 3 节 × 标价 200", clawback.refund, 900);
+ok("公式说明里写的是「实收」而不是「约定」",
+  prorata.formula.includes("实收") && clawback.formula.includes("实收"));
 ok("两条策略结果不同且都带公式说明",
   prorata.refund !== clawback.refund && prorata.formula !== "" && clawback.formula !== "");
 eq("已上完时不退款（追回口径）",
   findRefundPolicy("list-clawback").calculate({ ...refundSample, usedLessons: 10 }).refund, 0);
 ok("退款不会为负（超退保护）",
-  findRefundPolicy("list-clawback").calculate({ ...refundSample, usedLessons: 10, agreedAmount: 1000 }).refund >= 0);
+  findRefundPolicy("list-clawback").calculate({ ...refundSample, usedLessons: 10, paidAmount: 1000 }).refund >= 0);
 
-// 退课 + 退款：记一笔退款并把实收扣回
+/*
+ * 退课 + 退款：金额**由服务端按策略重算**（客户端只传口径 `policyId`）。
+ * 这里先自己按同一个函数算一遍期望值 —— 断言"服务端退的就是策略算出来的那个数"，
+ * 而不是写死一个魔数（写死的话，改了策略这条断言反而会拦着人）。
+ */
+const moneyBeforeRefund = (await api.students.get(moneyStudent.id))!.enrollments.find((item) => item.id === moneyCreated.id)!;
+const expectedRefund = calculateRefund(moneyBeforeRefund, "prorata");
 const moneyRefunded = await api.students.refundEnrollment(moneyStudent.id, moneyCreated.id, "退课自检", {
-  amount: 500, method: "微信", policyName: "按实付比例退（默认）",
+  policyId: "prorata", method: "微信",
 });
 const afterRefund = moneyRefunded!.enrollments.find((item) => item.id === moneyCreated.id)!;
 eq("退课后状态为已退课", afterRefund.status, "已退课");
-eq("退款后实收被扣回", afterRefund.paidAmount, 1900);
+eq("退款金额 = 服务端按策略重算的结果", expectedRefund.refund, 2400);
+eq("退款后实收被扣回", afterRefund.paidAmount, round2(moneyBeforeRefund.paidAmount - expectedRefund.refund));
 ok("退款流水已记录",
   (await api.payments.listByEnrollment(moneyCreated.id)).some((item) => item.kind === "退款"));
+ok("退款也写了操作日志（钱必须留痕）",
+  (await api.logs.list()).some((item) => item.entity === "收款" && item.action === "退款"));
 
 // 财务汇总：月份区间与按方式分组
 const finance = await api.finance(new Date());
@@ -3217,8 +3273,8 @@ await api.lessons.update(reconcileLesson.id, { status: "已取消" });
 ok("原课取消后不再要求补课",
   !(await api.lessons.pendingMakeups()).some((row) => row.original.id === reconcileLesson.id));
 
-await api.lessons.remove(makeup!.id);
-await api.lessons.remove(reconcileLesson.id);
+await dropFixture("lessons", makeup!.id);
+await dropFixture("lessons", reconcileLesson.id);
 
 // ── 经营统计（第六组）─────────────────────────────────────────────────
 // 统计最容易出的问题是「口径不一致」：利用率分母是什么、取消的课算不算、
@@ -3438,6 +3494,10 @@ const afterUpdate = await api.logs.list();
 ok("修改会留下日志并写明改了哪个字段",
   afterUpdate[0]?.action === "修改" && (afterUpdate[0]?.summary ?? "").includes("grade"));
 
+/*
+ * 这一处**必须走真实的产品路径**：断言的就是"删除会留日志"。
+ * （`__removeFixture` 是夹具钩子、不写日志，用它就测不到这件事了。）
+ */
 await api.students.remove(logStudent.id);
 const afterRemove = await api.logs.list();
 eq("删除会留下日志", afterRemove[0]?.action, "删除");
@@ -4092,13 +4152,13 @@ if (iqReport?.slots[0]?.ok === true && iqReport.slots[0].assignment !== null) {
     (await Promise.all(accepted.ok ? accepted.lessonIds.map((id) => api.lessons.get(id)) : []))
       .every((lesson) => lesson !== null && new Date(lesson.startsAt).getDay() === 6));
   // 清理
-  for (const id of accepted.ok ? accepted.lessonIds : []) await api.lessons.remove(id);
+  for (const id of accepted.ok ? accepted.lessonIds : []) await dropFixture("lessons", id);
 }
 
 const abandoned = await api.inquiries.abandon(createdInquiry.id, "自检放弃");
 eq("放弃后状态为已放弃", abandoned?.status, "已放弃");
 ok("放弃原因写进备注", (abandoned?.note ?? "").includes("自检放弃"));
-await api.inquiries.remove(createdInquiry.id);
+await dropFixture("inquiries", createdInquiry.id);
 
 /*
  * 端到端主线：新学生的时段被已有课挡住 → 把已有课挪走 → 再判定通过。
@@ -4151,8 +4211,8 @@ ok("挪课留下了操作日志（不静默改动别人的课）",
 
 // 清理：把课挪回原时间、删掉自检课与咨询
 await api.lessons.update(blockingLesson.id, { startsAt: blockingStart.toISOString() });
-await api.lessons.remove(blockingLesson.id);
-await api.inquiries.remove(e2eInquiry.id);
+await dropFixture("lessons", blockingLesson.id);
+await dropFixture("inquiries", e2eInquiry.id);
 
 // 挪课建议：给已有课算出可用的新时间
 const moveTarget = (await api.lessons.list()).find((lesson) => lesson.status === "已排");
@@ -4548,7 +4608,7 @@ const pbTeacher = await api.teachers.create({
   name: "自检老师", role: "", subjects: ["初中数学", "围棋"], phone: "", active: true,
 });
 eq("教师可带科目可以写后台新增的课程名", pbTeacher.subjects, ["初中数学", "围棋"]);
-await api.teachers.remove(pbTeacher.id);
+await dropFixture("teachers", pbTeacher.id);
 
 // 老库（v12 的教师没有资料字段）升级后要补空值与默认值，且不猜内容
 const pbV12 = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown>;
@@ -4663,7 +4723,7 @@ eq("课程库里设为暂未开放后报价配置同步停用",
   false);
 
 // 5) 删除后置为暂未开放（不静默消失，机构自己决定去留）
-await api.courses.remove(pbGo.id);
+await dropFixture("courses", pbGo.id);
 const pbAfterRemove = (await api.pricing.get()).stages.flatMap((stage) => stage.courses)
   .find((course) => course.courseId === pbGo.id);
 eq("删除课程后报价配置里的这一项仍在（置为暂未开放）", pbAfterRemove?.available, false);
@@ -6791,5 +6851,223 @@ console.log("\n=== 16. 节假日表：两个来源逐日比对一致才写入 ==
   }
 }
 
+console.log("\n=== 17. P0：数据与钱的五道护栏 ===");
+
+/*
+ * 这一节对应 2026-09 那次四路对抗性审计抓出来的**会伤到数据或钱**的问题：
+ *
+ *   ① 删除档案是硬删、护栏却写在没人走的老 REST 上 → 孤儿收款/流水/考勤（现在：有账就拒绝）
+ *   ② 收款既没有审计日志，又有通用写方法能绕开「实收 = 收款 − 退款」那条不变式
+ *   ③ 退费金额由**前端**算、服务端照收（实测能退 999999）
+ *   ④ 迁移卡住时 `load()` 把整库当成"首次访问"→ 清空并落盘
+ *   ⑤ 超额退款用 `Math.max(0, …)` 钳位，让"实收"与账本永久分叉
+ *
+ * 每一条都有"会不会自己变成坏样子"的反向验证（在提交说明里逐条记着）。
+ */
+{
+  /** 造一份"什么都沾过"的夹具：报课 + 收款 + 上课 + 考勤 + 测评 + 作业 + 排课。 */
+  const store = createMemoryStore();
+  __useStoreForTesting(store);
+  const KEY = "nexgenedu.admin.db.v1";
+  /*
+   * 这一条只在**内存后端**下有意义：HTTP 后端的数据在服务端进程里，
+   * 本地那个 store 根本不是数据源（`__useStoreForTesting` 对它不生效）。
+   * 这正是 `npm run check:both` 要分辨的事 —— 请见下面"迁移与坏库"那一段的模式判定。
+   */
+  if (!isRemoteMode()) {
+    ok("（装置自证）存储键就是 api 真正用的那一个",
+      (await api.students.list()) !== null && store.read(KEY) !== null, KEY);
+  }
+
+  const student = await api.students.create({
+    name: "护栏自检学生", grade: "初三", guardian: "138-0000-0000", phone: "", note: "", tags: [],
+    profile: {}, siteVisible: false, origin: "后台",
+  } as never);
+  await api.students.enroll(student.id, {
+    subject: "数学", form: "", teacherId: "", lessons: 10, startedAt: "2026-09-01",
+    note: "", unitPrice: 200, agreedAmount: 2000, paidNow: 1000, method: "微信",
+  } as never);
+  const enrollment = (await api.students.get(student.id))!.enrollments[0]!;
+  const teacher = await api.teachers.create({
+    name: "护栏自检教师", subjects: ["数学"], role: "", phone: "", active: true, years: "",
+    summary: "", bio: "", recommendation: "", order: 900, siteVisible: false, origin: "后台", kind: "教师",
+  } as never);
+  const room = await api.classrooms.create({
+    name: "护栏自检教室", capacity: 6, note: "", active: true, availability: [],
+  } as never);
+  const lesson = await api.lessons.create({
+    subject: "数学", form: "", teacherId: teacher.id, classroomId: room.id, studentIds: [student.id],
+    startsAt: new Date(Date.now() - 3_600_000).toISOString(), durationMinutes: 60, status: "已排", note: "",
+  } as never);
+  await api.lessons.markCompleted(lesson.id);
+  await api.lessonRecords.save({
+    lessonId: lesson.id, studentId: student.id, attendance: "到课", focus: 4, interaction: 4, note: "",
+  } as never);
+  await api.assessments.add({ studentId: student.id, subject: "数学", date: "2026-09-20", score: 90, total: 100, note: "" } as never);
+  await api.homework.create({ studentId: student.id, subject: "数学", date: "2026-09-20", title: "练习", status: "未完成", note: "" } as never);
+
+  /** 跑一个"应当被拒绝"的删除，把理由取回来（没抛错就返回空串，断言会因此报红）。 */
+  const refusalOf = async (run: () => Promise<unknown>): Promise<string> => {
+    try {
+      await run();
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+
+  // ── ① 删除护栏 ──────────────────────────────────────────────────────────
+  const studentRefusal = await refusalOf(() => api.students.remove(student.id));
+  ok("有账的学生：拒绝删除", studentRefusal !== "", studentRefusal.slice(0, 80));
+  eq("理由里点了名（收款 / 课时流水 / 课堂记录 / 测评 / 作业 至少四样）",
+    ["收款记录", "课时流水", "课堂记录", "阶段测评", "作业记录"].filter((key) => studentRefusal.includes(key)).length >= 4,
+    true);
+  ok("理由里写了「该怎么办」（结课 / 暂停，而不是只说不能删）",
+    studentRefusal.includes("结课") || studentRefusal.includes("暂停"), studentRefusal);
+  eq("被拒之后学生**还在**（没有半删状态）",
+    (await api.students.list()).some((item) => item.id === student.id), true);
+
+  const teacherRefusal = await refusalOf(() => api.teachers.remove(teacher.id));
+  ok("有排课的教师：拒绝删除，并建议改用「停用」",
+    teacherRefusal.includes("排课") && teacherRefusal.includes("停用"), teacherRefusal.slice(0, 80));
+  const roomRefusal = await refusalOf(() => api.classrooms.remove(room.id));
+  ok("有排课的教室：拒绝删除", roomRefusal.includes("排课"), roomRefusal.slice(0, 80));
+  const lessonRefusal = await refusalOf(() => api.lessons.remove(lesson.id));
+  ok("已扣课时的排课：拒绝删除，并提示先撤销「已上」",
+    lessonRefusal.includes("课时") && lessonRefusal.includes("撤销"), lessonRefusal.slice(0, 90));
+
+  const course = await api.courses.create({
+    name: "护栏自检科目", category: "学科辅导", forms: [], origin: "后台",
+    status: "开放", note: "", createdAt: new Date().toISOString(),
+  } as never);
+  const mathCourse = (await api.courses.list()).find((item) => item.name.trim() === "数学");
+  if (mathCourse !== undefined) {
+    const courseRefusal = await refusalOf(() => api.courses.remove(mathCourse.id));
+    ok("被报课/排课引用的课程：拒绝删除，并建议改成「暂未开放」",
+      courseRefusal.includes("暂未开放"), courseRefusal.slice(0, 90));
+  }
+  eq("没有被引用的课程照旧能删（护栏不误伤）", await api.courses.remove(course.id), true);
+
+  // 干净的东西仍然删得掉（否则"有账就拒绝"会变成"什么都删不掉"）
+  const cleanStudent = await api.students.create({
+    name: "干净学生", grade: "", guardian: "", phone: "", note: "", tags: [],
+    profile: {}, siteVisible: false, origin: "后台",
+  } as never);
+  const cleanLesson = await api.lessons.create({
+    subject: "数学", form: "", teacherId: "", classroomId: "", studentIds: [],
+    startsAt: new Date(Date.now() + 86_400_000).toISOString(), durationMinutes: 60, status: "已排", note: "",
+  } as never);
+  eq("只建档、没有任何记录的学生：仍然可以删", await api.students.remove(cleanStudent.id), true);
+  eq("没上过、没记录的排课：仍然可以删", await api.lessons.remove(cleanLesson.id), true);
+
+  // ── ② 收款的绕道已经关掉、并且留痕 ────────────────────────────────────
+  const paymentBypass = ["create", "update", "remove"].filter(
+    (name) => typeof (api.payments as unknown as Record<string, unknown>)[name] === "function",
+  );
+  eq("收款不再有通用写方法（create / update / remove 都已删掉）", paymentBypass, []);
+
+  const logsBeforePay = (await api.logs.list()).length;
+  await api.payments.record({
+    studentId: student.id, enrollmentId: enrollment.id, amount: 300, kind: "收款", method: "现金", note: "护栏自检补款",
+  } as never);
+  const payLogs = await api.logs.list();
+  ok("收款写了操作日志（钱必须留痕）",
+    payLogs.length > logsBeforePay && payLogs.some((item) => item.entity === "收款" && item.action === "收款"),
+    `${logsBeforePay} → ${payLogs.length}`);
+  ok("日志摘要里带金额（只说「记了一笔收款」等于没说）",
+    payLogs.some((item) => item.entity === "收款" && item.summary.includes("¥300")),
+    payLogs[0]?.summary ?? "");
+
+  // ── ③ 退费金额由服务端重算 ─────────────────────────────────────────────
+  const wrongAmount = await refusalOf(() =>
+    api.students.refundEnrollment(student.id, enrollment.id, "自检", {
+      policyId: "prorata", method: "微信", amount: 999_999,
+    } as never),
+  );
+  ok("前端报的退款金额与服务端重算不一致 → 拒绝并要求刷新",
+    wrongAmount.includes("对不上") && wrongAmount.includes("刷新"), wrongAmount.slice(0, 120));
+  eq("被拒之后这条报课还是「在读」（没有半退状态）",
+    (await api.students.get(student.id))!.enrollments.find((item) => item.id === enrollment.id)?.status, "在读");
+
+  const beforeRefund = (await api.students.get(student.id))!.enrollments.find((item) => item.id === enrollment.id)!;
+  const computed = calculateRefund(beforeRefund, "prorata");
+  ok("服务端重算按**实收**：实收 1300 ÷ 10 节 × 剩 9 节（已上 1 节）",
+    computed.refund === round2((beforeRefund.paidAmount / beforeRefund.totalLessons) * 9) && computed.formula.includes("实收"),
+    `${computed.refund} / ${computed.formula}`);
+  const refundedStudent = await api.students.refundEnrollment(student.id, enrollment.id, "自检退课", {
+    policyId: "prorata", method: "微信", amount: computed.refund,
+  } as never);
+  const afterRefundEnrollment = refundedStudent!.enrollments.find((item) => item.id === enrollment.id)!;
+  eq("界面传对金额时照常退课", afterRefundEnrollment.status, "已退课");
+  eq("实收被扣回（不会被钳到 0）",
+    afterRefundEnrollment.paidAmount, round2(beforeRefund.paidAmount - computed.refund));
+
+  // ── ④ 迁移卡住不再清库（**只在内存后端下能测**）─────────────────────────
+  /*
+   * 为什么这一段要判模式：迁移与"坏库"这两件事都发生在**存储层**，
+   * 而 HTTP 后端的数据在服务端进程里 —— 本地 `__useStoreForTesting(...)` 对它不生效，
+   * 硬写在这里只会得到"看起来通过了、其实测的是别的东西"（`check:both` 第一次跑
+   * 就在 HTTP 那一遍抓到了这个问题）。因此这一段只在内存后端下跑，
+   * HTTP 那一遍明确打一行说明，而不是假装测过。
+   */
+  if (isRemoteMode()) {
+    console.log("  （HTTP 后端：迁移与坏库这两组跳过 —— 它们测的是存储层，在内存后端那一遍跑）");
+  } else {
+  const migrationStore = createMemoryStore();
+  const seedJson = JSON.parse(store.read(KEY) ?? "{}") as Record<string, unknown>;
+  const seedCounts = {
+    students: (seedJson.students as unknown[]).length,
+    payments: (seedJson.payments as unknown[]).length,
+    lessons: (seedJson.lessons as unknown[]).length,
+  };
+  ok("（前置）夹具库里确实有数据可丢", seedCounts.students > 0 && seedCounts.payments > 0, JSON.stringify(seedCounts));
+  for (const claim of [1, 2]) {
+    const broken = { ...seedJson, version: claim };
+    migrationStore.write(KEY, JSON.stringify(broken));
+    __useStoreForTesting(migrationStore);
+    const listed = await api.students.list();
+    const after = JSON.parse(migrationStore.read(KEY) ?? "{}") as Record<string, unknown>;
+    eq(`版本号写着 v${claim} 但结构已是新版：数据**一条都不能少**`,
+      (after.students as unknown[]).length, seedCounts.students);
+    eq(`并且版本号被推进到当前版本（v${claim} → v${CURRENT_VERSION}）`, after.version, CURRENT_VERSION);
+    eq(`读出来的学生数与库里一致（不是空库）`, listed.length, seedCounts.students);
+  }
+
+  // 坏 JSON / 版本比当前新：必须**抛错且什么都不改**（而不是清库）
+  for (const [label, text] of [
+    ["不是合法 JSON", "{ 这不是 JSON"],
+    ["版本比当前新", JSON.stringify({ ...seedJson, version: CURRENT_VERSION + 1 })],
+  ] as const) {
+    const store2 = createMemoryStore();
+    store2.write(KEY, text);
+    __useStoreForTesting(store2);
+    const problem = await refusalOf(() => api.students.list());
+    ok(`库内容${label} → 抛错并说清「没有改动任何数据」`,
+      problem.includes("没有改动任何数据"), problem.slice(0, 120));
+    eq(`库内容${label} → 存储里那串内容**一个字节都没变**`, store2.read(KEY), text);
+  }
+  }
+
+  /*
+   * 把"数据"这一侧的存储换回夹具库：上面那两组坏库断言会把当前存储留在坏状态上
+   * （`__useStoreForTesting` 是全局的），不换回来后面的断言就全在测那个坏库。
+   * （HTTP 模式下没有那两组，也没有这个问题。）
+   */
+  if (!isRemoteMode()) __useStoreForTesting(store);
+
+  // ── ⑤ 超额退款改拒绝，不再钳位 ─────────────────────────────────────────
+  const overRefund = await refusalOf(() =>
+    api.payments.record({
+      studentId: student.id, enrollmentId: enrollment.id, amount: 99_999, kind: "退款", method: "微信", note: "超退自检",
+    } as never),
+  );
+  ok("退款超过实收 → 拒绝（而不是把实收钳到 0）",
+    overRefund.includes("不能超过实收"), overRefund.slice(0, 120));
+  const afterOverRefund = (await api.students.get(student.id))!.enrollments.find((item) => item.id === enrollment.id)!;
+  eq("被拒之后实收没有变（没有半截写入）", afterOverRefund.paidAmount, afterRefundEnrollment.paidAmount);
+}
+
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
+process.exit(failures === 0 ? 0 : 1);
+
 process.exit(failures === 0 ? 0 : 1);
