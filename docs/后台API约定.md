@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 110 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 109 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -42,7 +42,7 @@ lib/backend/api.ts        服务层实现（当前 110 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 110 个方法）
+## 二、接口分组（当前 109 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -272,6 +272,12 @@ lib/backend/api.ts        服务层实现（当前 110 个方法）；数据一�
 **已经删掉**（机构口径：现在都以后端为主）。内容文件只在**新装系统**时作为**初始数据**
 进库（`initial.ts`），之后课程、教师、课程正文都在后台维护；老的库要用 JSON 导入/恢复那条路
 （「数据与备份」页），不再从 Markdown 反推。
+
+**教师 / 教室同理（v36）：**`imports.fromSite`（教师资料与场地名那一路）**也删掉了** ——
+三个「从网站导入」入口至此全部清完。要注意的后果是：新装系统里**教师与教室是空的**
+（`initial.ts` 的"空库起步"只把课程库与报价配置当初始值，教师 / 教室属于机构自己录的那些），
+因此装好之后要在「教师」「教室」页录一次，或按 `imports.apply` 导一份 CSV。
+`imports.apply` 现在是导入的唯一方法，只有"从 CSV / JSON 文本"一个来源。
 
 **改内容：`site.saveContent(content)`**（整份覆盖）—— 后台课程库页上有两条路用它：
 每门课卡片里的「网站正文（小节）」、以及页面下方的「学科级设置与未挂到卡片的正文」。
@@ -503,7 +509,7 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 
 ### 7. 运维与审计
 
-`exportDataset`、`exportDatabase`、`importDatabase`、`imports.apply`、`imports.fromSite`、`hasBackup`、`backupSlots`、`restoreBackup`、
+`exportDataset`、`exportDatabase`、`importDatabase`、`imports.apply`、`hasBackup`、`backupSlots`、`restoreBackup`、
 `reset`、`setOperator`、`logs.list`、`logs.clear`。
 
 **两种"导入"别混**：
@@ -517,8 +523,10 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 | 后悔药 | 导入前自动备份（`restoreBackup` 可回） | 同样在导入前留一份（同一个键） |
 | 幂等 | 是（同一份文件重复导入结果相同） | 是（重复导入会被判重跳过） |
 
-`imports.apply`（从 CSV/JSON 文本）与 `imports.fromSite`（从网站内容：**教师资料（含 AI 智能体）**、场地名）
-走的是**同一套判定与落库**，只有数据来源不同。冲突处理是这两者共同的能力：
+`imports.apply` 只有"从 CSV / JSON 文本"这一个来源（**"从网站导入"那两条路已删**：
+课程的「从网站同步课程 / 从网站导入内容」v32 删，教师与场地的「从网站导入」v36 删 ——
+机构口径是"现在都以后端为主"）。**"体检"与"写入"两次调用**走的是**同一套判定与落库**，
+只有策略不同。冲突处理是它的能力：
 
 | `onConflict` | 行为 |
 | --- | --- |
@@ -584,7 +592,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 2. 它会进入 `API_CONTRACT` —— 而自检要求"服务层每个方法都必须在契约里"，
    于是契约里出现一个"只有服务端才有意义"的方法，契约就不再是"页面对服务层的形状"了。
 
-**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 110 个方法，
+**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 109 个方法，
 这四条路由**刻意不登记**（它们不是服务层方法）；页面的客户端是 `lib/auth/accounts.ts`，
 与 `lib/auth/session.ts` 调 `/api/login`、`/api/session` 是同一个做法。
 自检里对它们的要求写在 `scripts/check-auth.mts` 的 [10] 节（真实 HTTP、真实写盘），

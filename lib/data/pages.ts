@@ -46,7 +46,7 @@ export function getFaqContent(): FaqContent {
  * 常见问题（**只读模版**，不看后端快照）。
  *
  * 为什么单独留这个出口：`lib/backend/site-content.ts` 属于
- * **「内容文件 → 数据库」**这个方向（空库初始化、老库迁移、从网站导入），
+ * **「内容文件 → 数据库」**这个方向（空库初始化、老库迁移），
  * 它必须读模版 —— 否则就是把库里的问答再导一遍，绕成一个圈。
  */
 export function getFaqContentFromTemplate(): FaqContent {
@@ -94,7 +94,7 @@ export function getCasesContent(): CasesContent {
  * 学生案例（**只读模版**，不看后端快照）。
  *
  * 为什么单独留这个出口：`lib/backend/site-content.ts` 属于
- * **「内容文件 → 数据库」**这个方向（空库初始化、老库迁移、从网站导入），
+ * **「内容文件 → 数据库」**这个方向（空库初始化、老库迁移），
  * 它必须读模版 —— 否则就是把库里的案例再导一遍，绕成一个圈。
  */
 export function getCasesContentFromTemplate(): CasesContent {

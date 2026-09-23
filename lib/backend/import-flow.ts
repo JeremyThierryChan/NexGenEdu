@@ -5,9 +5,12 @@ import type { Conflict } from "./import";
  *
  * ## 为什么要单独一个模块
  *
- * 界面上"先看清会动到哪些记录、再决定"这个流程，被写了两遍（文件导入、从网站导入），
+ * 界面上"先看清会动到哪些记录、再决定"这个流程，当时被写了两遍（文件导入、从网站导入），
  * 而其中一遍**漏了第二步**：体检发现没有冲突时直接返回，于是"点了没反应、数据也没进来"
  * —— 这正是真实反馈里那个 bug。
+ *
+ * （"从网站导入"那一路 v36 已随"以后端为主"整块删掉；`runTwoPhaseImport` 现在只有
+ * 文件导入一个调用方 —— **但这段流程仍然值得单独存在**：它是那个 bug 的唯一防线。）
  *
  * 根因不是"手滑"，而是这段流程只存在于组件里、**无法被自检覆盖**（项目里没有前端测试浏览器）。
  * 抽成这个纯函数之后，`npm run check` 就能钉住它的两条关键性质：
@@ -33,7 +36,7 @@ export type TwoPhaseOutcome<Report extends ImportReportLike> =
  * 跑一次两阶段导入。
  *
  * `ask` 与 `write` 由调用方提供（同一个接口的两次调用，只是策略不同）——
- * 这样文件导入与从网站导入可以共用这段流程，不会各写一遍、各漏一步。
+ * 这样"体检"与"写入"不会各写一遍、各漏一步。
  */
 export async function runTwoPhaseImport<Report extends ImportReportLike>(
   io: { ask: () => Promise<Report>; write: () => Promise<Report> },

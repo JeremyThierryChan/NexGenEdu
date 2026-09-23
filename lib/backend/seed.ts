@@ -46,7 +46,7 @@ export function createSeedDatabase(now: Date = new Date()): Database {
       role: teacher.role,
       phone: "",
       active: true,
-      // 资料字段（v13）：夹具一样从网站教师页取，因此与"从网站导入"的结果一致
+      // 资料字段（v13）：夹具一样从网站教师页取，因此与网站上写的一致
       years: teacher.years ?? "",
       summary: teacher.summary ?? "",
       bio: teacher.bio ?? "",

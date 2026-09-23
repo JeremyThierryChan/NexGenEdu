@@ -159,7 +159,7 @@ function emptyFaqPage(): SiteFaqPage {
  *
  * id 由服务生成（`feat_…`）：它只用来"认人"（日志、上下移、删除），
  * URL 用的是 `slug`（路径分段）—— 两者分开，改名才不会让网址失效。
- * 反复导入不会重复（导入侧按 `slug` 路径认已有的行，见 `site-import.ts`）。
+ * 建库与迁移反复跑都不会重复（按 `slug` 路径认已有的行，认得出就复用）。
  */
 function featuredFromContent(): SiteFeaturedPage {
   const node = (course: {

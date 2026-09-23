@@ -117,7 +117,7 @@ export function getAllFeaturedCourses(): CourseDetail[] {
  * 特色课程（**只读模版**，不看后端快照）。
  *
  * 为什么单独留这个出口：`lib/backend/site-content.ts` 属于
- * **「内容文件 → 数据库」**这个方向（空库初始化、老库迁移、从网站导入），
+ * **「内容文件 → 数据库」**这个方向（空库初始化、老库迁移），
  * 它必须读模版 —— 否则就是把库里的课程树再导一遍，绕成一个圈。
  */
 export function getFeaturedContentFromTemplate(): FeaturedContent {

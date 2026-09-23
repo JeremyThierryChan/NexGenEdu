@@ -378,7 +378,7 @@ function TeacherForm({
    */
   const { options: subjectOptions } = useSubjectOptions();
   const [phone, setPhone] = useState(teacher?.phone ?? "");
-  // 资料字段（v13）：从网站导入时会带着内容进来，也可以在这里手填/修改
+  // 资料字段（v13）：网站教师页上就写着这几项，在这里照填（或走「批量导入」）
   const [years, setYears] = useState(teacher?.years ?? "");
   const [summary, setSummary] = useState(teacher?.summary ?? "");
   const [bio, setBio] = useState(teacher?.bio ?? "");

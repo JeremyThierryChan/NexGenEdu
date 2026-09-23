@@ -949,22 +949,29 @@ await check("数据与备份", "批量导入：覆盖 / 跳过 / 保留两份", 
   return { overwritten: overwritten.overwritten, role, skipped: skipped.skipped.length, duplicated: duplicated.duplicated, hasCopy };
 }, (v: { overwritten: number; role?: string; skipped: number; duplicated: number; hasCopy: boolean }) =>
   v.overwritten === 1 && v.role === "新职务" && v.skipped === 1 && v.duplicated === 1 && v.hasCopy);
-await check("数据与备份", "从网站导入教师资料（含 AI）", async () => {
-  // 网站上有真人教师与 AI 智能体，且都带资料（教龄 / 简介 / 详细介绍）
-  const imported = await api.imports.fromSite({ entity: "teachers", onConflict: "skip" });
+/*
+ * 「从网站导入教师资料」已经删掉（机构口径：现在都以后端为主，与 v32 删掉课程那两个同理）。
+ * 它当年覆盖的**三条口径仍然要验**：AI 智能体也在档案里、带着资料、且**不进排课下拉**。
+ *
+ * 现在改走**那条保留下来的正路**（批量导入 CSV）来造这条记录 —— 这样这一项验的是
+ * "AI 智能体在系统里的口径"，而不是"某个已经删掉的按钮还能不能点"。
+ */
+await check("数据与备份", "AI 智能体：批量导入后在档案里、带资料、不进排课下拉", async () => {
+  const csv =
+    "姓名,职务,可带科目,类型,一句话简介,详细介绍\r\n" +
+    "验收AI助手,试课诊断,全科诊断,AI,验收用的一句话,验收用的一段详细介绍\r\n";
+  const outcome = await api.imports.apply({ entity: "teachers", text: csv });
   const teachers = await api.teachers.list();
   const schedulable = await api.teachers.listActive();
-  const chen = teachers.find((teacher) => teacher.name === "陈老师");
   const ai = teachers.filter((teacher) => teacher.kind === "AI");
   return {
-    added: imported.added,
-    chenHasProfile: chen !== undefined && chen.bio !== "" && chen.years !== "",
+    added: outcome.added,
     aiCount: ai.length,
-    aiHasProfile: ai.every((teacher) => teacher.bio !== ""),
+    aiHasProfile: ai.every((teacher) => teacher.bio !== "" && teacher.summary !== ""),
     aiSchedulable: schedulable.some((teacher) => teacher.kind === "AI"),
   };
-}, (v: { added: number; chenHasProfile: boolean; aiCount: number; aiHasProfile: boolean; aiSchedulable: boolean }) =>
-  v.added >= 1 && v.chenHasProfile && v.aiCount >= 1 && v.aiHasProfile && v.aiSchedulable === false);
+}, (v: { added: number; aiCount: number; aiHasProfile: boolean; aiSchedulable: boolean }) =>
+  v.added === 1 && v.aiCount >= 1 && v.aiHasProfile && v.aiSchedulable === false);
 await check("数据与备份", "批量导入：缺少必填列时拒绝且不写入", async () => {
   const before = (await api.classrooms.list()).length;
   const outcome = await api.imports.apply({ entity: "classrooms", text: "房间名,容量\r\n漏了表头,6\r\n" });

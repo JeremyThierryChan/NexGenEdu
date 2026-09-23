@@ -1,10 +1,11 @@
 /**
- * **「内容文件 → 库」那一个方向的页面文案导入**（空库初始化、老库迁移、从网站导入）。
+ * **「内容文件 → 库」那一个方向的页面文案导入**（空库初始化、老库迁移）。
  *
  * 这个模块可以读 `data/site/*.md`（它就是干这个的）；**网站那一侧不许 import 它** ——
  * 那里要的是 `lib/backend/site-copy-model.ts`（纯函数，能把库里那一份适配成同一个读取接口）。
- * 这条分工与 `site-content.ts` / `site-import.ts` 同一条纪律：两条路各读各的来源，
+ * 这条分工与 `site-content.ts` 同一条纪律：两条路各读各的来源，
  * 但**共用同一个映射函数**，因此"导进去一套、页面读另一套"不可能发生。
+ * （v32 / v36 把运行期的三个「从网站导入」入口删掉之后，这里只剩下**建库**与**迁移**两条路。）
  */
 import { getPageBlock } from "@/lib/data/content";
 import { parseDocument } from "@/lib/data/content";

@@ -143,7 +143,6 @@ import {
   backendSnapshot,
   siteContentSource,
 } from "@/lib/site/backend-source";
-import { siteTeachers as siteTeachersFromContent } from "@/lib/backend/site-import";
 import { coursesFromSite } from "@/lib/backend/courses";
 import { SITE_COPY_KEYS, validateCopy } from "@/lib/backend/site-copy-model";
 import { copyBlocksFromContent } from "@/lib/backend/site-copy";
@@ -305,6 +304,7 @@ import {
   profileText,
 } from "@/lib/backend/student-profile";
 import { createSeedDatabase } from "@/lib/backend/seed";
+import { createEmptyDatabase } from "@/lib/backend/initial";
 import { materializeSiteCourses } from "@/lib/backend/courses";
 import {
   ENTITY_SPECS,
@@ -313,7 +313,6 @@ import {
   detectFormat,
   jsonTemplate,
   parseImport,
-  siteImportRecords,
 } from "@/lib/backend/import";
 import { runTwoPhaseImport } from "@/lib/backend/import-flow";
 import { describeSeriesDate, generateSeriesDates } from "@/lib/backend/recurrence";
@@ -5120,66 +5119,82 @@ const fakeReport = (over: Record<string, unknown> = {}) => ({
     ["done", false, false]);
 }
 
-/* ── 从网站（前端内容）导入 ── */
-const siteTeachersAsk = await api.imports.fromSite({ entity: "teachers", onConflict: "ask" });
-eq("从网站导入教师：因为库里已有同名，先要求决定", siteTeachersAsk.needsDecision, true);
-ok("冲突里能看到网站上的老师与库里那条的对应关系",
-  siteTeachersAsk.conflicts.some((item) => String(item.incoming.name) === "陈老师" && item.existing.id !== ""),
-  JSON.stringify(siteTeachersAsk.conflicts.map((item) => item.incoming.name)));
-const siteTeachers = await api.imports.fromSite({ entity: "teachers", onConflict: "skip" });
-eq("从网站导入教师（跳过同名）", [siteTeachers.ok, siteTeachers.needsDecision], [true, false]);
 /*
- * AI 智能体**也导进来**（机构要能在后台看到有哪些工具在服务学生），
- * 但类型标成 AI，并且**不进排课下拉**（那是"人"的地方）。
+ * 「从网站导入」（教师 / 教室）已经删掉（机构口径：现在都以后端为主，与 v32 删掉课程那两个同理）。
+ * 这里守住**它当年覆盖过、现在仍然成立**的三条口径 —— 数据改用夹具里的教师来验：
+ * AI 智能体也在档案里、但类型标成 AI、且**不进排课下拉**（那是给"人"的地方）。
+ * 冲突策略（ask / skip / 覆盖）的覆盖在上一节的 `imports.apply` 用例里，不受这次删除影响。
  */
-const importedTeachers = await api.teachers.list();
-ok("网站上的真实教师已经进库", importedTeachers.some((teacher) => teacher.name === "陈老师"));
-const importedAi = importedTeachers.filter((teacher) => teacher.kind === "AI");
-ok("AI 智能体也导进来，且类型标成 AI",
-  importedAi.length >= 1 && importedAi.every((teacher) => teacher.name.includes("·")),
-  importedAi.map((teacher) => teacher.name).join("、"));
-ok("AI 不出现在排课下拉里（排课下拉是给「人」用的）",
-  (await api.teachers.listActive()).every((teacher) => teacher.kind !== "AI"));
-ok("真人教师在排课下拉里仍在",
-  (await api.teachers.listActive()).some((teacher) => teacher.name === "陈老师"));
-
-// 教师资料（教龄 / 简介 / 详细介绍）也要跟着进来 —— 这正是"导入资料"的本意
-const chen = importedTeachers.find((teacher) => teacher.name === "陈老师")!;
-ok("教师的教龄导进来了", chen.years !== "", `years="${chen.years}"`);
-ok("教师的一句话简介导进来了", chen.summary !== "", `summary="${chen.summary.slice(0, 30)}…"`);
-ok("教师的详细介绍导进来了（多段文本）", chen.bio.length > 50, `bio 长度 ${chen.bio.length}`);
-eq("从网站导入的教师标记来源为「网站」", chen.origin, "网站");
-ok("AI 的介绍也导进来了",
-  importedAi.every((teacher) => teacher.bio !== ""),
-  importedAi.map((teacher) => `bio=${teacher.bio.length}`).join("、"));
+{
+  /*
+   * 示例库（`seedDb`）刻意只放真人教师，因此这里**自己造一条 AI 记录**来验口径 ——
+   * 比依赖夹具里恰好有 AI 更结实（夹具哪天改了，这条不会静默失效）。
+   */
+  const ai = await api.teachers.create({
+    name: "自检·AI 助手", role: "试课诊断", subjects: ["全科诊断"], phone: "", active: true,
+    years: "", summary: "自检用", bio: "自检用的一段介绍。", recommendation: "", order: 999,
+    siteVisible: false, origin: "后台", kind: "AI",
+  } as never);
+  ok("AI 智能体能进教师档案（机构要能看到有哪些工具在服务学生）",
+    (await api.teachers.list()).some((teacher) => teacher.id === ai.id && teacher.kind === "AI"));
+  ok("AI 不出现在排课下拉里（排课下拉是给「人」用的）",
+    (await api.teachers.listActive()).every((teacher) => teacher.kind !== "AI"));
+  ok("真人教师在排课下拉里仍在",
+    (await api.teachers.listActive()).some((teacher) => teacher.kind === "教师"));
+  await api.teachers.remove(ai.id);
+}
 
 /*
- * 场地名的来源是**网站内容**（首页「教室照片格位」），而内容是可以被编辑的
- * （当前那三条占位已刻意隐藏，见 data/site/content.md）。所以这里的断言**跟着内容走**，
- * 不写死"3 个" —— 写死的话，运营一改内容自检就红，而那是正常编辑。
+ * 「从网站导入」（教师 / 教室）删干净了没有（v36）。
+ *
+ * 机构在原话是「**要一起删掉**」—— 前提是我先把课程那两个入口删掉之后回头问了这一句：
+ * 「教师 / 教室面板里还有一个「从网站导入」，一起删吗？」。删的理由与 v32 同一条：
+ * **现在都以后端为主**，库已经在了就不该再从 Markdown 反推。
+ *
+ * 这里要钉住的不是"代码里少了几个字符串"，而是三件**会静默退化**的事：
+ *   1. **删干净**：契约、服务层、页面三处都不再有它 —— 只删一处会留下"点了报 404"的按钮；
+ *   2. **别把孩子跟洗澡水一起倒掉**：批量导入（机构自己的 CSV / JSON）与那套
+ *      "体检 → 写入"的流程必须还在（`runTwoPhaseImport` 的三条断言在上一节）；
+ *   3. **口径后果要写死**：新装系统里教师与教室是**空的**（`initial.ts` 的"空库起步"
+ *      一张表里，教师 / 教室列在"机构自己要录"那一栏）。以前那个按钮是"从网站拉一份"
+ *      的唯一入口，删掉它就等于"装好之后要录一次"。这条是我特意问过机构的，
+ *      所以**用断言写死**：哪天有人想改成自动灌一份（像课程那样），必须先改这一行，
+ *      而不是让新装系统悄悄多出 8 个人。
  */
-const siteRooms = siteImportRecords("classrooms");
-eq("从网站导入场地的条数跟着内容走（当前站点格位为空 → 0 条）",
-  siteRooms.records.length, homeContent.classrooms.length);
-ok("导出的每个场地名都非空（照片文件名不属于名字）",
-  siteRooms.records.every((record) => String(record.name ?? "").trim() !== ""));
-// 有格位时才有意义：名字里带"自习"的按自习室，其余按上课用教室
-ok("场地用途按名字推断（自习 → 自习室）",
-  siteRooms.records.every((record) =>
-    String(record.name).includes("自习")
-      ? record.kind === "自习室"
-      : record.kind === "上课用教室"),
-  JSON.stringify(siteRooms.records.map((record) => [record.name, record.kind])));
+{
+  const readFile = (file: string) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  eq("契约里没有 imports.fromSite（删方法要同步更新 contract.ts）",
+    realMethods.includes("imports.fromSite"), false);
+  eq("服务层的 imports 上只剩 apply", Object.keys(api.imports).filter((key) => key !== "apply"), []);
 
-// 站点格位为空时：体检不写入、也不报冲突（而不是"悄悄导了 0 条又说成功"）
-const emptySlotsAsk = await api.imports.fromSite({ entity: "classrooms", onConflict: "ask" });
-eq("站点没有格位时：不写入、无需决定",
-  [emptySlotsAsk.needsDecision, emptySlotsAsk.added, (await api.classrooms.list()).length],
-  [false, 0, (await api.classrooms.list()).length]);
+  const importPages = [
+    "components/admin/BulkImport.tsx",
+    "app/admin/(dashboard)/teachers/page.tsx",
+    "app/admin/(dashboard)/classrooms/page.tsx",
+    "app/admin/(dashboard)/students/page.tsx",
+    "app/admin/(dashboard)/data/page.tsx",
+  ];
+  eq("这几个页面与导入面板里都不再出现「从网站导入」",
+    importPages.filter((file) => readFile(file).includes("从网站导入")), []);
+  eq("导入面板里也不再接 siteSource / 调 fromSite",
+    importPages.filter((file) => /siteSource|fromSite/.test(readFile(file))), []);
+  ok("只服务它的那个模块整块删掉了（留着就是死代码 + 一句已经不对的文件头注释）",
+    !existsSync(new URL("../lib/backend/site-import.ts", import.meta.url)));
 
-/*
- * "从网站导入**真的能写进库**"由上面教师那一段证明（网站上有 2 位真实教师、
- * 库里原本没有，导入后确实进库了）—— 那是同一条代码路径（同一个 runImport）。
+  const bulk = readFile("components/admin/BulkImport.tsx");
+  ok("批量导入（机构自己的 CSV / JSON）还在，而不是被顺手一起删了",
+    bulk.includes("批量导入") && bulk.includes("imports.apply"));
+  ok("两阶段流程还在，批量导入走的就是它（上一节那三条断言守的是它）",
+    bulk.includes("runTwoPhaseImport"));
+  ok("代码里不再指向不存在的 npm 脚本 `server:import-site`（迁移注释里曾写着它）",
+    !readFile("lib/backend/api.ts").includes("server:import-site"));
+
+  const fresh = createEmptyDatabase();
+  eq("新装系统里教师与教室是空的：装好之后要录一次（想改成自动灌一份，先改这一行）",
+    [fresh.teachers.length, fresh.classrooms.length], [0, 0]);
+  ok("同一张「空库」表里课程是例外：建库就有课（否则排课下拉什么都选不到）",
+    fresh.courses.length > 0);
+}
 
 // 收尾：把库恢复成夹具原样，避免影响后面的断言（后面几节都在同一份内存存储上）
 await api.importDatabase(serializeDatabase(seedDb));
@@ -5376,7 +5391,7 @@ try {
     ...seedDb,
     // 教师要用**内容文件里的全部教师**（含 AI）：模版路径会列出它们，
     // 而示例库刻意只放真人教师（AI 不参与排课），两边对不上就比不平
-    teachers: siteTeachersFromContent().map((teacher, index) => ({
+    teachers: getTeachersPageFromTemplate().teachers.map((teacher, index) => ({
       id: `t_fixture_${index}`,
       name: teacher.name,
       subjects: teacher.subjects,
@@ -5390,7 +5405,7 @@ try {
       order: teacher.order,
       siteVisible: true,
       origin: "网站" as const,
-      kind: teacher.kind,
+      kind: teacher.kind === "ai" ? ("AI" as const) : ("教师" as const),
       // v17 起每条记录带乐观锁版本号：夹具也要与真实记录同形
       version: 1,
     })),

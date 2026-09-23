@@ -38,7 +38,7 @@ import {
  */
 
 /**
- * **权限外壳**：批量导入只有技术管理员能做（`imports.apply` / `imports.fromSite` 属于
+ * **权限外壳**：批量导入只有技术管理员能做（`imports.apply` 属于
  * "运维与审计"分组）。这个面板挂在五个页面上，因此把判定放在**这里一次**，
  * 而不是让每个页面各写一遍（审计实测：财务与招生点「批量导入」必然 403 并逐行报错）。
  *
@@ -88,10 +88,6 @@ function BulkImportPanel({
    * 体检（onConflict: "ask"）阶段**什么都没写**，所以人可以放心比较、改主意。
    */
   const [conflicts, setConflicts] = useState<Conflict[]>([]);
-  /** 待处理的冲突来自哪条路（文件 / 网站）—— 点「按以上选择导入」时要用对接口。 */
-  const [pendingSource, setPendingSource] = useState<"file" | "site">("file");
-  /** 站点导入的即时反馈：就显示在按钮旁边，不用滚到面板下面看。 */
-  const [siteNotice, setSiteNotice] = useState("");
   const [globalChoice, setGlobalChoice] = useState<ConflictStrategy>("skip");
   const [choices, setChoices] = useState<Record<string, ConflictStrategy>>({});
   const [result, setResult] = useState<{
@@ -151,7 +147,6 @@ function BulkImportPanel({
     setBusy(true);
     setResult(null);
     setConflicts([]);
-    setSiteNotice("");
     const call = (onConflict: "ask" | "skip") =>
       api.imports.apply({
         entity,
@@ -163,7 +158,6 @@ function BulkImportPanel({
     try {
       const outcome = await runTwoPhaseImport({ ask: () => call("ask"), write: () => call("skip") });
       if (outcome.status === "needs-decision") {
-        setPendingSource("file");
         setConflicts(outcome.conflicts);
         setChoices({});
         setGlobalChoice("skip");
@@ -190,23 +184,16 @@ function BulkImportPanel({
       for (const conflict of conflicts) {
         perRow[String(conflict.line)] = choices[String(conflict.line)] ?? globalChoice;
       }
-      const outcome = pendingSource === "site" && fixedEntity !== undefined
-        ? await api.imports.fromSite({
-            entity: fixedEntity as "teachers" | "classrooms",
-            onConflict: globalChoice,
-            perRow,
-          })
-        : await api.imports.apply({
-            entity,
-            text,
-            format: format === "auto" ? undefined : format,
-            fileName,
-            onConflict: globalChoice,
-            perRow,
-          });
+      const outcome = await api.imports.apply({
+        entity,
+        text,
+        format: format === "auto" ? undefined : format,
+        fileName,
+        onConflict: globalChoice,
+        perRow,
+      });
       setConflicts([]);
       showReport(outcome);
-      setSiteNotice(pendingSource === "site" && outcome.ok ? outcome.summary : "");
       if (outcome.ok) onImported?.();
     } catch (cause) {
       setResult({
@@ -217,51 +204,7 @@ function BulkImportPanel({
     } finally {
       setBusy(false);
     }
-  }, [conflicts, choices, globalChoice, entity, text, format, fileName, onImported, showReport, pendingSource, fixedEntity]);
-
-  /**
-   * 从**网站内容**导入（教师资料 / 场地名）。
-   *
-   * 走与文件导入**同一套**两阶段流程：先体检 → 有冲突就让人选 → 没冲突就**接着写入**。
-   *
-   * 踩过的坑：这条路径最初只做了体检那一步，于是"点了没反应、库里也没数据"
-   * （体检在没有冲突时会如实报告"都能导入"，但它并没有导入）。
-   * 现在这段流程由 `runTwoPhaseImport` 统一负责，两条路不可能再各漏一步。
-   */
-  const onFromSite = useCallback(async () => {
-    if (fixedEntity !== "teachers" && fixedEntity !== "classrooms") return;
-    setBusy(true);
-    setResult(null);
-    setConflicts([]);
-    setSiteNotice("正在检查网站内容…");
-    const call = (onConflict: "ask" | "skip") =>
-      api.imports.fromSite({ entity: fixedEntity, onConflict });
-    try {
-      const outcome = await runTwoPhaseImport({ ask: () => call("ask"), write: () => call("skip") });
-      if (outcome.status === "needs-decision") {
-        setPendingSource("site");
-        setConflicts(outcome.conflicts);
-        setChoices({});
-        setGlobalChoice("skip");
-        setSiteNotice(`有 ${outcome.conflicts.length} 条同名，请在下面选择怎么处理`);
-        return;
-      }
-      showReport(outcome.report);
-      // 即时反馈**就放在按钮旁边**：面板很长，把结果放到底部等于"没反应"
-      setSiteNotice(
-        outcome.report.ok
-          ? outcome.report.summary
-          : (outcome.report.error ?? "导入失败，请把下面的提示发给我们。"),
-      );
-      if (outcome.report.ok) onImported?.();
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setSiteNotice(`导入失败：${message}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [fixedEntity, onImported, showReport]);
-
+  }, [conflicts, choices, globalChoice, entity, text, format, fileName, onImported, showReport]);
 
   const reset = useCallback(() => {
     setText("");
@@ -306,24 +249,7 @@ function BulkImportPanel({
           {spec.warning}
         </p>
 
-        {/* ② 从网站（前端内容）导入：网站上有现成的教师名单与场地名 */}
-        {(entity === "teachers" || entity === "classrooms") && (
-          <div className="flex flex-wrap items-center gap-2 rounded-md border border-ink-200 bg-ink-50 px-3 py-2">
-            <span className="text-xs leading-relaxed text-ink-600">
-              网站内容里已有这份名单（
-              {entity === "teachers" ? "教师页的真实教师，AI 智能体不算" : "首页「教室照片格位」里的场地名"}
-              ），可以一键拉进来：
-            </span>
-            <Button size="sm" variant="outline" onClick={() => void onFromSite()} disabled={busy}>
-              {busy ? "处理中…" : "从网站导入"}
-            </Button>
-            {siteNotice !== "" && (
-              <span className="text-xs leading-relaxed text-ink-700">{siteNotice}</span>
-            )}
-          </div>
-        )}
-
-        {/* ③ 模板 + 文件 */}
+        {/* ② 模板 + 文件 */}
         <div className="flex flex-wrap items-center gap-2">
           <Button
             size="sm"

@@ -21,14 +21,12 @@ import {
   detectConflicts,
   ENTITY_SPECS,
   parseImport,
-  siteImportRecords,
   summarizeImport,
   type Conflict,
   type ConflictStrategy,
   type ImportEntity,
   type ImportFormat,
   type ParsedImport,
-  type SiteImportSource,
 } from "./import";
 import { isWithinAvailability } from "./availability";
 import { CURRENT_VERSION } from "./version";
@@ -695,8 +693,9 @@ function migrate(db: Database): Database | null {
      * 不能默认成"学科"，否则一次升级就会让网站多出一批没有正文的空卡片。
      *
      * 网站课程正文取**空结构**而不是拿网站文件来填：迁移是照着数据搬，不是
-     * 借机去读外部的 Markdown —— 真要灌内容，跑 `npm run server:import-site`，
-     * 或者在后台点「从网站导入」。这也让网站那侧的判定（有内容才用后端）能生效。
+     * 借机去读外部的 Markdown —— 灌内容的时机是**建库**（`initial.ts`）与**导入备份**，
+     * v32 起不再有运行期的入口（那两个按钮已删）。
+     * 这也让网站那侧的判定（有内容才用后端）能生效。
      */
     // 补默认值走 normalizeCourse（与新建/修改同一处默认值，避免两套口径）
     db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
@@ -727,8 +726,8 @@ function migrate(db: Database): Database | null {
      * 它不等于"现在该不该出现在宣传页上" —— 我第一版就是按来源默认的，
      * 结果真实库里有两位早已不在网站内容里的教师（历史上从网站导入过、后来内容改了名字）
      * 被标成"展示"，网站会多出两个人来。**迁移猜不出来机构想让谁上台**，
-     * 因此默认全部关掉（网站这次构站仍显示原来的那几位，因为紧接着的
-     * 「从网站导入内容」会把内容里那几位标上）；机构要放谁上去，在教师表单里勾一下。
+     * 因此默认全部关掉（当时紧接着还能点一次「从网站导入内容」把内容里那几位标上 ——
+     * 那个入口 v32 已删，现在再遇到这种老库只能手工勾）；机构要放谁上去，在教师表单里勾一下。
      */
     db.teachers = db.teachers.map((teacher) => ({
       ...teacher,
@@ -869,7 +868,8 @@ function migrate(db: Database): Database | null {
      * ## 为什么这一次要读内容文件灌初值（与 v15 那次相反）
      *
      * v15 把网站正文搬进库时，迁移刻意**只补空结构、不读外部 Markdown** ——
-     * 因为那时空着是安全的：课程正文可以点一次「从网站导入内容」补上。
+     * 因为那时空着是安全的：课程正文可以点一次「从网站导入内容」补上
+     * （该入口 v32 已删；这条对照记的是当时的取舍，不是现在还能这么做）。
      * 这次搬的是**已经发布出去的案例**：空着就等于升级完 `/cases` 与首页那块案例区
      * 全部变空。那不是"诚实的空"，是事故。做法与 `createInitialDatabase()` 里
      * "课程库与报价配置来自网站内容"同一条既有纪律：**内容文件是初值的来源**。
@@ -2977,8 +2977,9 @@ const localApi = {
   /**
    * 课程库：后台的课程台账（排课科目、教师可带科目、报课科目都按名字引用它）。
    *
-   * 网站上的课程在首次访问与「从网站同步」时自动进来；机构自己加的课
-   * （围棋、书法这类网站上还没有的）与它们平起平坐，都能排课、能记课时。
+   * 网站上的课程在**建库时**进来（`initial.ts` → `materializeSiteCourses()`，v32 起
+   * 不再有运行期的「从网站同步」入口）；机构自己加的课（围棋、书法这类网站上还没有的）
+   * 与它们平起平坐，都能排课、能记课时。
    *
    * 注意边界：这里加课程**不会**让宣传网站上多出一张卡片 —— 网站是静态内容。
    */
@@ -4815,38 +4816,6 @@ const localApi = {
         missingRequiredHeaders: parsed.missingRequiredHeaders,
       });
     },
-
-    /**
-     * 批量导入（**从网站内容**）。
-     *
-     * 网站上现成有两份真实名单：教师团队与场地名。机构刚起步时不必手录一遍。
-     * 走的是**同一套**判定与落库（`applyImport`），因此冲突处理、判重、日志与文件导入一致。
-     * 只支持 `teachers` 与 `classrooms`：课程已有「从网站同步课程」，学生网站上没有。
-     */
-    async fromSite(input: {
-      entity: SiteImportSource;
-      onConflict?: ConflictStrategy | "ask";
-      perRow?: Record<string, ConflictStrategy>;
-    }): Promise<ImportReport> {
-      await delay();
-      const data = siteImportRecords(input.entity);
-      const parsed: ParsedImport = {
-        entity: input.entity,
-        records: data.records,
-        problems: [],
-        headers: Object.keys(data.records[0] ?? {}),
-        unknownHeaders: [],
-        missingRequiredHeaders: [],
-      };
-      return runImport(load(), parsed, {
-        strategy: input.onConflict ?? "skip",
-        perRow: input.perRow,
-        source: `网站内容（${data.description}）`,
-        headers: parsed.headers,
-        unknownHeaders: [],
-        missingRequiredHeaders: [],
-      });
-    },
   },
 
   /**
@@ -5457,7 +5426,7 @@ const localApi = {
   },
 };
 
-/** 批量导入的返回结构（文件导入与"从网站导入"共用）。 */
+/** 批量导入的返回结构（CSV / JSON 文件导入用）。 */
 export type ImportReport = {
   /** 整体是否可用（必填列缺失时为 false，一份都不导）。 */
   ok: boolean;
@@ -5478,7 +5447,7 @@ export type ImportReport = {
 /**
  * 一次导入的公共后半段：**判定 → （必要时只报告）→ 落盘 → 写日志 → 返回报告**。
  *
- * 抽出来是为了让"从文件导入"与"从网站导入"**只有数据来源不同**：
+ * 抽出来是为了让"体检"与"写入"两次调用**只有策略不同**：
  * 判重、冲突策略、后悔药、日志、落盘全在这一个函数里，两处不可能分叉。
  */
 function runImport(
