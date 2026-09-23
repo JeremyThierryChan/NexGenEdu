@@ -10608,6 +10608,19 @@ console.log("\n=== 41. 报价与课程清单对齐（v37）===");
     pricingPageSource.includes('suffix="元 / 小时"') &&
       pricingPageSource.includes("课单价") &&
       !pricingPageSource.includes('suffix="元 / 节"'));
+  /*
+   * ⑦ 构站必须**问得到后端**（连不上就当场失败，而不是悄悄发一版空站）。
+   *
+   * 这一条是被一次真实事故催出来的：后端没起时 `npm run build` 退出码是 0，
+   * 但 `out/` 里的页面从 82 张掉到 31 张（课程卡片 / 教师 / 报价整块空白）——
+   * 对一次"本机构建然后发布"来说，这是最糟的失败方式：看起来成功了。
+   */
+  const packageJson = readFileSync(new URL("../package.json", import.meta.url), "utf8");
+  ok("npm run build 内置了 SITE_API_STRICT=1（后端连不上就构站失败，而不是发一版空站）",
+    /"build":\s*"[^"]*SITE_API_STRICT=1[^"]*sync-site-data/.test(packageJson));
+  ok("文档里写明了这一条（否则有人会以为「构站失败」是坏了）",
+    readFileSync(new URL("../docs/部署与发布.md", import.meta.url), "utf8").includes("SITE_API_STRICT=1"));
+
   ok("内容文件里也写明了基础价是元 / 小时",
     pricingSource.includes("基础价（**元 / 小时**"));
 

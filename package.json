@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "npm run sync-content && npm run sync-site-data && next build",
+    "build": "npm run sync-content && SITE_API_STRICT=1 npm run sync-site-data && next build",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
