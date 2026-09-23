@@ -237,7 +237,8 @@ try {
     status: "在读", note: "恢复演练用", profile: {},
   }])) as { id: string };
   const classroom = (await call(handle.base, "classrooms.create", [{
-    name: "演练教室", capacity: 6, kind: "上课用教室", note: "",
+    // v31：校区必填 —— 恢复演练的夹具同样要带，否则演练会在建教室这一步就失败
+    name: "演练教室", campus: "演练校区", capacity: 6, kind: "上课用教室", note: "",
     availability: [{ id: "d-a1", weekdays: [1, 2, 3, 4, 5, 6, 7], start: "08:00", end: "22:00" }],
   }])) as { id: string };
   const teacher = (await call(handle.base, "teachers.create", [{

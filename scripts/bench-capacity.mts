@@ -171,7 +171,8 @@ for (const studentCount of scales) {
     const coldMs = await timeIt(() => api.students.list());
     const warmMs = await timeIt(() => api.students.list());
     const createMs = await timeIt(() =>
-      api.classrooms.create({ name: "容量探针", capacity: 1, kind: "上课用教室", campus: "", note: "", availability: [] }),
+      // v31：校区必填 —— 容量探针也得带上校区，否则这里量到的是"被校验拒掉"的成本
+      api.classrooms.create({ name: "容量探针", capacity: 1, kind: "上课用教室", campus: "容量自检", note: "", availability: [] }),
     );
     const rss = process.memoryUsage().rss / 1024 / 1024;
 

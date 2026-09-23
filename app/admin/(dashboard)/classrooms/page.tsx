@@ -31,8 +31,11 @@ import { cn } from "@/lib/utils/cn";
  * 教室模块。
  *
  * 每个场地有四层信息：
- *   1. **校区**：这间房在哪个校区（自由文本，可留空）—— 与教室名**分开输入**，
- *      显示时由 `classroomLabel` 拼成「校区·教室名」（机构口径：**输入分开、显示不变**，v31）；
+ *   1. **校区**：这间房在哪个校区（自由文本）—— 与教室名**分开输入**，
+ *      显示时由 `classroomLabel` 拼成「校区·教室名」（机构口径：**输入分开、显示不变**，v31）。
+ *      **v31 起必填**（机构原话：「校区必须填」）：它决定显示口径，也用来按校区筛。
+ *      老库里"拆不出校区"的记录（例如「自习区」）照常读出来，卡片上挂一个**待补提示**，
+ *      保存时才被必填拦住；
  *   2. **用途**：上课用教室 / 自习室 —— 前者按班型排课，后者是学生自习的座位；
  *   3. **容量**：可容纳人数（自习室即座位数）；
  *   4. **可用时段**：一周中哪几天、哪个时间段开放；**留空表示不限**。
@@ -43,6 +46,23 @@ import { cn } from "@/lib/utils/cn";
  * 全页**只有标题与确认框显示教室名**，两处都走 `classroomLabel` ——
  * 其余地方只出现容量 / 时段这类数字，不会出现"半个教室名"。
  */
+
+/**
+ * **校区未填**的待补小标（v31 收紧）：虚线边框 + 灰底 + 更浅的字色。
+ *
+ * 与教师卡片上「用工未填」/「来源未填」**同一档样式、同一个思路**（机构口径：
+ * 「教师信息我自己在后台填，更希望没填的时候也看得出来」）——
+ * 校区没填的那种记录，标题里**只有房间名**、看起来一切正常，正因为"看不出来"才必须挂个标。
+ *
+ * 与已填信息**必须一眼分得开**（这一条比好看重要）：同一个样式的话，
+ * 「校区未填」会被读成"这间房的校区叫『校区未填』"—— 一条**假的场地信息**比不显示更糟。
+ * `scripts/check.mts` 有一条断言盯着"两边用的是同一个类"（各写一套会被读成两个不同的待办）。
+ */
+const CAMPUS_TODO_CLASS =
+  "rounded-sm border border-dashed border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[10px] text-ink-400";
+
+/** 灰标上的悬停提示：告诉人"去哪儿补"（卡片页脚那个「编辑」就是入口）。 */
+const CAMPUS_TODO_HINT = "点编辑补校区";
 export default function AdminClassroomsPage() {
   const [classrooms, setClassrooms] = useState<Classroom[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
@@ -234,8 +254,20 @@ export default function AdminClassroomsPage() {
                     ——「校区·教室名」（例如「沐阳教育·教室1」），没填校区时就是纯教室名。
                     机构的口径是"输入分开、显示不变"，因此这一行**不再单独印一遍「校区 …」**：
                     同一条信息不重复两遍（信息在标题里已经全了）。
+
+                    ⚠️ 例外：**校区没填**的老记录（v31 收紧之前建的、或更老的库拆不出校区的）
+                    标题里就只有房间名，和"真的没有校区"这个状态**长得一模一样** ——
+                    因此挂一个待补灰标。不挂的话，那种记录在列表上看不出任何异常，
+                    而保存时会被必填拦住（人会以为"我什么都没改，它凭什么不让我存"）。
                   */}
-                  <h2 className="text-sm font-medium text-ink-900">{classroomLabel(room)}</h2>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <h2 className="text-sm font-medium text-ink-900">{classroomLabel(room)}</h2>
+                    {room.campus.trim() === "" && (
+                      <span className={CAMPUS_TODO_CLASS} title={CAMPUS_TODO_HINT}>
+                        校区未填
+                      </span>
+                    )}
+                  </div>
                   <span className={kindClass(room.kind)}>{room.kind}</span>
                 </div>
                 <p className="mt-1 text-xs text-ink-500">
@@ -421,7 +453,11 @@ function ClassroomForm({
   /*
    * 校区（v30）：**自由文本**，但给一个 `<datalist>` 把**已在用的校区**列出来
    * （候选值由父组件从当前列表里收集后传进来）—— 自由文本的坑是同一个校区被写成
-   * 「城西校区」「城西」「西校区」三种，统计与筛选当场失效；让它可复用、但不强制。
+   * 「城西校区」「城西」「西校区」三种，统计与筛选当场失效；让它可复用、但不改写机构自己的叫法。
+   *
+   * v31 起**必填**（机构原话「校区必须填」）：自由文本不等于可以空着。留空的后果不只是
+   * 显示少一段 —— 它会让"这间房属于哪个校区"变成没人知道的事，而按校区筛 / 分权 / 分账
+   * 都建在这个字段上。
    */
   const [campus, setCampus] = useState(classroom?.campus ?? "");
   const [capacity, setCapacity] = useState(`${classroom?.capacity ?? 8}`);
@@ -463,7 +499,21 @@ function ClassroomForm({
     event.preventDefault();
 
     if (name.trim() === "") {
-      setError("教室名称必填（校区可以留空，教室名不行 —— 它是排课与冲突判定里认这间房的依据）。");
+      setError("教室名称必填（它是排课与冲突判定里认这间房的依据）。");
+      return;
+    }
+    /*
+     * 校区必填（v31 收紧，机构原话「**校区必须填**」）。
+     *
+     * 与 `required` 属性**两条都要**：`required` 是给浏览器用的（点保存时先弹原生提示），
+     * 这一句是给"浏览器不拦"的路径兜底（有些输入法 / 自动化会绕过原生校验），
+     * 而且它给的是**我们自己那句文案**（说清为什么必填），不是浏览器那句泛泛的"请填写此字段"。
+     *
+     * 服务端也有同一道闸（`normalizeClassroomStrict`，同一条口径、同一句文案）——
+     * 前端校验永远只是"早点告诉人"，不是"唯一一道门"。
+     */
+    if (campus.trim() === "") {
+      setError("校区必填 —— 它决定教室在列表与排课里显示成「校区·教室名」，也用来按校区筛。");
       return;
     }
     // 时段行必须选星期且结束晚于开始，否则排课时的可用性判断会失效
@@ -486,7 +536,7 @@ function ClassroomForm({
     const payload = {
       name: name.trim(),
       kind,
-      // 校区（v30）：自由文本，只去前后空白（口径在服务端 normalizeClassroomRecord 里也是"只 trim"）
+      // 校区（v31）：自由文本，只去前后空白；**必填**由服务端 normalizeClassroomStrict 再判一次
       campus: campus.trim(),
       capacity: Math.max(1, Math.trunc(Number(capacity) || 1)),
       availability: rows,
@@ -527,7 +577,7 @@ function ClassroomForm({
         */}
         <TextField
           label="教室名称"
-          hint="只填房间名；校区在右边单独填，显示时会拼成「校区·教室名」"
+          hint="只写房间名（不要写校区）—— 校区在下面「校区」那一格单独填，显示时会拼成「校区·教室名」"
           value={name}
           onChange={(event) => setName(event.target.value)}
           placeholder="例如 教室1 / 落地房四楼小"
@@ -556,11 +606,12 @@ function ClassroomForm({
         />
         <TextField
           label="校区"
-          hint="与教室名称分开填（显示时拼成「校区·教室名」）。已登记过的校区会提示出来，可直接选；也可以写新的（例如 城西校区 / 总校）"
+          hint="必填 —— 它决定教室在列表与排课里显示成「校区·教室名」，也用来按校区筛。与教室名称分开填；已登记过的校区会提示出来，可直接选，也可以写新的（例如 城西校区 / 总校）"
           value={campus}
           onChange={(event) => setCampus(event.target.value)}
           placeholder="例如 城西校区 / 总校"
           list={campusOptions.length > 0 ? campusListId : undefined}
+          required
         />
       </div>
 

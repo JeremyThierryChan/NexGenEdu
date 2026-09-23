@@ -59,6 +59,29 @@ export type FieldSpec = {
   /** 兼容的其他列名（大小写与空格不敏感）。 */
   aliases?: string[];
   required?: boolean;
+  /**
+   * 这一列**允许不在文件里**（但它仍然是必填列）：值＝能替它把值算出来的那一列的 key。
+   *
+   * 只为「校区」而生（v31 收紧）：教室的校区既可以直接写在「校区」那一列，
+   * 也可以**藏在名称里**（老表那种「沐阳教育·教室1」，行归一会按第一个「·」拆开）。
+   * 于是它的必填判据不是"这一格填了没有"，而是"**拆完之后校区有没有值**"——
+   * 因此它**不能进"整份不导入"那道表头闸**（`missingRequiredHeaders`）：
+   * 一份只有「名称」一列、名字里全是合并写法的旧名单**本来是能导的**，
+   * 判在拆分之前会把它们整份拒掉。改成**逐行判**（行归一之后），
+   * 只有"拆完还是没有校区"的那一行才报错。
+   *
+   * 为什么做成列自己的一个显式声明、而不是在解析器里特判 `campus`：
+   * 与 `empty`（枚举列留空取什么）同一个做法 —— 特判会把"教室的校区能从名字里拆"
+   * 这件事埋进通用代码里，后来的人既看不到它、也就不敢碰它。
+   */
+  derivableFrom?: string;
+  /**
+   * 这一列必填却（**归一之后**）仍为空时报的原话。
+   *
+   * 不给就用通用的 `「${header}」不能为空`。校区要自己一句，因为它缺了不只是"这格空了"，
+   * 而是"名称里也没有「校区·教室名」的写法可拆"—— 不写出来，用户会盯着一个他明明（以为）填了的列。
+   */
+  emptyReason?: string;
   kind: FieldKind;
   /** enum 的候选值。 */
   options?: string[];
@@ -172,16 +195,34 @@ export const ENTITY_SPECS: Record<ImportEntity, EntitySpec> = {
       { key: "name", header: "名称", required: true, kind: "text", example: "301 教室" },
       { key: "kind", header: "用途", kind: "enum", options: ["上课用教室", "自习室"], example: "上课用教室" },
       { key: "capacity", header: "容量", kind: "number", example: "8" },
-      // v30：校区（自由文本，可空）。同一份名单里往往同一个校区连着好几行 —— 重复填即可
-      { key: "campus", header: "校区", aliases: ["所属校区", "所在校区"], kind: "text", example: "城西校区" },
+      /*
+       * v30：校区（自由文本）。**v31 起必填**（机构原话：「校区必须填」）。
+       *
+       * `derivableFrom: "name"`：校区也能从「名称」里拆出来（老表那种「沐阳教育·教室1」），
+       * 因此这一列**不在"整份不导入"的表头闸里**，而是**行归一之后逐行判** ——
+       * 一份只有名称列、名字里都是合并写法的旧名单照样能导（判在拆分之前会把它整份拒掉）。
+       * 判据与文案都取自 `lib/backend/classrooms.ts`（与服务层那个写入闸共用，见 `hasCampus`）。
+       */
+      {
+        key: "campus",
+        header: "校区",
+        aliases: ["所属校区", "所在校区"],
+        required: true,
+        derivableFrom: "name",
+        emptyReason: `缺少必填列：校区（这一行没填校区，名称里也没有「校区·教室名」的写法可拆开）`,
+        kind: "text",
+        example: "城西校区",
+      },
       { key: "note", header: "备注", kind: "text", example: "白板 + 投影" },
     ],
     warning: "可用时段（哪个时段开放）不在这里导入 —— 导入后到「教室」页给每间房设时段；不设时段表示不限。" +
+      "「校区」**必填**（v31 收紧）：名称里不带校区的行必须自己带上校区列 —— " +
+      "为什么必填：它决定教室在列表与排课里显示成「校区·教室名」，也用来**按校区筛**。" +
       "「校区」与「名称」分开两列填（显示时拼成「校区·教室名」）：**名称只填房间本身的名字**。" +
-      "「校区」是自由文本（沐阳教育 / 全慧教育这类机构自己的叫法），可以留空；" +
-      "已经在用的校区会在页面表单里提示出来，导完想统一叫法到教室页改一下就行。" +
-      "老表里那种「沐阳教育·教室1」的合并写法也能直接导 —— 系统会按第一个「·」拆开（显示一模一样），" +
-      "因此重导一份旧名单不会多出一间重复的房。",
+      "「校区」是自由文本（沐阳教育 / 全慧教育这类机构自己的叫法）；已在用的校区会在页面表单里提示出来，" +
+      "导完想统一叫法到教室页改一下就行。" +
+      "老表里那种「沐阳教育·教室1」的合并写法**照样能导**（名称里带着校区就不必再填校区列）：" +
+      "系统会按第一个「·」拆开（显示一模一样），因此重导一份旧名单不会多出一间重复的房。",
   },
   courses: {
     key: "courses",
@@ -448,6 +489,10 @@ function jsonRows(entity: ImportEntity, text: string): { rows: RawRow[]; headers
  *
  * **必填列缺失时整份不导入**（记进 `missingRequiredHeaders`）：那种情况通常是列名写错或
  * 选错了实体，硬导进去只会得到一堆空名字的记录。
+ *
+ * 唯一不进这道闸的是带 `derivableFrom` 的列 —— 目前只有教室的「校区」（v31 收紧）：
+ * 它的值可能是从「名称」里拆出来的，因此只在**行归一之后**逐行判
+ * （见行循环里"先拆后判"那一段与 `FieldSpec.derivableFrom`）。
  */
 export function parseImport(entity: ImportEntity, text: string, format?: ImportFormat): ParsedImport {
   const spec = ENTITY_SPECS[entity];
@@ -462,8 +507,19 @@ export function parseImport(entity: ImportEntity, text: string, format?: ImportF
     else matched.set(header, field);
   }
 
+  /*
+   * 表头闸：**必填列缺了就整份不导入**。
+   *
+   * 带 `derivableFrom` 的列（目前只有「校区」）**不进这道闸**：它的值可能是拆出来的，
+   * 只在表头这一层判会误杀（见下面行循环里"先拆后判"那一段）。
+   */
   const missingRequiredHeaders = spec.fields
-    .filter((field) => field.required === true && ![...matched.values()].includes(field))
+    .filter(
+      (field) =>
+        field.required === true &&
+        field.derivableFrom === undefined &&
+        ![...matched.values()].includes(field),
+    )
     .map((field) => field.header);
 
   if (missingRequiredHeaders.length > 0) {
@@ -486,15 +542,29 @@ export function parseImport(entity: ImportEntity, text: string, format?: ImportF
     }
     if (rowFailed) continue;
 
-    // 必填字段（列存在但值为空）也算不通过
+    /*
+     * **先拆后判**（v31，机构口径「校区必须填」）。
+     *
+     * 行归一（拆分「校区·教室名」）必须早于必填判：`campus` 那一格空着时，
+     * 校区可能就写在名称里（老表那种「沐阳教育·教室1」）。顺序反了的话，
+     * 一份只有名称列、名字里全是合并写法的旧名单会**整行整行地被判成"缺校区"**
+     * —— 而它本来是能导的（"把旧表再导一次"正是机构最常做的事）。
+     *
+     * 于是必填判据是**拆完之后**的 `campus`：拆出来有值就通过，拆完还是空的那一行才报
+     * （`emptyReason` 把"名称里也没有可拆的写法"说清）。
+     */
+    const finalized = entity === "classrooms" ? normalizeClassroomRow(record) : record;
     const emptyRequired = spec.fields.find(
-      (field) => field.required === true && String(record[field.key] ?? "").trim() === "",
+      (field) => field.required === true && String(finalized[field.key] ?? "").trim() === "",
     );
     if (emptyRequired !== undefined) {
-      convertedProblems.push({ line: row.line, reason: `「${emptyRequired.header}」不能为空` });
+      convertedProblems.push({
+        line: row.line,
+        reason: emptyRequired.emptyReason ?? `「${emptyRequired.header}」不能为空`,
+      });
       continue;
     }
-    records.push(entity === "classrooms" ? normalizeClassroomRow(record) : record);
+    records.push(finalized);
   }
 
   return { entity, records, problems: convertedProblems, headers, unknownHeaders, missingRequiredHeaders: [] };
@@ -511,6 +581,9 @@ export function parseImport(entity: ImportEntity, text: string, format?: ImportF
  *   - 顺带让界面上的"体检"预览显示的是**将要落库的形状**，而不是文件里的原始写法。
  *
  * 只碰 `name` / `campus` 两格，其余字段原样带过（`splitCampusFields` 的约定）。
+ *
+ * ⚠️ 它**必须早于必填判**（`parseImport` 的行循环里就是这个次序）：校区那一列空着时，
+ * 校区可能写在名称里，拆完才算得清这一行到底缺不缺校区。
  */
 function normalizeClassroomRow(record: Record<string, unknown>): Record<string, unknown> {
   const parts = splitCampusFields(record);

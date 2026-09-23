@@ -637,11 +637,13 @@ await check("教室", "整份提交（页面表单那样交回整条）时校区
   return [(await api.classrooms.get(classroomId))?.capacity, saved?.campus];
 }, (value: unknown[]) => value[0] === 7 && value[1] === "验收校区·整份");
 /*
- * v31：「校区·教室名」这一对（机构口径：**输入分开、显示不变**）。
+ * v31 收紧：**校区必填**（机构原话「校区必须填」）。
  * 三条都要真写一遍：
  *   ① 校区 + 纯教室名 → 落库两格分开，**显示拼回「校区·教室名」**；
- *   ② 只填教室名（校区空）→ 显示就是纯名，不留一个孤零零的「·」；
- *   ③ 教室名里粘着校区（老表那种写法）→ 拆开，显示与原来一字不差。
+ *   ② 教室名里粘着校区（老表那种写法）→ 拆开，显示与原来一字不差（**先拆后判**：
+ *      校区那一格空着但名称里带着校区，因此不算"空校区"，仍然能建 —— 与批量导入同一条口径）；
+ *   ③ **空校区被拒**（空串与空格串都拒，错误里点名「校区」），而且**一条都没建进去** ——
+ *      这正是"校区必须填"要挡住的那种状态，也是下面 ④ 那句"把校区补上"的反面。
  */
 await check("教室", "校区 + 纯教室名：落库分开、显示拼成「校区·教室名」", async () => {
   const current = (await api.classrooms.get(classroomId))!;
@@ -664,12 +666,28 @@ await check("教室", "老表那种合并写法（名称里带「校区·」）�
 }, (value: unknown[]) =>
   value[0] === "沐阳教育" && value[1] === "验收老格式教室" &&
   value[2] === value[3] && value[2] === "沐阳教育·验收老格式教室");
-await check("教室", "没填校区时显示就是纯教室名（不会多出一个「·」）", async () => {
-  const created = await api.classrooms.create({
-    name: "验收独栋教室", kind: "上课用教室", campus: "", capacity: 4, availability: [], note: "",
-  });
-  return [created.campus, created.name, classroomLabel(created)];
-}, (value: unknown[]) => value[0] === "" && value[1] === "验收独栋教室" && value[2] === "验收独栋教室");
+/*
+ * 空校区被拒（v31 收紧）。两档都真写一遍，两件都要验到：
+ *   · **报错原话**里点名「校区」与「必填」（只判"抛错了"不够 —— 抛的是别的错也过）；
+ *   · **库里一条都没多**（拒绝路径写进去半截数据，比不拒绝更难查）。
+ */
+await check("教室", "空校区被拒：空串与空格串都拒，且一条都没建进去", async () => {
+  const messages: string[] = [];
+  for (const campus of ["", "   "]) {
+    try {
+      await api.classrooms.create({
+        name: "验收无校区教室", kind: "上课用教室", campus, capacity: 4, availability: [], note: "",
+      });
+      messages.push(`（「${campus}」被接受了，没有报错）`);
+    } catch (cause) {
+      messages.push(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+  const leaked = (await api.classrooms.list()).filter((room) => room.name === "验收无校区教室").length;
+  return { messages, leaked };
+}, (value: { messages: string[]; leaked: number }) =>
+  value.leaked === 0 &&
+  value.messages.every((message) => message.includes("校区") && message.includes("必填")));
 
 /* ── 3 教师 ── */
 let teacherId = "";
@@ -1055,20 +1073,52 @@ await check("报价", "改回原名（收尾）", async () => {
 /* ── 10 数据与备份 / 搜索 / 日志 ── */
 await check("数据与备份", "导出全部数据", async () => (await api.exportDatabase()).students.length > 0);
 // 批量导入（页面上的「批量导入」面板走的就是这个方法）
+/*
+ * v31 收紧后「校区」是**必填列**，因此这两条导入夹具也要带上校区列
+ * （不带的话行校验会拒掉它们，断言会红 —— 而那是**对的**，不该为了让用例通过而放宽必填）。
+ */
 await check("数据与备份", "批量导入：CSV 导入教室", async () => {
   const csv = [
-    "名称,用途,容量,备注",
-    "验收教室A,上课用教室,6,批量导入自检",
-    "验收教室B,自习室,4,",
+    "名称,用途,校区,容量,备注",
+    "验收教室A,上课用教室,验收校区,6,批量导入自检",
+    "验收教室B,自习室,验收校区,4,",
   ].join("\r\n");
   const outcome = await api.imports.apply({ entity: "classrooms", text: csv, fileName: "验收.csv" });
   return { ok: outcome.ok, added: outcome.added };
 }, (v: { ok: boolean; added: number }) => v.ok && v.added === 2);
 await check("数据与备份", "批量导入：重复导入不重复加", async () => {
-  const csv = "名称,用途,容量,备注\r\n验收教室A,上课用教室,6,批量导入自检\r\n";
+  const csv = "名称,用途,校区,容量,备注\r\n验收教室A,上课用教室,验收校区,6,批量导入自检\r\n";
   const outcome = await api.imports.apply({ entity: "classrooms", text: csv });
   return { added: outcome.added, skipped: outcome.skipped.length };
 }, (v: { added: number; skipped: number }) => v.added === 0 && v.skipped === 1);
+/*
+ * 「先拆后判」的真实验收（v31 收紧，机构原话「校区必须填」）。
+ *
+ * 这一份 CSV **只有「名称」一列** —— 就是老表那种写法（名字里带着「校区·教室名」）。
+ * 判据必须落在**拆分之后**：拆出来的校区让每一行都通过，一条都不许拒。
+ * 判在拆分之前的话，这份名单会被**整份拒掉**，而它本来是能导的
+ * （"把旧表再导一次"正是机构最常做的事）。
+ */
+await check("数据与备份", "批量导入：只写名称列的旧名单（名字里带「·」）先拆后过", async () => {
+  const csv = [
+    "名称,用途",
+    "沐阳教育·验收旧表教室1,上课用教室",
+    "全慧教育·验收旧表教室2,自习室",
+  ].join("\r\n");
+  const outcome = await api.imports.apply({ entity: "classrooms", text: csv, fileName: "验收旧表.csv" });
+  const rooms = await api.classrooms.list();
+  const one = rooms.find((room) => room.name === "验收旧表教室1");
+  const two = rooms.find((room) => room.name === "验收旧表教室2");
+  return {
+    added: outcome.added,
+    problems: outcome.problems.length,
+    one: [one?.campus, one?.name],
+    two: [two?.campus, two?.name],
+  };
+}, (v: { added: number; problems: number; one: string[]; two: string[] }) =>
+  v.added === 2 && v.problems === 0 &&
+  v.one.join("|") === "沐阳教育|验收旧表教室1" &&
+  v.two.join("|") === "全慧教育|验收旧表教室2");
 await check("数据与备份", "批量导入：JSON 导入教师", async () => {
   const json = JSON.stringify([{ name: "验收老师甲", subjects: ["初中数学"], role: "授课教师", active: true }]);
   const outcome = await api.imports.apply({ entity: "teachers", text: json });

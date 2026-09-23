@@ -691,7 +691,8 @@ try {
     teacherAId = teacherA.id;
     teacherBId = teacherB.id;
     const classroom = (await seed(first.base, admin.token, "classrooms.create", [
-      { name: "范围测试教室", kind: "上课用教室", capacity: 8, availability: [], note: "" },
+      // v31：校区必填 —— 权限自检的夹具也得带上，否则建教室这一步会 400、后面全跟着红
+      { name: "范围测试教室", kind: "上课用教室", campus: "自检校区", capacity: 8, availability: [], note: "" },
     ])) as { id: string };
     classroomId = classroom.id;
 

@@ -206,10 +206,13 @@ import { TEACHER_EMPLOYMENTS } from "./types";
 /*
  * 教室的显示口径与归一（v31）也各只有一处实现：
  *   - `classroomLabel`：给用户看教室名的地方都必须走它（`scripts/check.mts` 有源码级断言）；
- *   - `normalizeClassroom` / `needsCampusSplit`：迁移、收尾归一、批量导入、服务层写入共用。
+ *   - `normalizeClassroom` / `needsCampusSplit`：迁移、收尾归一、批量导入、服务层写入共用；
+ *   - `hasCampus` / `campusRequiredProblem`：「校区必填」（v31 收紧）的唯一判据与唯一文案。
  */
 import {
+  campusRequiredProblem,
   classroomLabel,
+  hasCampus,
   hasRedundantCampusPrefix,
   needsCampusSplit,
   normalizeClassroom,
@@ -1488,6 +1491,53 @@ function normalizeTeacherRecord(input: Teacher): Teacher {
 }
 
 /** 教室归一（v31 起在 `lib/backend/classrooms.ts`：它是"显示 / 拆分 / 归一"的唯一一处实现）。 */
+
+/**
+ * 教室的**校验**（服务层用）：返回问题清单，空数组＝通过。
+ *
+ * 校验的是「已经过 `normalizeClassroom` 的那一份」，也就是拆完「校区·教室名」之后的结果
+ * （顺序理由见下面 `normalizeClassroomStrict`）。
+ *
+ * 目前只有一条：**校区必填**（v31 收紧）。判据与文案都取自 `lib/backend/classrooms.ts`
+ * （`hasCampus` / `campusRequiredProblem`）—— 与批量导入的行校验共用同一句，
+ * 否则同一条记录从表单进来和从 CSV 进来会得到两种说法。
+ *
+ * 为什么**不**在这里判别的字段：`kind` / `capacity` / `availability` 各有一处口径
+ * （表单用 `Math.max(1, …)` 保证容量 ≥ 1，导入用 number 列校验），
+ * 与 `normalizeClassroom` 不归一它们同一个理由 —— 再判一次就是两套口径。
+ */
+function classroomIssues(room: Classroom): string[] {
+  const problems: string[] = [];
+  if (!hasCampus(room)) problems.push(campusRequiredProblem());
+  return problems;
+}
+
+/**
+ * 服务层用的归一 + 校验（传给 `versionedCollection` 的 `normalize` 钩子）。
+ *
+ * ## 顺序：**先拆后判**（与教师那条**正好相反**，这不是笔误）
+ *
+ * `normalizeTeacherStrict` 是"先校验后归一"，因为那里的归一**会抹掉**要判的东西
+ * （非法取值被压成空串，校验就再也看不见它了）。
+ * 教室这里反过来：归一（拆分）**会把校区补上** —— `campus=""` + `name="沐阳教育·教室1"`
+ * 拆完就有一个校区了。所以先判就等于把"合并写法"一起判死，也就等于把
+ * 一份旧名单 / 一个只知道合并写法的旧调用方**整份拒掉**，而它们本来是能建、能导的。
+ *
+ * 收紧要收的是**"校区空着"这个状态**，不是旧写法本身：拆分的结果是校区那一格有值，
+ * 存下来的每条记录照样满足"必填"。批量导入是同一条口径（见 `import.ts` 的 `normalizeClassroomRow`
+ * 与行校验的先后），两处不一致的话，"同一条记录无论从哪条路进来，存下来的形状都一样"
+ * 这句话当场就不成立了。
+ *
+ * 真正"拆完还是没校区"的记录（例如 `campus=""` + `name="自习区"`）在这里被拒绝，
+ * 一句 `campusRequiredProblem()` 说清为什么；钩子抛错时那一行还没进数组，因此
+ * **什么都不会写**（连版本号都不推进），调用方拿到的是原话错误。
+ */
+function normalizeClassroomStrict(room: Classroom): Classroom {
+  const normalized = normalizeClassroom(room);
+  const problems = classroomIssues(normalized);
+  if (problems.length > 0) throw new Error(problems.join("；"));
+  return normalized;
+}
 
 /**
  * 教师新字段的**校验**（服务层用）：返回问题清单，空数组＝通过。
@@ -3816,8 +3866,14 @@ const localApi = {
    * 被别人静默盖掉就会出现"排了节不该排的课，却没人知道为什么"。
    *
    * v30 起两边各接一个 `normalize` 钩子：整份提交意味着**新字段也跟着一起进来**，
-   * 归一（去空白、补空串）与校验（「全职 / 兼职」只认两个值）必须挂在**唯一那道写入闸**上，
-   * 否则页面、批量导入、`/api/call` 三条路各有各的口径。
+   * 归一（去空白、补空串）与校验（「全职 / 兼职」只认两个值、**校区必填**）必须挂在
+   * **唯一那道写入闸**上，否则页面、批量导入、`/api/call` 三条路各有各的口径。
+   *
+   * ⚠️ 两个钩子的**内部顺序是相反的**（这不是笔误）：
+   *   - 教师「先校验后归一」—— 归一会把非法取值压成空串，先归一就再也判不出非法值了；
+   *   - 教室「先拆后判」—— 归一（拆「校区·教室名」）会把校区**补上**，
+   *     先判会把"名称列里写着合并写法"的旧记录整份拒掉，而它们本来是能建的。
+   * 各自的理由写在 `normalizeTeacherStrict` / `normalizeClassroomStrict` 的说明里。
    */
   teachers: {
     ...versionedCollection<Teacher>(
@@ -3849,15 +3905,18 @@ const localApi = {
     "教室",
     classroomDeleteRefusal,
     /*
-     * 教室的归一：去空白 + 把「校区·教室名」的合并写法拆开（v31）。
-     * 「校区」是自由文本、没有可拒绝的取值域，因此这里**不抛错**，只归一。
+     * 教室的归一 + 校验（v31）：**先拆后判** —— 先把「校区·教室名」的合并写法拆开
+     * （`normalizeClassroom`），再判**校区必填**（`classroomIssues`）。
      *
      * 为什么服务层也拆（而不是只在迁移 / 导入里拆）：机构的口径是「**·** 就是校区与教室名的
      * 连接符」—— 名字里带「·」、校区空着，就是那条旧的合并写法。放在这里之后
      * **同一条记录无论从哪条路进来，存下来的形状都一样**（否则表单建的和迁移修的是两种形状，
      * 校区的候选值也会随"这间房是怎么来的"而不同）。拆分不改变显示（`classroomLabel` 拼回来一样）。
+     *
+     * 为什么顺序不能反（先判后拆会把旧写法整份拒掉），以及为什么 `campus` 空着就走不过去，
+     * 都写在 `normalizeClassroomStrict` 那段说明里。
      */
-    normalizeClassroom,
+    normalizeClassroomStrict,
   ),
 
   /**

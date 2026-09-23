@@ -94,8 +94,15 @@ import { TEACHER_EMPLOYMENTS } from "@/lib/backend/types";
 /*
  * 教室的显示口径与拆分（v31）也是**值**：第 45 节要拿 `classroomLabel` 比
  * 「校区为空时就是纯名」、拿 `splitCampusFields` 验"按第一个「·」拆"。
+ * 第 46 节还要拿 `hasCampus` / `campusRequiredProblem` 验「校区必填」这条口径
+ * —— 判据与文案各只有一处，服务层与导入共用它们。
  */
-import { classroomLabel, splitCampusFields } from "@/lib/backend/classrooms";
+import {
+  campusRequiredProblem,
+  classroomLabel,
+  hasCampus,
+  splitCampusFields,
+} from "@/lib/backend/classrooms";
 import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
 import { createMemoryStore } from "@/lib/backend/storage";
 import {
@@ -1732,8 +1739,14 @@ monday2030.setHours(20, 30, 0, 0);
 const limited = await api.classrooms.create({
   name: "自检·限时教室",
   kind: "自习室",
-  // v30：校区（自由文本）。自检建的是临时教室，不登记校区 —— 空串＝未填，与迁移口径一致
-  campus: "",
+  /*
+   * v31 收紧后校区**必须填**，因此这个夹具也显式给一个（不再靠"名称里带「·」自动拆"兜底）：
+   * 那串「自检·限时教室」里的「自检·」是**自检夹具的命名前缀**、并不是校区，
+   * 靠拆分去得到 `campus="自检"` 正好是机构说的"校区会多出一个值"。
+   * 显式写 `campus: "自检"` + 名称里保留原串，落库时会把重复的那段前缀剥一次
+   * （`splitCampusFields` 的第二种情形），显示仍是原来那一串 —— 断言不受影响。
+   */
+  campus: "自检",
   capacity: 4,
   availability: [{ id: "r1", weekdays: [1], start: "17:00", end: "21:00" }],
   note: "",
@@ -5117,12 +5130,13 @@ eq("多余列被记入未识别列表", extra.unknownHeaders, ["微信昵称"]);
 eq("多余列不影响导入", extra.records.length, 1);
 
 // JSON：数组与 { students: [...] } 两种形状都接受
+// v31：校区必填 —— 这两条夹具也得带上校区（不带的话它们会变成"被必填拒掉"的例子）
 const jsonArray = parseImport("classrooms", JSON.stringify([
-  { name: "301 教室", kind: "上课用教室", capacity: 8 },
+  { name: "301 教室", kind: "上课用教室", campus: "城西校区", capacity: 8 },
 ]));
 eq("JSON 数组可以直接导", jsonArray.records.length, 1);
 eq("JSON 里的数字列保持数字", jsonArray.records[0]?.capacity, 8);
-const jsonWrapped = parseImport("classrooms", JSON.stringify({ classrooms: [{ 名称: "302 教室", 用途: "上课用教室" }] }));
+const jsonWrapped = parseImport("classrooms", JSON.stringify({ classrooms: [{ 名称: "302 教室", 用途: "上课用教室", 校区: "城西校区" }] }));
 eq("JSON 对象按实体键取数组", jsonWrapped.records.length, 1);
 eq("JSON 里用中文列名也认", jsonWrapped.records[0]?.name, "302 教室");
 eq("空 JSON 对象会说明缺什么",
@@ -5317,7 +5331,8 @@ const seriesTeacher = await api.teachers.create({
   siteVisible: false, origin: "后台", kind: "教师", employment: "", source: "",
 });
 const seriesRoom = await api.classrooms.create({
-  name: "自检批量排课教室", kind: "上课用教室", campus: "", capacity: 8, availability: [], note: "",
+  // v31：校区必填 —— 夹具也要给（不给的话这里会被必填校验拒掉，而它要验的是批量排课）
+  name: "自检批量排课教室", kind: "上课用教室", campus: "自检校区", capacity: 8, availability: [], note: "",
 });
 const seriesStudent = await api.students.create({
   name: "自检批量排课学生", grade: "初二", guardian: "", status: "在读", note: "", profile: {},
@@ -7196,7 +7211,8 @@ console.log("\n=== 17. P0：数据与钱的五道护栏 ===");
     summary: "", bio: "", recommendation: "", order: 900, siteVisible: false, origin: "后台", kind: "教师",
   } as never);
   const room = await api.classrooms.create({
-    name: "护栏自检教室", capacity: 6, note: "", active: true, availability: [],
+    // v31：校区必填（这个夹具原先整个字段都没带，必填校验会把"删教室护栏"那一段直接弄红）
+    name: "护栏自检教室", campus: "自检校区", capacity: 6, note: "", active: true, availability: [],
   } as never);
   const lesson = await api.lessons.create({
     subject: "数学", form: "", teacherId: teacher.id, classroomId: room.id, studentIds: [student.id],
@@ -11360,11 +11376,11 @@ console.log("\n=== 44. 三个内部字段：校区 / 全职兼职 / 来源（v30
   eq("入参里没有这两个字段的老调用方仍然能建档案（缺字段＝未填，与迁移同口径）",
     [legacyTeacher.employment, legacyTeacher.source], ["", ""]);
 
-  // 教室：校区是自由文本，只去空白，没有取值域可拒
+  // 教室：校区**必填**（v31 收紧），但仍然是自由文本、只去空白
   /*
    * 夹具的教室名**刻意不带「·」**（v31 起「·」是校区与教室名的连接符，见第 45 节）：
-   * 这一组验的是「校区」这一格本身（trims、改值、清空），名字里带「·」会把
-   * "清空校区"变成"又从名字里拆出一个校区"，那是另一条规则、由第 45 节单独验。
+   * 这一组验的是「校区」这一格本身（trims、改值、**不许清空**），名字里带「·」会把
+   * "清空校区"变成"又从名字里拆出一个校区"，那是另一条规则、由第 45 / 46 节单独验。
    */
   const internalRoom = await api.classrooms.create({
     name: "自检校区教室", kind: "上课用教室", capacity: 4,
@@ -11373,8 +11389,30 @@ console.log("\n=== 44. 三个内部字段：校区 / 全职兼职 / 来源（v30
   eq("校区存的时候去掉前后空白", (await api.classrooms.get(internalRoom.id))?.campus, "城西校区");
   eq("校区能改成另一个值并读回来",
     (await api.classrooms.update(internalRoom.id, { campus: "总校" }))?.campus, "总校");
-  eq("校区也允许清空（＝未填）",
-    (await api.classrooms.update(internalRoom.id, { campus: "  " }))?.campus, "");
+  /*
+   * **v31 收紧**：校区**不许清空**（机构原话「校区必须填」）。
+   *
+   * 这一条原先断言的是"校区也允许清空（＝未填）"—— 那句话正是这次要作废的口径，
+   * 因此断言跟着反过来：拒绝 + 错误里点名「校区」+ **什么都没写**（值没变、版本号没推进）。
+   * 只判"抛错了"是不够的：拒绝路径写进去半截值，比不拒绝更难查。
+   */
+  const versionBeforeCampusClear = (await api.classrooms.get(internalRoom.id))!.version;
+  const campusClearRejection = await (async () => {
+    try {
+      await api.classrooms.update(internalRoom.id, { campus: "  " });
+      return null;
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  })();
+  ok("把校区清空（空格串）会被**报错拒绝**，错误里点名「校区」并说清为什么必须填",
+    campusClearRejection !== null &&
+      campusClearRejection.includes("校区") &&
+      campusClearRejection.includes("必填"),
+    campusClearRejection ?? "没有报错 —— 空格串被当成了合法校区");
+  eq("被拒的那一次**什么都没写**（校区还是原来的值、版本号也没推进）",
+    [(await api.classrooms.get(internalRoom.id))?.campus, (await api.classrooms.get(internalRoom.id))?.version],
+    ["总校", versionBeforeCampusClear]);
 
   // ── ④ 批量导入：模板与表头里有这三列 ──────────────────────────────────
   /*
@@ -11895,6 +11933,255 @@ console.log("\n=== 45. 教室名：显示格式不变、输入分开（v31「校
     seedDb.classrooms.filter((room) => room.name.includes("·") || room.campus.includes("·")), []);
   ok("示例教室确实填了校区（否则「显示口径没在工作」这件事看不出来）",
     seedDb.classrooms.some((room) => room.campus !== ""));
+
+  __useStoreForTesting(memory);
+}
+
+console.log("\n=== 46. 校区必填（v31 收紧 —— 机构原话「校区必须填」）===");
+
+/*
+ * ## 这一节守的是什么
+ *
+ * v31 给教室加了「校区」并定了显示口径「校区·教室名」之后，留下一个**已知歧义**：
+ * 名字里真带「·」而校区空着的房间，会被当成合并写法拆开（显示不变，但校区会多一个值）。
+ * 项目问过机构"要不要加个开关"，机构答：**「校区必须填」**。
+ *
+ * 也就是说：**不加开关，而是让那个歧义状态不再出现**。这一节把"必填"钉在三条路上
+ * （服务层 / 批量导入 / 界面表单），外加两条边界（老数据不许被搞坏、先拆后判）：
+ *
+ *   ① **服务层** `create` / `update`：空校区（空串、空格串）**报错拒绝**，错误里点名「校区」
+ *      并说清为什么必须填；带校区能建、能改、能读回来；被拒的那一次**什么都不写**；
+ *   ② **批量导入**：判据是**拆完之后**的校区 —— 只写名称列、名字里带「·」的旧名单
+ *      **先拆后过**（判在拆分之前会把它整份拒掉，而它本来是能导的）；
+ *      拆完还是没有校区的行才报「缺少必填列：校区」；
+ *   ③ **老数据**：更老的库里"拆不出校区"的记录（例如「自习区」）**读取 / 迁移都不报错**，
+ *      只是保存时才被必填拦住（界面上有「校区未填」待补灰标，见 ⑤）；
+ *   ④ **界面**：教室表单的校区那一格是必填（`required` + 提交前那句 JS 校验，源码级），
+ *      卡片上的待补灰标与教师卡片那两个待办标**同一档样式**；
+ *   ⑤ **三处同一条口径**：服务层与导入判的是同一件事（拆完之后的 `campus`），
+ *      因此一条记录从表单进来和从 CSV 进来不会得到两种说法。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+  const stripComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  // ── ① 判据与文案本身（服务层与导入共用的那一份）──────────────────────────
+  eq("校区的判据就是「trim 之后非空」（空格串不算填了）",
+    [hasCampus({ campus: "总校" }), hasCampus({ campus: "   " }), hasCampus({ campus: "" }), hasCampus({})],
+    [true, false, false, false]);
+  ok("那句文案点明了「必填」与为什么要填（不然用户只觉得「又是一格必填」）",
+    campusRequiredProblem().includes("校区必填") &&
+      campusRequiredProblem().includes("校区·教室名") &&
+      campusRequiredProblem().includes("按校区筛"),
+    campusRequiredProblem());
+
+  // ── ② 服务层：拒绝空校区，带校区能建能改能读回来 ─────────────────────────
+  const campusMemory = createMemoryStore();
+  __useStoreForTesting(campusMemory);
+
+  /** 教室入参（省得每条都写一遍） */
+  const roomBody = (name: string, campus: string) => ({
+    name, kind: "上课用教室" as const, campus, capacity: 4, availability: [], note: "",
+  });
+  /** 跑一次写操作，把"报错原话"或 `null`（＝没报错）拿回来 */
+  const rejectionOf = async (run: () => Promise<unknown>): Promise<string | null> => {
+    try {
+      await run();
+      return null;
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+
+  /*
+   * 「什么都没建」要按**前后差**判，不能写死成 `length === 0`：
+   * 这一节在 `npm run check`（内存库）里是空库，但在 `npm run check:both`（临时服务上的库）
+   * 里本来就有一批示例教室 —— 写死 0 会在 check:both 里假红（第一版就是这么红的）。
+   */
+  const roomsBeforeReject = (await api.classrooms.list()).length;
+  const emptyCampusReject = await rejectionOf(() => api.classrooms.create(roomBody("空校区教室", "")));
+  ok("新建时校区是空串 → **报错拒绝**，错误里点名「校区」并说清为什么必填",
+    emptyCampusReject !== null &&
+      emptyCampusReject.includes("校区") &&
+      emptyCampusReject.includes("必填") &&
+      emptyCampusReject.includes("校区·教室名"),
+    emptyCampusReject ?? "没有报错 —— 空校区被建进去了");
+
+  const blankCampusReject = await rejectionOf(() => api.classrooms.create(roomBody("空格校区教室", "   ")));
+  ok("校区只填了空格 → 同样拒绝（`trim` 之后为空就是没填）",
+    blankCampusReject !== null && blankCampusReject.includes("校区"),
+    blankCampusReject ?? "没有报错 —— 空格串被当成了合法校区");
+
+  const roomsAfterReject = await api.classrooms.list();
+  eq("被拒的那两次**什么都没建**",
+    [
+      roomsAfterReject.length,
+      roomsAfterReject.filter((room) => room.name === "空校区教室" || room.name === "空格校区教室").length,
+    ],
+    [roomsBeforeReject, 0]);
+
+  const withCampus = await api.classrooms.create(roomBody("满校区教室", "  城西校区  "));
+  eq("带校区能建、能读回来（顺带去掉了前后空白）",
+    [(await api.classrooms.get(withCampus.id))?.campus, (await api.classrooms.get(withCampus.id))?.name],
+    ["城西校区", "满校区教室"]);
+  eq("能改成另一个校区并读回来",
+    (await api.classrooms.update(withCampus.id, { campus: "总校" }))?.campus, "总校");
+
+  const versionBeforeClear = (await api.classrooms.get(withCampus.id))!.version;
+  const clearReject = await rejectionOf(() => api.classrooms.update(withCampus.id, { campus: "" }));
+  ok("改的时候把校区清空 → 也拒绝（不是「只有新建才判」）",
+    clearReject !== null && clearReject.includes("校区"), clearReject ?? "没有报错 —— 校区被清空了");
+  eq("被拒的那一次**什么都没写**（校区还在、版本号也没推进）",
+    [(await api.classrooms.get(withCampus.id))?.campus, (await api.classrooms.get(withCampus.id))?.version],
+    ["总校", versionBeforeClear]);
+
+  /*
+   * **先拆后判**（这条是刻意留的口子，别当成漏判）。
+   *
+   * 交上来的是老表那种合并写法（校区那一格空着）：拆分先跑，拆出来的校区让这一行**通过**。
+   * 判在拆分之前的话，一份"名称列里写着「沐阳教育·教室1」"的旧名单 / 一个只知道合并写法的
+   * 旧调用方会被**整份拒掉** —— 而它们本来是能建、能导的。
+   *
+   * 注意：**界面表单走不到这里**（校区那一格已经必填，空着就提交不了），
+   * 因此这个口子只服务于"绕开表单"的入口（批量导入 / `/api/call` / 老脚本）。
+   * 收紧要收的是"校区空着"这个状态 —— 拆分之后校区那一格是有值的，存下来的记录照样满足必填。
+   */
+  const legacyNotation = await api.classrooms.create(roomBody("沐阳教育·先拆后判教室", ""));
+  eq("老表那种合并写法仍然能建：先拆成两格（校区那一格有值，因此不算「空校区」）",
+    [legacyNotation.campus, legacyNotation.name, classroomLabel(legacyNotation)],
+    ["沐阳教育", "先拆后判教室", "沐阳教育·先拆后判教室"]);
+
+  // ── ③ 导入：缺列要报「缺少必填列」；只写名称列且名字带「·」→ 先拆后过 ──
+  /*
+   * ⚠️ 顺序是这一条的全部重点。
+   *
+   * 「校区」虽然声明成必填列，但它**不进"整份不导入"那道表头闸**：因为它的值能从「名称」里拆出来。
+   * 判据因此落在**行归一之后** —— 拆完还是没有校区的**那一行**才报错。
+   * 顺序反了（判在拆分之前）的话，下面第二份文件会被**整份拒掉**，而它本来是能导的。
+   */
+  const onlyNamesPlain = parseImport("classrooms", "名称,用途\n自习区,自习室\n");
+  eq("只写名称列、名字里没有「·」→ 这一行不通过（拆不出校区）", onlyNamesPlain.records.length, 0);
+  ok("错误原话是「缺少必填列：校区」（点名是哪一列，也说清名称里没有可拆的写法）",
+    (onlyNamesPlain.problems[0]?.reason ?? "").includes("缺少必填列：校区") &&
+      (onlyNamesPlain.problems[0]?.reason ?? "").includes("名称"),
+    onlyNamesPlain.problems[0]?.reason ?? "（没有报错）");
+
+  const onlyNamesMerged = parseImport(
+    "classrooms",
+    "名称,用途\n沐阳教育·教室1,上课用教室\n全慧教育·落地房四楼小,上课用教室\n",
+  );
+  eq("只写名称列、名字里带「·」→ **先拆后过**（一条都不许拒）",
+    [onlyNamesMerged.problems.length, onlyNamesMerged.missingRequiredHeaders.length, onlyNamesMerged.records.length],
+    [0, 0, 2]);
+  eq("落库的形状是拆开后的两格（判据正是拆完之后的校区）",
+    onlyNamesMerged.records.map((record) => `${record.campus}|${record.name}`),
+    ["沐阳教育|教室1", "全慧教育|落地房四楼小"]);
+
+  const blankCell = parseImport("classrooms", "名称,校区\n自习区,\n");
+  ok("校区列在、但这一行的校区空着 → 同样报「缺少必填列：校区」",
+    blankCell.records.length === 0 &&
+      (blankCell.problems[0]?.reason ?? "").includes("缺少必填列：校区"),
+    blankCell.problems.map((problem) => problem.reason).join(" / ") || "（没有报错）");
+
+  const filledCell = parseImport("classrooms", "名称,校区\n自习区,城西校区\n");
+  eq("校区列填了 → 通过，且值原样落进来",
+    [filledCell.problems.length, filledCell.records[0]?.campus], [0, "城西校区"]);
+
+  /*
+   * 表头闸对**真的缺列**仍然照旧整份拦住（「名称」这种不能从别处推出来的列）。
+   * 这一条是"放宽"的反面证据：改了校区那一列，别的必填列一个字都没松。
+   */
+  const missingNameColumn = parseImport("classrooms", "用途,校区\n上课用教室,城西校区\n");
+  eq("硬必填列（名称）缺席时仍然是整份不导入",
+    [missingNameColumn.missingRequiredHeaders, missingNameColumn.records.length], [["名称"], 0]);
+
+  // ── ④ 老数据：拆不出校区的记录读取 / 迁移都不报错，保存时才被拦住 ────────
+  /*
+   * 这份夹具就是任务里那种记录：**更老的库**（v30 之前还没有 `campus` 这个字段）
+   * 里一间名字里没有「·」的教室 —— 拆不出校区，也没人填过。
+   *
+   * 关键：**必填不许出现在读取与迁移上**。在那里抛错等于整库读不出来，
+   * 比"有一间房待补校区"坏得多（迁移的纪律是"不猜、不拒"，只补空串）。
+   */
+  const legacyMemory = createMemoryStore();
+  __useStoreForTesting(legacyMemory);
+  const legacyDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    version: number;
+    classrooms: Array<Record<string, unknown>>;
+  };
+  legacyDb.version = 30;
+  legacyDb.classrooms = [
+    // 名字里没有「·」→ 拆不出校区（真实里就是「自习区」这种），而且这份库里连 campus 键都没有
+    { id: "cold1", version: 1, name: "自习区", kind: "自习室", capacity: 6, availability: [], note: "" },
+    { id: "cold2", version: 1, name: "沐阳教育·教室1", kind: "上课用教室", capacity: 2, availability: [], note: "" },
+  ];
+  const legacyUpgrade = await api.importDatabase(JSON.stringify(legacyDb));
+  ok("带「拆不出校区」教室的老库照样能导入升级（必填**不许**让迁移失败）",
+    legacyUpgrade.ok, legacyUpgrade.ok ? "" : legacyUpgrade.error);
+
+  const legacyList = await api.classrooms.list();
+  eq("那间房读得出来：校区是空串（不报错、也**不猜**一个校区给它）",
+    [legacyList.find((room) => room.id === "cold1")?.campus, legacyList.find((room) => room.id === "cold1")?.name],
+    ["", "自习区"]);
+  eq("显示就是纯教室名（不会多出一个孤零零的「·」）",
+    classroomLabel(legacyList.find((room) => room.id === "cold1")!), "自习区");
+  eq("同一份库里有校区的记录照常（只对「拆不出校区」的那条网开一面）",
+    [legacyList.find((room) => room.id === "cold2")?.campus, legacyList.find((room) => room.id === "cold2")?.name],
+    ["沐阳教育", "教室1"]);
+
+  const legacyVersion = (await api.classrooms.get("cold1"))!.version;
+  const legacySaveReject = await rejectionOf(() => api.classrooms.update("cold1", { capacity: 8 }));
+  ok("真要保存时才被必填拦住（改的是容量也不行 —— 整份提交里校区还是空的）",
+    legacySaveReject !== null && legacySaveReject.includes("校区"),
+    legacySaveReject ?? "没有报错 —— 一条没校区的老记录被静默存了回去");
+  eq("被拦下之后库里那条一点没变",
+    [(await api.classrooms.get("cold1"))?.capacity, (await api.classrooms.get("cold1"))?.version],
+    [6, legacyVersion]);
+
+  const legacyFilled = await api.classrooms.update("cold1", { campus: "城西校区" });
+  eq("把校区补上就能存了（＝界面上那个待补提示要去做的事）",
+    [legacyFilled?.campus, legacyFilled?.name, classroomLabel(legacyFilled!)],
+    ["城西校区", "自习区", "城西校区·自习区"]);
+
+  // ── ⑤ 界面：校区那一格必填（源码级）+ 待补灰标与教师那两个同一档 ──────────
+  const campusPage = stripComments(read("app/admin/(dashboard)/classrooms/page.tsx"));
+  ok("教室表单的「校区」那一格是必填（`required` + 提交前那句 JS 校验，两条都在）",
+    /label="校区"[\s\S]{0,700}?required/.test(campusPage) &&
+      campusPage.includes("校区必填 —— 它决定教室在列表与排课里显示成「校区·教室名」"),
+    "校区那一格看不见 required，或提交前那句 JS 校验不见了");
+  ok("名称那一格的提示说明「校区不在这一格」",
+    campusPage.includes("只写房间名（不要写校区）") && campusPage.includes("「校区」那一格单独填"));
+
+  /*
+   * 卡片上的**待补灰标**：老记录（校区空着）在列表上看起来和正常的没两样 ——
+   * 标题里只有房间名。正因为"看不出来"，才必须挂个标（与教师卡片上「用工未填」同一个道理）。
+   */
+  const teacherPage = stripComments(read("app/admin/(dashboard)/teachers/page.tsx"));
+  const todoClass = "rounded-sm border border-dashed border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[10px] text-ink-400";
+  ok("教室卡片上待补灰标的渲染条件就是「校区空着」",
+    campusPage.includes('room.campus.trim() === ""') && campusPage.includes("校区未填"),
+    "卡片上没有「校区空着就挂待办标」这件事");
+  ok("灰标带了「去哪儿补」的提示",
+    campusPage.includes('CAMPUS_TODO_HINT = "点编辑补校区"'));
+  ok("待补灰标与教师卡片的「用工未填」**用同一个样式**（各写一套会被读成两个不同的待办）",
+    campusPage.includes(todoClass) && teacherPage.includes(todoClass),
+    "某一页的待办灰标样式与另一页不一致");
+
+  // ── ⑥ 三处同一条口径（源码级：谁在哪儿判"必填"）────────────────────────
+  const apiSource = stripComments(read("lib/backend/api.ts"));
+  const importSource = stripComments(read("lib/backend/import.ts"));
+  const classroomSource = read("lib/backend/classrooms.ts");
+  ok("服务层的写入闸挂的是「先拆后判」那个钩子（不是只归一不校验）",
+    apiSource.includes("normalizeClassroomStrict") && apiSource.includes("classroomIssues(normalized)"),
+    "服务层那个钩子里看不到校验");
+  ok("导入那一列声明成必填、并且声明了「能从名称推导」（因此不进整份表头闸）",
+    /key: "campus"[\s\S]{0,400}?required: true[\s\S]{0,200}?derivableFrom: "name"/.test(importSource),
+    "校区那一列的声明变了");
+  ok("判据与文案各只有一处（教室那个模块里）",
+    classroomSource.includes("export function hasCampus") &&
+      classroomSource.includes("export function campusRequiredProblem"));
 
   __useStoreForTesting(memory);
 }
