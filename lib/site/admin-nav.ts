@@ -31,6 +31,12 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
       "课程由五个维度组合而成（学段 × 学科 / 项目 × 内容模块 × 班型 × 交付形态）。这里是那五张维度表：加课、改名、排序、勾学段都在这一页",
   },
   {
+    href: "/admin/offers",
+    label: "开放矩阵",
+    description:
+      "哪些「学科 × 内容模块 × 班型 × 交付形态」的组合真的开放：整行、整列、整个学段一次勾，供 AI 排课与诊断推荐判定",
+  },
+  {
     href: "/admin/content",
     label: "网站内容",
     description: "宣传网站上的对外文案：学生案例（/cases 与首页那块的来源）",

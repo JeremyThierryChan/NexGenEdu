@@ -267,6 +267,15 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     coursePartitions: siteCourses.partitions,
     catalog: catalogFromSeed(),
     /*
+     * 开放组合（v24）：**空表起步**。
+     *
+     * 与课程类型不同，这里刻意不灌任何种子：哪些组合开放是**机构的经营决定**，
+     * 拼一份「看起来很像」的初值只会让人以为那是自己设的（而矩阵上一眼看不出来）。
+     * 空表在矩阵里的表现是「还没人设过」—— 后台那一页会把每个学段的格子数出来，
+     * 机构照着勾就行。
+     */
+    offers: [],
+    /*
      * 报价配置：用站点内容（data/site/pricing.md）初始化，而不是在种子里
      * 再抄一份价格。抄一份的后果是「宣传页一个价、后台算出来另一个价」，
      * 而家长会先看到宣传页的价。

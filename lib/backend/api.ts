@@ -2,6 +2,7 @@ import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createEmptyDatabase } from "./initial";
 import { catalogFromSeed, catalogSeedSummary } from "./catalog-seed";
 import { catalogSummary, validateCatalog } from "./catalog";
+import { offerId, offersSummary, validateOffers } from "./offers";
 import {
   emptySiteContent,
   siteContentFromContent,
@@ -147,6 +148,7 @@ import type {
   CatalogModule,
   CatalogFormat,
   CatalogDelivery,
+  CatalogOffer,
   SiteCopyBlock,
   SiteCopyGroup,
   SiteCopyItem,
@@ -933,6 +935,18 @@ function migrate(db: Database): Database | null {
     db.version = 23;
   }
 
+  if (db.version === 23) {
+    /*
+     * v23 → v24：**开放组合**（`offers`：学科 × 内容模块 × 班型 × 交付形态）。
+     *
+     * 与 v23 不同，这一张**空表起步**：哪些组合开放是机构的经营决定，
+     * 拼一份"看起来很像"的初值只会让人以为那是自己设的（矩阵上一眼看不出来）。
+     * 空表的表现在矩阵里就是"还没人设过"—— 那正是要机构去看一眼的状态。
+     */
+    db.offers = [];
+    db.version = 24;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -966,6 +980,14 @@ function migrate(db: Database): Database | null {
    * 缺了就从种子补一份（确定性 id，不会与人工改过的行混在一起）。
    */
   if (db.catalog === undefined || !Array.isArray(db.catalog.stages)) db.catalog = catalogFromSeed();
+
+  /*
+   * 收尾归一：**组合表必须是一个数组**（与分区表、维度表同一条纪律）。
+   * 一份"自称 v24"却缺 `offers` 的文件（手改过的导出、半份恢复）会让后台
+   * 「开放矩阵」页读 `db.offers.filter` 直接 TypeError。缺了兜成空数组 ——
+   * 空数组的含义是明确的（"还没设过"），而"照维度表铺满"是会覆盖机构决策的猜法。
+   */
+  if (!Array.isArray(db.offers)) db.offers = [];
 
   return db.version === CURRENT_VERSION ? db : null;
 }
@@ -1024,6 +1046,40 @@ function normalizeCatalog(input: Catalog): Catalog {
     })),
     seededAt: text(input.seededAt),
   };
+}
+
+/**
+ * 组合表归一：去空白、补默认值、**丢掉不认识的字段**，并按四个维度 id 重算 `id`。
+ *
+ * 与 `normalizeCatalog` 同一条纪律。多出来的一步（重算 id）是刻意的：
+ * `offers` 的身份就是那四个 id，因此 id **不是可自由填写的字段** ——
+ * 交上来什么 id 都以四个维度为准，省得出现"id 与内容对不上"这种只能靠人眼发现的行。
+ */
+function normalizeOffers(input: readonly CatalogOffer[]): CatalogOffer[] {
+  const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+  const seen = new Set<string>();
+
+  const rows: CatalogOffer[] = [];
+  for (const item of input ?? []) {
+    const key = {
+      subjectId: text(item.subjectId),
+      moduleId: text(item.moduleId),
+      formatId: text(item.formatId),
+      deliveryId: text(item.deliveryId),
+    };
+    const id = offerId(key);
+    // 交上来两条一样的组合时以后一条为准（而不是留着两行让校验去报重复）
+    if (seen.has(id)) rows.splice(rows.findIndex((row) => row.id === id), 1);
+    seen.add(id);
+    rows.push({
+      id,
+      ...key,
+      open: item.open !== false,
+      note: text(item.note),
+      updatedAt: text(item.updatedAt),
+    });
+  }
+  return rows;
 }
 
 function persist(db: Database): void {
@@ -2829,6 +2885,51 @@ const localApi = {
       });
       persist(db);
       return clone(db.catalog);
+    },
+  },
+
+  /**
+   * **开放组合**（v24）：本机构开哪些"学科 × 内容模块 × 班型 × 交付形态"。
+   *
+   * 与 `catalog` 同一套做法（整份读、整份写），理由也一样：矩阵那一页是
+   * "打开 → 在格子上勾 → 保存"，而**空表是合法的初值**（机构还没设过）。
+   * 两个方法刻意只有这两个：
+   *   - 批量勾选（整行 / 整列 / 整个学段）是**页面上的纯函数**（`applyDecision`），
+   *     不必为每种批量动作加一个接口 —— 那会让"批量"的口径散在服务端好几处；
+   *   - 单条勾选与批量勾选走的是同一条保存路径，因此不存在"单条能存、批量被拒"这种事。
+   */
+  offers: {
+    /** 整张组合表（稀疏：只有机构表过态的才有行）。 */
+    async list(): Promise<CatalogOffer[]> {
+      await delay();
+      return clone(load().offers);
+    },
+
+    /**
+     * 存整张组合表（校验后整体替换）。
+     *
+     * 校验与维度表分开：`validateOffers` 管的是"引用还在不在、同一条组合有没有两行"
+     * （`validateCatalog` 管维度表自己的自洽）。两者都要过 —— 但组合表**不**要求
+     * 维度表本身合法（先改维度、再调组合是常态，反过来也一样）。
+     */
+    async save(input: readonly CatalogOffer[]): Promise<CatalogOffer[]> {
+      await delay();
+      const db = load();
+      const normalized = normalizeOffers(input);
+      const problems = validateOffers(normalized, db.catalog);
+      if (problems.length > 0) throw new Error(problems.join("；"));
+
+      const before = offersSummary(db.offers);
+      const after = offersSummary(normalized);
+      db.offers = normalized;
+      writeLog(db, {
+        entity: "开放矩阵",
+        action: "保存",
+        targetId: "",
+        summary: `开放组合：${after}` + (before === after ? "（规模未变）" : `（原 ${before}）`),
+      });
+      persist(db);
+      return clone(db.offers);
     },
   },
 
@@ -5448,6 +5549,7 @@ export type {
   CatalogModule,
   CatalogFormat,
   CatalogDelivery,
+  CatalogOffer,
   SiteFeaturedCourse,
   SiteFeaturedPage,
   SiteCopyBlock,

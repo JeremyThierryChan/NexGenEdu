@@ -79,6 +79,13 @@ export const API_CONTRACT: ContractGroup[] = [
        * 后台那一页是"打开 → 在这一份草稿上增删改排序 → 保存"，整份交最省事。
        */
       "catalog.list", "catalog.save", "catalog.resetToSeed",
+      /*
+       * 开放组合（v24）：学科 × 内容模块 × 班型 × 交付形态。
+       *
+       * 与维度表同一套做法（整份读、整份写），**批量勾选是页面上的纯函数** ——
+       * 不为"整行 / 整列 / 整个学段"各加一个接口，否则"批量"的口径会散在服务端好几处。
+       */
+      "offers.list", "offers.save",
     ],
   },
   {

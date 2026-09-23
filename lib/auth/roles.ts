@@ -60,6 +60,11 @@ export const PAGE_ACCESS: Record<string, Role[]> = {
    * 这与 `GROUP_ACCESS.crud` 对 `catalog.save` 的判定是同一个答案（该分组不给普通教师）。
    */
   "/admin/catalog": ["技术管理员", "财务管理员", "招生老师"],
+  /*
+   * 开放矩阵（后台「开放矩阵」页）：勾"哪些组合真的开"。与课程类型同一档 ——
+   * 它是经营口径的设置（技术管理员 / 财务管理员 / 招生老师），教师只读。
+   */
+  "/admin/offers": ["技术管理员", "财务管理员", "招生老师"],
   "/admin/lessons": ["技术管理员", "招生老师", "普通教师"],
   "/admin/calendar": ["技术管理员", "财务管理员", "招生老师", "普通教师"],
   "/admin/timetable": ["技术管理员", "财务管理员", "招生老师", "普通教师"],
@@ -393,6 +398,12 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
    * （下面课程分区那段写了同一条取舍，自检也盯着这种死条目）。
    */
   "catalog.list": "global",
+  /*
+   * 开放组合（`offers`）：与维度表同一条理由 —— 它描述的是"本机构开哪些组合"，
+   * 不含任何学生 / 金额信息，而且前台报价与将来的排课下拉都要读它。
+   * 写方法 `offers.save` 同样**不登记**（`crud` 那一档本来就不给普通教师）。
+   */
+  "offers.list": "global",
   "site.publicContent": "global",
 
   /* 我的课：列表、单条、按日期 / 区间 / 教室 / 学生 / 教师取 */

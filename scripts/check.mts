@@ -129,6 +129,17 @@ import {
   validateCatalog,
 } from "@/lib/backend/catalog";
 import { catalogFromSeed, catalogId, catalogSeedSummary } from "@/lib/backend/catalog-seed";
+import {
+  applyDecision,
+  buildMatrix,
+  offerId,
+  offerKey,
+  offersByKey,
+  offersOfDimension,
+  resolveOffer,
+  validateOffers,
+} from "@/lib/backend/offers";
+import type { CatalogOffer } from "@/lib/backend/types";
 import { validateFeaturedPage } from "@/lib/backend/site-content";
 import {
   childPartitions,
@@ -9070,6 +9081,187 @@ console.log("\n=== 30. 课程类型：五张维度表（v23）===");
   const repaired = await api.exportDatabase();
   ok("导入后被兜成种子那一份（后台不会整页打不开）",
     Array.isArray(repaired.catalog.stages) && repaired.catalog.stages.length === seedSummary.stages);
+}
+
+console.log("\n=== 31. 开放矩阵：本机构开哪些组合（v24）===");
+
+/*
+ * 维度表回答"可以有哪些维度"，组合表回答"本机构开哪些组合"。
+ * 这一节守五件事：
+ *
+ *   1. **矩阵的形状**：行 = 学科 + 它的模块（含"不分模块"那一行），列 = 班型 × 交付形态，
+ *      分组（"外语等级考试"这种桶）**不出现在行里**；
+ *   2. **组合的身份**：四个维度 id 拼出来的 id 是确定的（可重复、不可能重复两行），
+ *      而且**不按下标反解**（学科 / 模块 id 里本来就带 `·`）；
+ *   3. **三种状态**：没设过 / 开放 / 明确关闭是**三件事**，批量勾选能退回"没设过"；
+ *   4. **校验真的拦**：悬空引用（维度被删之后留下的组合）、模块跨学科、同一条组合两行、id 对不上；
+ *   5. **API 与迁移**：v23 老库升到 v24 时是**空表**（不是猜一份初值），`save` 落库并留痕，
+ *      而"自称当前版本却缺这张表"的文件也要被兜住。
+ */
+{
+  __useStoreForTesting(memory);
+
+  const seedCatalogForOffers = catalogFromSeed();
+  const matrix = buildMatrix(seedCatalogForOffers);
+
+  // ① 矩阵的形状
+  const groupIds = new Set(
+    seedCatalogForOffers.subjects.flatMap((subject) => subject.parentIds),
+  );
+  ok("矩阵的行是「学科 + 它的模块 + 每个学科那一行『不分模块』」",
+    matrix.rows.length ===
+      seedCatalogForOffers.subjects.filter((subject) => !groupIds.has(subject.id)).length +
+        seedCatalogForOffers.modules.length);
+  eq("列 = 班型 × 交付形态（5 × 5 = 25）", matrix.columns.length,
+    seedCatalogForOffers.formats.length * seedCatalogForOffers.deliveries.length);
+  eq("分组（桶）自己不出现在行里",
+    matrix.rows.some((row) => row.subjectName === "外语等级考试"), false);
+  ok("而分组下面的学科在（雅思 / 日语…）",
+    matrix.rows.some((row) => row.subjectName === "雅思") &&
+      matrix.rows.some((row) => row.subjectName === "日语"));
+  eq("每个学科都恰好有一行『不分模块』",
+    matrix.rows.filter((row) => row.moduleId === "").length,
+    seedCatalogForOffers.subjects.filter((subject) => !groupIds.has(subject.id)).length);
+  const objectiveRow = matrix.rows.find(
+    (row) => row.subjectName === "语文" && row.moduleName === "客观题",
+  );
+  ok("模块行带自己的学段（语文的「客观题」只在初中与高中，不在小学）",
+    objectiveRow !== undefined && !objectiveRow.stageIds.includes(catalogId("st", "小学")) &&
+      objectiveRow.stageIds.includes(catalogId("st", "初中")));
+
+  // ② 组合的身份
+  const oneKey = {
+    subjectId: catalogId("subj", "语文"),
+    moduleId: catalogId("mod", "语文·客观题"),
+    formatId: catalogId("fmt", "一对一"),
+    deliveryId: catalogId("dlv", "网课"),
+  };
+  eq("组合 id 由四个维度 id 拼出来（确定性）",
+    offerId(oneKey),
+    `off_${oneKey.subjectId}·${oneKey.moduleId}·${oneKey.formatId}·${oneKey.deliveryId}`);
+  eq("同一个组合问两次得到同一个 id", offerId(oneKey), offerId({ ...oneKey }));
+  ok("键里带 `·` 也不影响身份（模块 id 自己就带 `·`）",
+    offerId(oneKey).includes("mod_语文·客观题"));
+  eq("空模块（不分模块）也是合法的一条",
+    offerId({ ...oneKey, moduleId: "" }),
+    `off_${oneKey.subjectId}··${oneKey.formatId}·${oneKey.deliveryId}`);
+
+  // ③ 三种状态与批量勾选
+  const now = "2026-09-23T00:00:00.000Z";
+  const keys = [oneKey, { ...oneKey, formatId: catalogId("fmt", "一对二") }];
+  const opened = applyDecision([], keys, "open", now);
+  eq("批量开放：两条都进来了", opened.length, 2);
+  eq("每条的 id 与四个维度一致",
+    opened.every((offer) => offer.id === offerId(offer)), true);
+  const openedIndex = offersByKey(opened);
+  eq("解析：开的算 open", resolveOffer(openedIndex, oneKey), "open");
+  eq("解析：没设过的算 unset",
+    resolveOffer(openedIndex, { ...oneKey, deliveryId: catalogId("dlv", "托管") }), "unset");
+
+  const withClosed = applyDecision(opened, [oneKey], "closed", now);
+  eq("改成明确关闭之后不是删行，而是 open: false",
+    [withClosed.length, withClosed.find((offer) => offerKey(offer) === offerKey(oneKey))?.open],
+    [2, false]);
+  eq("解析：明确关闭算 closed", resolveOffer(offersByKey(withClosed), oneKey), "closed");
+
+  const cleared = applyDecision(withClosed, [oneKey], "unset", now);
+  eq("清除设置＝把这一行删掉（回到『还没设过』）",
+    [cleared.length, resolveOffer(offersByKey(cleared), oneKey)], [1, "unset"]);
+  eq("清除别的行不受影响",
+    resolveOffer(offersByKey(cleared), keys[1]!), "open");
+  eq("批量动作不改入参（纯函数）", opened.length, 2);
+  ok("批量勾选保留原来的备注",
+    applyDecision(
+      applyDecision([], [oneKey], "open", now).map((offer) => ({ ...offer, note: "只在寒暑假开" })),
+      [oneKey], "closed", now,
+    )[0]?.note === "只在寒暑假开");
+
+  /** 跑一次"应当被拒绝"的保存，把服务端的原话取回来（没抛错就返回空串，断言会因此报红）。 */
+  const refusalOf = async (run: () => Promise<unknown>): Promise<string> => {
+    try {
+      await run();
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+
+  // ④ 校验真的拦
+  const catalogForOffers = seedCatalogForOffers;
+  const badOffers = (mutate: (rows: CatalogOffer[]) => void): string[] => {
+    const rows = applyDecision([], [oneKey], "open", now);
+    mutate(rows);
+    return validateOffers(rows, catalogForOffers);
+  };
+  eq("一条正常的组合通过", validateOffers(applyDecision([], keys, "open", now), catalogForOffers), []);
+  ok("引用不存在的学科被拒",
+    badOffers((rows) => { rows[0]!.subjectId = "subj_不存在"; }).some((t) => t.includes("不存在的学科")));
+  ok("引用不存在的班型被拒",
+    badOffers((rows) => { rows[0]!.formatId = "fmt_不存在"; }).some((t) => t.includes("不存在的班型")));
+  ok("引用不存在的交付形态被拒",
+    badOffers((rows) => { rows[0]!.deliveryId = "dlv_不存在"; }).some((t) => t.includes("不存在的交付形态")));
+  ok("引用不存在的内容模块被拒",
+    badOffers((rows) => { rows[0]!.moduleId = "mod_不存在"; }).some((t) => t.includes("不存在的内容模块")));
+  ok("模块挂在别的学科下被拒（模块不跨学科复用）", (() => {
+    const other = seedCatalogForOffers.modules.find(
+      (item) => item.subjectId !== oneKey.subjectId,
+    );
+    if (other === undefined) return false;
+    return badOffers((rows) => { rows[0]!.moduleId = other.id; })
+      .some((t) => t.includes("不属于它那个学科"));
+  })());
+  ok("同一条组合两行被拒",
+    badOffers((rows) => { rows.push({ ...rows[0]! }); }).some((t) => t.includes("只能有一行")));
+  ok("id 与四个维度对不上被拒",
+    badOffers((rows) => { rows[0]!.id = "off_自己写的"; }).some((t) => t.includes("对不上")));
+  ok("空 id 被拒",
+    badOffers((rows) => { rows[0]!.id = ""; }).some((t) => t.includes("没有 id")));
+  eq("一条组合都没设过＝合法（机构还没开始勾）", validateOffers([], catalogForOffers), []);
+
+  // ⑤ 「这一删会牵动几条组合」：后台删维度前的警告要能算出来
+  const touched = applyDecision([], keys, "open", now);
+  eq("按学科查引用它的组合", offersOfDimension(touched, "subject", oneKey.subjectId).length, 2);
+  eq("按班型查引用它的组合", offersOfDimension(touched, "format", oneKey.formatId).length, 1);
+  eq("没人引用的维度返回空", offersOfDimension(touched, "delivery", catalogId("dlv", "托管")), []);
+
+  // ⑥ API 与迁移
+  const legacyOffersDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & { version: number };
+  delete legacyOffersDb.offers;
+  legacyOffersDb.version = 23;
+  eq("v23 老库（没有组合表）能升级导入",
+    (await api.importDatabase(JSON.stringify(legacyOffersDb))).ok, true);
+  const afterOffers = await api.exportDatabase();
+  eq("升级后版本号是当前版本", afterOffers.version, CURRENT_VERSION);
+  eq("迁移**不猜初值**：组合表空着起步（哪些组合开放是机构的经营决定）",
+    afterOffers.offers.length, 0);
+
+  eq("offers.list 读出来的是库里的那一份", (await api.offers.list()).length, 0);
+
+  const offerDraft = applyDecision(await api.offers.list(), keys, "open", now);
+  const savedOffers = await api.offers.save(offerDraft);
+  eq("合法的组合表能保存", savedOffers.length, 2);
+  const offersLog = await api.logs.list();
+  eq("保存开放矩阵写了操作日志", offersLog[0]?.entity, "开放矩阵");
+  ok("日志里写了「开放几条 / 明确关闭几条」这句话",
+    (offersLog[0]?.summary ?? "").includes("开放"));
+  eq("再读一次，库里确实是那一份",
+    (await api.offers.list()).map((offer) => offer.id).sort(),
+    savedOffers.map((offer) => offer.id).sort());
+
+  const offerRefusal = await refusalOf(async () =>
+    await api.offers.save([{ ...savedOffers[0]!, subjectId: "subj_不存在" }]),
+  );
+  ok("offers.save 拦住悬空引用并把理由说清", offerRefusal.includes("不存在的学科"));
+  eq("被拒之后库里那一份没变（不是「改了一半」）", (await api.offers.list()).length, 2);
+
+  /* 尾闸门：自称当前版本却缺 `offers` 的文件（手改过的导出、半份恢复）也要能导入 */
+  const brokenOffersDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & { version: number };
+  delete brokenOffersDb.offers;
+  brokenOffersDb.version = CURRENT_VERSION;
+  eq("自称当前版本、却缺组合表的文件也能导入",
+    (await api.importDatabase(JSON.stringify(brokenOffersDb))).ok, true);
+  ok("导入后被兜成空数组（矩阵页不会整页打不开）",
+    Array.isArray((await api.exportDatabase()).offers));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

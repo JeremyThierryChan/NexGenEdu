@@ -11,6 +11,7 @@
  */
 
 import { api } from "../lib/backend/api.ts";
+import { applyDecision, offerKey, offersByKey, resolveOffer } from "../lib/backend/offers.ts";
 import { isRemoteMode, remoteBase } from "../lib/backend/remote.ts";
 
 /*
@@ -438,6 +439,103 @@ await check("课程类型", "恢复种子（收尾：验收加的那几行必须
     restored.formats.some((item) => item.name === "验收班型"),
   ];
 }, (value: boolean[]) => value.every((item) => item === false));
+
+/* ── 1.7 开放矩阵（哪些「学科 × 模块 × 班型 × 交付」的组合真的开）── */
+/*
+ * 按机构在后台的真实顺序走一遍：读 → 批量开放两条组合 → 解析确认 → 非法的一份被拒
+ * → 再读确认落库 → 收尾清除自己加的那些（这是机构自己的库，验完要回到原样）。
+ *
+ * 注意挑学科时要**排掉分组**（「外语等级考试」那种桶也在 `subjects` 里，
+ * 但它不是能开课的学科，也没有模块）—— 自检第 31 节专门钉着这件事。
+ */
+const offersBefore = await api.offers.list();
+const groupIdsOf = (catalog: { subjects: Array<{ id: string; parentIds: string[] }> }): Set<string> =>
+  new Set(catalog.subjects.flatMap((item) => item.parentIds));
+
+await check("开放矩阵", "组合表读得到（稀疏：可能一条都没有）", async () => Array.isArray(offersBefore));
+
+await check("开放矩阵", "批量开放两条组合（页面上的批量勾选走的就是这一条保存）", async () => {
+  const catalog = await api.catalog.list();
+  const groups = groupIdsOf(catalog);
+  const subject = catalog.subjects.find((item) => !groups.has(item.id));
+  const firstModule = catalog.modules.find((item) => item.subjectId === subject?.id);
+  const format = catalog.formats[0];
+  const delivery = catalog.deliveries[0];
+  if (subject === undefined || firstModule === undefined || format === undefined || delivery === undefined) return null;
+  const keys = [
+    { subjectId: subject.id, moduleId: "", formatId: format.id, deliveryId: delivery.id },
+    { subjectId: subject.id, moduleId: firstModule.id, formatId: format.id, deliveryId: delivery.id },
+  ];
+  const saved = await api.offers.save(applyDecision(offersBefore, keys, "open", new Date().toISOString()));
+  return [saved.length, saved.every((offer) => offer.open)];
+}, (value: unknown[]) => value[0] === 2 && value[1] === true);
+
+await check("开放矩阵", "解析：开的算 open、另一条交付形态仍是没设过", async () => {
+  const catalog = await api.catalog.list();
+  const groups = groupIdsOf(catalog);
+  const subject = catalog.subjects.find((item) => !groups.has(item.id));
+  const format = catalog.formats[0];
+  const delivery = catalog.deliveries[0];
+  const other = catalog.deliveries.find((item) => item.id !== delivery?.id);
+  if (subject === undefined || format === undefined || delivery === undefined || other === undefined) {
+    return ["?", "?"];
+  }
+  const index = offersByKey(await api.offers.list());
+  return [
+    resolveOffer(index, { subjectId: subject.id, moduleId: "", formatId: format.id, deliveryId: delivery.id }),
+    resolveOffer(index, { subjectId: subject.id, moduleId: "", formatId: format.id, deliveryId: other.id }),
+  ];
+}, (value: string[]) => value[0] === "open" && value[1] === "unset");
+
+await check("开放矩阵", "明确关闭是第三态（不是把行删掉）", async () => {
+  const catalog = await api.catalog.list();
+  const groups = groupIdsOf(catalog);
+  const subject = catalog.subjects.find((item) => !groups.has(item.id));
+  const key = {
+    subjectId: subject?.id ?? "",
+    moduleId: "",
+    formatId: catalog.formats[0]?.id ?? "",
+    deliveryId: catalog.deliveries[0]?.id ?? "",
+  };
+  const current = await api.offers.list();
+  const closed = await api.offers.save(applyDecision(current, [key], "closed", new Date().toISOString()));
+  return [
+    closed.length,
+    resolveOffer(offersByKey(closed), key),
+  ];
+}, (value: unknown[]) => value[0] === 2 && value[1] === "closed");
+
+await check("开放矩阵", "引用不存在的班型会被拒（不是静默保存）", async () => {
+  const offers = await api.offers.list();
+  const only = offers[0];
+  if (only === undefined) return "没有可用的组合";
+  try {
+    await api.offers.save([{ ...only, formatId: "fmt_不存在" }]);
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("不存在的班型") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+
+await check("开放矩阵", "保存写了操作日志", async () => {
+  const logs = await api.logs.list();
+  return logs.some((item) => item.entity === "开放矩阵");
+});
+
+await check("开放矩阵", "清除收尾（回到验收前的状态）", async () => {
+  const before = new Set(offersBefore.map(offerKey));
+  const current = await api.offers.list();
+  const added = current
+    .filter((offer) => !before.has(offerKey(offer)))
+    .map((offer) => ({
+      subjectId: offer.subjectId,
+      moduleId: offer.moduleId,
+      formatId: offer.formatId,
+      deliveryId: offer.deliveryId,
+    }));
+  const cleared = await api.offers.save(applyDecision(current, added, "unset", new Date().toISOString()));
+  return cleared.length;
+}, (n: number) => n === offersBefore.length);
 
 /* ── 2 教室 ── */
 let classroomId = "";
