@@ -7858,6 +7858,65 @@ console.log("\n=== 23. 课程分区：分区是数据，不是每门课上的一
     /if \(value === PICK_PLACEHOLDER\) return;/.test(coursesPageCode));
 }
 
+console.log("\n=== 24. 后台外壳：滚动时顶栏与侧栏不动（且不破坏滚动那套机制）===");
+
+/*
+ * 机构反馈的原话是「后台页面上下滑动的时候左边的导航不应该随着页面移动」。
+ *
+ * 这一节钉住四件事，前三件是"钉住"本身的要件（少一件就失效），
+ * 第四件是"别用错做法"——这条最容易被后来的人改坏：
+ *
+ *   1. 侧栏 `sticky` + `top-<顶栏高度变量>`：贴在顶栏下面；
+ *   2. 侧栏 `self-start`：**flex 行默认把子项拉伸到整列高**，而整列高的元素是钉不住的
+ *      （它会跟着页面一起滚走，看起来像"样式没生效"）。这一条是整件事的命门 ——
+ *      以前那行注释写着"桌面端为固定侧栏"，而代码里既没有 sticky 也没有 self-start；
+ *   3. 侧栏自己有 `max-h` + `overflow-y-auto`：被钉住之后，比视口高的部分必须能滚到，
+ *      否则导航最后几项**怎么滚页面都够不到**（钉住的另一半，最容易漏）;
+ *   4. **不许用 `fixed`**：fixed 会把元素移出文档流，文档高度随之变矮 —— 而这套界面里
+ *      `useScrollGuard`（就地动作的滚动守护）、`ScrollMemory`（整页重载后还原位置）、
+ *      "点编辑不跳顶部"整条链路都依赖"文档高度 / 窗口滚动位置"。sticky 仍在文档流里，
+ *      对这些机制透明。因此这条断言查的是"用对了做法"，而不只是"看起来对了"。
+ */
+{
+  const readShell = (file: string): string => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  /*
+   * **先去掉注释再查**：这几段的注释里正解释着 `lg:self-start`、`h-14`、`fixed` 这些词，
+   * 直接搜字面量会让"把类名删掉、只留一句解释"的改动照样通过 —— 那不是断言，是摆设。
+   * 第一版就是这么写的，做反向验证（删掉 self-start）时它照样绿，当场发现并改成这样。
+   */
+  const stripComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const sidebar = stripComments(readShell("components/layout/AdminSidebar.tsx"));
+  const topBar = stripComments(readShell("components/admin/AdminTopBar.tsx"));
+  const shell = stripComments(readShell("app/admin/(dashboard)/layout.tsx"));
+
+  ok("侧栏用了 sticky（不是 fixed）", /lg:sticky/.test(sidebar) && !/\bfixed\b/.test(sidebar));
+  ok("侧栏贴在顶栏下面，偏移用的是顶栏高度变量（而不是写死一个数字）",
+    /lg:top-\[var\(--admin-topbar-height\)\]/.test(sidebar));
+  ok("侧栏有 self-start —— 没有它，被拉伸到整列高的侧栏是钉不住的",
+    /lg:self-start/.test(sidebar));
+  ok("侧栏高过视口时自己能滚（否则被钉住后最后几项够不到）",
+    /lg:max-h-\[calc\(100dvh_-_var\(--admin-topbar-height\)\)\]/.test(sidebar) &&
+    /lg:overflow-y-auto/.test(sidebar));
+  ok("顶栏也钉住了（否则侧栏上方会空出一条缝）", /sticky top-0/.test(topBar) && !/\bfixed\b/.test(topBar));
+  ok("顶栏高度用同一个变量（两处各写一个数字就会错位）",
+    /h-\[var\(--admin-topbar-height\)\]/.test(topBar) && !/\bh-14\b/.test(topBar));
+  eq("顶栏高度变量只在一处定义",
+    ["components/admin/AdminTopBar.tsx", "components/layout/AdminSidebar.tsx"]
+      .filter((file) => /--admin-topbar-height\s*:/.test(stripComments(readShell(file)))),
+    []);
+  ok("变量确实定义在外壳里（否则侧栏的 top 是空的，sticky 会贴到视口顶端）",
+    /"--admin-topbar-height":\s*"3\.5rem"/.test(shell));
+  /*
+   * 分隔线：侧栏不再被拉伸，画在它身上的右边框会只画到导航最后一项就断掉 ——
+   * 因此这条线必须画在内容区那一侧。查两件事：侧栏不再挂 border-r，main 挂上了。
+   */
+  ok("分隔线画在内容区一侧（侧栏不再拉伸，画它身上会断在半途）",
+    !/lg:border-r/.test(sidebar) && /lg:border-l lg:border-ink-200/.test(shell));
+  ok("移动端仍是横向滚动条（小屏不钉，只占一行）",
+    /max-lg:overflow-x-auto/.test(sidebar) && /max-lg:border-b/.test(sidebar));
+}
+
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
 process.exit(failures === 0 ? 0 : 1);
 

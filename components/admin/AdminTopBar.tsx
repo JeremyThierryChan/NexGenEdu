@@ -14,6 +14,15 @@ import { useAuth } from "@/components/admin/AuthContext";
  * 每次请求按令牌所属账号设置。早期是前端调 `api.setOperator(name)`，而它是同步方法、
  * 经远端代理会静默变成 Promise —— 操作日志里的操作人一直是默认值，且没人会发现。
  * 现在前端说什么都不作数，这也是"谁改的"应当由服务端说了算的一个例子。
+ *
+ * ## 它是**钉住的**（页面滚动时不动）
+ *
+ * 侧边导航的 sticky 偏移就是"顶栏高度"，它得贴在顶栏下面：顶栏若跟着滚走，
+ * 侧栏上方就会空出一条缝、露出后面的内容。因此两者一起钉（见 `(dashboard)/layout.tsx`）。
+ * 顺带的好处是搜索框与「退出登录」永远在眼前，不必先滚回顶端。
+ *
+ * 高度用 `--admin-topbar-height`（**唯一一份定义**在 layout 里）：
+ * 侧栏的 `top-` 与 `max-h-` 引用的是同一个变量，改高度只改一处。
  */
 export function AdminTopBar() {
   const router = useRouter();
@@ -28,8 +37,12 @@ export function AdminTopBar() {
   }
 
   return (
-    <header className="border-b border-ink-200 bg-white">
-      <div className="flex h-14 items-center justify-between gap-4 px-4 sm:px-6">
+    <header className="sticky top-0 z-20 border-b border-ink-200 bg-white">
+      {/*
+        高度用那个共享变量（而不是 `h-14`）：它同时决定侧栏从哪里开始贴。
+        两处各写一个数字的话，改一处就会出现"侧栏压住第二行导航"这种错位。
+      */}
+      <div className="flex h-[var(--admin-topbar-height)] items-center justify-between gap-4 px-4 sm:px-6">
         <div className="flex items-baseline gap-2">
           <span className="text-base font-bold tracking-tight text-brand-800">
             NexGenEdu
