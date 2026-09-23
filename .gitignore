@@ -50,3 +50,6 @@ server/backups/
 # 本机环境变量（不提交）
 .env.local
 .env*.local
+
+# 机构自己的思维导图（用户的文件，不提交；早先一次 git add -A 误入库）
+*.xmind
