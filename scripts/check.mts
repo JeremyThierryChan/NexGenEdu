@@ -8056,6 +8056,37 @@ console.log("\n=== 25. 网站内容来源：后端 / 空白 /（显式）模版 
   __useBackendSnapshotForTesting(null);
 
   /*
+   * ③.5 报价那一块的**优先级**：backend 模式下，库里的价压过内容文件里的价。
+   *
+   * 机构问过一句「前端的基础价格已经可以根据后端走了吗？」—— 答案是"看在哪构站"，
+   * 而这里钉住的正是那个容易搞反的次序：本机构建（后端在跑）**库里的那份优先**，
+   * `data/site/pricing.md` 只在 template 模式（线上 Pages 那一份）与兜底时才用得上。
+   * 搞反的症状是"明明起了后端、也改了价，重新构站却没变"。
+   *
+   * 断言用的是**故意与文件不一样**的价格（文件里小学语文是 150，快照里给 777）：
+   * 结果必须是 777 —— 否则说明读的还是文件。
+   */
+  const priceSnapshot = {
+    ...emptySnapshot,
+    pricing: {
+      ...emptySnapshot.pricing,
+      stages: [{ name: "小学", courses: [{ name: "小学语文", basePrice: 777, available: true }] }],
+      classTypes: [{ name: "一对一", mode: "coefficient", coefficient: 1 }],
+      durations: [{ name: "1 小时", hours: 1, multiplier: 1 }],
+    },
+  } as unknown as PublicSite;
+  __useBackendSnapshotForTesting(priceSnapshot);
+  const fromBackend = getPricingData();
+  const fromFile = getPricingDataFromTemplate();
+  const priceOf = (data: typeof fromBackend, name: string) =>
+    data.stages.flatMap((stage) => stage.courses).find((course) => course.name === name)?.price;
+  ok("backend 模式下：报价取的是**库里那一份**（文件里那个价被忽略）",
+    priceOf(fromBackend, "小学语文") === 777 && priceOf(fromFile, "小学语文") === 150);
+  eq("而且阶段也跟着库走（不是「库里查不到就掺一半文件进来」）",
+    fromBackend.stages.map((stage) => stage.name), ["小学"]);
+  __useBackendSnapshotForTesting(null);
+
+  /*
    * ④ 源码级三条：判据只有一处、不许"逐块回落"、生成器把三种取值都写出来。
    *    `backendX() ?? getXFromTemplate()` 正是"半个页面来自文件"的来路。
    */
