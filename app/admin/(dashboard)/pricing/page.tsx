@@ -13,8 +13,9 @@ import { classTypeIssuesText, syncClassTypes } from "@/lib/backend/class-types";
 import { MultiSelect } from "@/components/admin/MultiSelect";
 import {
   addLibraryCourseToPricing,
+  pricingConfigCore,
+  pricingConfigFromContent,
   pricingStatusForCourses,
-  PRICING_SOURCE_ADMIN,
   validatePricingConfig,
   type PricingConfig,
   type QuoteResult,
@@ -126,6 +127,24 @@ export default function AdminPricingPage() {
   const dirty = useMemo(
     () => saved !== null && draft !== null && JSON.stringify(saved) !== JSON.stringify(draft),
     [draft, saved],
+  );
+
+  /**
+   * 「（未导出上线）」到底该不该显示 —— **真的比一次内容文件**，而不是只看来源。
+   *
+   * 原先这句写的是 `draft.source === "后台修改"`，于是它**永远不会消失**：点「导出配置」、
+   * 把片段替换进 `data/site/pricing.md` 并发布之后，配置的来源仍然是"后台修改"，
+   * 页面却还在说"未导出上线" —— 机构要么以为网站上的价还是旧的（白跑一遍发布），
+   * 要么因为这句永远在而干脆不当回事（那这句提示就白写了）。
+   *
+   * 现在比的是**库里存着的这一份**（`saved`，不是正在编辑的草稿 —— 草稿没保存时
+   * 按钮上已经写着"保存修改"）与内容文件里那一份。比的是 `pricingConfigCore`：
+   * 它刻意忽略 `courseId` 与班型的 `formatId`，那两样是后台专属的关联、内容文件里没有写法
+   * （比进去的话，"明明一样"的两份也会永远不相等）。
+   */
+  const publishedInSync = useMemo(
+    () => saved !== null && pricingConfigCore(saved) === pricingConfigCore(pricingConfigFromContent()),
+    [saved],
   );
 
   /**
@@ -389,7 +408,7 @@ export default function AdminPricingPage() {
         <span className="text-xs text-ink-500">
           来源：{draft.source}
           {draft.updatedAt === "" ? "" : ` · 最后修改 ${draft.updatedAt.slice(0, 16).replace("T", " ")}`}
-          {draft.source === PRICING_SOURCE_ADMIN ? "（未导出上线）" : ""}
+          {publishedInSync ? "" : "（未导出上线）"}
         </span>
       </div>
 

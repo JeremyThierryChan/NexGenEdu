@@ -124,6 +124,7 @@ import {
   summarizeCourses,
   validateCourse,
 } from "./courses";
+import { extraCourseDimensions, extraCourses } from "./extra-courses";
 import type { CourseOption, CourseSummary } from "./courses";
 import { nextId } from "./ids";
 import {
@@ -641,8 +642,13 @@ function migrate(db: Database): Database | null {
     /*
      * v11 → v12：新增课程库。老库没有课程表 → 用网站内容里的课程卡片灌入，
      * 与迁移前「科目候选来自网站内容」完全一致，因此升级不会让任何一节课的科目失效。
+     *
+     * 还要补上**报价里有、卡片上没有的那几门后台课**（`extraCourses()`）：
+     * 升级上来的库如果只有网站卡片，报价页上那些课（中考冲刺 / 医学 / 成人旅游、出行…）
+     * 在课程库里就不存在 —— 报课时选不到、也排不了课，与"以课程清单为准"正好相反。
+     * 与空库起步、示例库用的是同一份定义。
      */
-    db.courses = db.courses ?? coursesFromSite();
+    db.courses = db.courses ?? [...coursesFromSite(), ...extraCourses()];
     db.version = 12;
   }
 
@@ -856,7 +862,23 @@ function migrate(db: Database): Database | null {
       };
       void _dropCategory;
       void _dropSubgroup;
-      return normalizeCourse({ ...rest, partitionId });
+      /*
+       * **id 也在这里补上**。
+       *
+       * v12 那一步是把内容文件里的卡片按**名字**灌进来的（`coursesFromSite()`），
+       * 那时没有 id —— 而台账里改名 / 删除 / 挪分区、报课与排课引用课程，全都按 id 走。
+       * 修这一行之前的事实是：**从 v11 升上来的库，课程一条都没有 id**
+       * （自检当时只数了条数，所以一直没被发现；补上断言之后当场现形）。
+       *
+       * id 与 `materializeSiteCourses()` 用同一套（`course-site-<卡片路径>`），
+       * 于是"升级上来的库"与"新装的库"里同一门课的 id 完全一样 —— 备份 /
+       * 导出 JSON 在两套库之间搬来搬去时不会认成两门课。
+       */
+      const path = String((rest as { path?: unknown }).path ?? "").trim();
+      const id =
+        String((rest as { id?: unknown }).id ?? "").trim() ||
+        (path === "" ? nextId("course") : `course-site-${path}`);
+      return normalizeCourse({ ...rest, id, partitionId });
     });
     db.version = 18;
   }
@@ -1034,7 +1056,26 @@ function migrate(db: Database): Database | null {
      * 猜错的后果是排课与诊断按错的维度筛课，而页面上看起来一切正常。
      */
     db.courses = db.courses.map((course) => {
-      const suggestion = suggestCourseDimensions(course.name, db.catalog);
+      /*
+       * **已经挂过维度的课程不动**：这一步是"给老库补上"，不是"按名字重算一遍"。
+       *
+       * 为什么会遇到"已经挂过"的：`extraCourses()` 那几门后台课在 v12 那一步就
+       * 带着维度进库了，而按名字猜不出它们的学科（「小学奥数」里没有学科名）。
+       * 无条件覆盖的后果是：升级上来的库把这十二门课的学科全抹掉，
+       * 而台账上只表现为"这几门课又变成未挂维度了"。
+       */
+      // 老库的课程行**没有**这三个字段（这一步就是来补它们的），因此要先兜成空数组
+      const linked =
+        (course.stageIds?.length ?? 0) > 0 || (course.subjectIds?.length ?? 0) > 0;
+      if (linked) return normalizeCourse(course);
+      /*
+       * 先查「只在后台用的那几门课」的清单，再退回按名字猜：那份清单里的名字
+       * （小学奥数 / 中考冲刺 / 特殊计划专项…）按名字是猜不出学科的，而它们的维度
+       * 本来就写死在 `extra-courses.ts` 里 —— 不然升级上来的库会把它们列进
+       * "还没挂到维度上的课程"，明明有确定答案却要人手点一遍。
+       */
+      const suggestion =
+        extraCourseDimensions(course.name) ?? suggestCourseDimensions(course.name, db.catalog);
       return normalizeCourse({
         ...course,
         stageIds: suggestion.stageIds,
@@ -1568,10 +1609,18 @@ function describePricingChange(before: PricingConfig, after: PricingConfig): str
  * 依赖页面自觉调用一定会漏，然后两边就悄悄分叉了（家长看到旧课名、或者报了已停开的课）。
  */
 function syncPricingWithCourses(db: Database): string[] {
-  const { config, changes } = syncLibraryLinks(db.pricing, db.courses);
+  const { config, changes, linkOnly } = syncLibraryLinks(db.pricing, db.courses);
   if (changes.length === 0) return [];
 
-  db.pricing = { ...config, source: PRICING_SOURCE_ADMIN, updatedAt: nowIso() };
+  /*
+   * **只补关联时不动来源**：`source` 说的是"这份价是谁定的"（站点内容 / 后台修改）。
+   * 认领一条 `courseId` 不是机构改过价 —— 一起标成"后台修改"之后，报价页上
+   * "这份配置来自站点内容"就成了假话，而机构会据此以为有人动过价格。
+   * 关联这件事仍然写日志（下面那一句），只是不改来源与修改时间。
+   */
+  db.pricing = linkOnly
+    ? config
+    : { ...config, source: PRICING_SOURCE_ADMIN, updatedAt: nowIso() };
   writeLog(db, {
     entity: "报价",
     action: "跟随课程库",

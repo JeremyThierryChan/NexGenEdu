@@ -243,6 +243,7 @@ import {
   pricingStatusForCourses,
   syncLibraryLinks,
 } from "@/lib/backend/pricing";
+import { EXTRA_COURSE_NAMES, extraCourses } from "@/lib/backend/extra-courses";
 import {
   describeTeacherShare,
   sharePercentFor,
@@ -433,7 +434,10 @@ ok("法语各级都写了核心能力",
 
 const pricingDoc = parseDocument(pricingSource);
 const pricingPage = pricingDoc.pages.get("智能报价");
-eq("报价页分组", pricingPage?.groups.map((g) => g.name), ["学习阶段", "班级类型", "课时选择", "试课", "计费规则", "教师分成", "其他项目"]);
+// 顺序与 `pricing.exportMarkdown()` 的输出一致（v37 起内容文件就是"导出替换"出来的那一份，
+// 因此顺序也跟着导出走：试课排在教师分成之后）
+eq("报价页分组", pricingPage?.groups.map((g) => g.name),
+  ["学习阶段", "班级类型", "课时选择", "计费规则", "教师分成", "试课", "其他项目"]);
 
 console.log("\n=== 2. 数据访问层 ===");
 const brand = getSiteBrand();
@@ -840,16 +844,70 @@ eq("含斜杠的课程名映射到安全路径", smallGroup?.path, ["in-class", 
 
 console.log("\n=== 4. 报价数据 ===");
 const pricing = getPricingDataFromTemplate();
-eq("阶段数", pricing.stages.length, 6);
-eq("小学课程", pricing.stages[0]?.courses.map((c) => `${c.name}=${c.price}`),
-  ["小学课内=150", "小学奥数=260", "小学英语竞赛=260", "小升初=200"]);
-eq("初中课程数", pricing.stages[1]?.courses.length, 5);
-eq("高中课程数", pricing.stages[2]?.courses.length, 4);
-ok("专业英语全部未开放", pricing.stages[4]?.courses.every((c) => !c.available) === true);
-ok("成人/兴趣有未开放项", pricing.stages[5]?.courses.some((c) => !c.available) === true);
-eq("科目组数", pricing.subjectGroups.length, 3);
+/*
+ * v37：报价的**分组改成课程类型的学段**，里面的**课程名以课程库为准**
+ * （机构口径：「以课程清单为准…公式依旧不变，主要修改的是课程名称以及分类」）。
+ *
+ * 这一节因此分两层断言：
+ *   1. **结构性** —— 阶段名必须是课程类型里真有的学段（写死一个"小学课内"当场挂）；
+ *   2. **内容性** —— 这份站点内容（模板的那一份，也是新装库的报价初值）里有哪些组、
+ *      每组几门课、都是什么价。价格是按"沿用同组旧价的入门档"定的，不是重新拍的。
+ */
+const pricingStageNames = pricing.stages.map((stage) => stage.name);
+const catalogStageNames = catalogFromSeed().stages.map((stage) => stage.name);
+eq("报价的分组名都是课程类型里的学段",
+  pricingStageNames.filter((name) => !catalogStageNames.includes(name)), []);
+eq("阶段（没有课程的学段不建组：现在没有大学生的课）",
+  pricingStageNames, ["小学", "初中", "高中", "其他类型"]);
+const priceLabel = (course: { name: string; price: number | null; available: boolean }) =>
+  `${course.name}=${course.available ? course.price : "暂未开放"}`;
+eq("小学的课程与价格",
+  pricing.stages[0]?.courses.map(priceLabel),
+  ["小学语文=150", "小学数学=150", "小学英语=150", "小学科学=150", "小学奥数=260", "小学英语竞赛=260"]);
+eq("初中的课程与价格",
+  pricing.stages[1]?.courses.map(priceLabel),
+  ["初中语文=220", "初中数学=220", "初中英语=220", "初中科学=220", "初中社会=暂未开放",
+    "小升初=200", "中考冲刺=350", "提前招专项=400"]);
+eq("高中的课程与价格（含五个语种与两个专项）",
+  pricing.stages[2]?.courses.map(priceLabel),
+  ["高中语文=300", "高中数学=300", "高考外语=300", "高中物理=300", "高中化学=300", "高中生物=300",
+    "高中政治=暂未开放", "高中历史=暂未开放", "高中地理=暂未开放", "高中技术=暂未开放",
+    "日语=暂未开放", "俄语=暂未开放", "法语=300", "德语=300", "西班牙语=300",
+    "高考冲刺=400", "特殊计划专项=500"]);
+eq("其他类型的课程与价格",
+  pricing.stages[3]?.courses.map(priceLabel),
+  ["雅思=700", "意大利语=暂未开放", "3D建模 & 3D打印=暂未开放", "编程与信息素养=暂未开放",
+    "成人英语口语=暂未开放", "成人零基础外语=暂未开放", "出国语言备考=暂未开放",
+    "职场与商务英语=暂未开放", "医学=暂未开放", "机械=暂未开放", "贸易=暂未开放",
+    "成人旅游、出行=100", "跨国交友=暂未开放"]);
+ok("每一组都有可报价的课（否则家长点进来是空的）",
+  pricing.stages.every((stage) => stage.courses.some((course) => course.available)));
+ok("「暂未开放」的课不许带价（导出时那个价会丢，回读就对不上了）",
+  pricing.stages.every((stage) => stage.courses.every((course) => course.available || course.price === null)));
+eq("科目组数（只有按学段分的三组有科目）", pricing.subjectGroups.length, 3);
+eq("科目组的名字就是那三个学段",
+  pricing.subjectGroups.map((group) => group.name), ["小学", "初中", "高中"]);
 eq("小学科目", pricing.subjectGroups[0]?.subjects.map((s) => s.name), ["语文", "数学", "英语", "科学"]);
-eq("高中科目数", pricing.subjectGroups[2]?.subjects.length, 10);
+eq("初中科目（含小升初预习班这个项目）",
+  pricing.subjectGroups[1]?.subjects.map((s) => s.name),
+  ["语文", "数学", "英语", "科学", "小升初预习班", "社会"]);
+eq("高中科目数（课程用到的那 15 个学科；「初升高预习班」还没有课用它）",
+  pricing.subjectGroups[2]?.subjects.length, 15);
+/*
+ * 科目必须是**该学段真有的学科**：科目表是"哪个科目更贵"的系数表，
+ * 挂一个课程类型里不存在的科目，家长在报价页能选中、却谁也对应不上。
+ */
+const catalogSubjects = catalogFromSeed().subjects;
+eq("科目表里的每一行都是该学段真有的学科",
+  pricing.subjectGroups.flatMap((group) =>
+    group.subjects
+      .filter((subject) => {
+        const row = catalogSubjects.find((item) => item.name === subject.name);
+        return row === undefined ||
+          !row.stageIds.includes(catalogId("st", group.name));
+      })
+      .map((subject) => `${group.name}/${subject.name}`)),
+  []);
 eq("班级类型", pricing.classTypes.map((c) => c.name),
   ["一对一", "一对二", "一对三", "一对多（4-8）", "班课（9-20）"]);
 eq("时长选项", pricing.durations.map((d) => `${d.name}×${d.multiplier}`),
@@ -880,38 +938,38 @@ const quote = (
   });
 };
 
-// 九年级课本 300 × 一对二 0.7 = 210；1.5 小时 ×1.5 = 315；5 节正课 1575
-// 未满 10 节，试课按原价 300 计 → 总价 1875
-const a = quote("九年级课本", "数学", "一对二", "1.5 小时", 5);
-eq("300×0.7×1.5×5 节", [a.unitPrice, a.lessonsPrice, a.trialFee, a.totalPrice], [315, 1575, 300, 1875]);
-ok("5 节不加手续费", a.unitPrice === 315);
+// 初中数学 220 × 一对二 0.7 = 154；1.5 小时 ×1.5 = 231；5 节正课 1155
+// 未满 10 节，试课按原价 220 计 → 总价 1375
+const a = quote("初中数学", "数学", "一对二", "1.5 小时", 5);
+eq("220×0.7×1.5×5 节", [a.unitPrice, a.lessonsPrice, a.trialFee, a.totalPrice], [231, 1155, 220, 1375]);
+ok("5 节不加手续费", a.unitPrice === 231);
 ok("9 节以下试课不免费", a.trialFree === false);
 
-// 1 节 +10% 手续费：300×0.7=210 → 231；正课 231 + 试课 300 = 531
-const b = quote("九年级课本", "数学", "一对二", "1 小时", 1);
-eq("1 节含 10% 手续费", [b.unitPrice, b.lessonsPrice, b.totalPrice], [231, 231, 531]);
+// 1 节 +10% 手续费：220×1 = 220 → 242；正课 242 + 试课 220 = 462
+const b = quote("初中数学", "数学", "一对一", "1 小时", 1);
+eq("1 节含 10% 手续费", [b.unitPrice, b.lessonsPrice, b.totalPrice], [242, 242, 462]);
 
 // 满 10 节：试课免费
-const c = quote("九年级课本", "数学", "一对一", "1 小时", 10);
-eq("10 节正课", c.lessonsPrice, 3000);
-eq("10 节试课免费", [c.trialFree, c.trialFee, c.totalPrice], [true, 0, 3000]);
+const c = quote("初中数学", "数学", "一对一", "1 小时", 10);
+eq("10 节正课", c.lessonsPrice, 2200);
+eq("10 节试课免费", [c.trialFree, c.trialFee, c.totalPrice], [true, 0, 2200]);
 
 // 班课：教师费 2400 ÷ 12 人 = 200；×1.5 小时 = 300；×8 节 = 2400
-// 正课 2400 + 试课 260（八年级课本原价）= 2660
-const d = quote("八年级课本", "数学", "班课（9-20）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 });
-eq("班课按人数分摊", [d.unitPrice, d.lessonsPrice, d.totalPrice], [300, 2400, 2660]);
+// 正课 2400 + 试课 220（初中英语原价）= 2620
+const d = quote("初中英语", "英语", "班课（9-20）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 });
+eq("班课按人数分摊", [d.unitPrice, d.lessonsPrice, d.totalPrice], [300, 2400, 2620]);
 
 // 班课缺参数应报错
-const e = quote("八年级课本", "数学", "班课（9-20）", "1 小时", 5, { classCost: 2400 });
+const e = quote("初中英语", "英语", "班课（9-20）", "1 小时", 5, { classCost: 2400 });
 ok("班课缺人数时报错", e.ok === false);
 
 // 节数非法应报错
-const f = quote("九年级课本", "数学", "一对一", "1 小时", 0);
+const f = quote("初中数学", "数学", "一对一", "1 小时", 0);
 ok("节数为 0 时报错", f.ok === false);
 
 // 试课规则边界
 eq("试课免费门槛", [isTrialFree(9), isTrialFree(10)], [false, true]);
-eq("试课费", [trialFeeFor(9, 300), trialFeeFor(10, 300)], [300, 0]);
+eq("试课费", [trialFeeFor(9, 220), trialFeeFor(10, 220)], [220, 0]);
 
 console.log("\n=== 6. 教务后台服务层（同一套断言对两种后端都要通过）===");
 
@@ -4125,7 +4183,7 @@ const pbMini = parsePricingSource(`# NexGenEdu · 新锐教培 · 报价数据
 
 ### 小学
 
-#### 课程: 小学课内: 150
+#### 课程: 小学数学: 150
 
 #### 科目: 语文、物理 ×1.1
 
@@ -4165,13 +4223,13 @@ const pbQuote = (
 
 // 主线：同一方案，前台公式与后台服务必须一致
 const pbParityCases: Array<[string, string, string, string, number, Record<string, number>]> = [
-  ["九年级课本", "数学", "一对二", "1.5 小时", 5, {}],
-  ["九年级课本", "数学", "一对二", "1 小时", 1, {}],
-  ["九年级课本", "数学", "一对一", "1 小时", 10, {}],
-  ["八年级课本", "数学", "班课（9-20）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 }],
-  ["小学课内", "语文", "一对三", "2 小时", 20, {}],
+  ["初中数学", "数学", "一对二", "1.5 小时", 5, {}],
+  ["初中数学", "数学", "一对二", "1 小时", 1, {}],
+  ["初中数学", "数学", "一对一", "1 小时", 10, {}],
+  ["初中英语", "英语", "班课（9-20）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 }],
+  ["小学语文", "语文", "一对三", "2 小时", 20, {}],
   ["医学", "", "一对一", "1 小时", 5, {}],
-  ["九年级课本", "数学", "一对一", "1 小时", 0, {}],
+  ["初中数学", "数学", "一对一", "1 小时", 0, {}],
 ];
 for (const [course, subject, classType, duration, lessons, extra] of pbParityCases) {
   const front = quote(course, subject, classType, duration, lessons, extra);
@@ -4186,9 +4244,9 @@ for (const [course, subject, classType, duration, lessons, extra] of pbParityCas
 // 选择里有名字对不上时要说清是哪一项（而不是安静地按 0 元算）
 const pbUnknownCourse = await pbQuote("没有这门课", "数学", "一对一", "1 小时", 5);
 ok("未知课程会被指出", pbUnknownCourse.ok === false && (pbUnknownCourse.reason ?? "").includes("没有课程"));
-const pbUnknownClass = await pbQuote("九年级课本", "数学", "没有这种班型", "1 小时", 5);
+const pbUnknownClass = await pbQuote("初中数学", "数学", "没有这种班型", "1 小时", 5);
 ok("未知班型会被指出", pbUnknownClass.ok === false && (pbUnknownClass.reason ?? "").includes("班型"));
-const pbUnknownSubject = await pbQuote("九年级课本", "没有这个科目", "一对一", "1 小时", 5);
+const pbUnknownSubject = await pbQuote("初中数学", "没有这个科目", "一对一", "1 小时", 5);
 ok("科目不属于该阶段会被指出",
   pbUnknownSubject.ok === false && (pbUnknownSubject.reason ?? "").includes("科目"));
 
@@ -4219,7 +4277,7 @@ eq("拒绝后库里的配置没被改动", (await api.pricing.get()).source, PRI
 // 改价真的会影响报价，并且留下日志（价格变动必须可追溯）
 const pbRaised = JSON.parse(JSON.stringify(pbConfig));
 pbRaised.stages.forEach((stage: { courses: Array<{ name: string; basePrice: number | null }> }) => {
-  for (const course of stage.courses) if (course.name === "九年级课本") course.basePrice = 330;
+  for (const course of stage.courses) if (course.name === "初中数学") course.basePrice = 330;
 });
 pbRaised.subjects.forEach((subject: { name: string; stageName: string; coefficient: number }) => {
   if (subject.name === "数学") subject.coefficient = 1.2;
@@ -4227,7 +4285,7 @@ pbRaised.subjects.forEach((subject: { name: string; stageName: string; coefficie
 const pbSaved = await api.pricing.update(pbRaised);
 eq("保存后标记为后台修改", pbSaved.source, PRICING_SOURCE_ADMIN);
 // 330 × 数学 1.2 × 一对二 0.7 × 1.5 小时 = 415.8；1 节另加 10% 手续费不是本例
-const pbRaisedQuote = await pbQuote("九年级课本", "数学", "一对二", "1.5 小时", 5);
+const pbRaisedQuote = await pbQuote("初中数学", "数学", "一对二", "1.5 小时", 5);
 eq("改价后后台按新价报", pbRaisedQuote.unitPrice, 415.8); // 330 × 1.2 × 0.7 × 1.5
 eq("试课费按课程原价收（不带科目与班级系数）", pbRaisedQuote.trialFee, 330);
 const pbRaiseLogs = await api.logs.list(20);
@@ -4262,8 +4320,8 @@ eq("恢复后来源回到站点内容", pbRestored.source, PRICING_SOURCE_CONTEN
 eq("恢复后的价格就是宣传页的价格",
   pbRestored.stages[0]?.courses.map((course) => course.basePrice),
   pricing.stages[0]?.courses.map((course) => course.price));
-const pbRestoredQuote = await pbQuote("九年级课本", "数学", "一对二", "1.5 小时", 5);
-eq("恢复后报价回到原值", pbRestoredQuote, quote("九年级课本", "数学", "一对二", "1.5 小时", 5));
+const pbRestoredQuote = await pbQuote("初中数学", "数学", "一对二", "1.5 小时", 5);
+eq("恢复后报价回到原值", pbRestoredQuote, quote("初中数学", "数学", "一对二", "1.5 小时", 5));
 
 /*
  * 老库升级：pbV9 没有报价配置，升级后要按站点内容补齐（不能是空的，也不能变价）。
@@ -4311,18 +4369,18 @@ ok("人话版说明了 9 人以上大班课不适用",
 ok("人话版说明了课程单价的口径", pbShareText.includes("课程单价 = 基础价 × 科目系数"));
 ok("人话版说明了时长按小时算", pbShareText.includes("1.5 小时乘 1.5"));
 
-// 按名字算：一对一 1 人 1 小时（九年级课本 300 / 小时）= 300 × 40% = 120
+// 按名字算：一对一 1 人 1 小时（初中数学 220 / 小时）= 220 × 40% = 88
 const pbTeacher1 = await api.pricing.teacherFee({
-  courseName: "九年级课本", subjectName: "数学", classTypeName: "一对一",
+  courseName: "初中数学", subjectName: "数学", classTypeName: "一对一",
   durationName: "1 小时", lessons: 1, students: 1,
 });
-eq("一对一 1 人 1 小时的教师课时费", [pbTeacher1.ok, pbTeacher1.percent, pbTeacher1.teacherFee], [true, 40, 120]);
-// 3 人 = 60%；1.5 小时 ×300 ×0.6 = 270
+eq("一对一 1 人 1 小时的教师课时费", [pbTeacher1.ok, pbTeacher1.percent, pbTeacher1.teacherFee], [true, 40, 88]);
+// 3 人 = 60%；1.5 小时 ×220 ×0.6 = 198
 const pbTeacher3 = await api.pricing.teacherFee({
-  courseName: "九年级课本", subjectName: "数学", classTypeName: "一对三",
+  courseName: "初中数学", subjectName: "数学", classTypeName: "一对三",
   durationName: "1.5 小时", lessons: 5, students: 3,
 });
-eq("一对三 3 人 1.5 小时的教师课时费", [pbTeacher3.percent, pbTeacher3.teacherFee], [60, 270]);
+eq("一对三 3 人 1.5 小时的教师课时费", [pbTeacher3.percent, pbTeacher3.teacherFee], [60, 198]);
 ok("教师课时费里含家长侧收入与机构留存",
   pbTeacher3.revenue > pbTeacher3.teacherFee &&
   Math.abs(pbTeacher3.keepFee - (pbTeacher3.revenue - pbTeacher3.teacherFee)) < 0.01);
@@ -4331,7 +4389,7 @@ ok("教师课时费明细写清了比例怎么来的",
 
 // 大班课不适用：按人数分摊的那类按「教师费用 ÷ 人数」另议，不能硬套公式
 const pbTeacherBig = await api.pricing.teacherFee({
-  courseName: "八年级课本", subjectName: "数学", classTypeName: "班课（9-20）",
+  courseName: "初中英语", subjectName: "英语", classTypeName: "班课（9-20）",
   durationName: "1.5 小时", lessons: 5, students: 12,
 });
 ok("9 人以上大班课不适用分成规则",
@@ -4342,14 +4400,14 @@ const pbSeatConfig = JSON.parse(JSON.stringify(await api.pricing.get()));
 pbSeatConfig.teacherShare.priceBasis = "seat";
 await api.pricing.update(pbSeatConfig);
 const pbTeacherSeat = await api.pricing.teacherFee({
-  courseName: "九年级课本", subjectName: "数学", classTypeName: "一对二",
+  courseName: "初中数学", subjectName: "数学", classTypeName: "一对二",
   durationName: "1 小时", lessons: 1, students: 1,
 });
-// 班型课时价口径：300 ×0.7 = 210 → 40% = 84
-eq("切到班型课时价口径后的教师课时费", pbTeacherSeat.teacherFee, 84);
+// 班型课时价口径：220 ×0.7 = 154 → 40% = 61.6
+eq("切到班型课时价口径后的教师课时费", pbTeacherSeat.teacherFee, 61.6);
 eq("口径切换不影响家长报价",
-  (await pbQuote("九年级课本", "数学", "一对二", "1 小时", 5)).unitPrice,
-  quote("九年级课本", "数学", "一对二", "1 小时", 5).unitPrice);
+  (await pbQuote("初中数学", "数学", "一对二", "1 小时", 5)).unitPrice,
+  quote("初中数学", "数学", "一对二", "1 小时", 5).unitPrice);
 
 // 导出 → 回读：教师分成规则也要能带走
 const pbShareExport = await api.pricing.exportMarkdown();
@@ -4409,11 +4467,23 @@ const pbPartitions = await api.coursePartitions.list();
 const pbPartitionName = (id: string): string =>
   partitionPlace(pbPartitions, id).column?.name ?? "";
 ok(`课程库从网站内容播种（${pbLibrary.length} 门，至少 20 门）`, pbLibrary.length >= 20);
-ok("网站课程都标为「网站」来源", pbLibrary.every((course) => course.origin === "网站"));
+/*
+ * ⚠️ 清单里现在有**两类**课：网站卡片来的（32 门）与"报价里有、卡片上没有"的后台课（12 门，
+ * 见 `extra-courses.ts`）。分区是**网站那侧的结构**，所以下面这几条只对网站卡片成立 ——
+ * 不分青红皂白地要求"每门课都有分区"，等于要求后台课也必须挂在某个网站栏目下。
+ */
+const pbSiteCourses = pbLibrary.filter((course) => course.origin === "网站");
+const pbAdminCourses = pbLibrary.filter((course) => course.origin === "后台");
+ok(`网站卡片来的课都标为「网站」来源（${pbSiteCourses.length} 门）`,
+  pbSiteCourses.length >= 20 && pbSiteCourses.every((course) => course.origin === "网站"));
+eq("后台课也在同一个清单里（就是那十二门）",
+  pbAdminCourses.filter((course) => course.name !== "围棋").length, EXTRA_COURSE_NAMES.length);
 ok("每门网站课程都挂了分区（v18：不再是一串分类文字）",
-  pbLibrary.every((course) => partitionPlace(pbPartitions, course.partitionId).leaf !== null));
+  pbSiteCourses.every((course) => partitionPlace(pbPartitions, course.partitionId).leaf !== null));
 ok("网站课程的分区名非空（清单与网站要按它分组）",
-  pbLibrary.every((course) => pbPartitionName(course.partitionId) !== ""));
+  pbSiteCourses.every((course) => pbPartitionName(course.partitionId) !== ""));
+ok("后台课不带分区（分区是网站栏目的结构，它们不上网）",
+  pbAdminCourses.every((course) => course.partitionId === ""));
 ok("课程行上**没有**遗留的 category / subgroup 字段（同一件事只留一处）",
   pbLibrary.every((course) =>
     (course as unknown as Record<string, unknown>).category === undefined &&
@@ -4426,7 +4496,16 @@ ok(`科目候选非空（${pbOptions.length} 项）`, pbOptions.length >= 20);
 eq("科目候选里没有重复名字",
   pbOptions.filter((option, index) => pbOptions.findIndex((item) => item.name === option.name) !== index),
   []);
-ok("科目候选带分区名（下拉要按栏目分组）", pbOptions.every((option) => option.category !== ""));
+/*
+ * 科目候选里，网站课程带栏目名（下拉按栏目分组），后台课没有栏目 ——
+ * `MultiSelect` 把空 group 渲染成"不分组"（见 `components/admin/MultiSelect.tsx`），
+ * 因此这里断的是"网站课程必须有分组名、后台课必须是空串"，而不是"每一项都有分组名"。
+ */
+eq("科目候选里的网站课程都带分区名（下拉要按栏目分组）",
+  pbOptions.filter((option) => option.category === "" && option.origin === "网站").map((option) => option.name),
+  []);
+ok("后台课的科目候选确实在（排课与报课要选得到它们）",
+  EXTRA_COURSE_NAMES.every((name) => pbOptions.some((option) => option.name === name)));
 
 // 机构自己加一门网站上还没有的课：围棋（分区里要有"兴趣才艺"，先建后挂）
 const pbHobby = await api.coursePartitions.create({ name: "兴趣才艺" });
@@ -4528,6 +4607,17 @@ const pbV11Upgrade = await api.importDatabase(JSON.stringify(pbV11));
 ok("v11 老库能导入并升级", pbV11Upgrade.ok);
 const pbMigratedCourses = await api.courses.list();
 eq("v11 老库升级后课程库按网站内容补齐", pbMigratedCourses.length, pbLibrary.length);
+/*
+ * **升级上来的课程必须有 id**。
+ *
+ * 这是一条"顺手加断言、当场抓出真 bug"的例子：v12 那一步是按**名字**把内容文件里的
+ * 卡片灌进来的，一直没有 id —— 而台账里改名 / 删除 / 挪分区、报课与排课引用课程全按 id 走。
+ * 也就是说：**从 v11 升上来的库，课程一门都改不动**。原先这里只数了条数，所以一直绿着。
+ */
+eq("升级补上的课程都有 id（否则台账里改名 / 删除都点不动）",
+  pbMigratedCourses.filter((course) => course.id.trim() === "").map((course) => course.name), []);
+eq("id 与新装系统的同一门课一致（course-site-<卡片路径>）",
+  pbMigratedCourses.find((course) => course.name === "小学语文")?.id, "course-site-primary-chinese");
 eq("升级后版本号是当前版本",
   (await api.exportDatabase()).version, CURRENT_VERSION);
 await api.restoreBackup();
@@ -4550,10 +4640,12 @@ const pbPriceConfig = await api.pricing.get();
 /*
  * 1) 按名字认领：报价配置里的课程（内容带的，没有 courseId）与课程库同名时自动关联。
  *
- * 注意一个真实情况：报价配置里的课程名是「课程包」粒度（九年级课本 / 雅思口语），
- * 课程库是「学科」粒度（初中数学 / 雅思），**大多数名字本来就不一样** ——
- * 所以自动认领只在名字确实相同时生效，不强求两边一一对应。
- * 机构要给某门课定价，走的是「课程库课程定价」面板（显式选课程 + 填价格）。
+ * v37 起两边的**粒度是同一套**（报价里的课程名 = 课程库里的课程名，见第 41 节），
+ * 所以"按名字认领"能把整份配置一次认全。这条注释原先写的是「报价是课程包粒度
+ * （九年级课本 / 雅思口语）、课程库是学科粒度（初中数学 / 雅思），大多数名字本来就不一样」
+ * —— 那正是这一轮要修掉的错位：**报价页上有 20 门"课程"，课程库里一门都没有**，
+ * 打通机制因此完全空转。机构要给某门课定价，仍可以走「课程库课程定价」面板
+ * （显式选课程 + 填价格），两种做法都保留。
  */
 const pbClaimable = {
   ...pbPriceConfig,
@@ -4622,8 +4714,14 @@ eq("删除课程后报价配置里的这一项仍在（置为暂未开放）", p
 const pbStatus = pricingStatusForCourses(await api.pricing.get(), await api.courses.list());
 ok("每门课程库课程都能查出定价状态",
   pbStatus.length === (await api.courses.list()).length);
-ok("至少有一门课被标为未定价（演示库里的兴趣才艺课已停用）",
-  pbStatus.some((item) => !item.priced));
+/*
+ * 反过来断：**课程库里的每一门课在报价配置里都有行**（v37 起"以课程清单为准"）。
+ *
+ * 原先这里断的是"至少有一门未定价"（演示库里那门兴趣才艺课）—— 那条断言的立足点是
+ * 当年那个错位状态：报价页自己有 20 门"课程"，与课程库对不上，于是随便一门课都可能没价。
+ */
+eq("课程库里的每一门课在报价配置里都有行",
+  pbStatus.filter((item) => !item.priced).map((item) => item.name), []);
 
 // 收尾：把报价配置恢复成内容里的口径，避免影响后面的用例
 await api.pricing.reset();
@@ -10192,6 +10290,135 @@ console.log("\n=== 40. 「课程」页点页签有反应（一个真 bug 的回�
     page.includes("if (tabs.some((item) => item.key === tab)) return;"));
   ok("切页签不卸载已经打开过的面板（卸载会把没保存的草稿悄悄丢掉）",
     page.includes("hidden={tab !== \"ledger\"}") && page.includes("mounted.has("));
+}
+
+console.log("\n=== 41. 报价与课程清单对齐（v37）===");
+
+/*
+ * 机构：「**现在以课程清单为准，整理一下网站的报价**（公式依旧不变，主要修改的是课程名称
+ * 以及分类这些）」。
+ *
+ * 这一步要守的性质只有一句话：**报价里的每一门课，课程库里都真有那门课**（反过来也一样）。
+ * 这条性质以前不成立，而且不成立得很隐蔽：报价页上有 20 门"课程"（九年级课本 / 雅思口语 /
+ * 专业英语…），课程库里一门都找不到 —— 家长能选中、能算出价，机构却排不了课、报不了课，
+ * 而那 20 门课的价格全对不上任何一门真实课程。v25 那套"报价跟着课程库走"的打通机制
+ * 也因此完全空转（名字对不上，谁也没认领谁）。
+ *
+ * 断言分三层，都是"结构上必须成立"的那一类，而不是把当前的清单再抄一遍：
+ *   1. **集合相等**：报价的课程名集合 = 课程库的课程名集合（示例库 / 空库 / 新装库同一份）；
+ *   2. **分组对齐**：报价的每个阶段都对应课程类型里的一个学段，且那个学段下真有课；
+ *   3. **两端都在**：课程库里的课在报价里有行、开放的有价；那十二门"只在后台用"的课
+ *      确实没有上网（网站卡片数没变），维度也都挂上了。
+ */
+{
+  const templateCourses = pricing.stages.flatMap((stage) => stage.courses.map((course) => course.name));
+  const libraryNames = seedDb.courses.map((course) => course.name).sort();
+  eq("报价里的课程名与课程库里的课程名一一对应（名字就是引用键）",
+    [...templateCourses].sort(), libraryNames);
+  eq("报价里的课程没有重名（重名会按错误的价报价）",
+    templateCourses.filter((name, index) => templateCourses.indexOf(name) !== index), []);
+
+  const emptyNames = createEmptyDatabase().courses.map((course) => course.name).sort();
+  eq("空库起步与示例库是同一份课程清单（否则机构装出来的库与自检断的不是一份）",
+    emptyNames, libraryNames);
+
+  // 分组：报价的每个阶段 = 课程类型里的一个学段，且该学段下有课
+  const stageRows = catalogFromSeed().stages;
+  const courseStageNames = (course: { stageIds: string[] }) =>
+    course.stageIds.map((id) => stageRows.find((stage) => stage.id === id)?.name ?? id);
+  const seedByName = new Map(seedDb.courses.map((course) => [course.name, course]));
+  eq("报价的每个阶段都真有该学段的课",
+    pricing.stages
+      .filter((stage) =>
+        !stage.courses.some((course) => {
+          const row = seedByName.get(course.name);
+          return row !== undefined && courseStageNames(row).includes(stage.name);
+        }))
+      .map((stage) => stage.name),
+    []);
+  eq("课程库里每一门课的学段都能在报价里找到对应阶段",
+    seedDb.courses
+      .filter((course) => courseStageNames(course).every(
+        (name) => !pricing.stages.some((stage) => stage.name === name)))
+      .map((course) => course.name),
+    []);
+  eq("报价的每门课都有价或明确写着暂未开放（不留「两头空」的行）",
+    pricing.stages.flatMap((stage) =>
+      stage.courses.filter((course) => course.available === (course.price === null)).map((course) => course.name)),
+    []);
+
+  // 十二门「只在后台用」的课：进得了台账、上不了网站
+  const extras = extraCourses();
+  eq("「报价里有、卡片上没有」的课一共十二门", extras.length, EXTRA_COURSE_NAMES.length);
+  eq("它们的名字都在报价里（否则又是「报价有、库里没有」）",
+    EXTRA_COURSE_NAMES.filter((name) => !templateCourses.includes(name)), []);
+  ok("它们都不上网（没有 path、siteKind 是不展示）",
+    extras.every((course) => course.path === "" && course.siteKind === "不展示"));
+  ok("它们的维度都挂好了（学段 + 学科，台账按维度分组时不会掉到「未挂」里）",
+    extras.every((course) => course.stageIds.length > 0 && course.subjectIds.length > 0));
+  ok("网站卡片数没变（还是那 32 张，加课不该让课程页多出空卡片）",
+    seedDb.courses.filter((course) => course.siteKind !== "不展示" && course.path !== "").length === 32);
+
+  // 打通机制现在真的能生效：整份配置一次认全
+  const claimed = syncLibraryLinks(pricingConfigFromContent(), seedDb.courses);
+  eq("报价里的每一门课都能认领到课程库里那门课（不留未关联的行）",
+    claimed.config.stages
+      .flatMap((stage) => stage.courses)
+      .filter((course) => (course.courseId ?? "") === "")
+      .map((course) => course.name),
+    []);
+  /*
+   * ③ 「未导出上线」这句话必须**比出来**，不能只看来源。
+   *
+   * 原先报价页写的是 `draft.source === "后台修改"` —— 于是这句话永远不会消失：
+   * 导出、替换内容文件、发布之后来源仍然是"后台修改"，页面还在说"未导出上线"。
+   * 现在比的是库里的配置与内容文件里那一份（`pricingConfigCore`），因此这里也盯住
+   * "比的基准忽略后台专属关联"（`courseId` / 班型的 `formatId`：内容文件里没有它们，
+   * 比进去会让明明一样的两份永远不相等），以及页面确实用了那个比较。
+   */
+  const withLinks = pricingConfigFromContent();
+  const linked: typeof withLinks = {
+    ...withLinks,
+    stages: withLinks.stages.map((stage, index) => ({
+      ...stage,
+      courses: stage.courses.map((course, courseIndex) => ({
+        ...course,
+        courseId: `course-${String(index)}-${String(courseIndex)}`,
+      })),
+    })),
+    classTypes: withLinks.classTypes.map((classType) => ({ ...classType, formatId: `fmt_${classType.name}` })),
+  };
+  eq("「与内容文件一致吗」的比法忽略后台专属关联（courseId / 班型 formatId）",
+    pricingConfigCore(linked) === pricingConfigCore(withLinks), true);
+  ok("但它**不**忽略钱（改一个基础价就比得出不一样）",
+    pricingConfigCore({
+      ...withLinks,
+      stages: withLinks.stages.map((stage, index) =>
+        index === 0
+          ? { ...stage, courses: stage.courses.map((course, i) => (i === 0 ? { ...course, basePrice: 999 } : course)) }
+          : stage),
+    }) !== pricingConfigCore(withLinks));
+  const pricingPageSource = readFileSync(
+    new URL("../app/admin/(dashboard)/pricing/page.tsx", import.meta.url),
+    "utf8",
+  );
+  ok("报价页的「未导出上线」按内容文件比出来（不是看来源那一句话）",
+    pricingPageSource.includes("publishedInSync") &&
+      pricingPageSource.includes('"（未导出上线）"') &&
+      !pricingPageSource.includes('draft.source === PRICING_SOURCE_ADMIN ? "（未导出上线）"'));
+
+  eq("报价里没有「写着开放却没有价」的行（家长选中了却算不出价，是最糟的一种）",
+    pricing.stages
+      .flatMap((stage) => stage.courses)
+      .filter((course) => course.available && course.price === null)
+      .map((course) => course.name),
+    []);
+  /*
+   * 这里**刻意不**断「课程库里开放的课都必须有价」：模板内容里就有这种课 ——
+   * `data/site/content.md` 写着「初中社会」开放，而价目表里它是暂未开放。
+   * 那不是错，是两条口径的正常落差：课开着、价还没定，台账里会把它标成「未定价」，
+   * 那正是给机构看的待办清单。要守的是"课程库改了状态，报价跟着走"（第 10 节那几条）。
+   */
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

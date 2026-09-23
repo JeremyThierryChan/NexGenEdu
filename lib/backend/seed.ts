@@ -1,6 +1,7 @@
 import { getTeachersPageFromTemplate } from "@/lib/data/site";
 import { catalogFromSeed } from "./catalog-seed";
 import { materializeSiteCourses } from "./courses";
+import { extraCourses } from "./extra-courses";
 import { pricingConfigFromContent } from "./pricing";
 import { siteContentFromContent } from "./site-content";
 import { CURRENT_VERSION } from "./version";
@@ -260,10 +261,14 @@ export function createSeedDatabase(now: Date = new Date()): Database {
     // 咨询线索也从空开始：这是一次性录入的真实对话，示例数据编不出意义
     inquiries: [],
     /*
-     * 课程库：直接用网站内容里的课程卡片初始化（课程名与网站一致），
-     * 机构自己加的课（围棋、书法）由 /admin/courses 页面添加。
+     * 课程库：网站内容里的课程卡片（课程名与网站一致）+ **报价里有、卡片上没有的那十二门课**
+     * （`extraCourses()`，与空库起步用的是同一份定义）—— 机构自己加的课（围棋、书法）
+     * 由 /admin/courses 页面添加。
+     *
+     * 两段合起来才是"课程清单"：示例库与空库必须是同一份清单，
+     * 否则自检断言的是示例库、机构装出来的是另一个名单。
      */
-    courses: siteCourses.courses,
+    courses: [...siteCourses.courses, ...extraCourses()],
     coursePartitions: siteCourses.partitions,
     catalog: catalogFromSeed(),
     /*

@@ -860,11 +860,17 @@ export function pricingConfigToMarkdown(config: PricingConfig): string {
 }
 
 /**
- * 配置里与「钱」有关的可比较部分（导出回读校验用，忽略来源与时间）。
+ * 配置里与「钱」有关的可比较部分（导出回读校验、以及"库里这份与内容文件一致吗"都要用它）。
  *
- * **刻意忽略 `courseId`**：内容里的 Markdown 只写「课程名: 价格」，没有「这门课在后台
- * 课程库里是哪一条」这种后台专属信息。忽略它，导出 → 替换内容文件 → 回读 才能一致；
- * 后台自己的配置里这条关联一直保留（导出不会改动配置）。
+ * 忽略两样东西，理由是同一条：**它们在内容文件里根本没有写法**，是后台专属的**关联**
+ * （不是钱的一部分）。比进去会让"明明一样"的两份配置永远不相等：
+ *
+ *   - `courseId`（课程 ↔ 课程库那条关联）：Markdown 只写「课程名: 价格」；
+ *   - `classTypes[].formatId`（班型 ↔ 课程类型那条关联）：Markdown 只写「名称 / 系数」，
+ *     而读的时候 `syncClassTypes` 会按名字再认一次。
+ *
+ * 其余（价格、开放状态、科目系数、班级系数、时长、规则、分成、试课、其他项目）**一个不漏**：
+ * 漏掉哪个，导出到内容文件时那个字段丢了都不会有人知道。
  */
 export function pricingConfigCore(config: PricingConfig): string {
   return JSON.stringify({
@@ -879,7 +885,11 @@ export function pricingConfigCore(config: PricingConfig): string {
       })),
     })),
     subjects: config.subjects,
-    classTypes: config.classTypes,
+    classTypes: config.classTypes.map((classType) => ({
+      name: classType.name,
+      mode: classType.mode,
+      coefficient: classType.coefficient,
+    })),
     durations: config.durations,
     trial: config.trial,
     otherItems: config.otherItems,
@@ -989,7 +999,17 @@ export function addLibraryCourseToPricing(
 export function syncLibraryLinks(
   config: PricingConfig,
   courses: Array<{ id: string; name: string; status: string }>,
-): { config: PricingConfig; changes: string[] } {
+): { config: PricingConfig; changes: string[]; linkOnly: boolean } {
+  /*
+   * `linkOnly`：这次同步**只补了关联**（没有改任何价格 / 名字 / 开放状态）。
+   *
+   * 为什么要单独告诉调用方：`syncPricingWithCourses` 会把配置的来源标成"后台修改"，
+   * 而"补一条 `courseId`"不是机构改过价 —— 标成后台修改之后，报价页上那句
+   * "这份配置来自站点内容"就变成了假话（自检里两条断言当场抓住了这件事：
+   * 「种子报价配置来自站点内容」与「拒绝后库里的配置没被改动」）。
+   * 关联本身仍然值得写日志（谁认领了谁），但它不该改变"这份价是谁定的"。
+   */
+  let nonLinkChanges = 0;
   const byId = new Map(courses.map((course) => [course.id, course]));
   const byName = new Map(courses.map((course) => [course.name, course]));
   const next = JSON.parse(JSON.stringify(config)) as PricingConfig;
@@ -1007,6 +1027,7 @@ export function syncLibraryLinks(
           if (course.available) {
             course.available = false;
             course.basePrice = course.basePrice ?? null;
+            nonLinkChanges += 1;
             changes.push(`「${course.name}」在课程库里已不存在 → 报价配置里置为暂未开放`);
           }
         }
@@ -1020,10 +1041,12 @@ export function syncLibraryLinks(
       if (course.name !== linked.name) {
         changes.push(`课程名跟随课程库：「${course.name}」→「${linked.name}」`);
         course.name = linked.name;
+        nonLinkChanges += 1;
       }
       const shouldBeAvailable = linked.status === "开放";
       if (course.available !== shouldBeAvailable && course.basePrice !== null) {
         course.available = shouldBeAvailable;
+        nonLinkChanges += 1;
         changes.push(
           shouldBeAvailable
             ? `「${linked.name}」恢复为可报价`
@@ -1033,5 +1056,5 @@ export function syncLibraryLinks(
     }
   }
 
-  return { config: next, changes };
+  return { config: next, changes, linkOnly: changes.length > 0 && nonLinkChanges === 0 };
 }

@@ -1,5 +1,6 @@
 import { catalogFromSeed } from "./catalog-seed";
 import { materializeSiteCourses } from "./courses";
+import { extraCourses } from "./extra-courses";
 import { pricingConfigFromContent } from "./pricing";
 import { siteContentFromContent } from "./site-content";
 import { CURRENT_VERSION } from "./version";
@@ -23,7 +24,7 @@ import type { Database } from "./types";
  * | 项 | 初始状态 | 为什么 |
  * | --- | --- | --- |
  * | 学生 / 教师 / 教室 / 排课 / 收款 / 课时流水 / 咨询 / 日志 | **空** | 这些是机构要一条条真实录进去的东西 |
- * | 课程库 | **网站课程**（`coursesFromSite()`） | 网站上的课程是已确定的公开信息，不需要人工重录一遍 |
+ * | 课程库 | **网站课程**（`coursesFromSite()`）+ **报价里的那十二门后台课**（`extraCourses()`） | 网站上的课程是已确定的公开信息，不需要人工重录一遍；报价页上写着价的课也必须在课程库里，否则"以课程清单为准"就是句空话（见 `extra-courses.ts`） |
  * | 网站课程正文 | **站点内容初始化**（`siteContentFromContent()`） | 同上：网站已经写好的介绍，没必要让机构再录一遍 |
  * | 报价配置 | **站点内容初始化**（`pricingConfigFromContent()`） | 价格是算钱的依据，且公开报价已定；空着会导致报价页算不出价 |
  * | 版本号 | `CURRENT_VERSION` | 必须是当前版本，否则新数据下次读取时会被迁移逻辑改写 |
@@ -41,6 +42,15 @@ export function createEmptyDatabase(now: Date = new Date()): Database {
    * "32 门课全都没挂维度"，而机构根本没有老库可迁移。
    */
   const coursesFromContent = materializeSiteCourses([], undefined, catalogFromSeed());
+  /*
+   * 课程库 = 网站卡片 + **报价里有、卡片上没有的那十二门课**。
+   *
+   * 只放网站卡片会留下一个自相矛盾的库：报价页上列着 44 门课（家长能选中、
+   * 能算出价），课程库里只有 32 门 —— 那 12 门"报价课"在台账里根本不存在，
+   * 报课时选不到、也排不了课。它们从哪来、为什么不上网，见 `extra-courses.ts`。
+   */
+  const courses = [...coursesFromContent.courses, ...extraCourses()];
+
   return {
     version: CURRENT_VERSION,
     students: [],
@@ -55,7 +65,7 @@ export function createEmptyDatabase(now: Date = new Date()): Database {
     logs: [],
     inquiries: [],
     // 课程库与报价配置**不是"示例数据"**：它们来自网站内容，是真实的初始值
-    courses: coursesFromContent.courses,
+    courses,
     coursePartitions: coursesFromContent.partitions,
     // 课程类型的维度表（学段/学科/模块/班型/交付形态）：照种子灌一份
     catalog: catalogFromSeed(),
