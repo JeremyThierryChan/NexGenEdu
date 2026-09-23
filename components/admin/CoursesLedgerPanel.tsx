@@ -862,7 +862,16 @@ export function CoursesLedgerPanel() {
 
       setMessage(
         `${isCreate ? "已添加" : "已保存"}「${courseName}」：${pieces.join(" + ")}。` +
-          (isCreate ? "它现在可以用于排课、报课与教师科目。" : ""),
+          (isCreate ? "它现在可以用于排课、报课与教师科目。" : "") +
+          /*
+           * **这句提醒必须有**：提示里写着"卡片 + 网站正文"，读起来像"网站已经变了"，
+           * 而网站是**静态**的 —— 只在构站那一刻取一次库里的数据，
+           * 所以后台改完还要重新构站才看得见（机构反馈过"我在后台改了课程名、前台还是旧的"）。
+           * 卡片选了「不展示」的课则相反：它根本不上网，页面永远不会有它。
+           */
+          (siteKind !== "不展示" && path.trim() !== ""
+            ? " 网站页面上要重新构站一次（npm run build）才看得见；本机预览可跑 npm run sync-site-data 或重启 npm run dev。"
+            : " 它不在网站上（卡片选了「不展示」），所以课程页不会出现它。"),
       );
       resetForm();
       await load({ quiet: true });
