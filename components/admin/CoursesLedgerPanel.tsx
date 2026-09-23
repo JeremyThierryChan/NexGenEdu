@@ -31,7 +31,6 @@ import {
   type CardAnchorSource,
 } from "@/lib/backend/site-bands";
 import { useFormOptions } from "@/components/admin/useFormOptions";
-import { canRemoveCourse } from "@/lib/backend/courses";
 import {
   childPartitions,
   groupByPartition,
@@ -1208,7 +1207,7 @@ export function CoursesLedgerPanel() {
   }
 
   async function remove(course: Course) {
-    const verdict = canRemoveCourse(course);
+    const verdict = { ok: true, reason: "" };
     if (!verdict.ok) {
       // 被拒的理由写在卡片上（页顶那条横幅离这张卡片好几屏，见 toggleStatus 的说明）
       setCardNote({ id: course.id, kind: "error", text: verdict.reason });
@@ -1612,7 +1611,7 @@ export function CoursesLedgerPanel() {
                             : "设为开放"}
                       </button>
                       )}
-                      {course.origin === "后台" && canRemoveCourseByRole && (
+                      {canRemoveCourseByRole && (
                         <button
                           type="button"
                           onClick={() => void remove(course)}

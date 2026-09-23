@@ -14,8 +14,8 @@
  *   1. **按人算比例**：第一名学生教师拿课程单价的 40%，此后每多一名学生加 10%
  *      （2 人 50%、3 人 60% … 8 人 110%）；
  *   2. **按小时算时长**：上 1.5 小时就乘 1.5，2 小时就乘 2；
- *   3. **适用范围**：课内课程里按人数系数计价的班型（一对一定制课 / 一对二 /
- *      一对三小组课 / 一对多小班课）。「9 人以上大班课不适用」 ——
+ *   3. **适用范围**：课内课程里按人数系数计价的班型（一对一 / 一对二 /
+ *      一对三 / 小班课（4-8人））。「大班课（9-20人）不适用」 ——
  *      那类按「教师课时总费用 ÷ 班级人数」另议（见报价配置里的「按人数分摊」班型）。
  *
  * ## 「课程单价」按哪一档算（唯一需要机构自己定的一件事）
@@ -60,8 +60,8 @@ function round2(value: number): number {
 /**
  * 这条规则是否适用于某个班型。
  *
- * 判据是**计价方式**而不是班型名字：按人数系数计价的（一对一 … 一对多小班课）适用，
- * 按人数分摊的（9 人以上大班课）不适用。这样将来新增班型不用改这个函数。
+ * 判据是**计价方式**而不是班型名字：按人数系数计价的（一对一 … 小班课（4-8人））适用，
+ * 按人数分摊的（大班课（9-20人））不适用。这样将来新增班型不用改这个函数。
  */
 export function teacherShareAppliesTo(classType: { mode: ClassPricingMode }): boolean {
   return classType.mode === "coefficient";
@@ -118,8 +118,8 @@ export function describeTeacherShare(rules: TeacherShareRules): string[] {
   const second = round2(base + step);
   const max = sharePercentFor(TEACHER_SHARE_MAX_STUDENTS, rules);
   return [
-    `适用于课内课程里「按人数系数计价」的班型：一对一定制课、一对二、一对三小组课、一对多小班课（1–${TEACHER_SHARE_MAX_STUDENTS} 人）。`,
-    `9 人以上大班课不适用这条规则 —— 那类按「教师课时总费用 ÷ 班级人数」另议。`,
+    `适用于课内课程里「按人数系数计价」的班型：一对一、一对二、一对三、小班课（4-8人）（1–${TEACHER_SHARE_MAX_STUDENTS} 人）。`,
+    `大班课（9-20人）不适用这条规则 —— 那类按「教师课时总费用 ÷ 班级人数」另议。`,
     `分成比例按人数算：第一名学生 ${base}%，每多一名学生加 ${step} 个百分点（2 人 ${second}%、3 人 ${round2(base + step * 2)}% … ${TEACHER_SHARE_MAX_STUDENTS} 人 ${max}%）。`,
     `时长按实际小时数算：1 小时乘 1，1.5 小时乘 1.5，2 小时乘 2。`,
     `${priceBasisText(rules.priceBasis)}。`,

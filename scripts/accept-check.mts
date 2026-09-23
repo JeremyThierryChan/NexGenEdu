@@ -104,7 +104,7 @@ await check("课程库", "同级重名被拒绝", async () => {
 }, (text: string) => text === "已拒绝");
 await check("课程库", "新建课程（围棋，挂到子栏目）", async () => {
   const created = await api.courses.create({
-    name: "围棋", partitionId: subId, forms: ["一对一定制课"], origin: "后台",
+    name: "围棋", partitionId: subId, forms: ["一对一"], origin: "后台",
     status: "开放", note: "验收用", createdAt: new Date().toISOString(),
     path: "", tags: [], target: "", order: 990, intro: "", siteKind: "不展示",
     /*
@@ -768,8 +768,8 @@ await check("学生", "建档并报多门课（含课时流水）", async () => 
   const created = await api.students.create({
     name: "验收多门学生", grade: "初三", guardian: "", status: "在读", note: "", profile: {},
     enrollments: [
-      { subject: "验收科目A", lessons: 10, form: "一对一定制课", teacherId },
-      { subject: "验收科目B", lessons: 20, form: "一对二 / 一对三小组课" },
+      { subject: "验收科目A", lessons: 10, form: "一对一", teacherId },
+      { subject: "验收科目B", lessons: 20, form: "一对二" },
     ],
   });
   const ledgers = await Promise.all(
@@ -789,7 +789,7 @@ await check("学生", "建档并报多门课（含课时流水）", async () => 
 }) =>
   result.counts.join(",") === "10,20" &&
   // 每门课各自的班型与指定教师都要落对（这是界面上一行一行选出来的）
-  result.forms.join("|") === "一对一定制课|一对二 / 一对三小组课" &&
+  result.forms.join("|") === "一对一|一对二" &&
   result.teachers.join(",") === "true,false" &&
   result.kinds.every(
     (rows, index) =>
@@ -798,7 +798,7 @@ await check("学生", "建档并报多门课（含课时流水）", async () => 
 await check("学生", "信息采集表保存", async () => (await api.students.saveProfile(studentId, { school: "验收中学" }))?.profile.school === "验收中学");
 await check("学生", "报课（真实字段 lessons）", async () => {
   const updated = await api.students.enroll(studentId, {
-    subject: "围棋", form: "一对一定制课", teacherId, lessons: 4, startedAt: iso(0),
+    subject: "围棋", form: "一对一", teacherId, lessons: 4, startedAt: iso(0),
     note: "", unitPrice: 200, agreedAmount: 800, paidNow: 800, method: "微信",
   });
   enrollmentId = updated?.enrollments[0]?.id ?? "";
@@ -823,7 +823,7 @@ await check("收费", "退费试算（两种口径）", async () => {
 await check("课程安排", "按周批量排课：预检只算不写", async () => {
   const before = (await api.lessons.list()).length;
   const plan = await api.lessons.planSeries({
-    subject: "围棋", form: "一对一定制课", teacherId, classroomId, studentIds: [studentId],
+    subject: "围棋", form: "一对一", teacherId, classroomId, studentIds: [studentId],
     durationMinutes: 60, status: "已排", note: "验收批量排课", startDate: "2027-06-07",
     weekdays: [1], time: "16:00", count: 4,
   });
@@ -832,7 +832,7 @@ await check("课程安排", "按周批量排课：预检只算不写", async () 
   v.items === 4 && v.changed === 0 && v.schedulable === 4);
 await check("课程安排", "按周批量排课：写入并跳过冲突", async () => {
   const input = {
-    subject: "围棋", form: "一对一定制课", teacherId, classroomId, studentIds: [studentId],
+    subject: "围棋", form: "一对一", teacherId, classroomId, studentIds: [studentId],
     durationMinutes: 60, status: "已排" as const, note: "验收批量排课", startDate: "2027-06-07",
     weekdays: [1], time: "16:00", count: 4,
   };
@@ -855,7 +855,7 @@ await check("课程安排", "按周批量排课：写入并跳过冲突", async 
 let lessonId = "";
 await check("课程安排", "排课", async () => {
   const created = await api.lessons.create({
-    subject: "围棋", form: "一对一定制课", teacherId, classroomId, studentIds: [studentId],
+    subject: "围棋", form: "一对一", teacherId, classroomId, studentIds: [studentId],
     startsAt: iso(1, 10), durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
   });
   lessonId = created.id;
@@ -868,7 +868,7 @@ await check("课程安排", "改课（时间后移 1 小时）", async () => {
 await check("课程安排", "冲突检测（同一教师同一时段）", async () => {
   // LessonInput 是完整课节形状（不是只传几个字段）
   const report = await api.lessons.findConflicts({
-    id: "", subject: "围棋", form: "一对一定制课", teacherId, classroomId,
+    id: "", subject: "围棋", form: "一对一", teacherId, classroomId,
     studentIds: [studentId], startsAt: iso(1, 11), durationMinutes: 60,
     status: "已排", note: "", makeupForLessonId: "",
   });

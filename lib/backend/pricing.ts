@@ -495,7 +495,7 @@ export type TeacherFeeResult = {
  * 算教师课时费。
  *
  * 规则：`小时数 × 课程单价/小时 × (基准 + (人数 − 1) × 每加一名学生)`
- * （见 lib/backend/teacher-share.ts）。**9 人以上大班课不适用** ——
+ * （见 lib/backend/teacher-share.ts）。**大班课（9-20人）不适用** ——
  * 那类按「教师课时总费用 ÷ 班级人数」另议，因此这里直接返回原因而不是硬套公式。
  *
  * 人数一样由调用方给（试算时手填、将来排课时取学生名单的实际人数），
@@ -527,7 +527,7 @@ export function teacherFeeForSelection(
   if (input.course.price === null) return empty("所选课程暂未开放，无法计算教师课时费。");
   if (!teacherShareAppliesTo(input.classType)) {
     return empty(
-      "9 人以上大班课不适用分成规则：那类按「教师课时总费用 ÷ 班级人数」另议。",
+      "大班课（9-20人）不适用分成规则：那类按「教师课时总费用 ÷ 班级人数」另议。",
     );
   }
 

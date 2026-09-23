@@ -57,7 +57,7 @@ export function LessonSeriesForm({
   onDone: () => void | Promise<void>;
   onCancel: () => void;
 }) {
-  // 班型候选：来自课程类型维度表（一对一 / 一对二 / 一对三 / 一对多（4-8）/ 班课（9-20））
+  // 班型候选：来自课程类型维度表（一对一 / 一对二 / 一对三 / 小班课（4-8人）/ 大班课（9-20人））
   const formOptions = useFormOptions();
   const { options: subjectOptions } = useSubjectOptions();
 
@@ -184,7 +184,7 @@ export function LessonSeriesForm({
           value={form}
           onChange={(event) => setForm(event.target.value)}
           /*
-           * 当前值不在候选里时（老数据里的「一对一定制课」这类旧写法，或者机构刚把
+           * 当前值不在候选里时（老数据里的「一对一」这类旧写法，或者机构刚把
            * 某个班型改名）把它**补在最前面**，否则浏览器会显示第一项「（不填）」，
            * 保存时那次静默替换就会把班型改掉、而没人按过它。
            */

@@ -117,7 +117,6 @@ import { getCourseColumnsFromTemplate } from "@/lib/data/site";
 import { exportDataset as buildDatasetExport } from "./export";
 import type { ExportRequest, ExportResult } from "./export";
 import {
-  canRemoveCourse,
   courseOptions,
   coursesFromSite,
   normalizeCourse,
@@ -3548,7 +3547,7 @@ const localApi = {
      * 因此不再铺开（2026-09 审计后收的）。
      */
     list: versionedCollection<Course>((db) => db.courses, "course", "课程", courseDeleteRefusal).list,
-    // `remove` 在下面自己实现（要先过 `canRemoveCourse`：网站来源的课不让删）
+    // `remove` 在下面自己实现（要过 `courseDeleteRefusal`：被报课 / 排课引用着的课不许删）
 
     /**
      * 新建课程（先校验再落库）。
@@ -3686,9 +3685,13 @@ const localApi = {
       if (index === -1) return false;
 
       const target = db.courses[index]!;
-      const verdict = canRemoveCourse(target);
-      if (!verdict.ok) throw new Error(verdict.reason);
-
+      /*
+       * 这里以前还有一道 `canRemoveCourse()`：「网站来源」的课不让删。
+       * 那条护栏已经删掉（2026-09，机构问「为什么现有的这些课程卡片不能删除」）——
+       * v32 删掉了同步入口、v39/v40 又把真源反成"课程库 → 内容文件"，
+       * 因此"网站来的"不再是"不许删"的理由。**真正拦着的仍然是 `courseDeleteRefusal`**：
+       * 被报课或排课引用着的课不许删（见 `versionedCollection` 那处的守卫）。
+       */
       db.courses.splice(index, 1);
       syncPricingWithCourses(db);
       writeLog(db, {

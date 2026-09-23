@@ -232,7 +232,7 @@ export const ENTITY_SPECS: Record<ImportEntity, EntitySpec> = {
     fields: [
       { key: "name", header: "课程名", aliases: ["名称"], required: true, kind: "text", example: "初中数学" },
       { key: "category", header: "分类", aliases: ["栏目"], kind: "text", example: "初中课内" },
-      { key: "forms", header: "班型", kind: "list", example: "一对一定制课|一对二 / 一对三小组课" },
+      { key: "forms", header: "班型", kind: "list", example: "一对一|一对二" },
       { key: "status", header: "状态", kind: "enum", options: ["开放", "暂未开放"], example: "开放" },
       { key: "note", header: "备注", kind: "text", example: "" },
       // v15 的网站卡片字段：填了这张课才会出现在网站上（详见 docs/后台API约定.md）

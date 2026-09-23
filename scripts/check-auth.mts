@@ -659,7 +659,7 @@ try {
   };
 
   const SUBJECT = "初中数学";
-  const FORMS = "一对一定制课";
+  const FORMS = "一对一";
   /** 今天的某个整点（`today` 的口径按本地日期分组，所以固定在今天）。 */
   const todayAt = (hour: number): string => {
     const date = new Date();

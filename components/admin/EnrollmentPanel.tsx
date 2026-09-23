@@ -926,7 +926,7 @@ function EnrollForm({
           value={form}
           onChange={(event) => setForm(event.target.value)}
           list="enrollment-form-options"
-          placeholder="例如 一对一定制课"
+          placeholder="例如 一对一"
         />
         <label className="block">
           <span className="text-xs font-medium text-ink-600">指定教师</span>

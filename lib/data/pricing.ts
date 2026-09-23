@@ -50,7 +50,7 @@ export type PricingStage = {
 export type ClassPricingMode = "coefficient" | "cost-share";
 
 /**
- * 人数（班型）档：一对一 / 一对二 / 一对三 / 一对多（4-8）/ 班课（9-20）。
+ * 人数（班型）档：一对一 / 一对二 / 一对三 / 小班课（4-8人）/ 大班课（9-20人）。
  *
  * 标识符沿用 `ClassType` / `coefficient` 这两个老名字（改名会牵动契约与数据库形状，
  * 不值当），但它表达的是**「班型 → 人数系数」这张表**：`coefficient` 就是**人数系数**
@@ -87,7 +87,7 @@ export type TeacherSharePriceBasis = "course" | "seat";
  * 教师课时费（分成）规则。
  *
  * 原始口径：`教师课时费 = 小时数 × (课程单价/小时) × (0.4 + (学生人数 − 1) × 0.1)`，
- * 适用于课内课程里按人数系数计价的班型（一对一 … 一对多小班课），9 人以上大班课另议。
+ * 适用于课内课程里按人数系数计价的班型（一对一 … 小班课（4-8人）），大班课（9-20人）另议。
  * 算法与人话说明见 `lib/backend/teacher-share.ts`。
  */
 export type TeacherShareRules = {

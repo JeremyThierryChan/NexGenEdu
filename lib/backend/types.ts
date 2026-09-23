@@ -175,7 +175,7 @@ export type CourseSiteKind = (typeof COURSE_SITE_KINDS)[number];
  * | `catalog.stages` | 学段 | 小学 / 初中 / 高中 / 大学 / 其他类型 |
  * | `catalog.subjects` | 学科与项目（两级：分组 → 科目） | 语文 / 数学 / 雅思 / 网课；分组：外语等级考试 |
  * | `catalog.modules` | 内容模块（属于某个学科） | 一年级…九年级教材 / 客观题·阅读·作文 / CEFR-A1…B2 / N5…N1 |
- * | `catalog.formats` | 班型（**全系统唯一口径**） | 一对一 / 一对二 / 一对三 / 一对多（4-8）/ 班课（9-20） |
+ * | `catalog.formats` | 班型（**全系统唯一口径**） | 一对一 / 一对二 / 一对三 / 小班课（4-8人）/ 大班课（9-20人） |
  *
  * ## 刻意**没有**"交付形态"这一维（v26 更正）
  *
@@ -255,16 +255,16 @@ export type CatalogModule = {
   stageIds: string[];
 };
 
-/** 班型（**全系统唯一口径**：一对一 / 一对二 / 一对三 / 一对多（4-8）/ 班课（9-20））。 */
+/** 班型（**全系统唯一口径**：一对一 / 一对二 / 一对三 / 小班课（4-8人）/ 大班课（9-20人））。 */
 export type CatalogFormat = {
   id: string;
   name: string;
-  /** 最少人数 / 最多人数（1 对 1 就是 1–1；一对多（4-8）是 4–8）。 */
+  /** 最少人数 / 最多人数（1 对 1 就是 1–1；小班课（4-8人）是 4–8）。 */
   minSize: number;
   maxSize: number;
   /**
    * 计价模式：`系数`＝单价按**人数系数**打折（一对一 1.0 / 一对二 0.7 / …）；
-   * `分摊`＝按班上人数分摊教师课时费（现有报价配置里的「班课（9-20）」就是这种）。
+   * `分摊`＝按班上人数分摊教师课时费（现有报价配置里的「大班课（9-20人）」就是这种）。
    */
   mode: "系数" | "分摊";
   order: number;
@@ -709,7 +709,7 @@ export type Enrollment = {
   id: string;
   /** 科目，例如「初中数学」；与课程名用同一套叫法。 */
   subject: string;
-  /** 班型，例如「一对一定制课」。 */
+  /** 班型，例如「一对一」。 */
   form: string;
   /** 指定教师；空串表示未指定。 */
   teacherId: string;
@@ -1061,7 +1061,7 @@ export type Lesson = {
   version: number;
   /** 科目，例如「初中数学」。 */
   subject: string;
-  /** 班型，例如「一对一定制课」。 */
+  /** 班型，例如「一对一」。 */
   form: string;
   teacherId: string;
   classroomId: string;

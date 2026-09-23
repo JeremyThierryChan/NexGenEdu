@@ -246,7 +246,7 @@ try {
   }])) as { id: string };
 
   const enrolled = (await call(handle.base, "students.enroll", [student.id, {
-    subject: "数学", form: "一对一定制课", teacherId: teacher.id, lessons: 20,
+    subject: "数学", form: "一对一", teacherId: teacher.id, lessons: 20,
     startedAt: new Date().toISOString(), note: "演练报课",
   }])) as { enrollments: Array<{ id: string }> };
   const enrollmentId = enrolled.enrollments[0]!.id;
@@ -257,7 +257,7 @@ try {
     method: "微信", note: "演练收款",
   }]);
   await call(handle.base, "lessons.create", [{
-    subject: "数学", form: "一对一定制课", teacherId: teacher.id, classroomId: classroom.id,
+    subject: "数学", form: "一对一", teacherId: teacher.id, classroomId: classroom.id,
     studentIds: [student.id], startsAt: new Date(Date.now() + 86_400_000).toISOString(),
     durationMinutes: 90, status: "已排", note: "演练排课", makeupForLessonId: "",
   }]);

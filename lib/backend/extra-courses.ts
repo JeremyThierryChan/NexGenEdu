@@ -89,15 +89,21 @@ const SPECS: readonly ExtraCourseSpec[] = [
    * 这里必须跟着改：报价的课程名与课程库的课程名是一一对应的（`npm run check` 第一节
    * 与第 41 节都钉着这条），名字不跟就会出现"报价里有、课程库里没有"那套老毛病。
    */
-  { name: "医学", stage: "其他类型", subjects: ["专业外语"], modules: [], status: "暂未开放" },
+  { name: "医学专业英语", stage: "其他类型", subjects: ["专业外语"], modules: [], status: "暂未开放" },
   { name: "机械行业英语", stage: "其他类型", subjects: ["专业外语"], modules: [], status: "暂未开放" },
-  { name: "贸易", stage: "其他类型", subjects: ["专业外语"], modules: [], status: "暂未开放" },
+  { name: "贸易行业英语", stage: "其他类型", subjects: ["专业外语"], modules: [], status: "暂未开放" },
   { name: "成人旅游、出行", stage: "其他类型", subjects: ["成人英语口语"], modules: [], status: "开放" },
   { name: "跨国交友", stage: "其他类型", subjects: ["成人英语口语"], modules: [], status: "暂未开放" },
 ];
 
-/** 与网站卡片一致的四种班型（后台课也照写，免得台账上这一栏是空的）。 */
-const FORMS = ["一对一定制课", "一对二 / 一对三小组课", "一对多小班课", "9 人以上大班课"];
+/**
+ * 与网站卡片一致的**五个班型**（后台课也照写，免得台账上这一栏是空的）。
+ *
+ * 2026-09 机构把班型统一成这五个、其余写法全部清空（见 PROJECT.md 的 E13），
+ * 因此这里与 `catalog.formats`、与 42 张卡片的「班型」逐字同名 ——
+ * 三处写法不一致时，卡片上的班型会在特色课程树里查不到（`npm run check` 有断言盯着）。
+ */
+const FORMS = ["一对一", "一对二", "一对三", "小班课（4-8人）", "大班课（9-20人）"];
 
 /** 这门课为什么在库里（写在 `note` 上，台账里一眼能看出来路）。 */
 const NOTE = "旧报价里有、网站卡片上没有的课（2026-09 报价与课程清单对齐时建）";

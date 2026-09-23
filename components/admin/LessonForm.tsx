@@ -295,7 +295,7 @@ export function LessonForm({
           value={form}
           onChange={(event) => setForm(event.target.value)}
           list="lesson-form-options"
-          placeholder="例如 一对一定制课"
+          placeholder="例如 一对一"
         />
         <SelectInput
           label="教师"

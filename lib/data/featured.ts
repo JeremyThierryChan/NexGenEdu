@@ -7,11 +7,11 @@ import type { CourseDetail, FeaturedContent, LabeledItem } from "@/lib/types/sit
  *
  * 层级完全由标题层级决定：
  *   ### 课内辅导          → 一级课程
- *   #### 一对一定制课      → 二级课程
+ *   #### 一对一      → 二级课程
  *   ##### 精品小升初       → 三级课程
  *
  * 每门课程都有自己的独立页面，路径由「从根到该课程的课程名」拼成：
- *   /courses/featured/课内辅导/一对多小班课/精品小升初
+ *   /courses/featured/课内辅导/小班课（4-8人）/精品小升初
  *
  * 页面只调用本文件的函数，不直接解析 Markdown。
  */
@@ -24,7 +24,7 @@ const COURSE_FIELDS = ["适合对象", "课程定位", "主要做法", "可以�
  *
  * 剔除非 ASCII 可见字符：空格与斜杠等字符在 URL 里会被百分号编码，
  * 其中 `%2F` 会被静态托管与一部分浏览器当作路径分隔符处理，
- * 导致页面解析失败（例如「一对二 / 一对三小组课」）。
+ * 导致页面解析失败（例如「一对二」）。
  */
 function slugify(name: string): string {
   return name
@@ -126,7 +126,7 @@ export function getFeaturedContentFromTemplate(): FeaturedContent {
 
 /**
  * 按路径查找课程。
- * @param slugs 从根到目标课程的课程名数组，例如 ["课内辅导", "一对多小班课", "精品小升初"]
+ * @param slugs 从根到目标课程的课程名数组，例如 ["课内辅导", "小班课（4-8人）", "精品小升初"]
  * @returns 找到的课程，以及从根到它的完整链路（用于面包屑）
  */
 export function findFeaturedCourse(

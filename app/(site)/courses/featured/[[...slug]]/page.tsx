@@ -18,8 +18,8 @@ import Link from "next/link";
  * 用可选 catch-all 路由同时承载两种情况：
  *   /courses/featured                                → 总览（列出全部课程）
  *   /courses/featured/课内辅导                        → 一级课程
- *   /courses/featured/课内辅导/一对多小班课             → 二级课程
- *   /courses/featured/课内辅导/一对多小班课/精品小升初   → 三级课程
+ *   /courses/featured/课内辅导/小班课（4-8人）             → 二级课程
+ *   /courses/featured/课内辅导/小班课（4-8人）/精品小升初   → 三级课程
  *
  * 每门课程都有自己的独立页面与面包屑，内容来自 data/site/featured.md。
  */

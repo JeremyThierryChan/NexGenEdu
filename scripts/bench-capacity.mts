@@ -92,7 +92,7 @@ function buildDatabase(studentCount: number, lessonsPerStudent: number): Record<
         kind: "收款", method: "微信", at: iso(-90), note: "",
       });
       return {
-        id, subject, form: "一对一定制课", teacherId: `t${e}`, totalLessons, usedLessons,
+        id, subject, form: "一对一", teacherId: `t${e}`, totalLessons, usedLessons,
         unitPrice: 200, agreedAmount: totalLessons * 200, paidAmount: totalLessons * 200,
         status: "在读", startedAt: iso(-90), note: "",
         history: [
@@ -109,7 +109,7 @@ function buildDatabase(studentCount: number, lessonsPerStudent: number): Record<
 
     for (let l = 0; l < lessonsPerStudent; l += 1) {
       lessons.push({
-        id: `l${s}_${l}`, subject: "数学", form: "一对一定制课", teacherId: `t${l % 6}`,
+        id: `l${s}_${l}`, subject: "数学", form: "一对一", teacherId: `t${l % 6}`,
         classroomId: `c${l % 4}`, studentIds: [`s${s}`], startsAt: iso(-l), durationMinutes: 90,
         status: l % 5 === 0 ? "已排" : "已上", note: "", makeupForLessonId: "", createdAt: iso(-l),
       });

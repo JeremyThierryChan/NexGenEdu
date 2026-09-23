@@ -520,8 +520,13 @@ eq("编程与信息素养的正文里有四个方向小标题", headingNames("�
   ["Python", "C/C++", "Java", "其它"]);
 // 新增的两个学科组（备考与冲刺那几门课原来只在后台用，机构要求一起上网）
 eq("新学科组「小升初与初升高」", anchorsOfGroup("小升初与初升高"), ["小升初"]);
+/*
+ * 机构 2026-09 在后台把「高考冲刺」「特殊计划专项」**删掉了**（课程库里已经不存在），
+ * 它们的正文小节也跟着删（自检有一条"每个小节都对应课程库里的一门课"在守这件事）。
+ * 所以这里只留两门。
+ */
 eq("新学科组「备考与冲刺」", anchorsOfGroup("备考与冲刺"),
-  ["中考冲刺", "提前招专项", "高考冲刺", "特殊计划专项"]);
+  ["中考冲刺", "提前招专项"]);
 ok("学科组里没有任何一个空组（课程库以外的段落都删掉了）",
   (coursesPage?.groups ?? []).every((g) => g.children.length > 0),
   JSON.stringify((coursesPage?.groups ?? []).filter((g) => g.children.length === 0).map((g) => g.name)));
@@ -600,13 +605,22 @@ eq("课程页栏目", columns.map((c) => c.title),
   ["小学课内", "初中课内", "高中课内", "外语", "课外兴趣", "成人课程"]);
 eq("栏目与全站段同源", columns, getCourseColumnsFromTemplate());
 
-// 首页课程区展示的是班型（一对一等），不是学科
+/*
+ * 首页课程区展示的是班型（一对一等），不是学科。
+ *
+ * 2026-09 机构把班型统一成五个（E13）：一对一 / 一对二 / 一对三 / 小班课（4-8人）/
+ * 大班课（9-20人）。特色课程树的二级课程名里同时还有三个**服务**（晚托管 / 周中预习课 /
+ * 假期预习课）—— 它们会出现在这一区，因此这里断的是"那五个班型一个不少"，
+ * 而不是"这一区只有班型"。
+ */
 const classTypes = getFeaturedContent().courses.flatMap((c) =>
   c.children.map((child) => child.name),
 );
 ok("首页课程区有班型可展示", classTypes.length >= 5);
-ok("班型含 一对一定制课 与 小组课",
-  classTypes.some((n) => n.includes("一对一")) && classTypes.some((n) => n.includes("小组课")));
+ok("首页课程区列全了那五个班型",
+  ["一对一", "一对二", "一对三", "小班课（4-8人）", "大班课（9-20人）"]
+    .every((name) => classTypes.includes(name)),
+  JSON.stringify(classTypes));
 
 const HIGH_SCHOOL_SUBGROUPS = ["必考科目", "外语", "七选三"];
 /*
@@ -731,28 +745,35 @@ const reverseMismatch = formNames.flatMap((form) => {
 });
 eq("班型页列出的科目与卡片上写的班型一致", reverseMismatch, []);
 // 班型页按阶段分组展示：分组结果必须与卡片本身一一对应
-const grouped = getFormSubjectGroups("一对一定制课").flatMap((g) =>
+const grouped = getFormSubjectGroups("一对一").flatMap((g) =>
   g.subgroups.flatMap((sub) => sub.cards.map((card) => card.path)),
 );
 eq("班型页分组展示不漏卡片",
-  allCards.filter((c) => c.forms.includes("一对一定制课") && !grouped.includes(c.path)).map((c) => c.title),
+  allCards.filter((c) => c.forms.includes("一对一") && !grouped.includes(c.path)).map((c) => c.title),
   []);
 ok("班型页分组都带栏目页路径",
-  getFormSubjectGroups("一对一定制课").every((g) => g.columnHref.startsWith("/courses/")));
+  getFormSubjectGroups("一对一").every((g) => g.columnHref.startsWith("/courses/")));
 /*
- * 两种「不是按人数分」的班型，语义由业务决定，这里把它固定住：
+ * 三个**服务**（不是班型）的语义由业务决定，这里把它固定住：
  *   - 晚托管：不分科目，是单独的服务（按学段分小学晚托 / 初中晚托），
  *     因此不该挂到任何学科上；
- *   - 周中预习课：只在初中开设，因此只应挂在初中课内的科目上。
+ *   - 周中预习课：2026-09 起**不再是卡片上的班型**（机构口径：班型只有那五个，
+ *     其余的班型信息全部清空）—— 它仍然留在特色课程树里当一门服务，
+ *     因此卡片上一个字都不该有它。
  * 哪天业务变了，改内容的同时也会在这里被提醒。
  */
 eq("晚托管不挂到任何学科（它是单独的服务，不分科目）", getCardsForForm("晚托管"), []);
-eq("周中预习课只挂在初中科目上",
-  [...new Set(getCardsForForm("周中预习课").map((item) => item.column))],
-  ["初中课内"]);
-ok("四种按人数的班型都有关联科目",
-  ["一对一定制课", "一对二 / 一对三小组课", "一对多小班课", "9 人以上大班课"]
-    .every((form) => getCardsForForm(form).length >= 20));
+eq("周中预习课不再是卡片上的班型（它不是班型，是特色课程里的一门服务）",
+  getCardsForForm("周中预习课").map((item) => item.card.title), []);
+ok("周中预习课仍然在特色课程树里（删掉它等于删掉网站上的那一门）",
+  featuredNames.has("周中预习课"));
+const FIVE_FORMS = ["一对一", "一对二", "一对三", "小班课（4-8人）", "大班课（9-20人）"];
+ok("五个按人数的班型都有关联科目",
+  FIVE_FORMS.every((form) => getCardsForForm(form).length >= 20),
+  JSON.stringify(FIVE_FORMS.map((form) => [form, getCardsForForm(form).length])));
+ok("卡片上的班型就是那五个（机构口径：其他的班型信息全部清空）",
+  [...new Set(allCards.flatMap((c) => c.forms))].sort().join("、") === [...FIVE_FORMS].sort().join("、"),
+  JSON.stringify([...new Set(allCards.flatMap((c) => c.forms))]));
 eq("卡片上写的班型都存在于特色课程",
   allCards.flatMap((c) => c.forms.filter((form) => !featuredNames.has(form)).map((form) => `${c.title} → ${form}`)),
   []);
@@ -1045,23 +1066,33 @@ console.log("\n=== 3.1 特色课程（层级与独立页面）===");
 const featured = getFeaturedContent();
 eq("特色课程一级分组", featured.courses.map((c) => c.name), ["课内辅导"]);
 const inClass = featured.courses[0];
-eq("二级课程数", inClass?.children.length, 7);
+/*
+ * 二级课程 = **五个班型 + 三个服务**（晚托管 / 周中预习课 / 假期预习课）。
+ *
+ * 2026-09 机构把班型统一成五个（E13），原先那一套旧写法
+ * （一对一定制课 / 一对二 / 一对三小组课 / 一对多小班课 / 9 人以上大班课）全部换成新名字；
+ * 其中原来那个**合并写法**「一对二 / 一对三小组课」按五个班型拆成两个节点
+ * （一对二、一对三）—— 因为卡片上的「班型」必须在这棵树里找得到
+ * （见前面那条"卡片上写的班型都存在于特色课程"），合并成一个节点就会让
+ * 「一对三」变成一个查不到的名字。
+ */
+eq("二级课程数（五个班型 + 三个服务）", inClass?.children.length, 8);
 // 只要求「既有的这几门都在」：以后新增班型不该让自检失败，
 // 但改名或误删既有课程必须被拦住
 const LEVEL2_NAMES = [
-  "一对一定制课", "一对二 / 一对三小组课", "一对多小班课", "9 人以上大班课",
+  "一对一", "一对二", "一对三", "小班课（4-8人）", "大班课（9-20人）",
   "晚托管", "周中预习课", "假期预习课",
 ];
 eq("二级课程都在（含假期预习课）",
   LEVEL2_NAMES.filter((name) => !(inClass?.children.some((c) => c.name === name))),
   []);
-ok("特色课程数量合理（当前 14 门）", getAllFeaturedCourses().length >= 13);
+ok("特色课程数量合理（当前 15 门）", getAllFeaturedCourses().length >= 13);
 ok("每门课程都有 4 个描述字段",
   getAllFeaturedCourses().every((c) => c.fields.length >= 3));
 ok("三级课程挂在正确的父级下",
-  (inClass?.children.find((c) => c.name === "一对多小班课")?.children.length ?? -1) === 0);
-ok("基础班挂在 9 人以上大班课下",
-  (inClass?.children.find((c) => c.name === "9 人以上大班课")?.children.length ?? -1) === 0);
+  (inClass?.children.find((c) => c.name === "小班课（4-8人）")?.children.length ?? -1) === 0);
+ok("基础班挂在大班课（9-20人）下",
+  (inClass?.children.find((c) => c.name === "大班课（9-20人）")?.children.length ?? -1) === 0);
 ok("晚托班挂在晚托管下",
   (inClass?.children.find((c) => c.name === "晚托管")?.children.map((c) => c.name) ?? []).join(",") === "小学晚托,初中晚托");
 ok("假期预习课单独成组，含小升初 / 初升高四门课",
@@ -1071,7 +1102,7 @@ ok("精品 / 基础两种进度都归在假期预习课下",
   (inClass?.children.find((c) => c.name === "假期预习课")?.children ?? []).every(
     (c) => c.children.length === 0 && c.fields.some((f) => f.title === "适合对象")));
 ok("核心课程都有详细介绍",
-  ["周中预习课", "一对一定制课", "精品小升初"].every((name) => {
+  ["周中预习课", "一对一", "一对三", "精品小升初"].every((name) => {
     const found = getAllFeaturedCourses().find((c) => c.name === name);
     return (found?.body.length ?? 0) > 50;
   }));
@@ -1086,9 +1117,16 @@ const allPaths = getAllFeaturedCourses().flatMap((c) => c.path);
 ok("全部路径分段为 ASCII 安全字符",
   allPaths.every((segment) => /^[a-z0-9-]+$/.test(segment)));
 ok("路径无重复", new Set(getAllFeaturedCourses().map((c) => c.path.join("/"))).size === getAllFeaturedCourses().length);
-// 曾出问题的课程：课程名含空格与斜杠
-const smallGroup = getAllFeaturedCourses().find((c) => c.name.includes("一对二"));
-eq("含斜杠的课程名映射到安全路径", smallGroup?.path, ["in-class", "small-group"]);
+/*
+ * 曾出问题的课程：课程名里带空格与斜杠（旧写法「一对二 / 一对三小组课」）会让派生的
+ * 网址多出一个分段，页面直接 404。2026-09 那个名字已经拆成「一对二」「一对三」两个节点
+ * （E13），因此这一条改成钉住**改名后网址没变**：显式声明的 slug 与课程名是两份数据。
+ */
+const smallGroup = getAllFeaturedCourses().find((c) => c.name === "一对二");
+eq("改名之后网址没变（slug 是显式声明的，不跟着名字派生）",
+  smallGroup?.path, ["in-class", "small-group"]);
+eq("拆出来的那个节点也有自己的 ASCII 网址",
+  getAllFeaturedCourses().find((c) => c.name === "一对三")?.path, ["in-class", "one-on-three"]);
 
 console.log("\n=== 4. 报价数据 ===");
 const pricing = getPricingDataFromTemplate();
@@ -1121,12 +1159,14 @@ eq("高中的课程与价格（含五个语种与两个专项）",
   ["高中语文=300", "高中数学=300", "高考外语=300", "高中物理=300", "高中化学=300", "高中生物=300",
     "高中政治=暂未开放", "高中历史=暂未开放", "高中地理=暂未开放", "高中技术=暂未开放",
     "日语=暂未开放", "俄语=暂未开放", "法语=300", "德语=300", "西班牙语=300",
-    "高考冲刺=400", "特殊计划专项=500"]);
+    // 这两门课机构已从课程库删除 → 报价配置按既定口径把对应行**置成暂未开放、不删名字**
+    // （`syncLibraryLinks`："不静默删除，机构自己决定去留"）。要清掉就到报价页删那一行。
+    "高考冲刺=暂未开放", "特殊计划专项=暂未开放"]);
 eq("其他类型的课程与价格",
   pricing.stages[3]?.courses.map(priceLabel),
   ["雅思=700", "意大利语=暂未开放", "3D建模 & 3D打印=暂未开放", "编程与信息素养=暂未开放",
     "成人英语口语=暂未开放", "成人零基础外语=暂未开放", "出国语言备考=暂未开放",
-    "职场与商务英语=暂未开放", "医学=暂未开放", "机械行业英语=暂未开放", "贸易=暂未开放",
+    "职场与商务英语=暂未开放", "医学专业英语=暂未开放", "机械行业英语=暂未开放", "贸易行业英语=暂未开放",
     "成人旅游、出行=100", "跨国交友=暂未开放"]);
 ok("每一组都有可报价的课（否则家长点进来是空的）",
   pricing.stages.every((stage) => stage.courses.some((course) => course.available)));
@@ -1192,7 +1232,7 @@ const noSubjectTypes: [
 eq("类型上也删干净了（PricingData / PricingConfig / QuoteInput / QuoteSelection 都没有科目字段）",
   noSubjectTypes, [true, true, true, true]);
 eq("班级类型", pricing.classTypes.map((c) => c.name),
-  ["一对一", "一对二", "一对三", "一对多（4-8）", "班课（9-20）"]);
+  ["一对一", "一对二", "一对三", "小班课（4-8人）", "大班课（9-20人）"]);
 eq("时长选项", pricing.durations.map((d) => `${d.name}×${d.multiplier}`),
   ["1 小时×1", "1.5 小时×1.5", "2 小时×2"]);
 eq("试课", pricing.trial?.priceLabel, "免费");
@@ -1240,11 +1280,11 @@ eq("10 节试课免费", [c.trialFree, c.trialFee, c.totalPrice], [true, 0, 2200
 
 // 班课：教师费 2400 ÷ 12 人 = 200；×1.5 小时 = 300；×8 节 = 2400
 // 正课 2400 + 试课 220（初中英语原价）= 2620
-const d = quote("初中英语", "班课（9-20）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 });
+const d = quote("初中英语", "大班课（9-20人）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 });
 eq("班课按人数分摊", [d.unitPrice, d.lessonsPrice, d.totalPrice], [300, 2400, 2620]);
 
 // 班课缺参数应报错
-const e = quote("初中英语", "班课（9-20）", "1 小时", 5, { classCost: 2400 });
+const e = quote("初中英语", "大班课（9-20人）", "1 小时", 5, { classCost: 2400 });
 ok("班课缺人数时报错", e.ok === false);
 
 // 节数非法应报错
@@ -1391,14 +1431,14 @@ const multi = await api.students.create({
   name: "自检·多门报课", grade: "初三", guardian: "", status: "在读", note: "", profile: {},
   enrollments: [
     // 每门课各自带上班型与指定教师（界面上就是一行一行选的）
-    { subject: "自检·多门A", lessons: 10, form: "一对一定制课", teacherId: multiTeacher.id },
-    { subject: "自检·多门B", lessons: 20, form: "一对二 / 一对三小组课" },
+    { subject: "自检·多门A", lessons: 10, form: "一对一", teacherId: multiTeacher.id },
+    { subject: "自检·多门B", lessons: 20, form: "一对二" },
   ],
 });
 eq("建档一次报两门 → 两条报课记录", multi.enrollments.length, 2);
 eq("每门课的班型各自独立（不是一刀切同一个）",
   multi.enrollments.map((item) => [item.subject, item.form]).sort(),
-  [["自检·多门A", "一对一定制课"], ["自检·多门B", "一对二 / 一对三小组课"]].sort());
+  [["自检·多门A", "一对一"], ["自检·多门B", "一对二"]].sort());
 eq("指定教师也各自独立（一门指定、一门不指定）",
   multi.enrollments.map((item) => [item.subject, item.teacherId === multiTeacher.id]).sort(),
   [["自检·多门A", true], ["自检·多门B", false]].sort());
@@ -1511,7 +1551,7 @@ const beforeTotal = remainingTotal(target.enrollments);
 ok("示例学生有报课记录", target.enrollments.length >= 1);
 
 const enrolled = await api.students.enroll(target.id, {
-  subject: "自检科目", form: "一对一定制课", teacherId: "",
+  subject: "自检科目", form: "一对一", teacherId: "",
   lessons: 10, startedAt: new Date().toISOString(), note: "自检",
   unitPrice: 0, agreedAmount: 0, paidNow: 0, method: "微信",
 });
@@ -1595,7 +1635,7 @@ const first = slot(15);
 // 科目刻意用该学生**已报课**的科目：扣课时是按科目找报课记录的
 const anchorSubject = pupil.subjects[0] ?? "未指定科目";
 const anchorLesson = await api.lessons.create({
-  subject: anchorSubject, form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
+  subject: anchorSubject, form: "一对一", teacherId: teacher.id, classroomId: room.id,
   studentIds: [pupil.id], startsAt: first.start, durationMinutes: first.duration,
   status: "已排", note: "", makeupForLessonId: "",
 });
@@ -1747,18 +1787,18 @@ const editStudent = await api.students.create({
   name: "自检改课学生", grade: "初二", guardian: "", status: "在读", note: "", profile: {},
 });
 const editEnroll = await api.students.enroll(editStudent.id, {
-  subject: "自检改课科目", form: "一对一定制课", teacherId: teacher.id, lessons: 2,
+  subject: "自检改课科目", form: "一对一", teacherId: teacher.id, lessons: 2,
   startedAt: new Date().toISOString(), note: "自检",
   unitPrice: 0, agreedAmount: 0, paidNow: 0, method: "微信",
 });
 const editEnrollmentId = editEnroll!.enrollments[0]!.id;
 const editLesson = await api.lessons.create({
-  subject: "自检改课科目", form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
+  subject: "自检改课科目", form: "一对一", teacherId: teacher.id, classroomId: room.id,
   studentIds: [editStudent.id], startsAt: slot(16, 0).start, durationMinutes: 60,
   status: "已排", note: "", makeupForLessonId: "",
 });
 const editSecond = await api.lessons.create({
-  subject: "自检改课科目", form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
+  subject: "自检改课科目", form: "一对一", teacherId: teacher.id, classroomId: room.id,
   studentIds: [editStudent.id], startsAt: slot(17, 0).start, durationMinutes: 60,
   status: "已排", note: "", makeupForLessonId: "",
 });
@@ -1807,7 +1847,7 @@ eq("自检改课学生已清理", await api.students.get(editStudent.id), null);
 
 // 先建一节（此时有课时），再退掉这门课的报课记录 → 标记已上时就没有对应报课记录了
 const orphanLesson = await api.lessons.create({
-  subject: anchorSubject, form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
+  subject: anchorSubject, form: "一对一", teacherId: teacher.id, classroomId: room.id,
   studentIds: [pupil.id], startsAt: slot(9, 0).start, durationMinutes: 60,
   status: "已排", note: "", makeupForLessonId: "",
 });
@@ -1830,12 +1870,12 @@ const overflowStudent = await api.students.create({
   name: "自检超用学生", grade: "初二", guardian: "", status: "在读", note: "", profile: {},
 });
 const overflowEnroll = await api.students.enroll(overflowStudent.id, {
-  subject: "自检超用科目", form: "一对一定制课", teacherId: teacher.id, lessons: 5,
+  subject: "自检超用科目", form: "一对一", teacherId: teacher.id, lessons: 5,
   startedAt: new Date().toISOString(), note: "自检",
   unitPrice: 0, agreedAmount: 0, paidNow: 0, method: "微信",
 });
 const overflowLesson = await api.lessons.create({
-  subject: "自检超用科目", form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
+  subject: "自检超用科目", form: "一对一", teacherId: teacher.id, classroomId: room.id,
   studentIds: [overflowStudent.id], startsAt: slot(11, 0).start, durationMinutes: 60,
   status: "已排", note: "", makeupForLessonId: "",
 });
@@ -2828,7 +2868,7 @@ await api.restoreBackup();
     name: "自检·改报课学生", grade: "初三", guardian: "", status: "在读", note: "", profile: {},
   });
   const editEnroll = (await api.students.enroll(editStudent.id, {
-    subject: "自检·改报课科目", form: "一对一定制课", teacherId: "",
+    subject: "自检·改报课科目", form: "一对一", teacherId: "",
     lessons: 10, startedAt: new Date().toISOString(), note: "",
     unitPrice: 200, agreedAmount: 2000, paidNow: 2000, method: "微信",
   }))!.enrollments[0]!;
@@ -2850,17 +2890,17 @@ await api.restoreBackup();
   const teacherA = await api.teachers.create(newTeacher("自检·改课甲老师"));
   const teacherB = await api.teachers.create(newTeacher("自检·改课乙老师"));
   const pastDone = await api.lessons.create({
-    subject: editEnroll.subject, form: "一对一定制课", teacherId: teacherA.id, classroomId: room.id,
+    subject: editEnroll.subject, form: "一对一", teacherId: teacherA.id, classroomId: room.id,
     studentIds: [editStudent.id], startsAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
     durationMinutes: 60, status: "已上", note: "", makeupForLessonId: "",
   });
   const pastOpen = await api.lessons.create({
-    subject: editEnroll.subject, form: "一对一定制课", teacherId: teacherA.id, classroomId: room.id,
+    subject: editEnroll.subject, form: "一对一", teacherId: teacherA.id, classroomId: room.id,
     studentIds: [editStudent.id], startsAt: new Date(Date.now() - 86_400_000).toISOString(),
     durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
   });
   const futureLesson = await api.lessons.create({
-    subject: editEnroll.subject, form: "一对一定制课", teacherId: teacherA.id, classroomId: room.id,
+    subject: editEnroll.subject, form: "一对一", teacherId: teacherA.id, classroomId: room.id,
     studentIds: [editStudent.id], startsAt: new Date(Date.now() + 2 * 86_400_000).toISOString(),
     durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
   });
@@ -2868,13 +2908,13 @@ await api.restoreBackup();
   // ① 只改记录：课节一节都不动
   const onlyRecord = await api.students.updateEnrollment(
     editStudent.id, editEnroll.id,
-    { form: "一对二 / 一对三小组课", unitPrice: 260, agreedAmount: 2600 },
+    { form: "一对二", unitPrice: 260, agreedAmount: 2600 },
     "enrollment",
   );
   eq("只改记录时不动课节", onlyRecord.updatedLessons.length, 0);
-  eq("记录本身改了班型", (await api.students.get(editStudent.id))!.enrollments[0]?.form, "一对二 / 一对三小组课");
+  eq("记录本身改了班型", (await api.students.get(editStudent.id))!.enrollments[0]?.form, "一对二");
   eq("未来那节课的班型没跟着变（这正是「只改记录」的意思）",
-    (await api.lessons.get(futureLesson.id))?.form, "一对一定制课");
+    (await api.lessons.get(futureLesson.id))?.form, "一对一");
   eq("单价与约定应缴改了",
     [(await api.students.get(editStudent.id))!.enrollments[0]?.unitPrice,
      (await api.students.get(editStudent.id))!.enrollments[0]?.agreedAmount], [260, 2600]);
@@ -2882,14 +2922,14 @@ await api.restoreBackup();
   // ② 改记录 + 后续还没上的课：未来的跟着改，过去的（含已上、含状态还挂着的）一律不动
   const withFuture = await api.students.updateEnrollment(
     editStudent.id, editEnroll.id,
-    { form: "一对一定制课", teacherId: teacherB.id },
+    { form: "一对一", teacherId: teacherB.id },
     "future-lessons",
   );
   eq("只改了未来那一节", withFuture.updatedLessons.map((item) => item.id), [futureLesson.id]);
   eq("过去的两节都算「已过去、未动」", withFuture.pastLessons, 2);
   eq("未来那节换成新教师了",
     (await api.lessons.get(futureLesson.id))?.teacherId, teacherB.id);
-  eq("未来那节班型也变了", (await api.lessons.get(futureLesson.id))?.form, "一对一定制课");
+  eq("未来那节班型也变了", (await api.lessons.get(futureLesson.id))?.form, "一对一");
   eq("已上的课原封不动（老师没变）", (await api.lessons.get(pastDone.id))?.teacherId, teacherA.id);
   eq("过去但状态还挂着「已排」的课也原封不动",
     [(await api.lessons.get(pastOpen.id))?.teacherId, (await api.lessons.get(pastOpen.id))?.status],
@@ -2960,7 +3000,7 @@ const ics = createIcs(
   [
     {
       uid: "lesson-abc@nexgenedu",
-      title: "初中数学 · 一对一定制课",
+      title: "初中数学 · 一对一",
       location: "301 教室",
       description: "教师：陈老师\n备注：带,逗号;分号",
       startsAt: icsStart.toISOString(),
@@ -3005,7 +3045,7 @@ const beforeMoney = (await api.students.list()).length;
 
 // 报课带金额：约定应缴可低于标价（优惠）、实收可分次
 const moneyEnrollment = await api.students.enroll(moneyStudent.id, {
-  subject: "自检·收费科目", form: "一对一定制课", teacherId: "",
+  subject: "自检·收费科目", form: "一对一", teacherId: "",
   lessons: 10, startedAt: new Date().toISOString(), note: "自检报课",
   unitPrice: 200, agreedAmount: 1800, paidNow: 1000, method: "微信",
 });
@@ -3659,7 +3699,7 @@ const searchInput = {
   ],
   lessons: [
     {
-      id: "l1", version: 1, subject: "初中数学", form: "一对一定制课", teacherId: "t1", classroomId: "c1",
+      id: "l1", version: 1, subject: "初中数学", form: "一对一", teacherId: "t1", classroomId: "c1",
       studentIds: ["s1"], startsAt: new Date("2026-09-18T17:30:00").toISOString(),
       durationMinutes: 60, status: "已排" as const, note: "", makeupForLessonId: "",
     },
@@ -4537,9 +4577,9 @@ const pbParityCases: Array<[string, string, string, number, Record<string, numbe
   ["初中数学", "一对二", "1.5 小时", 5, {}],
   ["初中数学", "一对二", "1 小时", 1, {}],
   ["初中数学", "一对一", "1 小时", 10, {}],
-  ["初中英语", "班课（9-20）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 }],
+  ["初中英语", "大班课（9-20人）", "1.5 小时", 8, { studentCount: 12, classCost: 2400 }],
   ["小学语文", "一对三", "2 小时", 20, {}],
-  ["医学", "一对一", "1 小时", 5, {}],
+  ["医学专业英语", "一对一", "1 小时", 5, {}],
   ["初中数学", "一对一", "1 小时", 0, {}],
 ];
 for (const [course, classType, duration, lessons, extra] of pbParityCases) {
@@ -4704,17 +4744,17 @@ eq("内容的教师分成规则", [
 eq("人数对照表（1–8 人的分成比例）",
   Array.from({ length: TEACHER_SHARE_MAX_STUDENTS }, (_, index) => sharePercentFor(index + 1, pricing.teacherShare)),
   [40, 50, 60, 70, 80, 90, 100, 110]);
-eq("人数上限与班型「一对多（4-8）」对得上", TEACHER_SHARE_MAX_STUDENTS, 8);
+eq("人数上限与班型「小班课（4-8人）」对得上", TEACHER_SHARE_MAX_STUDENTS, 8);
 ok("规则原文与机构给的公式一致",
   teacherShareFormula(pricing.teacherShare).includes("(0.4 + (学生人数 − 1) × 0.1)"));
 
 // 人话版必须回答四件事：适用什么班型、比例怎么加、不适用什么、单价怎么取
 const pbShareText = describeTeacherShare(pricing.teacherShare).join("\n");
-ok("人话版说明了适用班型", pbShareText.includes("一对一定制课") && pbShareText.includes("一对多小班课"));
+ok("人话版说明了适用班型", pbShareText.includes("一对一") && pbShareText.includes("小班课（4-8人）"));
 ok("人话版写明了 40% 起与每人 +10", pbShareText.includes("40%") && pbShareText.includes("10 个百分点"));
 ok("人话版点明了 8 人时的比例", pbShareText.includes("110%"));
-ok("人话版说明了 9 人以上大班课不适用",
-  pbShareText.includes("9 人以上大班课不适用") && pbShareText.includes("另议"));
+ok("人话版说明了 大班课（9-20人）不适用",
+  pbShareText.includes("大班课（9-20人）不适用") && pbShareText.includes("另议"));
 /*
  * 人话版里的「课程单价」口径（v29 之后）：标准单价**就是基础价**（不含人数折扣），
  * 班型课时价才是「基础价 × 人数系数」。改这一条是因为文案本身变了 ——
@@ -4754,10 +4794,10 @@ ok("教师课时费明细写清了比例怎么来的",
 
 // 大班课不适用：按人数分摊的那类按「教师费用 ÷ 人数」另议，不能硬套公式
 const pbTeacherBig = await api.pricing.teacherFee({
-  courseName: "初中英语", classTypeName: "班课（9-20）",
+  courseName: "初中英语", classTypeName: "大班课（9-20人）",
   durationName: "1.5 小时", lessons: 5, students: 12,
 });
-ok("9 人以上大班课不适用分成规则",
+ok("大班课（9-20人）不适用分成规则",
   pbTeacherBig.ok === false && (pbTeacherBig.reason ?? "").includes("大班课"));
 
 // 单价口径切换会改变教师课时费，但不影响家长报价
@@ -4886,10 +4926,14 @@ ok(`网站卡片来的课都标为「网站」来源（${pbSiteCourses.length} �
  * 那十二门 2026-09 全部上网，因此它们现在与其余卡片一样是「网站」来源 ——
  * 这一条反过来钉住这件事：剔掉自检新加的围棋之后，**后台来源的课一门都不该有**。
  */
-eq("十二门上过网之后，清单里没有「只在后台用」的课了",
-  pbAdminCourses.filter((course) => course.name !== "围棋").length, 0);
-ok("而且那十二门确实在「网站」这一组里（否则上一条是空转的）",
-  EXTRA_COURSE_NAMES.every((name) => pbSiteCourses.some((course) => course.name === name)));
+/*
+ * ⚠️ 这一条**不是**"永远不许有『不展示』的课"：机构随时可以把某门课从网站撤下来
+ * （卡片改成「不展示」），那是正常的经营动作（2026-09 他们就把 4 门撤了）。
+ * 这里守的是"**那十二门当时确实上过网**"——因此只断"至少有一批在网站上"，
+ * 不再断"一门不在网站的都没有"。
+ */
+ok(`那十二门里至少有一批在网站上（当前 ${EXTRA_COURSE_NAMES.filter((name) => pbSiteCourses.some((course) => course.name === name)).length} / ${EXTRA_COURSE_NAMES.length}）`,
+  EXTRA_COURSE_NAMES.some((name) => pbSiteCourses.some((course) => course.name === name)));
 ok("每门网站课程都挂了分区（v18：不再是一串分类文字）",
   pbSiteCourses.every((course) => partitionPlace(pbPartitions, course.partitionId).leaf !== null));
 ok("网站课程的分区名非空（清单与网站要按它分组）",
@@ -4924,7 +4968,7 @@ const pbHobby = await api.coursePartitions.create({ name: "兴趣才艺" });
 eq("新建的分区排在同级最后（不抢到最前面）",
   topLevelPartitions(await api.coursePartitions.list()).at(-1)?.name, "兴趣才艺");
 const pbWeiqi = await api.courses.create({
-  name: "围棋", partitionId: pbHobby.id, forms: ["一对一定制课"], origin: "后台",
+  name: "围棋", partitionId: pbHobby.id, forms: ["一对一"], origin: "后台",
   status: "开放", note: "自检用", createdAt: new Date().toISOString(),
   stageIds: [], subjectIds: [], moduleIds: [],
   path: "", tags: [], target: "", order: 999, intro: "", siteKind: "不展示",
@@ -4961,19 +5005,60 @@ try {
 }
 ok("课程名为空被拒绝", pbEmptyRejected);
 
-// 网站来源的课程不能删（删了下次同步又回来），但可以设为暂未开放
-const pbSiteCourse = pbLibrary[0]!;
-let pbSiteRemoveRejected = false;
-try {
-  await api.courses.remove(pbSiteCourse.id);
-} catch {
-  pbSiteRemoveRejected = true;
-}
-ok("网站来源的课程不能删除", pbSiteRemoveRejected);
+/*
+ * 课程**可以删**（包括"网站来源"的那些）。
+ *
+ * 这条断言以前是反的：「网站来源的课程不能删除」（理由：删了下次同步又回来）。
+ * 那条护栏在 2026-09 删掉了 —— 机构问「为什么现有的这些课程卡片不能删除」：
+ * v32 把"从网站同步课程"入口删了、v39/v40 又把真源反成"课程库 → 内容文件"，
+ * 所以"网站来的"不再是"不许删"的理由。**真正拦着的仍是另一条**：
+ * 被报课 / 排课引用着的课不许删（下面单独断言）。
+ *
+ * ## 验法：**自己造一门临时课，一根手指都不许碰夹具**
+ *
+ * 上一版是直接在夹具上删一门（`pbLibrary[0]`）—— 断言当场通过了，代价却写在后面：
+ * 「主存储的课程库未被自检改坏」变成 `43 ≠ 44`。**断言自己把夹具改了**，
+ * 于是它既证明不了"课程可以删"（删得掉本来就是因为它删的是真数据），
+ * 又让后面所有"库里有几门课"的断言全部失去基准。这一版改成：
+ *
+ *   1. **建一门临时课 → 删掉它 → 断言它不在了**（`origin` 刻意写成「网站」：
+ *      那条老护栏的判据正是 `origin === "网站"`，拿它来删才是"护栏真的不在了"的证据）；
+ *   2. **源码级再钉一遍**：`canRemoveCourse` 不许在代码里复活 ——
+ *      否则有人把那段护栏贴回来，"建一门删一门"照样绿，机构却会发现卡片又删不掉了。
+ */
+const pbTempCourse = await api.courses.create({
+  name: "自检·建了就删的课", partitionId: pbPartitions[0]!.id, forms: [],
+  origin: "网站", status: "开放", note: "", createdAt: new Date().toISOString(),
+  path: "", tags: [], target: "", order: 999, intro: "", siteKind: "不展示",
+  stageIds: [], subjectIds: [], moduleIds: [],
+});
+eq("临时课程建出来了（走的是同一条新建校验）",
+  (await api.courses.list()).filter((course) => course.id === pbTempCourse.id).length, 1);
+// 先验"网站来源的课能改状态"（同一门临时课，删之前验），再验删除
 eq("网站课程可以设为暂未开放",
-  (await api.courses.update(pbSiteCourse.id, { status: "暂未开放" }))?.status, "暂未开放");
+  (await api.courses.update(pbTempCourse.id, { status: "暂未开放" }))?.status, "暂未开放");
 eq("改回开放",
-  (await api.courses.update(pbSiteCourse.id, { status: pbSiteCourse.status }))?.status, pbSiteCourse.status);
+  (await api.courses.update(pbTempCourse.id, { status: pbTempCourse.status }))?.status,
+  pbTempCourse.status);
+eq("课程**可以删**（造一门再删掉，夹具一门没动）", await api.courses.remove(pbTempCourse.id), true);
+ok("删掉之后它不在清单里了",
+  (await api.courses.list()).every((course) => course.id !== pbTempCourse.id));
+/*
+ * 「夹具一门没少」的判据按 **id 逐个比**，不按条数比：自检自己在这之前也建过课
+ * （围棋那条夹具），条数本来就比 `pbLibrary` 多一条 —— 按条数比会把"自检建的课"
+ * 也算成"夹具被改了"，那正是上一版翻车的同一种错（拿一个会变的总数当判据）。
+ */
+const pbCoursesAfterTempRemove = await api.courses.list();
+ok(`夹具那 ${String(pbLibrary.length)} 门课一门没少（这就是「不碰夹具」的判据）`,
+  pbLibrary.every((course) => pbCoursesAfterTempRemove.some((item) => item.id === course.id)));
+/** 去掉注释后再找：那几处说明文字里就写着 `canRemoveCourse`，按字面量搜会把自己搜出来。 */
+const pbCode = (file: string): string =>
+  readFileSync(new URL(`../${file}`, import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+ok("「网站来源的课不许删」那条护栏（`canRemoveCourse`）在代码里已经不存在了",
+  !pbCode("lib/backend/courses.ts").includes("canRemoveCourse") &&
+  !pbCode("lib/backend/api.ts").includes("canRemoveCourse"));
 
 // 后台新增的课程可以删
 eq("后台新增的课程可以删除", await api.courses.remove(pbWeiqi.id), true);
@@ -5074,7 +5159,7 @@ eq("认领后再次同步不再产生变更", syncLibraryLinks(pbClaimed.config,
 
 // 2) 课程库里加一门课 → 定价 → 后台能给这门课报价
 const pbGo = await api.courses.create({
-  name: "围棋", partitionId: "", forms: ["一对一定制课"], origin: "后台",
+  name: "围棋", partitionId: "", forms: ["一对一"], origin: "后台",
   status: "开放", note: "", createdAt: new Date().toISOString(),
   stageIds: [], subjectIds: [], moduleIds: [],
   path: "", tags: [], target: "", order: 999, intro: "", siteKind: "不展示",
@@ -5351,7 +5436,7 @@ eq("导入的学生没有报课记录（报课要走页面流程）",
   (await api.students.list()).find((student) => student.name === "导入同学甲")?.enrollments.length, 0);
 
 // 课程：重名会被拦（课程名是引用键）
-const courseCsv = "课程名,分类,班型\n导入课程甲,初中课内,一对一定制课\n导入课程甲,初中课内,一对一定制课\n";
+const courseCsv = "课程名,分类,班型\n导入课程甲,初中课内,一对一\n导入课程甲,初中课内,一对一\n";
 const coursesImported = await api.imports.apply({ entity: "courses", text: courseCsv });
 eq("同名课程只进第一条", coursesImported.added, 1);
 eq("第二条被记成跳过", coursesImported.skipped.length, 1);
@@ -5497,7 +5582,7 @@ const seriesStudent = await api.students.create({
 });
 // 报 12 节：够跑"排 6 节 + 重复排一次（冲突跳过）"，又不足以跑满 100 节（用来验封顶）
 await api.students.enroll(seriesStudent.id, {
-  subject: seriesSubject, form: "一对一定制课", teacherId: seriesTeacher.id, lessons: 12,
+  subject: seriesSubject, form: "一对一", teacherId: seriesTeacher.id, lessons: 12,
   startedAt: new Date().toISOString(), note: "自检",
   unitPrice: 0, agreedAmount: 0, paidNow: 0, method: "微信",
 });
@@ -5510,7 +5595,7 @@ const farMonday = (() => {
 })();
 const seriesInput = {
   subject: seriesSubject,
-  form: "一对一定制课",
+  form: "一对一",
   teacherId: seriesTeacher.id,
   classroomId: seriesRoom.id,
   studentIds: [seriesStudent.id],
@@ -8191,10 +8276,9 @@ console.log("\n=== 23. 课程分区：分区是数据，不是每门课上的一
   /*
    * 子栏目护栏：**造一个临时的栏目 + 子栏目**来测，不再依赖现成的结构。
    *
-   * 为什么不能像以前那样拿"第一个有子级的栏目"（高中课内）直接测：2026-09 起
-   * 高中课内 自己名下也有课了（高考冲刺 / 特殊计划专项 两门备考课不属于
-   * 必考科目 / 外语 / 七选三 任何一档），而护栏是**先看本区有没有课、再看有没有子栏目**
-   * —— 拿它会先命中"还有 N 门课"那条，子栏目那一条就测不到了。
+   * 为什么不能像以前那样拿"夹具里第一个有子级的栏目"直接测：护栏是
+   * **先看本区有没有课、再看有没有子栏目**，而那类栏目（高中课内）自己名下可能也有课
+   * —— 拿它会先命中"还有 N 门课"那条，子栏目这一条就测不到了。
    * 造一个干净的临时结构，两条分支就各测各的。
    */
   const tempParent = await api.coursePartitions.create({ name: "自检·有子栏目的栏目" });
@@ -8206,15 +8290,40 @@ console.log("\n=== 23. 课程分区：分区是数据，不是每门课上的一
   eq("空栏目可以删（护栏不误伤）", await api.coursePartitions.remove(tempParent.id), true);
 
   /*
-   * 既有课又有子栏目时（高中课内就是这种形状）：**先提示把课移走**。
+   * 既有课又有子栏目时：**先提示把课移走**。
+   *
    * 课会变成「未归类」是静默的数据错位，比"子栏目还在"更急，因此护栏的优先级如此。
+   *
+   * ## 这一条也改成**自己在用例里造结构**
+   *
+   * 原先它拿夹具里现成的「高中课内」来测 —— 那个栏目 2026-09 起确实同时有子栏目
+   * （必考科目 / 外语 / 七选三）和自己名下的两门备考课（高考冲刺 / 特殊计划专项）。
+   * 但机构后来把那两门课**删掉了**（课程清单整理，见 E13 与 `data/site/content.md`），
+   * 于是「高中课内」只剩子栏目、自己名下没有课，这条断言就落到了「子栏目」那一条分支上
+   * （实际打印的是"下面还有 3 个子栏目…"）—— **断言的成立与否取决于夹具碰巧长成什么样**，
+   * 那是这类断言最不该有的性质：夹具一改，它就从"验护栏"变成"验数据"。
+   *
+   * 现在自己造：临时栏目 + 临时子栏目 + 一门挂在临时栏目上的课。
+   * 判据仍然是那个护栏行为本身（先看本区有没有课，且说清会变成「未归类」）。
    */
-  const bothPartition = (await api.coursePartitions.list()).find((item) => item.name === "高中课内");
-  ok("高中课内 就是「既有子栏目、自己名下也有课」的那个栏目（否则下面那条是空转的）",
-    bothPartition !== undefined);
-  const bothRefusal = await refusalOf(() => api.coursePartitions.remove(bothPartition?.id ?? ""));
+  const tempBothParent = await api.coursePartitions.create({ name: "自检·既有课又有子栏目" });
+  const tempBothChild = await api.coursePartitions.create({
+    name: "自检·它下面的子栏目", parentId: tempBothParent.id,
+  });
+  const tempBothCourse = await api.courses.create({
+    name: "自检·挂在那个栏目上的课", partitionId: tempBothParent.id, forms: [],
+    origin: "后台", status: "开放", note: "", createdAt: new Date().toISOString(),
+    path: "", tags: [], target: "", order: 999, intro: "", siteKind: "不展示",
+    stageIds: [], subjectIds: [], moduleIds: [],
+  });
+  const bothRefusal = await refusalOf(() => api.coursePartitions.remove(tempBothParent.id));
   ok("本区既有课又有子栏目时：先提示把课移走（并说清会变成「未归类」）",
     bothRefusal.includes("门课") && bothRefusal.includes("未归类"), bothRefusal.slice(0, 90));
+  // 收尾：把临时结构整份拆掉（课 → 子栏目 → 栏目），一条都不留给后面的用例
+  eq("清掉临时的那门课", await api.courses.remove(tempBothCourse.id), true);
+  eq("清掉临时子栏目", await api.coursePartitions.remove(tempBothChild.id), true);
+  eq("清掉临时栏目（课与子栏目都空了才能删）",
+    await api.coursePartitions.remove(tempBothParent.id), true);
 
   /* ── ⑥ 批量移课 + 未归类 ── */
   const movePartitions = await api.coursePartitions.list();
@@ -8936,14 +9045,14 @@ console.log("\n=== 27. 特色课程进库（v20：机构要求「特色课程也
     ...basePage,
     courses: [
       { id: "f1", name: "课内辅导", slug: "in-class", fields: [], body: "", children: [
-        { id: "f2", name: "一对多小班课", slug: "mini-class", fields: [], body: "", children: [] },
+        { id: "f2", name: "小班课（4-8人）", slug: "mini-class", fields: [], body: "", children: [] },
       ] },
     ],
   } as never;
   ok("有子课程的节点：拒绝删除并点名子课程",
     featuredDeleteRefusal(guardPage, "f1", []).includes("子课程"));
   ok("名字正被课程当班型用：拒绝删除并点名是哪几门课",
-    featuredDeleteRefusal(guardPage, "f2", [{ name: "小学数学", forms: ["一对多小班课"] }])
+    featuredDeleteRefusal(guardPage, "f2", [{ name: "小学数学", forms: ["小班课（4-8人）"] }])
       .includes("小学数学"));
   eq("既没子课程、也没被引用：可以删（护栏不误伤）",
     featuredDeleteRefusal(guardPage, "f2", []), "");
@@ -8951,16 +9060,20 @@ console.log("\n=== 27. 特色课程进库（v20：机构要求「特色课程也
   /*
    * ⑤ 后台「班型」候选的口径（v23 改成维度表）。
    *
-   * 这一条原先钉的是"班型候选 = 库里特色课程的二级课程名"（一对一定制课 / 一对二 / 一对三小组课…）。
-   * 机构确认「班型以系统现行的那一套为准，全部改过来」之后，班型的唯一口径是
-   * `catalog.formats`（一对一 / 一对二 / 一对三 / 一对多（4-8）/ 班课（9-20），
-   * 与 `data/site/pricing.md` 的「班级类型」逐个同名）—— 特色课程树那套写法废弃。
+   * 这一条原先钉的是"班型候选 = 库里特色课程的二级课程名"（一对一定制课 / 一对二 /
+   * 一对三小组课…那套写法）。机构确认「班型以系统现行的那一套为准，全部改过来」之后，
+   * 班型的唯一口径是 `catalog.formats`（一对一 / 一对二 / 一对三 / 小班课（4-8人）/
+   * 大班课（9-20人），与 `data/site/pricing.md` 的「班级类型」逐个同名）。
+   *
+   * ⚠️ 2026-09 之后**两边写法已经一样了**（E13 把旧那一套从特色课程树里也清掉了），
+   * 但这条断言仍然要守着"候选只从维度表来"：特色课程树的二级课程名里还有三个服务
+   * （晚托管 / 周中预习课 / 假期预习课），拿它当候选就会把服务混进班型下拉。
    */
   eq("班型候选的同步种子 = 课程类型里的班型（不再是特色课程的二级课程名）",
     getFormOptionsFromTemplate(), catalogFromSeed().formats.map((format) => format.name));
   eq("而且就是报价里那五个班型（同一件事不再有两套写法）",
     catalogFromSeed().formats.map((format) => format.name),
-    ["一对一", "一对二", "一对三", "一对多（4-8）", "班课（9-20）"]);
+    ["一对一", "一对二", "一对三", "小班课（4-8人）", "大班课（9-20人）"]);
   const optionsSource = readFileSync(new URL("../lib/backend/options.ts", import.meta.url), "utf8");
   ok("那一份只读种子的班型候选**明确写着是同步种子**（名字里带 FromTemplate）",
     optionsSource.includes("getFormOptionsFromTemplate") && optionsSource.includes("catalogFromSeed()"));
@@ -9569,7 +9682,7 @@ console.log("\n=== 31. 开放矩阵：本机构开哪些组合（v24）===");
   const openedIndex = offersByKey(opened);
   eq("解析：开的算 open", resolveOffer(openedIndex, oneKey), "open");
   eq("解析：没设过的算 unset",
-    resolveOffer(openedIndex, { ...oneKey, formatId: catalogId("fmt", "班课（9-20）") }), "unset");
+    resolveOffer(openedIndex, { ...oneKey, formatId: catalogId("fmt", "大班课（9-20人）") }), "unset");
 
   const withClosed = applyDecision(opened, [oneKey], "closed", now);
   eq("改成明确关闭之后不是删行，而是 open: false",
@@ -9633,7 +9746,7 @@ console.log("\n=== 31. 开放矩阵：本机构开哪些组合（v24）===");
   const touched = applyDecision([], keys, "open", now);
   eq("按学科查引用它的组合", offersOfDimension(touched, "subject", oneKey.subjectId).length, 2);
   eq("按班型查引用它的组合", offersOfDimension(touched, "format", oneKey.formatId).length, 1);
-  eq("没人引用的维度返回空", offersOfDimension(touched, "format", catalogId("fmt", "班课（9-20）")), []);
+  eq("没人引用的维度返回空", offersOfDimension(touched, "format", catalogId("fmt", "大班课（9-20人）")), []);
 
   // ⑥ API 与迁移
   const legacyOffersDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & { version: number };
@@ -10846,22 +10959,39 @@ console.log("\n=== 41. 报价与课程清单对齐（v37）===");
     []);
 
 /*
- * 去重后的合并：那十二门课（`extraCourses()` 的 `SPECS`）2026-09 **全部上网站了**，
- * 因此它们现在由网站卡片这条路建出来 —— `extraCourses(网站卡片名)` 返回空，
- * 库里不会有同名两条（报价与台账都按名字认领，重名一定认错一门）。
+ * 去重后的合并：那十二门课（`extraCourses()` 的 `SPECS`）2026-09 **全部上过网站**，
+ * 因此它们由网站卡片那条路建出来 —— `extraCourses(网站卡片名)` 只会返回**还没上网的**
+ * 那几门，库里不会有同名两条（报价与台账都按名字认领，重名一定认错一门）。
  * 清单本身仍然有用：`extraCourseDimensions()` 是这十二门课的维度口径。
+ *
+ * ## ⚠️ 为什么这里不再断「十二门一门不少地上网」
+ *
+ * 机构随时可以把某门课从网站撤下来、甚至从课程库删掉 —— 那是正常的经营动作
+ * （2026-09 他们就删了「高考冲刺」「特殊计划专项」，报价里那两行按既定口径留着并置成
+ * 「暂未开放」）。旧的写法把"十二门全在卡片上"当成不变式，机构一整理课程清单，
+ * 自检就红在**数据**上，而不是红在**代码**上 —— 那种红只会让人去改断言。
+ * 现在守的是两件真正的不变式：
+ *   ① `extraCourses(网站卡片名)` 不许**造新名字**（只从那十二门里挑没上网的）；
+ *   ② 它挑出来的那几门确实不在网站卡片上（否则就是"同名两条"的那个老毛病）。
  */
 const extras = extraCourses();
 eq("完整清单仍然是十二门（`SPECS` 没被删空，维度口径还靠它）", extras.length, EXTRA_COURSE_NAMES.length);
 eq("它们的名字都在报价里（否则又是「报价有、库里没有」）",
   EXTRA_COURSE_NAMES.filter((name) => !templateCourses.includes(name)), []);
-eq("但它们已经全部在网站卡片上，因此没有任何一门还需要「只在后台用」地补一遍",
-  extraCourses(coursesFromSite().map((course) => course.name)), []);
-eq("这十二门确实都在网站卡片里（不然上一条就是空转的）",
-  EXTRA_COURSE_NAMES.filter((name) => !coursesFromSite().some((course) => course.name === name)), []);
-ok("它们都上网了（有 path、siteKind 是学科或选修）",
+const extrasToBackfill = extraCourses(coursesFromSite().map((course) => course.name));
+eq("`extraCourses(网站卡片名)` 只从那十二门里挑，不造新名字",
+  extrasToBackfill.filter((course) => !EXTRA_COURSE_NAMES.includes(course.name)), []);
+ok(`它挑出来的那几门确实都不在网站卡片上（当前要补 ${String(extrasToBackfill.length)} 门：` +
+  `${extrasToBackfill.map((course) => course.name).join("、") || "无"}）`,
+  extrasToBackfill.every(
+    (course) => !coursesFromSite().some((card) => card.name === course.name)));
+const onSiteNames = EXTRA_COURSE_NAMES.filter(
+  (name) => coursesFromSite().some((course) => course.name === name));
+ok(`那十二门里至少有一批仍挂在网站卡片上（当前 ${String(onSiteNames.length)} / ` +
+  `${String(EXTRA_COURSE_NAMES.length)}）`, onSiteNames.length > 0);
+ok("仍然挂在网站卡片上的那几门确实带着网站卡片字段（有 path、siteKind 不是「不展示」）",
   seedDb.courses
-    .filter((course) => EXTRA_COURSE_NAMES.includes(course.name))
+    .filter((course) => onSiteNames.includes(course.name))
     .every((course) => course.path !== "" && course.siteKind !== "不展示"));
 eq("库里没有同名两条（重名会让报价与台账认错课）",
   seedDb.courses.map((course) => course.name).filter((name, i, all) => all.indexOf(name) !== i), []);
@@ -10869,8 +10999,22 @@ ok("它们的维度都挂好了（学段 + 学科，台账按维度分组时不�
   seedDb.courses
     .filter((course) => EXTRA_COURSE_NAMES.includes(course.name))
     .every((course) => course.stageIds.length > 0 && course.subjectIds.length > 0));
-ok("网站卡片数 = 课程库总数（44 门课全部上网，不再有「只在后台用」的课）",
-  seedDb.courses.filter((course) => course.siteKind !== "不展示" && course.path !== "").length === 44);
+/*
+ * 「上网」这件事的判据是**有 `path` 且 `siteKind` 不是「不展示」**，而这里守的是
+ * 「上网的那些**就是网站卡片上的那些**」（按名字一一对应，不多不少）。
+ *
+ * 原先这一条写死了一个数字（`=== 44`）：44 = 42 张卡片 + 2 门"只在后台用"的课全上网时的总数。
+ * 机构 2026-09 删掉「高考冲刺」「特殊计划专项」之后，卡片变成 42 张、库里那两门回落成
+ * 「不展示」，写死的数字当场变假 —— 而它想说的话（"上网的与卡片一致"）本来与数字无关。
+ * 改成比**两份名单**：库里"上网的课" vs 内容文件里的卡片。
+ */
+{
+  const onSiteCourses = seedDb.courses.filter(
+    (course) => course.siteKind !== "不展示" && course.path !== "");
+  eq("「上网」的课就是网站卡片上的那些课（按名字一一对应，不多不少）",
+    onSiteCourses.map((course) => course.name).sort(),
+    coursesFromSite().map((course) => course.name).sort());
+}
 
   // 打通机制现在真的能生效：整份配置一次认全
   const claimed = syncLibraryLinks(pricingConfigFromContent(), seedDb.courses);
@@ -11277,7 +11421,7 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
   const xiaoxue = find(mutated.courses, "小学语文");
   xiaoxue.status = "暂未开放";
   xiaoxue.path = "primary-chinese-v2";
-  xiaoxue.forms = ["一对一定制课"];
+  xiaoxue.forms = ["一对一"];
   xiaoxue.tags = [{ label: "基础", target: "小学语文" }];
   const yuwen = find(mutated.siteContent.coursePage.subjects, "语文");
   yuwen.unavailable = true;
@@ -11317,7 +11461,7 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
   const featuredFirst = mutated.siteContent.featuredPage.courses[0]!;
   featuredFirst.body = "自检改过的特色课程介绍。";
   featuredFirst.fields[0]!.value = "自检改过的适合对象。";
-  featuredFirst.children[0]!.name = "一对一定制课（自检）";
+  featuredFirst.children[0]!.name = "一对一（自检）";
   mutated.siteContent.featuredPage.courses.push({
     id: "feat_selfcheck",
     name: "自检特色课",

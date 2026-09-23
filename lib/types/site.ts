@@ -276,7 +276,7 @@ export type ScheduleContent = PageIntro & {
 export type CourseDetail = {
   /** 本级的课程名，同时作为路径分段。 */
   slug: string;
-  /** 从根到本课程的完整路径分段，例如 ["课内辅导", "一对多小班课", "精品小升初"]。 */
+  /** 从根到本课程的完整路径分段，例如 ["课内辅导", "小班课（4-8人）", "精品小升初"]。 */
   path: string[];
   name: string;
   /** 课程描述字段（适合对象 / 课程定位 / 主要做法 / 可以期待）。 */
