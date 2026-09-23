@@ -39,12 +39,60 @@ function syncSiteData() {
 await sync();
 
 /*
+ * 起 dev 之前**先等后端一下**（最多 ~10 秒）。
+ *
+ * ## 为什么要有这一段（踩过）
+ *
+ * 网站的教师 / 课程 / 正文 / 报价是**启动那一刻**从后端取的一份快照：后端没起来，
+ * 这几块就按"连不上就是空白"的口径变成**空的**，而机构看到的是
+ * 「后台明明显示连上了，网站却说没连上」——因为**后台的"连上"是实时的探活**，
+ * 而网站那一份是启动时的快照，两者可以不一致（页脚右下角那个小圆标就是为此加的）。
+ *
+ * 2026-09 真发生过一次：后端被上一个进程的收尾带停、`npm run dev` 先起来，
+ * 于是整站空了，页脚写着「内容：空（没连上后端）」，而机构刚在后台看到"已连接"。
+ *
+ * 所以：给后端一个宽限（它是本机进程，通常已经在跑或马上起来），
+ * 实在等不到就**把话说清楚**（怎么补回来），而不是安静地发一版空站。
+ */
+async function waitForBackend(maxMs = 10000) {
+  const base = (
+    process.env.SITE_API_BASE ??
+    process.env.NEXT_PUBLIC_API_BASE ??
+    "http://127.0.0.1:4000"
+  ).replace(/\/+$/, "");
+  const deadline = Date.now() + maxMs;
+  let waited = 0;
+  for (;;) {
+    try {
+      const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) });
+      if (response.ok) {
+        if (waited > 0) console.log(`[site-data] 后端起来了（等了约 ${Math.round(waited / 1000)} 秒）：${base}`);
+        return true;
+      }
+    } catch {
+      // 没起来：继续等
+    }
+    if (Date.now() >= deadline) {
+      console.warn(
+        `\n[site-data] ⚠️ 等不到后端（${base}）——教师 / 课程卡片 / 课程正文 / 报价这几块**这一版会是空的**，\n` +
+          "           网站页脚右下角会显示「内容：空（没连上后端）」。\n" +
+          "           后端起来之后，跑一次 `npm run sync-site-data`（dev 会自动重编译）就能补回来。\n",
+      );
+      return false;
+    }
+    waited += 1000;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
+/*
  * 取一次后端数据（决定网站内容用后端还是模版）。
  *
  * 启动时取一次只是**起点**：下面还有一段"盯着后端"的循环（见 watchBackendContent），
  * 后端里的教师 / 课程 / 正文 / 报价一变，网站内容就会自动跟着刷新 ——
  * 本机开发时不用为了看一个改动去重启 dev 或手工构站。
  */
+await waitForBackend();
 await syncSiteData();
 
 // 启动 next dev，继承标准输入输出
