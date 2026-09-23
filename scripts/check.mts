@@ -9993,8 +9993,21 @@ console.log("\n=== 37. 日历的月视图（v30）===");
     /zoom === "month" && grid\.length > 0[\s\S]{0,160}grid\[0\][\s\S]{0,160}grid\[grid\.length - 1\]/.test(page));
   ok("翻月 / 回到本月用的是 shiftMonths（不是手写 date.setMonth）",
     page.includes("shiftMonths(anchor, -1)") && page.includes("shiftMonths(anchor, 1)"));
-  ok("月视图格子里有日号、节数与日子徽标，明细留给下面的「选中那天」",
-    page.includes("min-h-[5.5rem]") && page.includes("{day.getDate()}") && page.includes("windowsHint(plan.windowGroup)"));
+  /*
+   * 机构口径（v31）：「月视图应该和周视图的**卡片一样**，只不过是按照日历的排布顺序，
+   * 同一周内上个月 / 下个月的卡片可以颜色浅一点」。因此这里断言的是"两张视图共用同一个卡片组件"
+   * —— 而不是"月视图有自己的一套精简格子"（那正是被改掉的那一版）。
+   */
+  ok("周视图与月视图**共用同一个日卡片组件**（不是各画一套）",
+    (page.match(/function DayCard\(/g) ?? []).length === 1 &&
+      (page.match(/<DayCard/g) ?? []).length === 2);
+  ok("月视图是「一周一行、七列」的日历排布（周一到周日的表头 + grid-cols-7）",
+    page.includes('["周一", "周二", "周三", "周四", "周五", "周六", "周日"]') &&
+      (page.match(/grid-cols-7/g) ?? []).length >= 2);
+  ok("上个月 / 下个月的卡片淡一档（dimmed）",
+    page.includes("dimmed={!inMonth}") && page.includes("dimmed && \"opacity-60\""));
+  ok("窄屏不把七列压扁，而是整块横向滚动（不然一天一张卡片没法看）",
+    page.includes("overflow-x-auto") && page.includes("min-w-[68rem]"));
   ok("点开的是「不在本月」的那几天时页面上写明了",
     page.includes("（不在本月）"));
 }

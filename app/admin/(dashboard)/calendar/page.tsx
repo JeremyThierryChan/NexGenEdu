@@ -362,184 +362,70 @@ export default function AdminCalendarPage() {
 
       {/*
         ── 月视图 ──
-        一张"周 × 7"的表：先看哪天忙、哪天有假日/调休/寒暑假，再点某天看明细。
-        格子里只放最必要的三样（日号、节数、日子徽标），课程标题放在 tooltip 里 ——
-        42 个格子都塞标题的话，这一屏会糊成一片（要看内容就点开那一天，下面就是明细）。
+        机构口径：「月视图应该和周视图的卡片一样，只不过是按照日历的排布顺序」。
+        因此这里不是另一种精简格子，而是**同一张 DayCard 按日历摆**：
+        一周一行、周一到周日七列。**上个月 / 下个月的卡片淡一档**（`dimmed`）——
+        它们与本月同处一行（同一周），但不是这个月的主角。
+
+        窄屏不把七列压扁（那样一天一张卡片会看不清），而是整块横向滚动 ——
+        与「开放矩阵」页同一个做法。
       */}
       {zoom === "month" && (
-        <div className="mt-4 rounded-lg border border-ink-200 bg-white">
-          <div className="grid grid-cols-7 border-b border-ink-100 text-center text-[11px] text-ink-500">
-            {["一", "二", "三", "四", "五", "六", "日"].map((label) => (
-              <span key={label} className="px-2 py-1.5">
-                {label}
-              </span>
-            ))}
-          </div>
-          <div className="grid grid-cols-7">
-            {grid.map((day) => {
-              const key = dateKey(day);
-              const dayLessons = byDay.get(key) ?? [];
-              const plan = planOf(key);
-              const inMonth = isSameMonth(day, anchor);
-              const isToday = key === todayKey;
-              const isSelected = key === selectedKey;
-              const badgeClass =
-                plan.kind === "holiday"
-                  ? "border-danger-100 bg-danger-50 text-danger-600"
-                  : plan.kind === "makeup"
-                    ? "border-warning-100 bg-warning-50 text-warning-700"
-                    : plan.kind === "vacation"
-                      ? "border-brand-200 bg-brand-50 text-brand-700"
-                      : "border-ink-200 bg-white text-ink-400";
-
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setSelectedKey(key)}
-                  title={[
-                    formatDayLabel(day),
-                    plan.label,
-                    windowsHint(plan.windowGroup),
-                    dayLessons.length === 0
-                      ? "没有排课"
-                      : dayLessons.map((lesson) => `${formatTime(lesson.startsAt)} ${lesson.subject}`).join("、"),
-                  ].join(" · ")}
-                  className={cn(
-                    "min-h-[5.5rem] border-b border-r border-ink-100 px-2 py-1.5 text-left transition-colors last:border-r-0",
-                    inMonth ? "bg-white" : "bg-ink-50",
-                    isSelected && "ring-1 ring-inset ring-brand-400",
-                    isToday && !isSelected && "bg-brand-50",
-                    "hover:bg-brand-50/60",
-                  )}
-                >
-                  <span className="flex items-baseline justify-between gap-1">
-                    <span
-                      className={cn(
-                        "text-xs font-medium",
-                        inMonth ? (isToday ? "text-brand-700" : "text-ink-700") : "text-ink-400",
-                      )}
-                    >
-                      {day.getDate()}
-                    </span>
-                    {plan.kind !== "workday" && plan.kind !== "weekend" && (
-                      <span className={cn("rounded-sm border px-1 text-[10px]", badgeClass)}>{plan.badge}</span>
-                    )}
-                  </span>
-                  {dayLessons.length > 0 && (
-                    <span className="mt-1 block text-[11px] text-ink-600">
-                      {dayLessons.length} 节
-                      <span className="ml-1 text-ink-400">
-                        {Math.round(dayLessons.reduce((sum, lesson) => sum + lesson.durationMinutes, 0) / 6) / 10} 小时
-                      </span>
-                    </span>
-                  )}
-                </button>
-              );
-            })}
+        <div className="mt-4 overflow-x-auto">
+          <div className="min-w-[68rem]">
+            <div className="grid grid-cols-7 gap-2 pb-1 text-center text-[11px] text-ink-500">
+              {["周一", "周二", "周三", "周四", "周五", "周六", "周日"].map((label) => (
+                <span key={label}>{label}</span>
+              ))}
+            </div>
+            <div className="grid grid-cols-7 gap-2">
+              {grid.map((day) => {
+                const key = dateKey(day);
+                const inMonth = isSameMonth(day, anchor);
+                const plan = planOf(key);
+                return (
+                  <DayCard
+                    key={key}
+                    day={day}
+                    lessons={byDay.get(key) ?? []}
+                    teachers={teachers}
+                    classrooms={classrooms}
+                    plan={plan}
+                    windowHint={windowsHint(plan.windowGroup)}
+                    isToday={key === todayKey}
+                    isSelected={key === selectedKey}
+                    dimmed={!inMonth}
+                    onSelect={() => setSelectedKey(key)}
+                  />
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
 
-      {/* 周视图 */}
+      {/* 周视图（与月视图共用同一张卡片，见 DayCard） */}
       {zoom === "week" && (
-      <div className="mt-4 grid gap-2 lg:grid-cols-7">
-        {days.map((day) => {
-          const key = dateKey(day);
-          const dayLessons = byDay.get(key) ?? [];
-          const isToday = key === todayKey;
-          const isSelected = key === selectedKey;
-          const plan = planOf(key);
-          const badgeClass =
-            plan.kind === "holiday"
-              ? "border-danger-100 bg-danger-50 text-danger-600"
-              : plan.kind === "makeup"
-                ? "border-warning-100 bg-warning-50 text-warning-700"
-                : plan.kind === "vacation"
-                  ? "border-brand-200 bg-brand-50 text-brand-700"
-                  : "border-ink-200 bg-white text-ink-500";
-
-          return (
-            <section
-              key={key}
-              className={cn(
-                "rounded-lg border bg-white",
-                isSelected ? "border-brand-400" : "border-ink-200",
-              )}
-            >
-              <button
-                type="button"
-                onClick={() => setSelectedKey(key)}
-                title={plan.reason}
-                className={cn(
-                  "w-full rounded-t-lg px-3 py-2 text-left",
-                  isToday ? "bg-brand-50" : "bg-ink-50",
-                )}
-              >
-                <span className="flex items-baseline justify-between gap-2">
-                  <span
-                    className={cn(
-                      "text-xs font-medium",
-                      isToday ? "text-brand-700" : "text-ink-600",
-                    )}
-                  >
-                    {formatDayLabel(day)}
-                  </span>
-                  <span className="text-xs text-ink-400">{dayLessons.length}</span>
-                </span>
-                {/*
-                  「这一天按哪一组时段」— 这一行是这次改动的重点：看周视图的人必须知道
-                  某天是法定假日（照常上课、白天能排）、调休上班日（学生要上学、只能晚上）
-                  还是寒暑假（每天都能排）。判定只有一份（lib/backend/calendar-plan.ts）。
-                */}
-                <span className="mt-1 flex flex-wrap items-center gap-1">
-                  <span className={cn("rounded-sm border px-1.5 py-0.5 text-[11px]", badgeClass)}>
-                    {plan.badge}
-                  </span>
-                  {plan.kind === "holiday" || plan.kind === "makeup" ? (
-                    <span className="truncate text-[11px] text-ink-500">{plan.label}</span>
-                  ) : null}
-                </span>
-                <span className="mt-0.5 block truncate text-[11px] text-ink-400">
-                  {windowsHint(plan.windowGroup)}
-                </span>
-              </button>
-
-              <ul className="space-y-1.5 p-2">
-                {dayLessons.map((lesson) => (
-                  <li key={lesson.id}>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedKey(key)}
-                      className={cn(
-                        "block w-full rounded-md border px-2 py-1.5 text-left text-xs transition-colors hover:border-brand-300",
-                        lesson.status === "已取消"
-                          ? "border-ink-100 bg-ink-50 text-ink-400 line-through"
-                          : lesson.status === "已上"
-                            ? "border-success-100 bg-success-50 text-success-600"
-                            : "border-ink-200 bg-white text-ink-700",
-                      )}
-                    >
-                      <span className="block font-mono tabular">
-                        {formatTime(lesson.startsAt)}
-                      </span>
-                      <span className="mt-0.5 block truncate">{lesson.subject}</span>
-                      <span className="mt-0.5 block truncate text-[11px] opacity-80">
-                        {teachers.find((t) => t.id === lesson.teacherId)?.name ?? "—"} ·{" "}
-                        {classrooms.find((c) => c.id === lesson.classroomId)?.name ?? "—"}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-
-                {dayLessons.length === 0 && (
-                  <li className="px-2 py-3 text-center text-xs text-ink-400">空档</li>
-                )}
-              </ul>
-            </section>
-          );
-        })}
-      </div>
+        <div className="mt-4 grid gap-2 lg:grid-cols-7">
+          {days.map((day) => {
+            const key = dateKey(day);
+            return (
+              <DayCard
+                key={key}
+                day={day}
+                lessons={byDay.get(key) ?? []}
+                teachers={teachers}
+                classrooms={classrooms}
+                plan={planOf(key)}
+                windowHint={windowsHint(planOf(key).windowGroup)}
+                isToday={key === todayKey}
+                isSelected={key === selectedKey}
+                dimmed={false}
+                onSelect={() => setSelectedKey(key)}
+              />
+            );
+          })}
+        </div>
       )}
 
       {/* 选中那天的明细 */}
@@ -593,6 +479,121 @@ export default function AdminCalendarPage() {
         </>
       )}
     </>
+  );
+}
+
+/**
+ * **一天一张卡片**（周视图与月视图共用）。
+ *
+ * 机构口径：「月视图应该和周视图的卡片一样，只不过是按照日历的排布顺序」——
+ * 所以两个视图长得一样，只是摆法不同（一周一行 vs 一整个月的日历格）。
+ * 卡片做成一个组件、两处共用，就不会出现"改了一处、另一个视图还是老样子"。
+ *
+ * `dimmed`：月视图里**上个月 / 下个月的卡片**用淡一点的样式（机构要求）——
+ * 它们属于同一行（同一周），但不是这个月的主角。
+ */
+function DayCard({
+  day,
+  lessons,
+  teachers,
+  classrooms,
+  plan,
+  windowHint,
+  isToday,
+  isSelected,
+  dimmed,
+  onSelect,
+}: {
+  day: Date;
+  lessons: Lesson[];
+  teachers: Teacher[];
+  classrooms: Classroom[];
+  plan: DayPlan;
+  windowHint: string;
+  isToday: boolean;
+  isSelected: boolean;
+  dimmed: boolean;
+  onSelect: () => void;
+}) {
+  const badgeClass =
+    plan.kind === "holiday"
+      ? "border-danger-100 bg-danger-50 text-danger-600"
+      : plan.kind === "makeup"
+        ? "border-warning-100 bg-warning-50 text-warning-700"
+        : plan.kind === "vacation"
+          ? "border-brand-200 bg-brand-50 text-brand-700"
+          : "border-ink-200 bg-white text-ink-500";
+
+  return (
+    <section
+      className={cn(
+        "rounded-lg border bg-white",
+        isSelected ? "border-brand-400" : "border-ink-200",
+        // 隔壁月的卡片淡一档（颜色浅一点），但不至于看不清那里有没有课
+        dimmed && "opacity-60",
+      )}
+    >
+      <button
+        type="button"
+        onClick={onSelect}
+        title={plan.reason}
+        className={cn(
+          "w-full rounded-t-lg px-3 py-2 text-left",
+          isToday ? "bg-brand-50" : "bg-ink-50",
+        )}
+      >
+        <span className="flex items-baseline justify-between gap-2">
+          <span className={cn("text-xs font-medium", isToday ? "text-brand-700" : "text-ink-600")}>
+            {formatDayLabel(day)}
+          </span>
+          <span className="text-xs text-ink-400">{lessons.length}</span>
+        </span>
+        {/*
+          「这一天按哪一组时段」— 看这张卡片的人必须知道某天是法定假日（照常上课、白天能排）、
+          调休上班日（学生要上学、只能晚上）还是寒暑假（每天都能排）。
+          判定只有一份（lib/backend/calendar-plan.ts）。
+        */}
+        <span className="mt-1 flex flex-wrap items-center gap-1">
+          <span className={cn("rounded-sm border px-1.5 py-0.5 text-[11px]", badgeClass)}>
+            {plan.badge}
+          </span>
+          {plan.kind === "holiday" || plan.kind === "makeup" ? (
+            <span className="truncate text-[11px] text-ink-500">{plan.label}</span>
+          ) : null}
+        </span>
+        <span className="mt-0.5 block truncate text-[11px] text-ink-400">{windowHint}</span>
+      </button>
+
+      <ul className="space-y-1.5 p-2">
+        {lessons.map((lesson) => (
+          <li key={lesson.id}>
+            <button
+              type="button"
+              onClick={onSelect}
+              className={cn(
+                "block w-full rounded-md border px-2 py-1.5 text-left text-xs transition-colors hover:border-brand-300",
+                lesson.status === "已取消"
+                  ? "border-ink-100 bg-ink-50 text-ink-400 line-through"
+                  : lesson.status === "已上"
+                    ? "border-success-100 bg-success-50 text-success-600"
+                    : "border-ink-200 bg-white text-ink-700",
+              )}
+            >
+              <span className="block font-mono tabular">{formatTime(lesson.startsAt)}</span>
+              <span className="mt-0.5 block truncate">{lesson.subject}</span>
+              <span className="mt-0.5 block truncate text-[11px] opacity-80">
+                {teachers.find((t) => t.id === lesson.teacherId)?.name ?? "—"} ·{" "}
+                {classrooms.find((c) => c.id === lesson.classroomId)?.name ?? "—"}
+              </span>
+            </button>
+          </li>
+        ))}
+
+        {lessons.length === 0 && (
+          <li className="px-2 py-3 text-center text-xs text-ink-400">空档</li>
+        )}
+      </ul>
+    </section>
   );
 }
 
