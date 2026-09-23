@@ -12,6 +12,7 @@ import {
   weekDays,
 } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
+import { countLessons } from "@/lib/backend/lesson-stats";
 
 /**
  * 日历（按周查看）。
@@ -102,7 +103,7 @@ export default function AdminCalendarPage() {
         </button>
         <span className="text-xs text-ink-500">
           {formatDayLabel(days[0] ?? new Date())} – {formatDayLabel(days[6] ?? new Date())} ·
-          本周 {lessons.length} 节
+          本周 {countLessons(lessons).active} 节
           {loading && " · 加载中…"}
         </span>
       </div>

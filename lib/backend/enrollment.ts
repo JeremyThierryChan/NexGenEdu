@@ -26,6 +26,44 @@ export function remainingTotal(enrollments: Enrollment[]): number {
 }
 
 /** 按科目汇总剩余课时，例如 { 初中数学: 8, 初中物理: 3 }。 */
+/**
+ * 一个学生的**课时余额**：合计 + 最少的那一门。
+ *
+ * ## 为什么要有它（审计抓到的"同一个问题四个答案"）
+ *
+ * "剩余课时不足"原先在四个地方各算一遍，而且**算法不一样**：
+ *   - 今日概览：各科**合计**，含"一节课都没报"的学生，排除「结课」；
+ *   - 待跟进：**剩余最少的那一门**，跳过「结课」与"没有在读报课"的学生；
+ *   - 学生列表、学生详情：合计，阈值又各自写死一个 `5`。
+ * 结果是同一个学生在两个页面上一个被预警、一个不被预警，而页面上那句
+ * "阈值集中在 FOLLOWUP_RULES，改那一处即可"是假的（另外三处写死了 5）。
+ *
+ * 现在只有这一处算余额：**合计用于"总共还剩多少"，最少的那一门用于"还能排几节课"**
+ * （排课受单科限制 —— 数学只剩 3 节，就排不了第 4 节数学课），两个数都带出来，
+ * 由调用方决定说哪个，而不是各自再算一遍。
+ */
+export type LessonBalance = {
+  /** 在读报课的合计剩余。 */
+  total: number;
+  /** 剩余最少的那一门（没有在读报课时为 `null`）。 */
+  weakest: Enrollment | null;
+  /** 那一门的剩余（没有在读报课时为 0）。 */
+  weakestRemaining: number;
+};
+
+export function lessonBalance(enrollments: Enrollment[]): LessonBalance {
+  const active = activeEnrollments(enrollments);
+  let weakest: Enrollment | null = null;
+  for (const enrollment of active) {
+    if (weakest === null || remainingOf(enrollment) < remainingOf(weakest)) weakest = enrollment;
+  }
+  return {
+    total: remainingTotal(enrollments),
+    weakest,
+    weakestRemaining: weakest === null ? 0 : remainingOf(weakest),
+  };
+}
+
 export function remainingBySubject(enrollments: Enrollment[]): Array<{ subject: string; remaining: number }> {
   const map = new Map<string, number>();
   for (const item of activeEnrollments(enrollments)) {

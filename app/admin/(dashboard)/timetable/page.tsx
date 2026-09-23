@@ -15,6 +15,7 @@ import {
 import { getClassHoursWindow } from "@/lib/backend/options";
 import { createIcs, downloadTextFile, stampForFilename } from "@/lib/backend/backup";
 import { cn } from "@/lib/utils/cn";
+import { countLessons } from "@/lib/backend/lesson-stats";
 
 /**
  * 空档计算选项：窗口取自站点内容的「上课时间」，因此课前 / 课后两段空档
@@ -107,9 +108,8 @@ export default function AdminTimetablePage() {
     return map;
   }, [filtered]);
 
-  const totalMinutes = filtered
-    .filter((lesson) => lesson.status !== "已取消")
-    .reduce((sum, lesson) => sum + lesson.durationMinutes, 0);
+  // 焦点行与下面的"本周总览"必须同一口径（取消的课不算），否则同一屏两个数会打架
+  const focusCounts = countLessons(filtered);
 
   /** 本周每间教室 / 每位教师的课次与时长，用于总览一行。 */
   const summary = useMemo(() => {
@@ -119,11 +119,13 @@ export default function AdminTimetablePage() {
           ? lesson.teacherId === item.id
           : lesson.classroomId === item.id,
       );
+      const counts = countLessons(own);
       return {
         id: item.id,
         name: item.name,
-        count: own.length,
-        hours: Math.round((own.reduce((sum, lesson) => sum + lesson.durationMinutes, 0) / 60) * 10) / 10,
+        count: counts.active,
+        cancelled: counts.cancelled,
+        hours: Math.round((counts.activeMinutes / 60) * 10) / 10,
       };
     });
   }, [classrooms, lessons, tab, teachers]);
@@ -205,7 +207,9 @@ export default function AdminTimetablePage() {
           </select>
         </label>
         <span className="text-xs text-ink-500">
-          {focusName} 本周 {filtered.length} 节 · {Math.round((totalMinutes / 60) * 10) / 10} 小时
+          {focusName} 本周 {focusCounts.active} 节 ·{" "}
+          {Math.round((focusCounts.activeMinutes / 60) * 10) / 10} 小时
+          {focusCounts.cancelled > 0 ? `（另有 ${focusCounts.cancelled} 节已取消）` : ""}
         </span>
         {/* 导出当前焦点的本周课表：老师把它导进手机日历，就不用来后台查课 */}
         <Button
@@ -333,7 +337,10 @@ export default function AdminTimetablePage() {
               </button>
               <span className="text-xs tabular text-ink-600">{row.count} 节</span>
               <span className="text-xs tabular text-ink-500">{row.hours} 小时</span>
-              {row.count === 0 && <span className="text-xs text-ink-400">本周无课</span>}
+              {row.cancelled > 0 && (
+                <span className="text-xs text-ink-400">（另有 {row.cancelled} 节已取消，未计入）</span>
+              )}
+              {row.count === 0 && row.cancelled === 0 && <span className="text-xs text-ink-400">本周无课</span>}
             </li>
           ))}
         </ul>

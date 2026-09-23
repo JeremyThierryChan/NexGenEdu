@@ -5,7 +5,7 @@ import type {
   LessonRecord,
   Student,
 } from "./types";
-import { activeEnrollments, remainingOf, remainingTotal } from "./enrollment";
+import { activeEnrollments, lessonBalance, remainingTotal } from "./enrollment";
 import { formatMoney, outstandingAmount } from "./finance";
 import { formatDayLabel } from "./format";
 
@@ -116,11 +116,19 @@ function checkLowLessons(student: Student): FollowUpItem[] {
   const active = activeEnrollments(student.enrollments);
   if (active.length === 0) return [];
 
-  const weakest = active.reduce((min, item) => (remainingOf(item) < remainingOf(min) ? item : min));
-  const remaining = remainingOf(weakest);
+  /*
+   * 判据用**剩余最少的那一门**（不是合计）：排课受单科限制 —— 数学只剩 3 节，
+   * 就排不了第 4 节数学课。合计只是"总共还剩多少"，不决定"还能不能排"。
+   *
+   * 这个"最少的一门"现在由 `lessonBalance` 统一算（今日概览用同一个函数），
+   * 因此两个页面对同一个学生不会再给出不同答案。
+   */
+  const balance = lessonBalance(student.enrollments);
+  const weakest = balance.weakest;
+  if (weakest === null) return [];
+  const remaining = balance.weakestRemaining;
+  const total = balance.total;
   if (remaining > FOLLOWUP_RULES.lowLessons) return [];
-
-  const total = remainingTotal(student.enrollments);
   const severity: FollowUpSeverity =
     remaining <= FOLLOWUP_RULES.lowLessonsUrgent ? "紧急" : "提醒";
 

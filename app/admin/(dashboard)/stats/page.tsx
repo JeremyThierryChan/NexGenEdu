@@ -96,9 +96,10 @@ export default function AdminStatsPage() {
         <header className="border-b border-ink-100 px-4 py-3">
           <h2 className="text-sm font-medium text-ink-900">教室利用率</h2>
           <p className="mt-0.5 text-xs text-ink-500">
-            可用时长按教室自己的「可用时段」算；没设时段的按上课时间估算（每天{" "}
-            {CLASS_HOURS_PER_DAY} 小时，即 8:00–22:00 —— 教室能不能用取决于能不能上课，
-            而不是前台有没有人）。只统计未取消的课。
+            可用时长按教室自己的「可用时段」算；没设时段的一律按每天{" "}
+            {CLASS_HOURS_PER_DAY} 小时估算（8:00–22:00，与内容里写的「上课时间」无关 ——
+            那个数字是给家长看的，不是每间教室的营业口径）。想要更准，去教室页给它们配上可用时段。
+            只统计未取消的课。
           </p>
         </header>
 

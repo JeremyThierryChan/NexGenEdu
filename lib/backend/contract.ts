@@ -47,7 +47,9 @@ export const API_CONTRACT: ContractGroup[] = [
       "teachers.list", "teachers.get", "teachers.create", "teachers.update", "teachers.remove",
       "classrooms.list", "classrooms.get", "classrooms.create", "classrooms.update", "classrooms.remove",
       "lessons.list", "lessons.get", "lessons.create", "lessons.update", "lessons.remove",
-      "lessonRecords.list", "lessonRecords.get", "lessonRecords.create", "lessonRecords.update", "lessonRecords.remove",
+      /* 课堂记录同样只有读方法：写入口是 `lessonRecords.save`（它会按出勤事实重算课时）。
+       * 删除记录会留下"没有任何依据的课时扣减"，因此 `create` / `update` / `remove` 已删。 */
+      "lessonRecords.list", "lessonRecords.get",
       "homework.list", "homework.get", "homework.create", "homework.update", "homework.remove",
       "assessments.list", "assessments.get", "assessments.create", "assessments.update", "assessments.remove",
       /*

@@ -815,7 +815,10 @@ import type { StudentProfile } from "./student-profile";
 /** 今日概览的汇总数据。 */
 export type TodaySummary = {
   date: string;
+  /** 有效的课次（**不含已取消的课**，口径见 `lib/backend/lesson-stats.ts`）。 */
   lessonCount: number;
+  /** 这天被取消了几节（单独给一个数，而不是混进 lessonCount）。 */
+  cancelledLessonCount: number;
   /** 今天有课的教师数。 */
   teacherCount: number;
   /** 今天的课时总时长（分钟）。 */
@@ -823,7 +826,19 @@ export type TodaySummary = {
   /** 教室占用：教室 + 今天的课次。 */
   classroomUsage: Array<{ classroom: Classroom; lessonCount: number }>;
   /** 课时不足的学生（剩余课时 ≤ 阈值）。 */
-  lowLessonStudents: Array<{ student: Student; remainingLessons: number }>;
+  /**
+   * 低课时预警的学生。
+   *
+   * `remainingLessons` 是**剩余最少的那一门**（不是合计）——排课受单科限制：
+   * 数学只剩 3 节就排不了第 4 节数学课。合计在 `totalRemaining` 里，
+   * `weakSubject` 说明是哪一门，界面上两个数都显示出来（审计之后统一的：与「待跟进」同一份判定）。
+   */
+  lowLessonStudents: Array<{
+    student: Student;
+    remainingLessons: number;
+    totalRemaining: number;
+    weakSubject: string;
+  }>;
   studentCount: number;
   activeTeacherCount: number;
 };

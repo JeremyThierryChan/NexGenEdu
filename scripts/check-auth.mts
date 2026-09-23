@@ -856,15 +856,22 @@ try {
 
     console.log("\n[9.5] 看板与搜索按我的口径重算");
     const todayMine = (await read(second.base, teacherA.token, "today")).result as {
-      lessonCount: number; studentCount: number; teacherCount: number;
+      lessonCount: number; studentCount: number; teacherCount: number; cancelledLessonCount: number;
       lowLessonStudents: Array<{ student: { id: string } }>;
     };
     const todayAdmin = (await read(second.base, admin.token, "today")).result as {
-      lessonCount: number; studentCount: number;
+      lessonCount: number; studentCount: number; cancelledLessonCount: number;
     };
-    equal("今日概览的课次只算我的（含自己那节已取消的）", todayMine.lessonCount, 2);
+    /*
+     * 口径（2026-09 审计后统一）：课次**不含已取消的课**，取消的单独给一个数。
+     * 这里教师甲名下有 2 节（1 节正常 + 1 节已取消），因此课次 1、取消 1；
+     * 技术管理员看全校：3 节里 1 节已取消 → 课次 2、取消 1。
+     */
+    equal("今日概览的课次只算我的，且不含已取消的", todayMine.lessonCount, 1);
+    equal("取消的那一节单独报出来（不藏）", todayMine.cancelledLessonCount, 1);
     equal("今日概览的学生数只算我的", todayMine.studentCount, 1);
-    equal("（对照）技术管理员的今日概览是全校口径", [todayAdmin.lessonCount, todayAdmin.studentCount], [3, 2]);
+    equal("（对照）技术管理员的今日概览是全校口径", [todayAdmin.lessonCount, todayAdmin.studentCount], [2, 2]);
+    equal("（对照）技术管理员那边也有 1 节已取消", todayAdmin.cancelledLessonCount, 1);
     check("低课时预警里只有我的学生",
       todayMine.lowLessonStudents.every((item) => item.student.id === studentAId));
     const statsMine = (await read(second.base, teacherA.token, "stats")).result as {

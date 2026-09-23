@@ -11,6 +11,7 @@ import { api, type Classroom, type Lesson, type Student, type Teacher } from "@/
 import { remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
+import { FOLLOWUP_RULES } from "@/lib/backend/followup";
 
 /**
  * 学生详情。
@@ -87,7 +88,7 @@ export function StudentDetail({
           <span
             className={cn(
               "text-lg font-medium tabular",
-              total <= 5 ? "text-warning-600" : "text-ink-900",
+              total <= FOLLOWUP_RULES.lowLessons ? "text-warning-600" : "text-ink-900",
             )}
           >
             {total}

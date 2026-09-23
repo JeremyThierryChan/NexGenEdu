@@ -30,7 +30,14 @@ import {
 } from "./concurrency";
 import { createRemoteApi, isRemoteMode, remoteBase } from "./remote";
 import { addTransaction, nowIso, reconcileCharge, recordPayment } from "./charges";
-import { enrollmentForLesson, remainingOf, remainingTotal } from "./enrollment";
+import { enrollmentForLesson, lessonBalance, remainingOf, remainingTotal } from "./enrollment";
+/*
+ * 低课时预警的阈值从「待跟进」那一份规则里取（`FOLLOWUP_RULES.lowLessons`）：
+ * 界面上写着"阈值集中在 FOLLOWUP_RULES，改那一处即可"，那就必须真的只有那一处 ——
+ * 早先概览与学生页各自写死一个 5，改了常量它们不会跟着动（审计抓到的那条）。
+ */
+import { FOLLOWUP_RULES } from "./followup";
+import { countLessons } from "./lesson-stats";
 import { decideCharge, isAbsent } from "./attendance";
 import { databaseStats, validateImportedDatabase, type ImportOutcome } from "./backup";
 import { buildFollowUps, type FollowUpItem } from "./followup";
@@ -1766,6 +1773,30 @@ function addLessonTransaction(
  * 两处各写一份的话，「建档报的课」与「后来单独报的课」迟早会在某个字段上分叉
  * （一边记了课时流水、另一边忘了），对账时才发现两批数据不是一个形状。
  */
+/**
+ * 校验**单条**报课。
+ *
+ * ## 为什么要有它（审计抓到的"同一个动作两个口径"）
+ *
+ * 建档时报课走 `normalizeNewEnrollments`（空科目、课时 ≤ 0、同科目重复、不存在的教师全拦），
+ * 注释还解释了为什么；但**后来单独补报课**走的是 `students.enroll` → `addEnrollment`，
+ * 那条路上一条都不查。实测：`teacherId: "t_根本不存在"`、`subject: ""`、
+ * 同一门科目报两次 —— 全都静默落库。于是"建档时报的第一门课是干净的，
+ * 后来补报的课可以是脏的"，同一张表两种数据质量。
+ *
+ * 现在两处共用这一个函数：规则只有一份，`students.enroll` / `renewEnrollment` 都过它。
+ */
+function validateNewEnrollment(db: Database, input: NewEnrollment): void {
+  const subject = input.subject.trim();
+  if (subject === "") throw new Error("报课科目不能为空。");
+  if (!Number.isFinite(input.lessons) || Math.trunc(input.lessons) <= 0) {
+    throw new Error(`「${subject}」的课时数必须是大于 0 的整数。`);
+  }
+  if (input.teacherId !== "" && !db.teachers.some((teacher) => teacher.id === input.teacherId)) {
+    throw new Error(`「${subject}」指定的教师不存在：请重新选择（或改成「不指定」）。`);
+  }
+}
+
 function addEnrollment(db: Database, student: Student, input: NewEnrollment): Enrollment {
   const lessons = Math.max(0, Math.trunc(input.lessons));
   const enrollment: Enrollment = {
@@ -1910,6 +1941,17 @@ const localApi = {
       const db = load();
       const student = db.students.find((item) => item.id === studentId);
       if (student === undefined) return null;
+
+      // 与「建档时报课」同一套校验（见 `validateNewEnrollment` 的说明）
+      validateNewEnrollment(db, input);
+      const subject = input.subject.trim();
+      const existing = student.enrollments.find((item) => item.subject.trim() === subject && item.status === "在读");
+      if (existing !== undefined) {
+        throw new Error(
+          `「${subject}」已经有一条在读的报课（还剩 ${existing.totalLessons - existing.usedLessons} 节）：` +
+            "同一门科目请用「续费」加课时，而不是再报一次 —— 否则课时会分成两条、余额看着对不上。",
+        );
+      }
 
       const enrollment = addEnrollment(db, student, input);
 
@@ -2307,6 +2349,19 @@ const localApi = {
         });
       }
 
+      /*
+       * **改账必须留痕**（审计抓到的一处）：这里直接把购买课时改掉并写课时流水，
+       * 但早先没有操作日志 —— "谁在什么时候把这条报课的课时从 4 改成 7"查不到，
+       * 而它比改一个备注严重得多。
+       */
+      writeLog(db, {
+        entity: "报课",
+        action: "调整课时",
+        targetId: enrollment.id,
+        summary:
+          `${student.name} 的「${enrollment.subject}」课时 ${before} → ${enrollment.totalLessons} 节` +
+          `（${effective > 0 ? "+" : ""}${effective}）${note.trim() === "" ? "" : ` · ${note.trim()}`}`,
+      });
       syncSubjects(student);
       touchStudent(db, student.id);
       persist(db);
@@ -2811,9 +2866,23 @@ const localApi = {
    * 保存用 upsert 而不是 create：一节课一个学生只有一条记录，
    * 老师改完再保存不应该多出一条（这是最容易被写成「每次保存都新增」的地方）。
    */
+  /**
+   * 课堂记录（出勤 / 专注 / 互动）：**只读 + 一条正规入口 `save`**。
+   *
+   * ## 为什么删掉通用写方法（审计抓出来的一条"账对不上"）
+   *
+   * 早先这里是 `...collection<LessonRecord>((db) => db.lessonRecords, "lr")` ——
+   * 工厂一次给出 `create` / `update` / `remove`，而它们：
+   *
+   *   1. 建集合时**没给日志标签** → 删除课堂记录**不留痕**（谁删的、为什么删，查不到）；
+   *   2. **不重算课时**：`save` 会走 `reconcileCharge`（按出勤事实对账、该扣的扣、该退的退），
+   *      而 `remove` 只是把记录抹掉 —— 课时仍然扣着，而下次对账会把"没有记录"当成**到课**，
+   *      于是这节已经扣过的课在数据上变成"没有任何依据的一笔扣减"。
+   *
+   * 而且页面里一处都没调用过它们（界面上的出勤纠错走的是重新 `save`）。
+   * 因此删掉三个写方法，只留 `save`：**纠错是改记录，不是删记录**。
+   */
   lessonRecords: {
-    ...collection<LessonRecord>((db) => db.lessonRecords, "lr"),
-
     /** 课堂记录列表：教师只看得到**自己课**上的记录。 */
     async list(): Promise<LessonRecord[]> {
       const view = captureView();
@@ -3012,6 +3081,18 @@ const localApi = {
         previousScore: previous?.score ?? null,
       };
       db.assessments.push(created);
+      /*
+       * 教学记录也要留痕（审计抓到的一处）：早先新增一条测评不写操作日志，
+       * 而"谁在什么时候给学生记了一次测评"是家长会追问的事。
+       */
+      writeLog(db, {
+        entity: "阶段测评",
+        action: "新增",
+        targetId: created.id,
+        summary:
+          `${db.students.find((item) => item.id === created.studentId)?.name ?? created.studentId} 的` +
+          `「${created.subject}」测评 ${created.score} 分（${created.date}）`,
+      });
       persist(db);
       return clone(created);
     },
@@ -3432,6 +3513,15 @@ const localApi = {
       };
 
       db.lessons.push(created);
+      // 排一节课不留痕说不过去：补课同样是"排了一节课"，而且它关联着原课
+      writeLog(db, {
+        entity: "排课",
+        action: "补课",
+        targetId: created.id,
+        summary:
+          `${created.subject} 补课 ${created.startsAt.slice(0, 16).replace("T", " ")}` +
+          `（为 ${original.startsAt.slice(0, 10)} 那节）· ${makeupStudents.length} 名学生`,
+      });
       persist(db);
       return clone(created);
     },
@@ -3634,17 +3724,45 @@ const localApi = {
       lessonCount: todays.filter((lesson) => lesson.classroomId === classroom.id).length,
     }));
 
+    const todayCounts = countLessons(todays);
     return clone({
       date: key,
-      lessonCount: todays.length,
-      teacherCount: new Set(todays.map((lesson) => lesson.teacherId)).size,
-      totalMinutes: todays.reduce((total, lesson) => total + lesson.durationMinutes, 0),
+      /*
+       * 节数与课时**一律不计已取消的课**（`countLessons` 是唯一口径）：
+       * 早先这里把取消的课也算进"今天 3 节课 · 4 小时"，而课程安排页、课表、统计
+       * 都不算 —— 同一个词四个意思（审计抓到的那条）。取消的课单独给一个数，
+       * 界面上显示成"另有 N 节已取消"，不藏起来。
+       */
+      lessonCount: todayCounts.active,
+      cancelledLessonCount: todayCounts.cancelled,
+      teacherCount: new Set(todays.filter((lesson) => lesson.status !== "已取消").map((lesson) => lesson.teacherId)).size,
+      totalMinutes: todayCounts.activeMinutes,
       classroomUsage,
+      /*
+       * 低课时预警：与「待跟进」用**同一个函数、同一个阈值**（`lessonBalance` +
+       * 待跟进的 `FOLLOWUP_RULES.lowLessons`）。
+       *
+       * 早先这里自己算合计、阈值写死 5，而待跟进算"最少的那一门"、阈值取常量 ——
+       * 于是"数学 3 节 + 物理 4 节"的学生在待跟进里被标成课时不足，
+       * 在概览与学生页却不预警；改了常量那三处也不会跟着动（审计抓到的那条）。
+       *
+       * 判据取**最少的那一门**（见 followup.ts 的说明：排课受单科限制）。
+       * 与待跟进的唯一差别是"没有任何在读报课"的学生：这里**要**列出来
+       * （那意味着这节课根本排不了，管理员得知道），待跟进里则跳过
+       * （"一节课都没报"不是"该催续费"的场景）。这条差别是明确的、也有断言盯着。
+       */
       lowLessonStudents: myStudents
         .filter((student) => student.status !== "结课")
-        .map((student) => ({ student, remainingLessons: remainingTotal(student.enrollments) }))
-        // 没有任何在读报课的学生也算「需要跟进」，否则会从预警里消失
-        .filter((item) => item.remainingLessons <= 5)
+        .map((student) => {
+          const balance = lessonBalance(student.enrollments);
+          return {
+            student,
+            remainingLessons: balance.weakestRemaining,
+            totalRemaining: balance.total,
+            weakSubject: balance.weakest?.subject ?? "",
+          };
+        })
+        .filter((item) => item.remainingLessons <= FOLLOWUP_RULES.lowLessons)
         .sort((a, b) => a.remainingLessons - b.remainingLessons),
       studentCount: myStudents.length,
       /*

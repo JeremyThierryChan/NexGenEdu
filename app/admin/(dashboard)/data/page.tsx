@@ -35,6 +35,7 @@ import {
 } from "@/lib/backend/backup";
 import { formatDayLabel } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
+import { LOG_LIMIT } from "@/lib/backend/api";
 
 /**
  * 数据与备份。
@@ -282,7 +283,10 @@ export default function AdminDataPage() {
       <Panel
         className="mt-4"
         title="操作日志"
-        description="记录谁在什么时候改了什么（最近 100 条）。纯前端阶段存在本机，接服务端后改为服务端审计。"
+        description={
+          `记录谁在什么时候改了什么（这里显示最近 100 条；库里最多保留 ${LOG_LIMIT} 条，` +
+          `超出后最早的那些会被丢弃 —— 要长期留存请定期导出）。日志在服务端，操作人由服务端按会话记录。`
+        }
         actions={
           <Button
             size="sm"

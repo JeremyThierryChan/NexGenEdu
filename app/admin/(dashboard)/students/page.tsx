@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { api, type Lesson, type Student } from "@/lib/backend/api";
 import { remainingTotal } from "@/lib/backend/enrollment";
+import { FOLLOWUP_RULES } from "@/lib/backend/followup";
 
 /**
  * 学生模块。
@@ -228,7 +229,7 @@ export default function AdminStudentsPage() {
                       <>
                         <span
                           className={
-                            remaining <= 5
+                            remaining <= FOLLOWUP_RULES.lowLessons
                               ? "tabular font-medium text-warning-600"
                               : "tabular text-ink-700"
                           }
@@ -238,7 +239,7 @@ export default function AdminStudentsPage() {
                         <span className="ml-1.5 text-[11px] text-ink-400">
                           {student.enrollments.filter((item) => item.status === "在读").length} 门
                         </span>
-                        {remaining <= 5 && student.status === "在读" && (
+                        {remaining <= FOLLOWUP_RULES.lowLessons && student.status === "在读" && (
                           <span className="ml-1.5 text-[11px] text-warning-600">需提醒</span>
                         )}
                       </>

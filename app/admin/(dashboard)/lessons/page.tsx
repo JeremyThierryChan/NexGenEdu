@@ -17,6 +17,7 @@ import {
   type Teacher,
 } from "@/lib/backend/api";
 import { dateKey, formatDayLabel, formatTimeRange } from "@/lib/backend/format";
+import { countLessons, describeLessonCounts } from "@/lib/backend/lesson-stats";
 
 /**
  * 课程安排（按天排课）。
@@ -159,9 +160,12 @@ export default function AdminLessonsPage() {
     await load({ quiet: true });
   }
 
-  const totalMinutes = lessons
-    .filter((lesson) => lesson.status !== "已取消")
-    .reduce((sum, lesson) => sum + lesson.durationMinutes, 0);
+  /*
+   * 节数与课时的口径只有一处（`countLessons`）：**取消的课不算**。
+   * 早先这一行左边用 `lessons.length`（含取消）、右边排除取消 ——
+   * 同一行写"3 节 · 2 小时"，那两个数互相矛盾（审计抓到的那条）。
+   */
+  const counts = countLessons(lessons);
 
   const isToday = date === toDateInput(new Date());
 
@@ -199,8 +203,7 @@ export default function AdminLessonsPage() {
           </Button>
         )}
         <span className="text-xs text-ink-500">
-          {formatDayLabel(new Date(`${date}T00:00:00`))} · {lessons.length} 节 ·{" "}
-          {Math.round((totalMinutes / 60) * 10) / 10} 小时
+          {formatDayLabel(new Date(`${date}T00:00:00`))} · {describeLessonCounts(counts)}
         </span>
         <div className="ml-auto flex items-center gap-2">
           {/* 按周批量排课：一次排一串（每周二、五 17:00 × N 节），冲突的跳过并说明 */}

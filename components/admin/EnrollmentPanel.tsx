@@ -29,6 +29,7 @@ import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel } from "@/lib/backend/format";
 import { getFormOptions } from "@/lib/backend/options";
 import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
+import { FOLLOWUP_RULES } from "@/lib/backend/followup";
 
 /**
  * 报课与课时面板。
@@ -108,7 +109,7 @@ export function EnrollmentPanel({
             </span>
           )}
           剩余课时合计{" "}
-          <span className={total <= 5 ? "font-medium tabular text-warning-600" : "font-medium tabular text-ink-900"}>
+          <span className={total <= FOLLOWUP_RULES.lowLessons ? "font-medium tabular text-warning-600" : "font-medium tabular text-ink-900"}>
             {total}
           </span>{" "}
           节
@@ -160,6 +161,13 @@ export function EnrollmentPanel({
                     method,
                   }),
                 )
+              }
+              /*
+               * 调整课时：走 `adjustEnrollmentLessons` —— 服务层会写课时流水（kind「调整」）
+               * 与操作日志，因此"课时账错了"这件事有据可查。它**不动钱**。
+               */
+              onAdjustLessons={(delta, note) =>
+                run(() => api.students.adjustEnrollmentLessons(student.id, enrollment.id, delta, note))
               }
               onRecordPayment={(amount, kind, method, note) =>
                 run(() =>
@@ -218,6 +226,7 @@ function EnrollmentRow({
   transactions,
   payments,
   onRenew,
+  onAdjustLessons,
   onRecordPayment,
   onRefund,
   onEdit,
@@ -234,6 +243,15 @@ function EnrollmentRow({
   /** 这条报课的收款 / 退款流水。 */
   payments: Payment[];
   onRenew: (lessons: number, amount: number, method: PaymentMethod) => void | Promise<void>;
+  /**
+   * 调整课时（补录 / 纠错）：只改购买课时、不动钱。
+   *
+   * 为什么要有这个入口：`students.adjustEnrollmentLessons` 服务层一直有实现、权限也齐、
+   * 使用手册还明确让用户在"课时账错了"时用它（§4.8 / §7.1.1 附近写着"按实际情况调整课时"），
+   * **但界面上从来没有入口** —— 功能是死的（审计抓到的那条）。补齐它，
+   * 而不是把手册那句话删掉：机构真要纠错时，只有这条路是"留流水 + 留日志"的正规做法。
+   */
+  onAdjustLessons: (delta: number, note: string) => void | Promise<void>;
   onRecordPayment: (
     amount: number,
     kind: Payment["kind"],
@@ -249,7 +267,10 @@ function EnrollmentRow({
 }) {
   const remaining = remainingOf(enrollment);
   const refunded = enrollment.status === "已退课";
-  const [panel, setPanel] = useState<"renew" | "pay" | "refund" | "edit" | null>(null);
+  const [panel, setPanel] = useState<"renew" | "pay" | "refund" | "edit" | "adjust" | null>(null);
+  /** 调整课时的输入（正数 = 加，负数 = 减）与原因。 */
+  const [adjustDelta, setAdjustDelta] = useState("");
+  const [adjustNote, setAdjustNote] = useState("");
   const [editResult, setEditResult] = useState<EnrollmentEditResult | null>(null);
   const [policyId, setPolicyId] = useState(DEFAULT_REFUND_POLICY_ID);
   const [amountInput, setAmountInput] = useState("");
@@ -299,7 +320,7 @@ function EnrollmentRow({
 
         <span className={refunded ? "text-xs text-ink-400" : "text-xs text-ink-600"}>
           已购 {enrollment.totalLessons} · 已上 {enrollment.usedLessons} ·
-          <span className={refunded ? "ml-1" : remaining <= 5 ? "ml-1 font-medium text-warning-600" : "ml-1"}>
+          <span className={refunded ? "ml-1" : remaining <= FOLLOWUP_RULES.lowLessons ? "ml-1 font-medium text-warning-600" : "ml-1"}>
             剩 {remaining}
           </span>
         </span>
@@ -335,6 +356,14 @@ function EnrollmentRow({
               className="text-xs text-brand-700 transition-colors hover:text-brand-800 disabled:opacity-60"
             >
               续费
+            </button>
+            <button
+              type="button"
+              disabled={pending}
+              onClick={() => setPanel(panel === "adjust" ? null : "adjust")}
+              className="text-xs text-brand-700 transition-colors hover:text-brand-800 disabled:opacity-60"
+            >
+              调整课时
             </button>
             <button
               type="button"
@@ -434,6 +463,46 @@ function EnrollmentRow({
           >
             确认续费
           </button>
+        </div>
+      )}
+
+      {/* 调整课时：补录 / 纠错（只改课时，不动钱；原因必填，因为它改的是账） */}
+      {panel === "adjust" && !refunded && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-600">
+          <span>课时</span>
+          <input
+            type="number"
+            value={adjustDelta}
+            onChange={(event) => setAdjustDelta(event.target.value)}
+            placeholder="+3 / -2"
+            className="w-20 rounded-md border border-ink-300 px-2 py-1 text-xs tabular outline-none focus:border-brand-500"
+          />
+          <span>节，原因</span>
+          <input
+            type="text"
+            value={adjustNote}
+            onChange={(event) => setAdjustNote(event.target.value)}
+            placeholder="例如：试听送 2 节 / 上错科目扣回"
+            className="w-56 rounded-md border border-ink-300 px-2 py-1 text-xs outline-none focus:border-brand-500"
+          />
+          <button
+            type="button"
+            disabled={pending || adjustDelta.trim() === "" || adjustNote.trim() === ""}
+            onClick={() => {
+              const delta = Math.trunc(Number(adjustDelta));
+              const note = adjustNote.trim();
+              setPanel(null);
+              setAdjustDelta("");
+              setAdjustNote("");
+              void onAdjustLessons(delta, note);
+            }}
+            className="rounded-md bg-brand-700 px-2.5 py-1 text-xs text-white transition-colors hover:bg-brand-800 disabled:opacity-60"
+          >
+            确认调整
+          </button>
+          <span className="text-[11px] text-ink-400">
+            正数加课时、负数减；这里不动钱（收款/退款请用左边那两个按钮）。课时不会变成负数。
+          </span>
         </div>
       )}
 

@@ -11,6 +11,7 @@ import {
 } from "@/lib/backend/timetable";
 import { getClassHoursWindow } from "@/lib/backend/options";
 import { PageHeading } from "@/components/ui/PageHeading";
+import { FOLLOWUP_RULES } from "@/lib/backend/followup";
 import {
   api,
   type Classroom,
@@ -114,7 +115,7 @@ export default function AdminTodayPage() {
         <Stat
           label="课时预警"
           value={loading ? "…" : `${summary?.lowLessonStudents.length ?? 0} 人`}
-          hint="剩余 ≤ 5 节"
+          hint={`剩余 ≤ ${FOLLOWUP_RULES.lowLessons} 节（最少的那一门）`}
           tone={(summary?.lowLessonStudents.length ?? 0) > 0 ? "warning" : "normal"}
         />
       </dl>

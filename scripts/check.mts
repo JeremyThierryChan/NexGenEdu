@@ -63,6 +63,8 @@ import {
 } from "@/lib/admin/scroll-restore";
 import { dateKey } from "@/lib/backend/format";
 import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
+import { lessonBalance } from "@/lib/backend/enrollment";
+import { countLessons, describeLessonCounts } from "@/lib/backend/lesson-stats";
 import {
   checkHolidaySources,
   combineHolidaySources,
@@ -7067,7 +7069,192 @@ console.log("\n=== 17. P0：数据与钱的五道护栏 ===");
   eq("被拒之后实收没有变（没有半截写入）", afterOverRefund.paidAmount, afterRefundEnrollment.paidAmount);
 }
 
+console.log("\n=== 18. P1：账目与审计一致性 ===");
+
+/*
+ * 这一节对应审计里"账对不上、查不到原因"那一档：
+ *
+ *   ① 一整片写操作不留痕（调课时 / 补课 / 阶段测评 / 删课堂记录 / 收款）
+ *   ② 课堂记录的通用写方法能绕过「按出勤事实重算课时」
+ *   ③ `students.enroll` 与"建档时报课"校验不对等（脏数据从后一条路进来）
+ *   ④ 课时预警与"含不含已取消的课"同一个问题各有四套口径
+ */
+{
+  const store = createMemoryStore();
+  __useStoreForTesting(store);
+
+  const student = await api.students.create({
+    name: "账目自检学生", grade: "初三", guardian: "", phone: "", note: "", tags: [],
+    profile: {}, siteVisible: false, origin: "后台",
+  } as never);
+
+  // ── ③ 报课校验：两条路必须同一口径 ────────────────────────────────────
+  const enrollProblem = async (input: Record<string, unknown>): Promise<string> => {
+    try {
+      await api.students.enroll(student.id, {
+        subject: "数学", form: "", teacherId: "", lessons: 10, startedAt: "2026-09-01",
+        note: "", unitPrice: 200, agreedAmount: 2000, paidNow: 0, method: "微信",
+        ...input,
+      } as never);
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+  ok("单独报课：科目为空 → 拒绝（与建档报课同一口径）", (await enrollProblem({ subject: "  " })).includes("科目不能为空"));
+  ok("单独报课：课时 ≤ 0 → 拒绝", (await enrollProblem({ lessons: 0 })).includes("大于 0"));
+  ok("单独报课：教师不存在 → 拒绝（不许静默存一个查不到的 id）",
+    (await enrollProblem({ teacherId: "t_根本不存在" })).includes("教师不存在"));
+
+  await api.students.enroll(student.id, {
+    subject: "数学", form: "", teacherId: "", lessons: 4, startedAt: "2026-09-01",
+    note: "", unitPrice: 200, agreedAmount: 800, paidNow: 800, method: "微信",
+  } as never);
+  const mathEnrollment = (await api.students.get(student.id))!.enrollments[0]!;
+  ok("单独报课：同一门科目已有在读报课 → 拒绝并提示用「续费」",
+    (await enrollProblem({ subject: "数学", lessons: 5 })).includes("续费"));
+
+  // ── ① 调课时 / 阶段测评 / 补课 都要留痕 ───────────────────────────────
+  const logCount = async (): Promise<number> => (await api.logs.list()).length;
+  const beforeAdjust = await logCount();
+  await api.students.adjustEnrollmentLessons(student.id, mathEnrollment.id, 3, "试听送 2 节·自检");
+  const adjustLogs = await api.logs.list();
+  ok("调整课时写了操作日志（改的是账，必须留痕）",
+    adjustLogs.length > beforeAdjust && adjustLogs.some((item) => item.action === "调整课时"),
+    `${beforeAdjust} → ${adjustLogs.length}`);
+  ok("日志里写明前后节数与原因",
+    adjustLogs.some((item) => item.action === "调整课时" && item.summary.includes("4 → 7") && item.summary.includes("试听送")),
+    adjustLogs[0]?.summary ?? "");
+  ok("调课时同样写课时流水（kind「调整」）",
+    (await api.transactions.listByStudent(student.id)).some((item) => item.kind === "调整" && item.delta === 3));
+
+  const beforeAssessment = await logCount();
+  await api.assessments.add({ studentId: student.id, subject: "数学", date: "2026-09-20", score: 88, total: 100, note: "" } as never);
+  ok("新增阶段测评写了操作日志", (await logCount()) > beforeAssessment);
+  ok("日志里带分数",
+    (await api.logs.list()).some((item) => item.entity === "阶段测评" && item.summary.includes("88")),
+    (await api.logs.list())[0]?.summary ?? "");
+
+  // ── ② 课堂记录：没有通用写方法，纠错走 save（会重算课时）─────────────
+  const recordWrites = ["create", "update", "remove"].filter(
+    (name) => typeof (api.lessonRecords as unknown as Record<string, unknown>)[name] === "function",
+  );
+  eq("课堂记录不再有通用写方法（删除记录会留下没有依据的课时扣减）", recordWrites, []);
+  ok("课堂记录的正规写入口是 save", typeof api.lessonRecords.save === "function");
+
+  const teacher = await api.teachers.create({
+    name: "账目自检教师", subjects: ["数学"], role: "", phone: "", active: true, years: "",
+    summary: "", bio: "", recommendation: "", order: 901, siteVisible: false, origin: "后台", kind: "教师",
+  } as never);
+  const lesson = await api.lessons.create({
+    subject: "数学", form: "", teacherId: teacher.id, classroomId: "", studentIds: [student.id],
+    startsAt: new Date(Date.now() - 3_600_000).toISOString(), durationMinutes: 60, status: "已排", note: "",
+  } as never);
+  await api.lessonRecords.save({
+    lessonId: lesson.id, studentId: student.id, attendance: "到课", focus: 4, interaction: 4, note: "",
+  } as never);
+  /*
+   * 扣课时发生在**课被标成「已上」**之后（出勤事实 + 课已完成才决定扣不扣），
+   * 因此先标已上、再记考勤 —— 这正是真实使用顺序（老师上完课先点"标记已上"再补考勤）。
+   */
+  await api.lessons.markCompleted(lesson.id);
+  const usedAfterAttend = (await api.students.get(student.id))!.enrollments[0]!.usedLessons;
+  eq("标「已上」+ 记「到课」后扣 1 节", usedAfterAttend, 1);
+  /*
+   * 改成「请假」：**这节课已经开始了**，所以它是"迟到请假" —— 按 24 小时规则仍旧扣课时，
+   * 课时**不该**被退回。这一条把规则也钉住了（不是"一改请假就退课时"）。
+   */
+  await api.lessonRecords.save({
+    lessonId: lesson.id, studentId: student.id, attendance: "请假", focus: 4, interaction: 4, note: "上课当天才说",
+    leaveRequestedAt: new Date(Date.now() - 1_800_000).toISOString(),
+  } as never);
+  eq("课后才说请假 → 仍按缺课扣 1 节（24 小时规则）",
+    (await api.students.get(student.id))!.enrollments[0]!.usedLessons, 1);
+
+  /*
+   * 再建一节**三天后**的课，标已上 + 提前请假（离上课 > 24 小时）→ 课时必须退回来。
+   * 这条同时证明 `save` 会按出勤事实**重算**（而不是只改记录）。
+   */
+  const futureLesson = await api.lessons.create({
+    subject: "数学", form: "", teacherId: teacher.id, classroomId: "", studentIds: [student.id],
+    startsAt: new Date(Date.now() + 3 * 86_400_000).toISOString(), durationMinutes: 60, status: "已排", note: "",
+  } as never);
+  await api.lessons.markCompleted(futureLesson.id);
+  eq("标已上后扣到 2 节", (await api.students.get(student.id))!.enrollments[0]!.usedLessons, 2);
+  await api.lessonRecords.save({
+    lessonId: futureLesson.id, studentId: student.id, attendance: "请假", focus: 4, interaction: 4, note: "提前三天请假",
+    // 请假时间要留时间戳：扣不扣课时看的是"距离上课还有多久"，不是备注里那句话
+    leaveRequestedAt: new Date(Date.now() - 3_600_000).toISOString(),
+  } as never);
+  eq("提前 > 24 小时请假 → 课时被退回（save 会重算，而不是只改记录）",
+    (await api.students.get(student.id))!.enrollments[0]!.usedLessons, 1);
+
+  const beforeMakeup = await logCount();
+  const makeup = await api.lessons.createMakeup({
+    originalLessonId: lesson.id, startsAt: new Date(Date.now() + 86_400_000).toISOString(),
+    durationMinutes: 60, teacherId: teacher.id, classroomId: "", studentIds: [student.id], note: "",
+  } as never);
+  ok("补课也写了操作日志（它同样是「排了一节课」）", (await logCount()) > beforeMakeup && makeup !== null);
+
+  // ── ④ 口径合一：低课时判定与"已取消的课" ──────────────────────────────
+  // 数学 4 + 3 = 7、物理 3 → 合计 10，但**最少的那一门是 3**
+  await api.students.enroll(student.id, {
+    subject: "物理", form: "", teacherId: "", lessons: 3, startedAt: "2026-09-01",
+    note: "", unitPrice: 200, agreedAmount: 600, paidNow: 0, method: "微信",
+  } as never);
+  const enrollmentsNow = (await api.students.get(student.id))!.enrollments;
+  const expectedTotal = enrollmentsNow.reduce((sum, item) => sum + (item.totalLessons - item.usedLessons), 0);
+  const balance = lessonBalance(enrollmentsNow);
+  eq("余额：合计 = 各科剩余之和，最少的那一门单独算出来",
+    [balance.total, balance.weakestRemaining, balance.weakestRemaining < balance.total], [expectedTotal, 3, true]);
+  eq("最少的那一门是哪一科也带出来（界面要说清是数学还是物理）", balance.weakest?.subject, "物理");
+
+  const overview = await api.today(new Date());
+  const overviewRow = overview.lowLessonStudents.find((item) => item.student.id === student.id);
+  ok("今日概览列出的低课时学生 = 用「最少的那一门」判出来的",
+    overviewRow !== undefined && overviewRow.remainingLessons === 3, JSON.stringify(overviewRow?.remainingLessons));
+  eq("概览同时给出合计与科目（不再只显示一个含糊的「剩余」）",
+    [overviewRow?.totalRemaining, overviewRow?.weakSubject], [expectedTotal, "物理"]);
+
+  const followUps = await api.followups(new Date());
+  const followUpRow = followUps.find((item) => item.studentId === student.id && item.kind === "课时不足");
+  ok("待跟进也用同一个判据列出这位学生（两个页面不会给出不同答案）",
+    followUpRow !== undefined && followUpRow.reason.includes("物理") && followUpRow.reason.includes(String(expectedTotal)),
+    followUpRow?.reason ?? "（没有这一条）");
+
+  const threshold = FOLLOWUP_RULES.lowLessons;
+  ok("阈值只有一个来源（FOLLOWUP_RULES.lowLessons），概览与待跟进都从它取",
+    threshold === 5 && overviewRow !== undefined && overviewRow.remainingLessons <= threshold);
+
+  // 已取消的课不算课次、不算课时，但要单列出来
+  const cancelled = await api.lessons.create({
+    subject: "数学", form: "", teacherId: teacher.id, classroomId: "", studentIds: [],
+    startsAt: new Date(Date.now() + 3_600_000).toISOString(), durationMinutes: 90, status: "已排", note: "",
+  } as never);
+  const beforeCancel = await api.today(new Date());
+  await api.lessons.update(cancelled.id, { status: "已取消" } as never);
+  const afterCancel = await api.today(new Date());
+  eq("取消之后：有效课次少 1（取消的不算课时）",
+    [beforeCancel.lessonCount - afterCancel.lessonCount, beforeCancel.totalMinutes - afterCancel.totalMinutes],
+    [1, 90]);
+  eq("但「取消了 1 节」要说出来（不藏起来）", afterCancel.cancelledLessonCount, 1);
+  eq("有效 + 取消 = 这天的全部课（数字不丢）",
+    afterCancel.lessonCount + afterCancel.cancelledLessonCount,
+    beforeCancel.lessonCount + beforeCancel.cancelledLessonCount);
+
+  const counts = countLessons([
+    { ...lesson, status: "已排", durationMinutes: 60 },
+    { ...cancelled, status: "已取消", durationMinutes: 90 },
+  ] as never);
+  eq("countLessons：有效 1 节 60 分钟、取消 1 节 90 分钟",
+    [counts.active, counts.activeMinutes, counts.cancelled, counts.cancelledMinutes], [1, 60, 1, 90]);
+  ok("「3 节 · 2 小时」这类说法由同一个函数生成（取消的多一句说明）",
+    describeLessonCounts(counts).includes("另有 1 节已取消"));
+}
+
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
+process.exit(failures === 0 ? 0 : 1);
+
 process.exit(failures === 0 ? 0 : 1);
 
 process.exit(failures === 0 ? 0 : 1);
