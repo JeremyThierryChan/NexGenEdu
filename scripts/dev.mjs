@@ -79,6 +79,11 @@ const POLL_MS = Number(process.env.SITE_LIVE_POLL_MS ?? 2000);
  * 后端公开数据，于是"点一下 → 过 1~5 秒页面自己跳回顶部"（机构真实反馈）。
  * 也就是说：这个功能的收益只在"**正在编辑网站内容**"时才存在，代价却是**每次改数据都重载后台**。
  * 因此改成显式开启：写网站文案时开它，做日常运营时别开。
+ *
+ * **这个默认值有断言守着**（`npm run check` 第 14 节）：那条断言同时核对"那个生成文件是不是
+ * 真的在后台页面的模块图里"（是 —— 课程库页 → lib/backend/options.ts → lib/data/site.ts →
+ * lib/site/backend-source.ts → data/site/.backend-snapshot.ts）。所以别把这里改回默认开：
+ * 一改回去，"点一下 → 过几秒跳回顶部"立刻回来。机构侧的判断法见 docs/使用手册.md §15.3。
  */
 const LIVE = process.env.SITE_LIVE === "1";
 const backendBase = (

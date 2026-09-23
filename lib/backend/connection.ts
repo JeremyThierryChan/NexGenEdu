@@ -309,27 +309,56 @@ async function fetchDatabaseHealth(base: string, token: string | null): Promise<
  * 已经有结论时，屏幕上继续挂上一个真实结论（哪怕它马上就过期），复查完成后直接换成新结论。
  * 这也更诚实：右上角那个状态信号不该每半分钟改口说一次"检查中…"，它应该只在**真的变了**
  * 的时候改口。
+ *
+ * ## 更进一步：结论**一样**时连重渲染都不发生
+ *
+ * 上面那条只保证"不退回 checking"，但每次复查仍然会新建一个等价的状态对象、发一次通知，
+ * 于是那两个组件（提示条 + 顶栏徽标）每 30 秒照样重渲染一次。**重渲染本身不改页高**，
+ * 真正的风险是"重渲染出来的东西不一样"——提示条就在课程清单**上方**，它变矮就会把
+ * 滚动位置夹一下（§15.3 原因二）。
+ *
+ * 现在把这条路彻底堵死：结论用 `sameConnectionState` 与当前那份逐项比，**一样就返回
+ * 原来那个对象、不发通知**（见 `commit`）。于是"后端一直好好的"这种最常见的状态下，
+ * 30 秒一次的复查在界面上**什么都不会发生**。自检里有一条行为级断言真的跑两遍复查、
+ * 要求一次通知都不发（`scripts/check.mts` 第 14 节）。
  */
+/**
+ * 记下一次新的探活结论；**和现在一样就什么都不做**。
+ *
+ * 返回的永远是"当前生效的那个状态对象"：没变时返回**原来那一个**（不是新建的等价对象）。
+ * 这一条是刻意的：`useSyncExternalStore` 用 `Object.is` 比快照，返回原对象它就不重渲染 ——
+ * 于是 30 秒一次的定时复查在"后端一直好好的"这种情况下**连一次重渲染都没有**，
+ * 页面上方那条提示条（它在课程清单上方）不可能因为复查而改变高度。
+ * 自检里有一条行为级断言守着它（把结论相同的两次复查真的跑一遍，要求**一次通知都不发**）。
+ *
+ * 结论真的变了才 `notify` —— 那时该改口就得改口（后端断了、会话失效了），
+ * 而提示条本身是**各分支等高**的（见 `components/admin/DataNotice.tsx`），
+ * 因此"改口"最多只是换一行字，不会让页面上方变矮。
+ */
+function commit(next: ConnectionState): ConnectionState {
+  if (sameConnectionState(state, next)) return state;
+  state = next;
+  notify();
+  return state;
+}
+
 export async function refreshConnection(
   options: { autoDetect?: boolean; token?: string | null } = {},
 ): Promise<ConnectionState> {
   if (state.status === "idle") {
-    state = { status: "checking" };
-    notify();
+    commit({ status: "checking" });
   }
   const base = backendBase();
   if (base === "") {
     // 没有配置地址：先试着自动找一台（本机常见端口）
     const found = options.autoDetect === false ? null : await autoDetectBackend();
     if (found === null || !found.ok) {
-      state = {
+      return commit({
         status: "down",
         base: "",
         reason: "还没有配置后端地址（也没能在本机的常见端口上找到后端）。",
         detected: null,
-      };
-      notify();
-      return state;
+      });
     }
     setBackendOverride(found.base);
     return refreshConnection({ autoDetect: false, token: options.token });
@@ -338,18 +367,18 @@ export async function refreshConnection(
   const probed = await probeBackend(base);
   if (probed.ok) {
     const database = await fetchDatabaseHealth(probed.base, options.token ?? null);
-    state = database.ok
-      ? { status: "ok", base: probed.base, service: probed.service, db: probed.db, database: database.health }
-      : {
-          status: "ready",
-          base: probed.base,
-          service: probed.service,
-          db: probed.db,
-          database: null,
-          dbReason: database.reason,
-        };
-    notify();
-    return state;
+    return commit(
+      database.ok
+        ? { status: "ok", base: probed.base, service: probed.service, db: probed.db, database: database.health }
+        : {
+            status: "ready",
+            base: probed.base,
+            service: probed.service,
+            db: probed.db,
+            database: null,
+            dbReason: database.reason,
+          },
+    );
   }
 
   // 连不上：允许自动探测一次（并把探测到的地址记住）
@@ -361,9 +390,63 @@ export async function refreshConnection(
     }
   }
 
-  state = { status: "down", base: probed.base, reason: probed.reason, detected: null };
-  notify();
-  return state;
+  return commit({ status: "down", base: probed.base, reason: probed.reason, detected: null });
+}
+
+/** 数据库细节是不是同一份（逐项比，`counts` 也逐键比 —— 见 `sameConnectionState` 的说明）。 */
+function sameDatabaseHealth(a: DatabaseHealth, b: DatabaseHealth): boolean {
+  if (a.schemaVersion !== b.schemaVersion) return false;
+  if (a.latestBackup !== b.latestBackup) return false;
+  if (a.latestBackupAt !== b.latestBackupAt) return false;
+  const aKeys = Object.keys(a.counts);
+  if (aKeys.length !== Object.keys(b.counts).length) return false;
+  return aKeys.every((key) => a.counts[key] === b.counts[key]);
+}
+
+/**
+ * 两个结论**是不是同一件事**（纯函数：不碰网络、不读存储，自检直接拿它做断言）。
+ *
+ * ## 为什么需要它（这是"延迟跳顶"那一类问题的最后一环）
+ *
+ * 复查连接是**定时**的（`POLL_INTERVAL_MS`，30 秒一次），而它的结论就渲染在页面
+ * 顶部那条提示条里、也在顶栏那个状态徽标里 —— 都在课程清单**上方**。定时器本身
+ * 改变不了页面高度（不点它什么都不会动），真正能动高度的是**重渲染出来的东西不一样**。
+ *
+ * 口径是**逐项比**：四类状态各自的字段全部比一遍（`ok` 那一支连各表条数、最近备份也一起比），
+ * 有一项不一样就算"变了"。全部一样 → 交回**原来那个状态对象** → `notify` 都不发 →
+ * `useSyncExternalStore` 根本不会重渲染 → **页面上一个字都不会变，页高自然也不变**。
+ *
+ * ## 为什么比这么细（而不是只比 `status`）
+ *
+ * 宁可多比几个字段，也不要漏比：少比一个"其实会显示"的字段，界面就会停在旧值上，
+ * 那比多一次无害的重渲染糟糕得多。反过来，比得细也不会带来噪音 ——
+ * `counts` / `latestBackup*` 也由 `/api/status` 一次给出，只有真的变了才会不一样；
+ * 而"什么都没变"（本机使用时的常态：没有任何人在改数据）时连一次重渲染都不会发生。
+ */
+export function sameConnectionState(a: ConnectionState, b: ConnectionState): boolean {
+  switch (a.status) {
+    case "idle":
+    case "checking":
+      return b.status === a.status;
+    case "ready":
+      return (
+        b.status === "ready" &&
+        a.base === b.base &&
+        a.service === b.service &&
+        a.db === b.db &&
+        a.dbReason === b.dbReason
+      );
+    case "ok":
+      return (
+        b.status === "ok" &&
+        a.base === b.base &&
+        a.service === b.service &&
+        a.db === b.db &&
+        sameDatabaseHealth(a.database, b.database)
+      );
+    case "down":
+      return b.status === "down" && a.base === b.base && a.reason === b.reason && a.detected === b.detected;
+  }
 }
 
 /** 供界面显示的一句话结论。 */

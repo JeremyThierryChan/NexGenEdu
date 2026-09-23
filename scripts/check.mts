@@ -41,10 +41,19 @@ import {
   __useConnectionStoreForTesting,
   getConnectionState,
   refreshConnection,
+  sameConnectionState,
   SERVICE_NAME,
   setBackendOverride,
   subscribeConnection,
+  type ConnectionState,
 } from "@/lib/backend/connection";
+import {
+  NOTICE_LINE_REM,
+  NOTICE_MIN_H_CLASS,
+  NOTICE_RESERVED_LINES,
+  noticeBranchOf,
+  type NoticeBranch,
+} from "@/lib/admin/notice-layout";
 import { dateKey } from "@/lib/backend/format";
 import { isWithinAvailability, isoWeekday } from "@/lib/backend/availability";
 import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
@@ -5683,10 +5692,43 @@ console.log("\n=== 13. 界面稳定：就地动作不滚动、不塌页高 ===")
     await refreshConnection({ token: "stub-token" });
     eq("首次探活：先显示「检查中」再给结论", seen, ["checking", "ok"]);
 
+    /*
+     * **这一条是"点击之后过一会儿自己跳回顶部"那一类问题的核心断言。**
+     *
+     * 复查是**定时**的（30 秒一次），结论就渲染在页面顶部那条提示条里 —— 它在课程清单
+     * **上方**。所以要求不是"别退回检查中"这么弱，而是：**结论一样时一次通知都不许发**。
+     * 通知不发 → `useSyncExternalStore` 拿到的还是原来那个对象 → 组件**根本不重渲染**
+     * → 页面上一个字都不会变，页高自然也不会变（变矮才会把滚动位置夹回去，§15.3 原因二）。
+     *
+     * 这条断言是真的跑出来的（桩 fetch + 内存存储），不是读源码猜的：
+     * 把 `commit` 改回"每次都赋值并 notify"，这里立刻变成 `["ok"]` 而报红。
+     */
     seen.length = 0;
     await refreshConnection({ token: "stub-token" });
-    eq("复查时不退回「检查中」（横幅不会每 30 秒换一次高度）", seen, ["ok"]);
+    eq("复查结论没变时一次通知都不发（定时复查不可能改变页高）", seen, []);
     eq("复查后状态仍然是有结论的", getConnectionState().status, "ok");
+
+    /*
+     * 反向：**真的变了就必须通知**，否则界面会停在旧说法上（那是比多一次重渲染更糟的事）。
+     * 桩里把数据库结构版本改一位 —— 结论变了，应当恰好发一次通知。
+     */
+    globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const body = url.endsWith("/health")
+        ? { ok: true, service: SERVICE_NAME, db: "stub.db" }
+        : url.endsWith("/api/status")
+          ? { ok: true, schemaVersion: 2, counts: {}, backup: { latest: null, latestAt: null } }
+          : null;
+      return body === null
+        ? new Response("not found", { status: 404 })
+        : new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+    };
+    seen.length = 0;
+    await refreshConnection({ token: "stub-token" });
+    eq("结论真的变了：恰好通知一次（界面该改口就得改口）", seen, ["ok"]);
   } finally {
     unsubscribe();
     globalThis.fetch = realFetch;
@@ -5694,6 +5736,282 @@ console.log("\n=== 13. 界面稳定：就地动作不滚动、不塌页高 ===")
     if (savedApiBase === undefined) delete process.env.NEXT_PUBLIC_API_BASE;
     else process.env.NEXT_PUBLIC_API_BASE = savedApiBase;
   }
+}
+
+console.log("\n=== 14. 延迟型跳顶：点击之后就地的动作，过一会儿也不许改变页面 ===");
+
+/*
+ * 这一节守的是**机构这一次的反馈**：「点击暂未开放后，**页面一会儿之后**就跳到最顶部」。
+ * 与第 13 节的区别全在"一会儿之后"上：13 节管的是点击那一瞬间发生的事（显式滚动、
+ * 聚焦按钮被置为 disabled 把焦点丢回 body、刷新把列表换成一行"加载中…"）；
+ * 而"延迟"只剩三种可能的来源，本节把三种都钉住：
+ *
+ *   ① **定时器 / 轮询改变页高**。整个仓库里与后台页面有关的定时器只有一处：
+ *      连接状态复查（`POLL_INTERVAL_MS`，30 秒一次，`lib/backend/connection.ts`）。
+ *      它的结论就渲染在课程清单**上方**那条提示条里。因此判据不是"别退回检查中"，
+ *      而是更硬的两条：**结论一样时一次通知都不许发**（A 组，行为级：不通知 ⇒ 不重渲染
+ *      ⇒ 页高不可能变），以及**说法切换只许变高、不许变矮**（B 组：四个分支共用同一份
+ *      最小高度）。变矮才会把滚动位置夹回去，变高不会。
+ *   ② **整页重载**。重载后 `RequireAuth` 的占位屏只有一屏高，滚动位置会被夹到 0
+ *      —— 这是"跳到**最顶部**"唯一说得通的机制（要夹到 0，文档必须塌到不足一屏）。
+ *      本仓库里唯一会**在用户操作之后隔几秒**触发整页重载的东西是 `npm run dev` 的
+ *      「盯着后端」（每 2 秒比一次内容指纹，变了就重写 `data/site/.backend-snapshot.ts`，
+ *      那个模块在后台页面的模块图里 ⇒ Next 重编译 ⇒ 整页重载）。D 组钉住它的开关。
+ *   ③ **自动消失的提示**。某个提示自己超时不见了 ⇒ 页面上方少一块。C 组钉住
+ *      "就地动作这两处文件里没有任何定时器"。
+ *
+ * 放在 `check.mts` 而不是别处：这些都是**前端源码与纯函数**的性质，不需要浏览器；
+ * 而 `check.mts` 在两种后端下都要跑（`npm run check:both`），因此两种环境都拦得住。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+
+  // ── A. 什么算"结论没变"：写死、可穷举、别人改不坏 ──────────────────────────
+  /*
+   * 这一组测的是纯函数 `sameConnectionState`。它是"30 秒复查不会重渲染"的**唯一判据**，
+   * 因此它自己必须是穷尽的：每一种状态、每一个会影响显示结果的字段都要各测一次。
+   * 逐项测而不是只测两个同样的对象 —— 那样的话把函数写成 `return true` 也能过。
+   */
+  const okState = (over: {
+    schemaVersion?: number;
+    counts?: Record<string, number>;
+    latestBackup?: string | null;
+    latestBackupAt?: string | null;
+    db?: string;
+  } = {}): ConnectionState => ({
+    status: "ok",
+    base: "http://localhost:4000",
+    service: SERVICE_NAME,
+    db: over.db ?? "nexgenedu.db",
+    database: {
+      schemaVersion: over.schemaVersion ?? 17,
+      counts: over.counts ?? { students: 3, courses: 32 },
+      latestBackup: over.latestBackup === undefined ? "backup-1.db" : over.latestBackup,
+      latestBackupAt: over.latestBackupAt === undefined ? "2026-01-01T00:00:00.000Z" : over.latestBackupAt,
+    },
+  });
+
+  eq("同样的结论判定为「没变」", sameConnectionState(okState(), okState()), true);
+  eq("数据库结构版本变了算「变了」", sameConnectionState(okState(), okState({ schemaVersion: 18 })), false);
+  eq("各表条数变了算「变了」（该重渲染一次，界面才不会停在旧数字上）",
+    sameConnectionState(okState(), okState({ counts: { students: 4, courses: 32 } })), false);
+  eq("最近备份变了算「变了」",
+    sameConnectionState(okState(), okState({ latestBackup: "backup-2.db" })), false);
+  eq("最近备份时间变了算「变了」",
+    sameConnectionState(okState(), okState({ latestBackupAt: "2026-01-02T00:00:00.000Z" })), false);
+  eq("库文件名变了算「变了」", sameConnectionState(okState(), okState({ db: "other.db" })), false);
+
+  const readyState = (reason: "no-token" | "expired" | "unreachable"): ConnectionState => ({
+    status: "ready",
+    base: "http://localhost:4000",
+    service: SERVICE_NAME,
+    db: "nexgenedu.db",
+    database: null,
+    dbReason: reason,
+  });
+  eq("ready：原因一样 = 没变", sameConnectionState(readyState("expired"), readyState("expired")), true);
+  eq("ready：原因变了 = 变了（会话失效要立刻改口）",
+    sameConnectionState(readyState("no-token"), readyState("expired")), false);
+
+  const downState = (reason: string): ConnectionState => ({
+    status: "down",
+    base: "http://localhost:4000",
+    reason,
+    detected: null,
+  });
+  eq("down：原因一样 = 没变", sameConnectionState(downState("请求失败：failed"), downState("请求失败：failed")), true);
+  eq("down：原因变了 = 变了", sameConnectionState(downState("请求失败：a"), downState("请求失败：b")), false);
+  eq("跨状态一律算「变了」", sameConnectionState({ status: "checking" }, okState()), false);
+  eq("checking 与 idle 是两回事", sameConnectionState({ status: "checking" }, { status: "idle" }), false);
+
+  // ── B. 提示条：四个分支共用同一份最小高度（只会变高，不会变矮）────────────
+  /*
+   * 上面 A 组管的是"结论没变时什么都不发生"。这一组管"结论**真的**变了"那一次：
+   * 那时候说法必须换（不讲清楚更糟），但**版面不许变矮**。
+   * 判据是纯的：说法由 `noticeBranchOf` 决定（穷尽），高度由 `NOTICE_MIN_H_CLASS` 决定
+   * （四种说法共用同一份），而且那个类名必须与预留行数算得出来的一致。
+   */
+  const branchesSeen: NoticeBranch[] = [
+    noticeBranchOf({ status: "idle" }),
+    noticeBranchOf({ status: "checking" }),
+    noticeBranchOf(okState()),
+    noticeBranchOf(readyState("no-token")),
+    noticeBranchOf(readyState("expired")),
+    noticeBranchOf(readyState("unreachable")),
+    noticeBranchOf(downState("请求失败：x")),
+  ];
+  eq("四种连接状态映射到五种说法（没有落进兜底里没说话的）",
+    [...new Set(branchesSeen)].sort(), ["checking", "down", "ok", "ready", "ready-expired"]);
+  eq("会话失效单独有一种说法（不是含糊的「未登录」）",
+    noticeBranchOf(readyState("expired")), "ready-expired");
+  ok("提示条预留高度至少 3 行（正常桌面宽度下最长的那一句只要 2 行）",
+    NOTICE_RESERVED_LINES >= 3, `NOTICE_RESERVED_LINES = ${NOTICE_RESERVED_LINES}`);
+  /*
+   * 最小高度类必须是**字面量**（Tailwind 扫源码生成 CSS，拼出来的类名它看不见），
+   * 又必须与预留行数吻合 —— 于是这里按行数把那个字面量**算一遍**再比。
+   * 改行数却忘了改类名（或反过来），这里立刻报红。
+   */
+  const derivedRem = Math.ceil(NOTICE_RESERVED_LINES * NOTICE_LINE_REM * 4) / 4;
+  eq("最小高度类与预留行数一致（两处不可能各说一套）",
+    NOTICE_MIN_H_CLASS, `min-h-[${derivedRem}rem]`);
+
+  const dataNoticeUrl = new URL("components/admin/DataNotice.tsx", rootUrl);
+  const dataNoticeSource = readFileSync(dataNoticeUrl, "utf8");
+  /*
+   * 数之前先把注释去掉：这段说明本身就在讨论 `<p>` 与这两个标识符
+   * （不剥注释的话，一写说明就报红 —— 而"只提到名字、没用上"正是要拦的东西）。
+   */
+  const codeOnly = dataNoticeSource.replace(/\/\*[\s\S]*?\*\//g, " ");
+  /** 提示条那**一个**段落元素的开标签（属性都在这里面）。 */
+  const noticeTag = /<p\b[\s\S]*?>/.exec(codeOnly)?.[0] ?? "";
+  /*
+   * 断言必须落在"用在哪"上，而不是"出现过"。第一版只查 `includes("NOTICE_MIN_H_CLASS")`,
+   * 结果**把 className 里那一行删掉之后照样通过** —— 因为 import 语句与说明注释里还留着这个名字。
+   * 那种断言等于没写（"只提到名字"和"真的用上"是两回事），反向验证时才发现。
+   */
+  ok("最小高度类被用在提示条这一个段落元素的 className 上",
+    noticeTag.includes("NOTICE_MIN_H_CLASS"),
+    `段落开标签：${noticeTag.replace(/\s+/g, " ").slice(0, 120)}`);
+  ok("说法由 noticeBranchOf 决定（不在这里另写一串状态判断）",
+    /const branch = noticeBranchOf\(state\)/.test(codeOnly),
+    "见 components/admin/DataNotice.tsx 与 lib/admin/notice-layout.ts");
+  /*
+   * 五种说法**共用同一个 `<p>`**：只要有一个分支自己另起一个段落元素，
+   * "各分支等高"这件事就不再是结构上的事实、而只是"看起来差不多"。
+   * 以后真要再加一段，必须回来改这条断言并写清理由 —— 那时请同时确认它不占高度。
+   */
+  eq("提示条里只有一个段落元素（五种说法共用同一个容器）",
+    (codeOnly.match(/<p\b/g) ?? []).length, 1);
+
+  // ── C. 就地动作那两处文件里，不许有任何定时器 ─────────────────────────────
+  /*
+   * "过一会儿自己动"只可能来自定时器。就地动作的两处（课程库页、页顶提示条）里出现
+   * 任何 `setTimeout` / `setInterval`，都要在这里说清它为什么不会改变页高 —— 否则就是
+   * 下一个"点完过几秒跳回顶部"。渲染在它们里面的 `BackendStatus` 会挂那个 30 秒的复查
+   * 定时器（在 connection.ts 里），那一条由上面 A/B 两组管着：结论没变不通知、
+   * 说法切换只变高不变矮。
+   */
+  const noTimerFiles = [
+    "components/admin/DataNotice.tsx",
+    "app/admin/(dashboard)/courses/page.tsx",
+  ];
+  const filesWithTimers = noTimerFiles.filter((file) =>
+    /\bsetTimeout\s*\(|\bsetInterval\s*\(/.test(readFileSync(new URL(file, rootUrl), "utf8")),
+  );
+  eq("就地动作的两处文件里没有任何定时器（否则就是「点完过一会儿自己变」的来源）",
+    filesWithTimers, []);
+
+  // ── D. 延迟型整页重载的唯一开关：dev 的「盯着后端」 ───────────────────────
+  /*
+   * ## 为什么这条断言属于"跳回顶部"这一节
+   *
+   * 要把滚动位置夹到**最顶部**（0），文档高度必须塌到不足一屏 —— 页面上方少掉几十像素
+   * 是做不到的（那只会让位置往上收几十像素）。能做到的只有一件事：**整页重载**。
+   * 重载后 `RequireAuth` 先渲染占位屏（`min-h-dvh`，正好一屏高），滚动位置在那时被夹到 0，
+   * 之后后台内容再长回来，位置也不会自己回去。
+   *
+   * 本仓库里唯一会**在用户点完按钮之后隔几秒**触发整页重载的东西是 `npm run dev` 的
+   * 「盯着后端」：它每 2 秒比一次后端公开内容的指纹，一旦变了就重写
+   * `data/site/.backend-snapshot.ts`。而那个生成文件**确实在后台页面的模块图里**（下面那条
+   * 图谱断言就是核对这件事的），于是 Next 重编译、整页重载 —— 时间点正好是
+   * "点一下 → 过 1~5 秒页面自己跳回顶部"，与机构反馈的原话逐字对得上。
+   *
+   * 因此这条开关**必须是显式开启**的（默认关）。谁想把它改回默认开，会先在这里看到原因。
+   */
+  const devSource = readFileSync(new URL("scripts/dev.mjs", rootUrl), "utf8");
+  eq("dev 的「盯着后端」必须显式开启（SITE_LIVE=1），不许默认开",
+    /const LIVE = process\.env\.SITE_LIVE === "1";/.test(devSource), true);
+
+  /*
+   * 图谱核对：从后台页面的模块图出发做一次**值导入**的遍历（`import type` 编译后被擦除，
+   * 不算依赖），看能不能走到那个生成文件。这里刻意把**事实**断言出来，而不是断言"没关系"：
+   *
+   *   - 现状：**到得了** → 所以上面那条开关不能放宽；
+   *   - 哪天有人把耦合断开（后台不再 import 网站侧那套数据模块），这条会变红 ——
+   *     那时请把它改成"到不了"，并**放宽**上面那条（耦合断了之后，
+   *     重写那个文件不会再让后台整页重载）。
+   */
+  const adminGraphReaches = (target: string): { reached: boolean; chain: string[] } => {
+    const rootDir = new URL("../", import.meta.url);
+    const collect = (dir: string): string[] => {
+      const files = readdirSync(new URL(dir, rootDir), { recursive: true }) as string[];
+      return files
+        .map((entry) => entry.replaceAll("\\", "/"))
+        .filter((entry) => /\.(ts|tsx)$/.test(entry))
+        .map((entry) => `${dir}${entry}`);
+    };
+    const resolveSpec = (spec: string, from: string): string | null => {
+      const base = spec.startsWith("@/")
+        ? spec.slice(2)
+        : spec.startsWith(".")
+          ? `${from.slice(0, from.lastIndexOf("/") + 1)}${spec}`
+          : null;
+      if (base === null) return null;
+      const normalized = base.replace(/\/[^/]+\/\.\.\//g, "/").replace(/^\.\//, "");
+      for (const candidate of [normalized, `${normalized}.ts`, `${normalized}.tsx`, `${normalized}/index.ts`]) {
+        if (/\.(ts|tsx)$/.test(candidate) && existsSync(new URL(candidate, rootDir))) return candidate;
+      }
+      return null;
+    };
+    /** 只看**值导入**：`import type` / `export type { } from` 编译后被擦除，不构成依赖。 */
+    const valueImports = (file: string): string[] => {
+      const source = readFileSync(new URL(file, rootDir), "utf8");
+      const found: string[] = [];
+      const pattern = /(?:^|\n)\s*(import|export)\s+(type\s+)?([\s\S]*?)from\s+["']([^"']+)["']/g;
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(source)) !== null) {
+        if (match[2] !== undefined) continue;
+        if (match[1] === "export" && /^\s*type\s*\{/.test(match[3] ?? "")) continue;
+        found.push(match[4] ?? "");
+      }
+      return found;
+    };
+
+    const starts = [...collect("app/admin/"), ...collect("components/admin/")];
+    const seenFiles = new Set<string>(starts);
+    const parent = new Map<string, string>();
+    const queue = [...starts];
+    while (queue.length > 0) {
+      const file = queue.pop() as string;
+      for (const spec of valueImports(file)) {
+        const next = resolveSpec(spec, file);
+        if (next === null || seenFiles.has(next)) continue;
+        seenFiles.add(next);
+        if (!parent.has(next)) parent.set(next, file);
+        queue.push(next);
+      }
+    }
+    const hit = [...seenFiles].find((file) => file.startsWith(target));
+    if (hit === undefined) return { reached: false, chain: [] };
+    const chain: string[] = [];
+    let cursor: string | undefined = hit;
+    while (cursor !== undefined) {
+      chain.unshift(cursor);
+      cursor = parent.get(cursor);
+    }
+    return { reached: true, chain: [...chain, target].slice(-4) };
+  };
+  const snapshotLink = adminGraphReaches("data/site/.backend-snapshot");
+  /*
+   * 上面那条断言的意义全看这个遍历**是不是真的在走图**，所以配一组对照：
+   *   - 正对照：`lib/data/site.ts`（后台确实在用）**必须**走得到；
+   *   - 负对照：`components/courses/CourseTree.tsx`（只有网站页在用）**必须**走不到。
+   * 少了负对照，"永远返回 true"的坏遍历也能过；少了正对照，"永远返回 false"的也能过。
+   */
+  const positiveControl = adminGraphReaches("lib/data/site");
+  const negativeControl = adminGraphReaches("components/courses/CourseTree");
+  ok("（对照）后台模块图走得到 lib/data/site.ts —— 遍历确实在读导入边",
+    positiveControl.reached, positiveControl.chain.join(" → "));
+  eq("（对照）后台模块图走不到只有网站页在用的组件 —— 遍历不是「永远为真」",
+    negativeControl.reached, false);
+  ok(
+    "（事实核对）后台页面的模块图确实引用着 dev 会重写的那个生成文件 —— 所以上面那条开关不能被放宽；" +
+      "哪天耦合断开了，请把这条改成「到不了」并放宽上面的开关",
+    snapshotLink.reached,
+    snapshotLink.reached
+      ? `链路：${snapshotLink.chain.join(" → ")}`
+      : "后台模块图已经到不了 data/site/.backend-snapshot.ts（耦合已断开）",
+  );
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
