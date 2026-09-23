@@ -264,7 +264,7 @@ export function CoursesLedgerPanel() {
   const [subjectIds, setSubjectIds] = useState<string[]>([]);
   const [moduleIds, setModuleIds] = useState<string[]>([]);
   /*
-   * 报价（元 / 节）：机构要的是"**一门课一张卡片里改完所有东西**" —— 卡片字段、网站正文、报价。
+   * 报价（元 / 小时）：机构要的是"**一门课一张卡片里改完所有东西**" —— 卡片字段、网站正文、报价。
    * 报价那侧的管线本来就有（纯函数 `addLibraryCourseToPricing` 做 upsert + `pricing.update` 落库，
    * 报价页就是这么用的），因此这里只是把它接到卡片表单上：阶段 + 基础价 + 是否可报价。
    * 留空基础价 = 不参与报价页（内部课程不需要它）。
@@ -857,7 +857,7 @@ export function CoursesLedgerPanel() {
           available: priceAvailable,
         });
         await api.pricing.update(updated.config);
-        pieces.push(`报价（${stageName} · ${price} 元/节${priceAvailable ? "" : " · 暂不可报价"}）`);
+        pieces.push(`报价（${stageName} · ${price} 元/小时${priceAvailable ? "" : " · 暂不可报价"}）`);
       }
 
       setMessage(
@@ -1543,7 +1543,7 @@ export function CoursesLedgerPanel() {
                         <p className="mt-1 text-[11px] text-ink-500">
                           {status.basePrice === null
                             ? `已关联报价（${status.stageName} · 暂未开放）`
-                            : `报价 ${status.basePrice} 元/节（${status.stageName}）`}
+                            : `报价 ${status.basePrice} 元/小时（${status.stageName}）`}
                         </p>
                       );
                     })()}
@@ -2024,7 +2024,7 @@ export function CoursesLedgerPanel() {
           改完点一次保存，卡片与价格一起落库。留空基础价 = 这门课不参与报价页。
         */}
         <div className="mt-3 rounded-md border border-ink-200 bg-ink-50/50 px-3 py-3">
-          <p className="text-xs font-medium text-ink-700">报价（元 / 节）</p>
+          <p className="text-xs font-medium text-ink-700">报价（元 / 小时）</p>
           <p className="mt-1 text-xs text-ink-500">
             填写后这门课就会出现在家长的报价页上（与「报价」页改的是同一份配置）。
             <strong className="font-medium text-ink-600">留空表示不参与报价页</strong> —— 内部课程不用填。
@@ -2032,11 +2032,11 @@ export function CoursesLedgerPanel() {
           <div className="mt-2 grid gap-3 sm:grid-cols-3">
             <TextField
               label="学习阶段"
-              hint="报价页的第一步（小学 / 初中阶段 / 高中阶段 / 出国考试…）"
+              hint="报价页的第一步（小学 / 初中 / 高中 / 其他类型 —— 与课程类型的学段同名）"
               value={priceStage}
               onChange={(event) => setPriceStage(event.target.value)}
               list="course-price-stages"
-              placeholder="例如 初中阶段"
+              placeholder="例如 初中"
             />
             <datalist id="course-price-stages">
               {(pricingConfig?.stages ?? []).map((stage) => (
@@ -2045,7 +2045,7 @@ export function CoursesLedgerPanel() {
             </datalist>
             <TextField
               label="基础价"
-              hint="元 / 节；填写即会写入报价配置"
+              hint="元 / 小时；填写即会写入报价配置（课单价 = 它 × 每节课几小时）"
               type="number"
               min={0}
               value={priceValue}

@@ -26,7 +26,7 @@ import {
   teacherShareFormula,
   TEACHER_SHARE_MAX_STUDENTS,
 } from "@/lib/backend/teacher-share";
-import { formatMoney } from "@/lib/backend/finance";
+import { formatMoney, round2 } from "@/lib/backend/finance";
 import { cn } from "@/lib/utils/cn";
 
 /**
@@ -220,7 +220,7 @@ export default function AdminPricingPage() {
       }
     });
     setMessage(
-      `已把 ${pickedCourses.length} 门课加进「${stageName}」（基础价 ${newCoursePrice} 元/节）。` +
+      `已把 ${pickedCourses.length} 门课加进「${stageName}」（基础价 ${newCoursePrice} 元/小时）。` +
         "确认价格后点「保存修改」；要上线到家长看到的报价页，还需要「导出配置」并替换内容文件。",
     );
     setPickedCourses([]);
@@ -673,13 +673,26 @@ export default function AdminPricingPage() {
                 )}
                 <NumberInput
                   label="基础价"
-                  hint="一对一、1 小时、报 2 节及以上的价格"
-                  suffix="元 / 节"
+                  hint="每小时的价（一对一、报 2 节及以上）——再乘每节课的小时数才是课单价"
+                  suffix="元 / 小时"
                   min={0}
                   value={newCoursePrice}
                   onChange={(event) => setNewCoursePrice(Number(event.target.value))}
                 />
               </div>
+
+              {/*
+                把"这个价折成课单价是多少"当场算给机构看：基础价是**元 / 小时**，
+                而家长看到的课单价是**元 / 节**（= 基础价 × 每节课几小时）。
+                不写这一行，填 150 的人会以为家长看到的就是 150。
+              */}
+              <p className="mt-1 text-xs text-ink-400">
+                {formatMoney(newCoursePrice)} 元/小时 →
+                {draft.durations
+                  .map((duration) => ` ${duration.name} ${formatMoney(round2(newCoursePrice * duration.multiplier))} 元/节`)
+                  .join(" ·")}
+                （一对一、不加手续费）
+              </p>
 
               <div className="flex flex-wrap items-center gap-3">
                 <Button
@@ -701,7 +714,7 @@ export default function AdminPricingPage() {
       {/* ── 基础价 ── */}
       <Panel
         title="基础价"
-        description="每门课「一对一、1 小时、报 2 节及以上」的价格（元 / 节），所有换算都从它开始。"
+        description="每门课的价格在这里定，单位是**元 / 小时**（一对一、报 2 节及以上）：一节课 1 小时就是它本身，1.5 小时乘 1.5、2 小时乘 2 —— 家长看到的「课单价（元 / 节）」就是这么算出来的。"
         className="mt-5"
       >
         <div className="space-y-5 px-4 py-4">
@@ -722,7 +735,7 @@ export default function AdminPricingPage() {
                     <div className="flex items-end gap-2">
                       <NumberInput
                         label=""
-                        suffix="元 / 节"
+                        suffix="元 / 小时"
                         min={0}
                         disabled={!course.available}
                         value={course.basePrice ?? ""}

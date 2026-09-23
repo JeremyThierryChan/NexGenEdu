@@ -49,7 +49,7 @@ export function EstimateForm({ data }: EstimateFormProps) {
     }));
 
   const isCostShare = classType?.mode === "cost-share";
-  /** 该阶段是否有科目可选（出国考试 / 专业英语 / 成人兴趣没有科目分组）。 */
+  /** 该阶段是否有科目可选（「其他类型」那一组没有科目分组）。 */
   const subjectsRequired = (subjectGroup?.subjects.length ?? 0) > 0;
   const lessonsNumber = Number.parseInt(lessons, 10);
 

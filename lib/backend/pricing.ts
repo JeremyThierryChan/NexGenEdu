@@ -20,7 +20,7 @@
  *
  * | 维度 | 字段 | 含义 | 默认 |
  * | --- | --- | --- | --- |
- * | 课程 | `basePrice` | **一对一、1 小时、报 2 节及以上**的价格（元 / 节），所有换算的基准 | 分阶段设定 |
+ * | 课程 | `basePrice` | **每小时的价**（元 / 小时）：一对一、报 2 节及以上；再乘时长才是课单价 | 分阶段设定 |
  * | 科目 | `subject.coefficient` | 同一阶段内不同科目的师资/难度差异 | 1.0（不加价） |
  * | 班级 | `classType.coefficient` | 人越多每人越便宜 | 一对二 0.7、一对三 0.6、一对多 0.5 |
  * | 时长 | `duration.multiplier` | 一节课上多久 | 1 小时 1.0、1.5 小时 1.5、2 小时 2.0 |
@@ -69,10 +69,17 @@ export type { PricingRules, TeacherShareRules };
 
 /* ── 一、配置：后台可改的那份数据 ─────────────────────────────────────── */
 
-/** 一门课程：名字 + 基础价（元 / 节）。 */
+/**
+ * 一门课程：名字 + 基础价（**元 / 小时**）。
+ *
+ * ⚠️ 单位是"每小时"，不是"每节课"：家长在报价页选的**每节课时长**（1 / 1.5 / 2 小时）
+ * 是**再乘**上去的（`duration.multiplier`），算出来才是课单价（元 / 节）。
+ * 这两个单位混着说会立刻误导人 —— 150 元/小时的课，1.5 小时一节就是 225 元/节，
+ * 而不是"150 元的课被加了 50%"。
+ */
 export type PricingCourse = {
   name: string;
-  /** 基础价；null 表示暂未开放（不可选、不可报价）。 */
+  /** 基础价（元 / 小时）；null 表示暂未开放（不可选、不可报价）。 */
   basePrice: number | null;
   available: boolean;
   /**
@@ -85,7 +92,7 @@ export type PricingCourse = {
   courseId?: string;
 };
 
-/** 一个学习阶段（小学 / 初中阶段 / …）及其课程。 */
+/** 一个学习阶段（小学 / 初中 / 高中 / 其他类型 —— 与课程类型的学段同名，v37）及其课程。 */
 export type PricingStage = {
   name: string;
   courses: PricingCourse[];
@@ -169,7 +176,7 @@ export type QuoteInput = {
   course: StageCourse;
   /**
    * 所选科目（含科目系数）。
-   * 部分阶段（出国考试 / 专业英语 / 成人兴趣）没有科目概念，此时传 null，科目系数按 1 计。
+   * 部分阶段（「其他类型」那一组）没有科目概念，此时传 null，科目系数按 1 计。
    */
   subject: SubjectOption | null;
   /** 所选班级类型。 */
@@ -194,7 +201,10 @@ export type QuoteResult = {
   /** 是否计算成功；false 时 reason 说明原因。 */
   ok: boolean;
   reason?: string;
-  /** 最终单价（元 / 节，已含时长与手续费）。 */
+  /**
+   * 课单价（**元 / 节**）= 基础价（元/小时）× 每节课几小时 × 科目系数 × 班级系数
+   * （报 1 节时再含手续费）。别与基础价混淆：基础价是"每小时"的价。
+   */
   unitPrice: number;
   /** 报课节数。 */
   lessons: number;
@@ -277,8 +287,11 @@ function baseUnitPrice(input: QuoteInput): { price: number } | { error: string }
 /**
  * 生成价格构成明细。
  *
- * 有意不展示时长乘数的换算过程：家长关心的是最终课单价与总价，
- * 中间换算是内部逻辑，摆出来反而增加理解成本。
+ * **时长那一行要摆出来**（"每节课 1.5 小时 ×1.5"）：基础价的单位是**元 / 小时**，
+ * 而家长看到的课单价是**元 / 节** —— 中间就差这一次乘法。不写出来，
+ * 「150 元的课怎么变成 225 元」就只能靠猜（早先这里有意省略，是把它当成内部换算了；
+ * 单位写清楚之后，它反而是最需要交代的那一步）。
+ * 时长恰好 1 小时（乘数 1）时不显示这一行：乘 1 什么都不用解释。
  */
 function buildBreakdown(
   input: QuoteInput,
@@ -289,11 +302,15 @@ function buildBreakdown(
 ): QuoteBreakdownItem[] {
   const { course, subject, classType, lessons } = input;
   const items: QuoteBreakdownItem[] = [
-    { label: `${course.name} 基础价`, value: money(course.price ?? 0) },
+    { label: `${course.name} 基础价（元/小时）`, value: money(course.price ?? 0) },
   ];
 
   if (subject !== null && subject.coefficient !== 1) {
     items.push({ label: `${subject.name} 科目系数`, value: `×${subject.coefficient}` });
+  }
+
+  if (input.duration.multiplier !== 1) {
+    items.push({ label: `每节课 ${input.duration.hours} 小时`, value: `×${input.duration.multiplier}` });
   }
 
   if (classType.mode === "cost-share") {

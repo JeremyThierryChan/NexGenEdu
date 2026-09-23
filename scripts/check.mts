@@ -971,6 +971,24 @@ ok("节数为 0 时报错", f.ok === false);
 eq("试课免费门槛", [isTrialFree(9), isTrialFree(10)], [false, true]);
 eq("试课费", [trialFeeFor(9, 220), trialFeeFor(10, 220)], [220, 0]);
 
+/*
+ * **基础价的单位是"元 / 小时"**（机构口径：基础价之后还要按客户选的每节课小时数
+ * 1 / 1.5 / 2 才算出一节课的价，写成"元 / 节"会两套单位混着说）。
+ *
+ * 这里钉两件事：① 乘数确实是"每节课几小时"这个乘数（1.5 小时 = 基础价 ×1.5）；
+ * ② 明细里把这一步写出来（不写出来，"150 元的课怎么变成 225 元"只能靠猜）。
+ */
+const hourlyQuote = quote("初中数学", "数学", "一对一", "1.5 小时", 5);
+eq("基础价 220（元/小时）× 1.5 小时 = 课单价 330（元/节）",
+  [hourlyQuote.unitPrice, hourlyQuote.lessonsPrice], [330, 1650]);
+ok("价格构成明细里写明了基础价是按小时算的",
+  hourlyQuote.breakdown.some((item) => item.label.includes("基础价（元/小时）")));
+ok("明细里列出了「每节课 1.5 小时 ×1.5」这一行",
+  hourlyQuote.breakdown.some((item) => item.label === "每节课 1.5 小时" && item.value === "×1.5"));
+ok("1 小时的课不显示这一行（乘 1 不用解释）",
+  quote("初中数学", "数学", "一对一", "1 小时", 5).breakdown
+    .every((item) => !item.label.startsWith("每节课")));
+
 console.log("\n=== 6. 教务后台服务层（同一套断言对两种后端都要通过）===");
 
 /*
@@ -10433,6 +10451,29 @@ console.log("\n=== 41. 报价与课程清单对齐（v37）===");
     new URL("../app/admin/(dashboard)/pricing/page.tsx", import.meta.url),
     "utf8",
   );
+  /*
+   * ④ 基础价的单位在**界面与内容文件里都写成"元 / 小时"**（机构口径）。
+   *
+   * 这是"两套单位混着说"的防呆：基础价（元 / 小时）与课单价（元 / 节）并存，
+   * 只要有一处把基础价标成"元 / 节"，填价的人就会以为家长看到的就是那个数。
+   * 断言按"基础价附近不许出现元 / 节"来写：台账与报价页里的报价区块必须是"元 / 小时"。
+   */
+  const ledgerSource = readFileSync(
+    new URL("../components/admin/CoursesLedgerPanel.tsx", import.meta.url),
+    "utf8",
+  );
+  ok("课程台账里的报价单位是「元 / 小时」",
+    ledgerSource.includes('报价（元 / 小时）') && ledgerSource.includes('${price} 元/小时'));
+  ok("报价页里基础价输入框的单位是「元 / 小时」（课单价才是元 / 节）",
+    pricingPageSource.includes('suffix="元 / 小时"') &&
+      pricingPageSource.includes("课单价") &&
+      !pricingPageSource.includes('suffix="元 / 节"'));
+  ok("内容文件里也写明了基础价是元 / 小时",
+    pricingSource.includes("基础价（**元 / 小时**"));
+
+  // 报价页把"这个价折成课单价是多少"算给机构看（填 150 不会以为家长看到的也是 150）
+  ok("报价页在基础价输入框下面列出了各时长的课单价",
+    pricingPageSource.includes("元/小时 →") && pricingPageSource.includes("元/节"));
   ok("报价页的「未导出上线」按内容文件比出来（不是看来源那一句话）",
     pricingPageSource.includes("publishedInSync") &&
       pricingPageSource.includes('"（未导出上线）"') &&

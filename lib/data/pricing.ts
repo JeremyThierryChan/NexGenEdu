@@ -24,15 +24,19 @@ import { parseDocument, type PageBlock, type Section } from "@/lib/data/content"
  */
 export const UNAVAILABLE_PRICE_LABEL = "暂未开放";
 
-/** 学习阶段下的一个课程（含基础价，单位：元 / 节）。 */
+/** 学习阶段下的一个课程（含基础价，单位：**元 / 小时**）。 */
 export type StageCourse = {
   name: string;
-  /** 基础价；不可选时为 null。 */
+  /**
+   * 基础价（元 / 小时）；不可选时为 null。
+   *
+   * 课单价（元 / 节）是它**乘上每节课的小时数**之后的结果（见 `calculateQuote`）。
+   */
   price: number | null;
   available: boolean;
 };
 
-/** 学习阶段（小学 / 初中阶段 / …）。 */
+/** 学习阶段（小学 / 初中 / 高中 / 其他类型 —— 与课程类型的学段同名，v37）。 */
 export type PricingStage = {
   name: string;
   courses: StageCourse[];
