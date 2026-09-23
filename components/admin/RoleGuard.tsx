@@ -64,8 +64,9 @@ export function RoleGuard({ children }: { children: React.ReactNode }) {
  * 其余页面不提示，免得出现一句多数情况下不准确的话 —— 宁可少说，也不要瞎说。
  */
 const roleHints: Array<[string, string]> = [
-  ["/admin/finance", "财务管理员 或 技术管理员"],
-  ["/admin/pricing", "财务管理员 或 技术管理员"],
+  ["/admin/finance", "技术管理员 或 财务管理员"],
+  // 报价页 `PAGE_ACCESS` 里还有招生老师（他们要给家长试算，只是不能改价）
+  ["/admin/pricing", "技术管理员 或 财务管理员 或 招生老师"],
   ["/admin/data", "技术管理员"],
   ["/admin/accounts", "技术管理员"],
   ["/admin/inquiries", "招生老师 或 技术管理员"],

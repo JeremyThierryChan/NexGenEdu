@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/admin/AdminFields";
 import { api } from "@/lib/backend/api";
 import { runTwoPhaseImport } from "@/lib/backend/import-flow";
+import { useAuth, rolesOrAll } from "@/components/admin/AuthContext";
+import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
 import { downloadTextFile, stampForFilename } from "@/lib/backend/backup";
 import {
   csvTemplate,
@@ -34,7 +36,34 @@ import {
  * 5. **报课与收款不在这里导入**：那些牵动账本（实收、已用课时），必须走页面流程。
  *    面板上明写这一点，免得有人导完名单以为账也进去了。
  */
-export function BulkImport({
+
+/**
+ * **权限外壳**：批量导入只有技术管理员能做（`imports.apply` / `imports.fromSite` 属于
+ * "运维与审计"分组）。这个面板挂在五个页面上，因此把判定放在**这里一次**，
+ * 而不是让每个页面各写一遍（审计实测：财务与招生点「批量导入」必然 403 并逐行报错）。
+ *
+ * 写成外壳而不是在组件内部早退：早退会让下面的 Hook 顺序随角色变化，
+ * React 的规则不允许（`react-hooks/rules-of-hooks` 当场报错）。
+ */
+export function BulkImport(props: {
+  onImported?: () => void;
+  fixedEntity?: ImportEntity;
+}) {
+  const roles = rolesOrAll(useAuth());
+  if (!canCallMethod(roles, "imports.apply")) {
+    return (
+      <Panel className="mt-4" title="批量导入" description="把 CSV / JSON 里的成批记录一次导进来。">
+        <p className="px-4 py-3 text-sm leading-relaxed text-ink-600">
+          你的角色（{roles.join(" · ")}）不能批量导入 —— 这件事归 {methodOwnerText("imports.apply")}。
+          需要的话请让技术管理员来导，或者用页面上的「新增」一条一条录（那些动作你的角色有）。
+        </p>
+      </Panel>
+    );
+  }
+  return <BulkImportPanel {...props} />;
+}
+
+function BulkImportPanel({
   onImported,
   fixedEntity,
 }: {

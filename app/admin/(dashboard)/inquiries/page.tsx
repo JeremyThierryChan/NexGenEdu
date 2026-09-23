@@ -10,6 +10,7 @@ import { PageHeading } from "@/components/ui/PageHeading";
 import { api, INQUIRY_STATUSES, type Inquiry, type InquiryStatus } from "@/lib/backend/api";
 import { formatDayLabel } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
+import { LoadFailure } from "@/components/admin/LoadFailure";
 
 /**
  * 咨询。
@@ -23,8 +24,15 @@ import { cn } from "@/lib/utils/cn";
 export default function AdminInquiriesPage() {
   const [inquiries, setInquiries] = useState<Inquiry[]>([]);
   const [loading, setLoading] = useState(true);
+  /**
+   * 读不出来时的原因（审计抓到的那条：这里原先没有 try/catch ——
+   * 后端没开 / 登录过期 / 权限不足时 setLoading(false) 永远走不到，界面就停在「加载中…」）。
+   */
+  const [loadError, setLoadError] = useState("");
   const [creating, setCreating] = useState(false);
   const [selectedId, setSelectedId] = useState("");
+  /** 刚复制过的内容（按一下给个即时反馈，2 秒后收回）。 */
+  const [copied, setCopied] = useState("");
   const [filter, setFilter] = useState<"全部" | InquiryStatus>("待确认");
 
   /**
@@ -36,8 +44,25 @@ export default function AdminInquiriesPage() {
    */
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
     if (options.quiet !== true) setLoading(true);
-    setInquiries(await api.inquiries.list());
-    setLoading(false);
+    try {
+      setInquiries(await api.inquiries.list());
+      setLoading(false);
+
+      setLoadError("");
+    } catch (cause) {
+      /*
+       * 失败要把话说出来：服务端那句通常写着「该找谁 / 该先做什么」（403 说角色、
+       * 400 说哪个参数不对），比界面自己编一句准。**屏幕上的旧数据不动** ——
+       * 它可能是对的，只是这次没刷新成功。
+       */
+      setLoadError(
+        cause instanceof Error && cause.message.trim() !== ""
+          ? cause.message
+          : `读取失败（${String(cause)}）—— 请重试；仍然不行就去看后端日志。`,
+      );
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -56,6 +81,24 @@ export default function AdminInquiriesPage() {
     if (reason === null) return;
     await api.inquiries.abandon(inquiry.id, reason);
     await load({ quiet: true });
+  }
+
+  /**
+   * 复制一段文本（联系方式这类"要拿去打电话/发微信"的字段）。
+   *
+   * 与「话术」页同一套：优先 `navigator.clipboard`，拿不到就退化成 `window.prompt`
+   * 让人自己复制 —— 后一条是为了"剪贴板不可用（非 HTTPS / 权限被拒）"时仍然有出路。
+   */
+  async function copyText(text: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(text);
+      // 2 秒后收回提示（这里刻意用定时器而不是常驻文案：它只是"按下了"的即时反馈）
+      window.setTimeout(() => setCopied(""), 2000);
+    } catch {
+      // 剪贴板不可用（http 或权限被拒）时退化为「显示出来让人手动复制」
+      window.prompt("复制这段内容（Ctrl/Cmd + C）：", text);
+    }
   }
 
   async function remove(inquiry: Inquiry) {
@@ -78,6 +121,14 @@ export default function AdminInquiriesPage() {
           await load({ quiet: true });
         }}
       />
+
+      {loadError !== "" && (
+        <LoadFailure
+          error={loadError}
+          onRetry={() => void load({ quiet: true })}
+          className="mt-4"
+        />
+      )}
 
       {creating && (
         <Panel
@@ -136,6 +187,8 @@ export default function AdminInquiriesPage() {
           <thead>
             <tr className="border-b border-ink-100 text-left text-xs text-ink-500">
               <th className="px-4 py-2.5 font-medium">学生</th>
+              {/* 家长联系方式是线索最有价值的字段，原先收了、存了，后台任何地方都看不到 */}
+              <th className="px-4 py-2.5 font-medium">联系方式</th>
               <th className="px-4 py-2.5 font-medium">科目</th>
               <th className="px-4 py-2.5 font-medium">安排</th>
               <th className="px-4 py-2.5 font-medium">候选时段</th>
@@ -157,6 +210,20 @@ export default function AdminInquiriesPage() {
                       <span className="ml-1.5 text-xs font-normal text-ink-400">{inquiry.grade}</span>
                     )}
                   </button>
+                </td>
+                <td className="px-4 py-2.5 text-xs text-ink-600">
+                  {inquiry.guardian === "" ? (
+                    <span className="text-ink-400">（没填）</span>
+                  ) : (
+                    <button
+                      type="button"
+                      title="点一下复制"
+                      onClick={() => void copyText(inquiry.guardian)}
+                      className="text-left underline-offset-2 transition-colors hover:text-brand-700 hover:underline"
+                    >
+                      {copied === inquiry.guardian ? "已复制 ✓" : inquiry.guardian}
+                    </button>
+                  )}
                 </td>
                 <td className="px-4 py-2.5 text-ink-700">{inquiry.subject}</td>
                 <td className="px-4 py-2.5 text-xs text-ink-600">

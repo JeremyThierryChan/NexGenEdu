@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 109 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 110 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -42,7 +42,7 @@ lib/backend/api.ts        服务层实现（当前 109 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 109 个方法）
+## 二、接口分组（当前 110 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -480,7 +480,7 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 
 ### 7. 运维与审计
 
-`exportDataset`、`exportDatabase`、`importDatabase`、`imports.apply`、`imports.fromSite`、`hasBackup`、`restoreBackup`、
+`exportDataset`、`exportDatabase`、`importDatabase`、`imports.apply`、`imports.fromSite`、`hasBackup`、`backupSlots`、`restoreBackup`、
 `reset`、`setOperator`、`logs.list`、`logs.clear`。
 
 **两种"导入"别混**：
@@ -527,8 +527,10 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 `reset` 的语义是**清空业务数据**（回到 `createEmptyDatabase()`：业务表全空 + 网站课程 + 报价配置），
 不是"回到示例数据"。
 
-⚠️ 别把两个"备份"搞混：`hasBackup`/`restoreBackup` 指的是**「导入前自动备份」那一份快照**
-（存在同一个 KeyValueStore 里的 `nexgenedu.admin.db.backup.v1` 键上，是导入功能的后悔药）；
+⚠️ 别把两个"备份"搞混：`hasBackup`/`backupSlots`/`restoreBackup` 指的是**「导入前自动备份」**
+（存在同一个 KeyValueStore 里，键 `nexgenedu.admin.db.backup.v1` 存**最新那一份**、
+`nexgenedu.admin.db.backups.v1` 是清单 —— **滚动保留最近 5 份**，`backupSlots` 给界面看清单。
+早先只有一个键、每次导入覆盖，于是"选错文件 → 导入 → 恢复"只能走一次，再选错就回不去了）；
 **每天一份的备份文件**（`server/backups/`，保留 90 份）是另一套，由服务端的备份调度负责，
 接口里没有对应方法。
 
@@ -559,7 +561,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 2. 它会进入 `API_CONTRACT` —— 而自检要求"服务层每个方法都必须在契约里"，
    于是契约里出现一个"只有服务端才有意义"的方法，契约就不再是"页面对服务层的形状"了。
 
-**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 109 个方法，
+**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 110 个方法，
 这四条路由**刻意不登记**（它们不是服务层方法）；页面的客户端是 `lib/auth/accounts.ts`，
 与 `lib/auth/session.ts` 调 `/api/login`、`/api/session` 是同一个做法。
 自检里对它们的要求写在 `scripts/check-auth.mts` 的 [10] 节（真实 HTTP、真实写盘），

@@ -71,6 +71,12 @@ export default function AdminClassroomsPage() {
     void load();
   }, [load]);
 
+  /** 支持从全局搜索直达：/admin/classrooms?classroomId=xxx 直接展开那间教室（理由同教师页）。 */
+  useEffect(() => {
+    const value = new URLSearchParams(window.location.search).get("classroomId");
+    if (value !== null && value !== "") setOpenId(value);
+  }, []);
+
   const visible = useMemo(
     () =>
       kindFilter === "全部" ? classrooms : classrooms.filter((room) => room.kind === kindFilter),

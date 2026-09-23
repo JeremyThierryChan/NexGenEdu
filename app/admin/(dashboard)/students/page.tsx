@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { ActionNoticeView } from "@/components/admin/ActionNotice";
 import { useActionNotice } from "@/components/admin/useActionNotice";
+import { useAuth, rolesOrAll } from "@/components/admin/AuthContext";
+import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
 import { Panel } from "@/components/admin/AdminFields";
 import { BulkImport } from "@/components/admin/BulkImport";
 import { StudentForm } from "@/components/admin/StudentForm";
@@ -13,6 +15,7 @@ import { PageHeading } from "@/components/ui/PageHeading";
 import { api, type Lesson, type Student } from "@/lib/backend/api";
 import { remainingTotal } from "@/lib/backend/enrollment";
 import { FOLLOWUP_RULES } from "@/lib/backend/followup";
+import { LoadFailure } from "@/components/admin/LoadFailure";
 
 /**
  * 学生模块。
@@ -27,6 +30,11 @@ export default function AdminStudentsPage() {
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(true);
+  /**
+   * 读不出来时的原因（审计抓到的那条：这里原先没有 try/catch ——
+   * 后端没开 / 登录过期 / 权限不足时 setLoading(false) 永远走不到，界面就停在「加载中…」）。
+   */
+  const [loadError, setLoadError] = useState("");
   const [creating, setCreating] = useState(false);
   // 批量导入面板（与「新增」表单互斥，避免同屏两个大面板）
   const [importing, setImporting] = useState(false);
@@ -34,6 +42,17 @@ export default function AdminStudentsPage() {
   const [openId, setOpenId] = useState<string | null>(null);
   /** 写操作的提示（删除被护栏拦下时，把服务端那句原话显示出来）。 */
   const notice = useActionNotice();
+  /*
+   * 这个角色的动作能力：**直接问服务端用的那个判定函数**（`canCallMethod`），
+   * 不另建一张页面专用的权限表 —— 两张表迟早分叉，而分叉的表现就是
+   * "按钮看得见、点了 403、界面还什么都不说"（审计实测到的那一类）。
+   */
+  const auth = useAuth();
+  const roles = rolesOrAll(auth);
+  const canCreate = canCallMethod(roles, "students.create");
+  const canUpdate = canCallMethod(roles, "students.update");
+  const canRemove = canCallMethod(roles, "students.remove");
+  const canImport = canCallMethod(roles, "imports.apply");
 
   /**
    * 读数据。
@@ -44,13 +63,30 @@ export default function AdminStudentsPage() {
    */
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
     if (options.quiet !== true) setLoading(true);
-    const [studentList, lessonList] = await Promise.all([
-      api.students.list(),
-      api.lessons.list(),
-    ]);
-    setStudents(studentList);
-    setLessons(lessonList);
-    setLoading(false);
+    try {
+      const [studentList, lessonList] = await Promise.all([
+        api.students.list(),
+        api.lessons.list(),
+      ]);
+      setStudents(studentList);
+      setLessons(lessonList);
+      setLoading(false);
+
+      setLoadError("");
+    } catch (cause) {
+      /*
+       * 失败要把话说出来：服务端那句通常写着「该找谁 / 该先做什么」（403 说角色、
+       * 400 说哪个参数不对），比界面自己编一句准。**屏幕上的旧数据不动** ——
+       * 它可能是对的，只是这次没刷新成功。
+       */
+      setLoadError(
+        cause instanceof Error && cause.message.trim() !== ""
+          ? cause.message
+          : `读取失败（${String(cause)}）—— 请重试；仍然不行就去看后端日志。`,
+      );
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -128,16 +164,24 @@ export default function AdminStudentsPage() {
           await load({ quiet: true });
         }}
       />
+
+      {loadError !== "" && (
+        <LoadFailure
+          error={loadError}
+          onRetry={() => void load({ quiet: true })}
+          className="mt-4"
+        />
+      )}
       {/* 一次写操作的结果（删除被护栏拦下时，服务端那句原话显示在这里） */}
       <ActionNoticeView notice={notice} className="mt-4" />
 
 
       {/* 新增表单 */}
 
-      {importing && (
+      {importing && canImport && (
         <BulkImport fixedEntity="students" onImported={async () => { await load({ quiet: true }); }} />
       )}
-      {creating && (
+      {creating && canCreate && (
         <Panel
           className="mt-6"
           title="新增学生"
@@ -165,26 +209,41 @@ export default function AdminStudentsPage() {
           {loading ? "加载中…" : `${visible.length} / ${students.length} 人`}
         </span>
         <div className="ml-auto flex items-center gap-2">
-          {/* 次要样式：导入是低频操作，不该和每天点的「新增」长得一样 */}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              setCreating(false);
-              setImporting((value) => !value);
-            }}
-          >
-            {importing ? "收起导入" : "批量导入"}
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => {
-              setImporting(false);
-              setCreating((value) => !value);
-            }}
-          >
-            {creating ? "收起表单" : "新增学生"}
-          </Button>
+          {/*
+            没有权限的按钮**不渲染**（而不是渲染出来点了 403）：审计实测普通教师会看到
+            「新增学生 / 删除 / 编辑」，点下去没有任何反应（裸 await 的拒绝没人接）。
+            这里再补一句"这件事归谁"，让人知道该找谁，而不是以为系统坏了。
+          */}
+          {canImport && (
+            /* 次要样式：导入是低频操作，不该和每天点的「新增」长得一样 */
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setCreating(false);
+                setImporting((value) => !value);
+              }}
+            >
+              {importing ? "收起导入" : "批量导入"}
+            </Button>
+          )}
+          {canCreate && (
+            <Button
+              size="sm"
+              onClick={() => {
+                setImporting(false);
+                setCreating((value) => !value);
+              }}
+            >
+              {creating ? "收起表单" : "新增学生"}
+            </Button>
+          )}
+          {!canCreate && (
+            <span className="text-xs text-ink-500">
+              你的角色（{roles.join(" · ")}）是只读的：建档 / 改档案归{" "}
+              {methodOwnerText("students.create")}
+            </span>
+          )}
         </div>
       </div>
 
@@ -252,13 +311,17 @@ export default function AdminStudentsPage() {
                 <td className="px-4 py-2.5 text-ink-600">{student.guardian}</td>
                 <td className="px-4 py-2.5">
                   <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setEditingId(editingId === student.id ? null : student.id)}
-                      className="text-xs text-brand-700 transition-colors hover:text-brand-800"
-                    >
-                      {editingId === student.id ? "收起" : "编辑"}
-                    </button>
+                    {/* 没有权限就不渲染（见上面那段说明）：点了 403 而界面不说话，最容易被当成"系统坏了" */}
+                    {canUpdate && (
+                      <button
+                        type="button"
+                        onClick={() => setEditingId(editingId === student.id ? null : student.id)}
+                        className="text-xs text-brand-700 transition-colors hover:text-brand-800"
+                      >
+                        {editingId === student.id ? "收起" : "编辑"}
+                      </button>
+                    )}
+                    {canRemove && (
                     <button
                       type="button"
                       onClick={() => void remove(student)}
@@ -266,6 +329,7 @@ export default function AdminStudentsPage() {
                     >
                       删除
                     </button>
+                    )}
                   </div>
                 </td>
               </tr>

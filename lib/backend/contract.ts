@@ -175,7 +175,7 @@ export const API_CONTRACT: ContractGroup[] = [
       "`logs` 存在库里、能被导入导出整体替换，因此还不是不可篡改的审计记录。",
     methods: [
       "exportDataset",
-      "exportDatabase", "importDatabase", "imports.apply", "imports.fromSite", "hasBackup", "restoreBackup", "reset",
+      "exportDatabase", "importDatabase", "imports.apply", "imports.fromSite", "hasBackup", "backupSlots", "restoreBackup", "reset",
       /*
        * 两个"会话管道"方法：不做业务，只把"这次请求是谁、按谁的范围看"交给服务层。
        * 它们由**服务端**在每个请求开头按会话调用（见 server/index.mts 的 requireAuth），

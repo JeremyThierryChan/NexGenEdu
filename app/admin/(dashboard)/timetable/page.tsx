@@ -16,6 +16,7 @@ import { getClassHoursWindow } from "@/lib/backend/options";
 import { createIcs, downloadTextFile, stampForFilename } from "@/lib/backend/backup";
 import { cn } from "@/lib/utils/cn";
 import { countLessons } from "@/lib/backend/lesson-stats";
+import { LoadFailure } from "@/components/admin/LoadFailure";
 
 /**
  * 空档计算选项：窗口取自站点内容的「上课时间」，因此课前 / 课后两段空档
@@ -43,6 +44,11 @@ export default function AdminTimetablePage() {
   const [tab, setTab] = useState<"teacher" | "classroom">("teacher");
   const [focusId, setFocusId] = useState("");
   const [loading, setLoading] = useState(true);
+  /**
+   * 读不出来时的原因（审计抓到的那条：这里原先没有 try/catch ——
+   * 后端没开 / 登录过期 / 权限不足时 setLoading(false) 永远走不到，界面就停在「加载中…」）。
+   */
+  const [loadError, setLoadError] = useState("");
 
   const days = useMemo(() => weekDays(anchor), [anchor]);
 
@@ -55,17 +61,34 @@ export default function AdminTimetablePage() {
    */
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
     if (options.quiet !== true) setLoading(true);
-    const from = days[0] ?? new Date();
-    const to = days[6] ?? new Date();
-    const [weekLessons, teacherList, classroomList] = await Promise.all([
-      api.lessons.listBetween(from, to),
-      api.teachers.listActive(),
-      api.classrooms.list(),
-    ]);
-    setLessons(weekLessons);
-    setTeachers(teacherList);
-    setClassrooms(classroomList);
-    setLoading(false);
+    try {
+      const from = days[0] ?? new Date();
+      const to = days[6] ?? new Date();
+      const [weekLessons, teacherList, classroomList] = await Promise.all([
+        api.lessons.listBetween(from, to),
+        api.teachers.listActive(),
+        api.classrooms.list(),
+      ]);
+      setLessons(weekLessons);
+      setTeachers(teacherList);
+      setClassrooms(classroomList);
+      setLoading(false);
+
+      setLoadError("");
+    } catch (cause) {
+      /*
+       * 失败要把话说出来：服务端那句通常写着「该找谁 / 该先做什么」（403 说角色、
+       * 400 说哪个参数不对），比界面自己编一句准。**屏幕上的旧数据不动** ——
+       * 它可能是对的，只是这次没刷新成功。
+       */
+      setLoadError(
+        cause instanceof Error && cause.message.trim() !== ""
+          ? cause.message
+          : `读取失败（${String(cause)}）—— 请重试；仍然不行就去看后端日志。`,
+      );
+    } finally {
+      setLoading(false);
+    }
   }, [days]);
 
   useEffect(() => {
@@ -78,17 +101,6 @@ export default function AdminTimetablePage() {
     if (tab === "classroom" && focusId === "") setFocusId(classrooms[0]?.id ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在意页签变化
   }, [tab, teachers, classrooms]);
-
-  /** 按天分组（区间内的课）。 */
-  const byDay = useMemo(() => {
-    const map = new Map<string, Lesson[]>();
-    for (const lesson of lessons) {
-      const key = dateKey(lesson.startsAt);
-      map.set(key, [...(map.get(key) ?? []), lesson]);
-    }
-    for (const list of map.values()) list.sort((a, b) => a.startsAt.localeCompare(b.startsAt));
-    return map;
-  }, [lessons]);
 
   const filtered = useMemo(
     () =>
@@ -148,6 +160,14 @@ export default function AdminTimetablePage() {
           await load({ quiet: true });
         }}
       />
+
+      {loadError !== "" && (
+        <LoadFailure
+          error={loadError}
+          onRetry={() => void load({ quiet: true })}
+          className="mt-4"
+        />
+      )}
 
       {/* 周切换 + 页签 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">
@@ -348,7 +368,7 @@ export default function AdminTimetablePage() {
 
       {/* 本周全部课程（区间内、未按焦点过滤）——用于核对没有排漏 */}
       <p className="mt-4 text-xs text-ink-400">
-        本周全部课程 {byDay.size > 0 ? lessons.length : 0} 节（含所有{tab === "teacher" ? "教师" : "教室"}）。
+        本周全部课程 {countLessons(lessons).active} 节（含所有{tab === "teacher" ? "教师" : "教室"}；已取消的不计）。
       </p>
     </>
   );

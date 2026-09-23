@@ -198,6 +198,71 @@ const STORAGE_KEY = "nexgenedu.admin.db.v1";
 /** 「导入前」的备份键：导入是唯一能一次性毁掉全部数据的操作，留一颗后悔药。 */
 const BACKUP_KEY = "nexgenedu.admin.db.backup.v1";
 
+/**
+ * 「导入前备份」改成**滚动保留最近几份**。
+ *
+ * ## 为什么（审计抓到的一条"后悔药只有一次"）
+ *
+ * 早先只有一个键：每次导入都把它覆盖掉。于是"选错文件 → 导入 → 发现不对 → 恢复"这一步
+ * 只能走一次；再选错一次，那唯一一份备份也没了，`restoreBackup` 再也回不去。
+ * 而整库导入是全系统破坏力最大的动作。
+ *
+ * 现在：每份备份一个键（带时间戳），另外用一个**索引键**记住它们（KeyValueStore 只有
+ * read/write/remove，没有"列出所有键"的能力，所以必须自己维护一个索引）。
+ * 保留最近 `BACKUP_SLOTS` 份，更老的删掉（删除用 `store.remove`，不会撑爆存储）。
+ *
+ * 兼容：老库里那个单键备份仍然认（`hasBackup` / `restoreBackup` 会先看索引、再看老键），
+ * 下一次导入时会把它当成一份普通备份收进索引。
+ */
+const BACKUP_INDEX_KEY = "nexgenedu.admin.db.backups.v1";
+/** 保留几份（含刚写的那一份）。 */
+export const BACKUP_SLOTS = 5;
+
+type BackupSlot = { key: string; at: string; summary: string };
+
+function readBackupIndex(): BackupSlot[] {
+  const raw = store.read(BACKUP_INDEX_KEY);
+  if (raw === null) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is BackupSlot => {
+        if (typeof item !== "object" || item === null) return false;
+        const slot = item as Record<string, unknown>;
+        return typeof slot.key === "string" && typeof slot.at === "string" && slot.key !== "";
+      })
+      .map((slot) => ({ key: slot.key, at: slot.at, summary: typeof slot.summary === "string" ? slot.summary : "" }))
+      .sort((a, b) => b.at.localeCompare(a.at));
+  } catch {
+    return [];
+  }
+}
+
+function writeBackupIndex(slots: BackupSlot[]): void {
+  store.write(BACKUP_INDEX_KEY, JSON.stringify(slots));
+}
+
+/** 写一份"导入前备份"，并把超过保留份数的老备份删掉。返回这一份的说明。 */
+function writeBackupSlot(summary: string): string {
+  const at = nowIso();
+  // 兼容：老库里那个单键备份先收进索引，免得被后来的轮换挤掉
+  const legacy = store.read(BACKUP_KEY);
+  let slots = readBackupIndex();
+  if (legacy !== null && !slots.some((slot) => slot.key === BACKUP_KEY)) {
+    slots = [...slots, { key: BACKUP_KEY, at, summary: "（升级前留下的那一份备份）" }];
+  }
+  store.write(BACKUP_KEY, JSON.stringify(load()));
+  const merged = [{ key: BACKUP_KEY, at, summary }, ...slots.filter((slot) => slot.key !== BACKUP_KEY)]
+    .sort((a, b) => b.at.localeCompare(a.at));
+  const kept = merged.slice(0, BACKUP_SLOTS);
+  for (const slot of merged.slice(BACKUP_SLOTS)) {
+    if (slot.key !== BACKUP_KEY) store.remove(slot.key);
+  }
+  writeBackupIndex(kept);
+  return at;
+}
+
 // 版本号与变更记录见 lib/backend/version.ts（seed 与迁移必须用同一个值）
 
 /**
@@ -3825,8 +3890,8 @@ const localApi = {
       return { ok: false, error: "文件的数据结构无法识别，已保持现状。" };
     }
 
-    // 备份当前数据（只保留最近一次，避免存储被备份撑满）
-    store.write(BACKUP_KEY, JSON.stringify(load()));
+    // 备份当前数据（滚动保留最近几份，见 `writeBackupSlot` 的说明）
+    writeBackupSlot(`导入前（${fileSummary(load().version, load())}）`);
 
     cache = migrated;
     writeLog(cache, {
@@ -3855,7 +3920,19 @@ const localApi = {
    * `api.ts` 底部的类型级断言把它挡在编译期：**api 上不允许存在同步方法**。
    */
   async hasBackup(): Promise<boolean> {
-    return store.read(BACKUP_KEY) !== null;
+    return store.read(BACKUP_KEY) !== null || readBackupIndex().length > 0;
+  },
+
+  /**
+   * 导入前备份的清单（最近的在最前）。
+   *
+   * 给界面用：让人看到"有几份、什么时候的"，而不是只有一个"有 / 无"。
+   */
+  async backupSlots(): Promise<Array<{ at: string; summary: string }>> {
+    const slots = readBackupIndex();
+    if (slots.length > 0) return clone(slots.map(({ at, summary }) => ({ at, summary })));
+    const legacy = store.read(BACKUP_KEY);
+    return legacy === null ? [] : [{ at: "", summary: "导入前的数据（升级前留下的那一份）" }];
   },
 
   /** 恢复导入前的数据（后悔药）。 */

@@ -202,6 +202,8 @@ export default function AdminCoursesPage() {
   const [contentPending, setContentPending] = useState(false);
   /** 读不到正文的原因（读不到只影响"改正文"，不该让整个课程库页打不开）。 */
   const [contentLoadError, setContentLoadError] = useState("");
+  /** 报价配置读不到时的说明（普通教师对 `pricing.get` 是 403，但课程库仍应可用）。 */
+  const [pricingLoadError, setPricingLoadError] = useState("");
   /*
    * 面板的「保存网站内容」与卡片表单的保存**是两个动作**，因此提示也分两行：
    * 动作发生在哪一块，结果就显示在哪一块旁边（共用一行的话，在面板里保存的人
@@ -264,9 +266,16 @@ export default function AdminCoursesPage() {
     const [list, stats, config, site] = await Promise.all([
       api.courses.list(),
       api.courses.summary(),
-      api.pricing.get(),
       /*
-       * 网站正文一并读（省一次往返）。**单独 catch**：它读不到只是"正文那两块暂时改不了"，
+       * 报价配置**单独 catch**：`pricing.get` 对普通教师是 403（报价归技术/财务/招生），
+       * 而这一页 `PAGE_ACCESS` 是允许普通教师进来看课程的 —— 早先把三个请求放进同一个
+       * `Promise.all`，于是教师一点进课程库就是"整页停在一行「加载中…」"，
+       * 没有任何解释（审计实测到的那条：403 → 远端代理 reject → `setLoading(false)` 走不到）。
+       * 现在：读不到报价就退回 `null`，页面上"报价状态"那部分改成一句说明，课程照常能看。
+       */
+      api.pricing.get().catch(() => null),
+      /*
+       * 网站正文同样单独 catch：它读不到只是"正文那两块暂时改不了"，
        * 不该把整个课程库页拖成打不开 —— 排课科目、价格状态都还等着这一页。
        */
       api.site
@@ -277,7 +286,15 @@ export default function AdminCoursesPage() {
     setCourses(list);
     setSummary(stats);
     setPricingConfig(config);
-    setPricingStatus(pricingStatusForCourses(config, list));
+    setPricingStatus(config === null ? [] : pricingStatusForCourses(config, list));
+    /*
+     * 报价读不到时**单独说一句**（不借用"网站正文"那条错误 —— 那会把原因说错地方）。
+     */
+    setPricingLoadError(
+      config === null
+        ? "读不到报价配置（你的角色可能看不到报价）—— 课程照常能看，但「未定价 / 已定价」与报价阶段暂时不显示。"
+        : "",
+    );
     if (site === null) {
       setContentLoadError("读不到网站正文（后端没在跑？）—— 卡片里的「网站正文」与下面的学科面板暂时改不了。");
     } else {
@@ -1551,6 +1568,13 @@ export default function AdminCoursesPage() {
                         {course.note !== "" && (
                           <p className="mt-1 text-[11px] text-ink-400">{course.note}</p>
                         )}
+
+                        {pricingLoadError !== "" && (
+                          <p className="mt-1 text-[11px] leading-relaxed text-warning-600">
+                            {pricingLoadError}
+                          </p>
+                        )}
+
 
                         {/* 报价状态：课程库与报价配置「打通」之后，这里能一眼看出哪门课还没定价 */}
                         {(() => {

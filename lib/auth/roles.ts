@@ -104,30 +104,39 @@ export const HOLIDAY_ACTION_ACCESS: Record<string, Role[]> = {
 };
 
 /**
- * 学生页内部的动作 → 允许的角色（页面级权限管不到这一层）。
+ * **界面用**：这个角色集合能不能调这个服务层方法？
  *
- * 这张表是给实现时用的：同一个 `/admin/students` 页面，
- * 教师只能读课时余额，招生与财务能报课收款退课，技术管理员全权。
+ * ## 为什么要有它（审计抓到的一整片"点了没反应"）
+ *
+ * 界面上的按钮原先对四个角色**一律渲染**，于是普通教师在学生页看到「新增 / 编辑 / 删除」、
+ * 财务管理员在排课页看到「标记已上」，点下去服务端 403，而调用是裸 `await` ——
+ * 没人接的拒绝：提示不出现、按钮停在"保存中"。用户只知道"点了没反应"。
+ *
+ * 判定**不另建一张表**：直接问服务端用的那一个函数（`allowedRolesForMethod`）。
+ * 这样界面上"看得见"的按钮与接口"放得行"的判定**天然同源**，
+ * 不会再出现"页面进得去、每个请求都 403"（审计里报价页、课程库页正是这样）。
+ *
+ * 注意：前端拦得住手滑，拦不住直接调接口 —— **权限始终由服务端判定**，
+ * 这里只是把必然失败的按钮藏起来，并告诉人该找谁。
  */
-export const STUDENT_ACTION_ACCESS: Record<string, Role[]> = {
-  /** 看档案与课时余额（普通教师只看自己学生的）。 */
-  "students.read": ["技术管理员", "财务管理员", "招生老师", "普通教师"],
-  /** 建档 / 改档案。 */
-  "students.write": ["技术管理员", "财务管理员", "招生老师"],
-  /** 报课 / 改报课（机构确认：财务也要能报课）。 */
-  "students.enroll": ["技术管理员", "财务管理员", "招生老师"],
-  /** 收款 / 退款 / 退课（机构确认：招生也要能退课）。 */
-  "students.money": ["技术管理员", "财务管理员", "招生老师"],
-  /** 只读课时账本（流水与撤销记录）。 */
-  "students.ledger": ["技术管理员", "财务管理员", "招生老师", "普通教师"],
-};
+export function canCallMethod(roles: readonly Role[], method: string): boolean {
+  const allowed = allowedRolesForMethod(method);
+  // 没登记归属的方法对谁都不放行（与服务端闸门同一个默认：关门）
+  return allowed !== null && canAccess(roles, allowed);
+}
+
+/** 上面那条判定失败时的说法（界面上写一句"这件事归谁"，而不是让人猜）。 */
+export function methodOwnerText(method: string): string {
+  const allowed = allowedRolesForMethod(method);
+  return allowed === null ? "（这个方法没登记归属，谁都调不了）" : allowed.join(" 或 ");
+}
 
 /**
  * 接口分组（键与 `lib/backend/contract.ts` 的 `API_CONTRACT[].id` 一致）→ 允许的角色。
  *
  * 粒度刻意取"分组"而不是"逐个方法"：115 个方法逐个配一遍，改一次要动几十行、
  * 而且没人会去核对；按分组配，一眼能看完，服务端闸门也正好是"按方法前缀/分组"一处。
- * 分组内部真的需要再分时（例如学生页的"读 / 写 / 钱"），用 `STUDENT_ACTION_ACCESS` 那一层。
+ * 分组内部真的需要再分时（例如学生页的"读 / 写 / 钱"），用 `canCallMethod`（按具体方法名问同一个判定函数）。
  */
 export const GROUP_ACCESS: Record<string, Role[]> = {
   /** 一、通用 CRUD：档案类增删改（学生 / 教师 / 教室 / 课程 / 排课…）。 */

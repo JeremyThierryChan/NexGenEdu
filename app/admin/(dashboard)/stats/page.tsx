@@ -8,6 +8,7 @@ import { api } from "@/lib/backend/api";
 import { CLASS_HOURS_PER_DAY, describeMinutes, describeRate } from "@/lib/backend/stats";
 import { formatDayLabel, weekDays } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
+import { LoadFailure } from "@/components/admin/LoadFailure";
 
 type StatsData = Awaited<ReturnType<typeof api.stats>>;
 
@@ -23,6 +24,11 @@ export default function AdminStatsPage() {
   const [anchor, setAnchor] = useState(() => new Date());
   const [data, setData] = useState<StatsData | null>(null);
   const [loading, setLoading] = useState(true);
+  /**
+   * 读不出来时的原因（审计抓到的那条：这里原先没有 try/catch ——
+   * 后端没开 / 登录过期 / 权限不足时 setLoading(false) 永远走不到，界面就停在「加载中…」）。
+   */
+  const [loadError, setLoadError] = useState("");
 
   /**
    * 读数据。
@@ -33,8 +39,25 @@ export default function AdminStatsPage() {
    */
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
     if (options.quiet !== true) setLoading(true);
-    setData(await api.stats(anchor));
-    setLoading(false);
+    try {
+      setData(await api.stats(anchor));
+      setLoading(false);
+
+      setLoadError("");
+    } catch (cause) {
+      /*
+       * 失败要把话说出来：服务端那句通常写着「该找谁 / 该先做什么」（403 说角色、
+       * 400 说哪个参数不对），比界面自己编一句准。**屏幕上的旧数据不动** ——
+       * 它可能是对的，只是这次没刷新成功。
+       */
+      setLoadError(
+        cause instanceof Error && cause.message.trim() !== ""
+          ? cause.message
+          : `读取失败（${String(cause)}）—— 请重试；仍然不行就去看后端日志。`,
+      );
+    } finally {
+      setLoading(false);
+    }
   }, [anchor]);
 
   useEffect(() => {
@@ -60,6 +83,14 @@ export default function AdminStatsPage() {
           await load({ quiet: true });
         }}
       />
+
+      {loadError !== "" && (
+        <LoadFailure
+          error={loadError}
+          onRetry={() => void load({ quiet: true })}
+          className="mt-4"
+        />
+      )}
 
       {/* 周切换 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">

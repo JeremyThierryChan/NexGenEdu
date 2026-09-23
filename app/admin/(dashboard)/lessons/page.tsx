@@ -1,6 +1,8 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useState } from "react";
+import { useAuth, rolesOrAll } from "@/components/admin/AuthContext";
+import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { Panel } from "@/components/admin/AdminFields";
 import { LessonForm } from "@/components/admin/LessonForm";
@@ -18,6 +20,7 @@ import {
 } from "@/lib/backend/api";
 import { dateKey, formatDayLabel, formatTimeRange } from "@/lib/backend/format";
 import { countLessons, describeLessonCounts } from "@/lib/backend/lesson-stats";
+import { LoadFailure } from "@/components/admin/LoadFailure";
 
 /**
  * 课程安排（按天排课）。
@@ -37,6 +40,11 @@ export default function AdminLessonsPage() {
   const [classrooms, setClassrooms] = useState<Classroom[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
+  /**
+   * 读不出来时的原因（审计抓到的那条：这里原先没有 try/catch ——
+   * 后端没开 / 登录过期 / 权限不足时 setLoading(false) 永远走不到，界面就停在「加载中…」）。
+   */
+  const [loadError, setLoadError] = useState("");
   const [creating, setCreating] = useState(false);
   // 按周批量排课面板（与「新增排课」互斥，避免同屏两个大面板）
   const [series, setSeries] = useState(false);
@@ -53,6 +61,19 @@ export default function AdminLessonsPage() {
    */
   const [notice, setNotice] = useState<{ text: string; tone: "ok" | "error" } | null>(null);
 
+  /*
+   * 这个角色能做什么：**问服务端用的那个判定函数**（`canCallMethod`），不另建页面权限表。
+   * 审计实测：普通教师在这一页看到「取消 / 恢复 / 编辑 / 删除」四个按钮，
+   * 点下去服务端 403 而调用是裸 await —— 四个按钮全部"点了没反应"；
+   * 财务管理员看到「标记已上」也一样（那件事归教师 / 招生 / 技术管理员）。
+   */
+  const roles = rolesOrAll(useAuth());
+  const canMarkCompleted = canCallMethod(roles, "lessons.markCompleted");
+  const canWriteLesson = canCallMethod(roles, "lessons.update");
+  const canRemoveLesson = canCallMethod(roles, "lessons.remove");
+  const canCreateLesson = canCallMethod(roles, "lessons.create");
+  const canRecord = canCallMethod(roles, "lessonRecords.save");
+
   /**
    * 读数据。
    *
@@ -62,18 +83,35 @@ export default function AdminLessonsPage() {
    */
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
     if (options.quiet !== true) setLoading(true);
-    const day = new Date(`${date}T00:00:00`);
-    const [dayLessons, teacherList, classroomList, studentList] = await Promise.all([
-      api.lessons.listByDate(day),
-      api.teachers.list(),
-      api.classrooms.list(),
-      api.students.list(),
-    ]);
-    setLessons(dayLessons);
-    setTeachers(teacherList);
-    setClassrooms(classroomList);
-    setStudents(studentList);
-    setLoading(false);
+    try {
+      const day = new Date(`${date}T00:00:00`);
+      const [dayLessons, teacherList, classroomList, studentList] = await Promise.all([
+        api.lessons.listByDate(day),
+        api.teachers.list(),
+        api.classrooms.list(),
+        api.students.list(),
+      ]);
+      setLessons(dayLessons);
+      setTeachers(teacherList);
+      setClassrooms(classroomList);
+      setStudents(studentList);
+      setLoading(false);
+
+      setLoadError("");
+    } catch (cause) {
+      /*
+       * 失败要把话说出来：服务端那句通常写着「该找谁 / 该先做什么」（403 说角色、
+       * 400 说哪个参数不对），比界面自己编一句准。**屏幕上的旧数据不动** ——
+       * 它可能是对的，只是这次没刷新成功。
+       */
+      setLoadError(
+        cause instanceof Error && cause.message.trim() !== ""
+          ? cause.message
+          : `读取失败（${String(cause)}）—— 请重试；仍然不行就去看后端日志。`,
+      );
+    } finally {
+      setLoading(false);
+    }
   }, [date]);
 
   useEffect(() => {
@@ -183,6 +221,14 @@ export default function AdminLessonsPage() {
         }}
       />
 
+      {loadError !== "" && (
+        <LoadFailure
+          error={loadError}
+          onRetry={() => void load({ quiet: true })}
+          className="mt-4"
+        />
+      )}
+
       {/* 日期切换 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">
         <Button size="sm" variant="outline" onClick={() => setDate(shiftDate(date, -1))}>
@@ -217,15 +263,22 @@ export default function AdminLessonsPage() {
           >
             {series ? "收起批量排课" : "按周批量排课"}
           </Button>
-          <Button
-            size="sm"
-            onClick={() => {
-              setSeries(false);
-              setCreating((value) => !value);
-            }}
-          >
-            {creating ? "收起表单" : "新增排课"}
-          </Button>
+          {canCreateLesson ? (
+            <Button
+              size="sm"
+              onClick={() => {
+                setSeries(false);
+                setCreating((value) => !value);
+              }}
+            >
+              {creating ? "收起表单" : "新增排课"}
+            </Button>
+          ) : (
+            <span className="text-xs text-ink-500">
+              你的角色（{roles.join(" · ")}）只能看和记课堂记录：排课 / 改课 / 取消归{" "}
+              {methodOwnerText("lessons.create")}
+            </span>
+          )}
         </div>
       </div>
 
@@ -326,7 +379,7 @@ export default function AdminLessonsPage() {
                 </td>
                 <td className="px-4 py-2.5">
                   <div className="flex flex-wrap gap-2">
-                    {lesson.status !== "已上" && (
+                    {canMarkCompleted && lesson.status !== "已上" && (
                       <button
                         type="button"
                         onClick={() => void markCompleted(lesson)}
@@ -335,7 +388,7 @@ export default function AdminLessonsPage() {
                         标记已上
                       </button>
                     )}
-                    {lesson.status === "已排" && (
+                    {canWriteLesson && lesson.status === "已排" && (
                       <button
                         type="button"
                         onClick={() => void setStatus(lesson, "已取消")}
@@ -344,7 +397,7 @@ export default function AdminLessonsPage() {
                         取消
                       </button>
                     )}
-                    {lesson.status === "已取消" && (
+                    {canWriteLesson && lesson.status === "已取消" && (
                       <button
                         type="button"
                         onClick={() => void setStatus(lesson, "已排")}
@@ -353,27 +406,33 @@ export default function AdminLessonsPage() {
                         恢复
                       </button>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => setRecordId(recordId === lesson.id ? null : lesson.id)}
-                      className="text-xs text-brand-700 transition-colors hover:text-brand-800"
-                    >
-                      {recordId === lesson.id ? "收起记录" : "课堂记录"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setEditingId(editingId === lesson.id ? null : lesson.id)}
-                      className="text-xs text-brand-700 transition-colors hover:text-brand-800"
-                    >
-                      {editingId === lesson.id ? "收起" : "编辑"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void remove(lesson)}
-                      className="text-xs text-ink-500 transition-colors hover:text-danger-600"
-                    >
-                      删除
-                    </button>
+                    {canRecord && (
+                      <button
+                        type="button"
+                        onClick={() => setRecordId(recordId === lesson.id ? null : lesson.id)}
+                        className="text-xs text-brand-700 transition-colors hover:text-brand-800"
+                      >
+                        {recordId === lesson.id ? "收起记录" : "课堂记录"}
+                      </button>
+                    )}
+                    {canWriteLesson && (
+                      <button
+                        type="button"
+                        onClick={() => setEditingId(editingId === lesson.id ? null : lesson.id)}
+                        className="text-xs text-brand-700 transition-colors hover:text-brand-800"
+                      >
+                        {editingId === lesson.id ? "收起" : "编辑"}
+                      </button>
+                    )}
+                    {canRemoveLesson && (
+                      <button
+                        type="button"
+                        onClick={() => void remove(lesson)}
+                        className="text-xs text-ink-500 transition-colors hover:text-danger-600"
+                      >
+                        删除
+                      </button>
+                    )}
                   </div>
                 </td>
               </tr>

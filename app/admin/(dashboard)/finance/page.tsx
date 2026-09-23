@@ -8,6 +8,7 @@ import { DataNotice } from "@/components/admin/DataNotice";
 import { api, type Payment, type Student } from "@/lib/backend/api";
 import { REFUND_POLICIES, formatMoney } from "@/lib/backend/finance";
 import { formatDayLabel } from "@/lib/backend/format";
+import { LoadFailure } from "@/components/admin/LoadFailure";
 
 /**
  * 收费。
@@ -25,6 +26,8 @@ export default function AdminFinancePage() {
   const [data, setData] = useState<Awaited<ReturnType<typeof api.finance>> | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
+  /** 读不出来时的原因（原先没有 try/catch：读失败会停在「加载中…」，什么都不说）。 */
+  const [loadError, setLoadError] = useState("");
 
   /**
    * 读数据。
@@ -35,10 +38,27 @@ export default function AdminFinancePage() {
    */
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
     if (options.quiet !== true) setLoading(true);
-    const [finance, studentList] = await Promise.all([api.finance(month), api.students.list()]);
-    setData(finance);
-    setStudents(studentList);
-    setLoading(false);
+    try {
+      const [finance, studentList] = await Promise.all([api.finance(month), api.students.list()]);
+      setData(finance);
+      setStudents(studentList);
+      setLoading(false);
+
+      setLoadError("");
+    } catch (cause) {
+      /*
+       * 失败要把话说出来：服务端那句通常写着「该找谁 / 该先做什么」（403 说角色、
+       * 400 说哪个参数不对），比界面自己编一句准。**屏幕上的旧数据不动** ——
+       * 它可能是对的，只是这次没刷新成功。
+       */
+      setLoadError(
+        cause instanceof Error && cause.message.trim() !== ""
+          ? cause.message
+          : `读取失败（${String(cause)}）—— 请重试；仍然不行就去看后端日志。`,
+      );
+    } finally {
+      setLoading(false);
+    }
   }, [month]);
 
   useEffect(() => {
@@ -60,6 +80,14 @@ export default function AdminFinancePage() {
           await load({ quiet: true });
         }}
       />
+
+      {loadError !== "" && (
+        <LoadFailure
+          error={loadError}
+          onRetry={() => void load({ quiet: true })}
+          className="mt-4"
+        />
+      )}
 
       {/* 月份切换 */}
       <div className="mt-6 flex flex-wrap items-center gap-2">

@@ -120,7 +120,7 @@ import {
   HOLIDAY_ACTION_ACCESS,
   PAGE_ACCESS,
   ROLES,
-  STUDENT_ACTION_ACCESS,
+  canCallMethod,
   TEACHER_SCOPE_RULES,
   allowedGroups,
   allowedRolesForMethod,
@@ -3801,14 +3801,24 @@ ok("每个分组都有方法", API_CONTRACT.every((group) => group.methods.lengt
   ok("招生老师进不了数据与备份（运维与审计是技术管理员的）",
     allowedGroups(["招生老师"]).includes("ops") === false);
 
-  // 四条已确认的边界：逐一钉在断言里，免得以后被"顺手收紧"
+  /*
+   * 四条已确认的边界：逐一钉在断言里，免得以后被"顺手收紧"。
+   *
+   * 判据用 `canCallMethod`（界面与服务端**同一个**判定函数）而不是另建一张动作表 ——
+   * 审计发现原先那张 `STUDENT_ACTION_ACCESS` 全仓库没有任何运行时读者，
+   * 只有自检拿它自己的字面值自证（"两张表互相证明"），而真正生效的是 `METHOD_ACCESS`。
+   * 现在界面上能点的按钮就是服务端放行的方法，`canCallMethod` 是那条纽带。
+   */
   ok("机构确认①：财务管理员能建档 / 报课",
-    canAccess(["财务管理员"], STUDENT_ACTION_ACCESS["students.enroll"]!) &&
-      canAccess(["财务管理员"], STUDENT_ACTION_ACCESS["students.write"]!));
+    canCallMethod(["财务管理员"], "students.create") &&
+      canCallMethod(["财务管理员"], "students.enroll"));
   ok("机构确认②：招生老师能退课（含那笔退款）",
-    canAccess(["招生老师"], STUDENT_ACTION_ACCESS["students.money"]!));
+    canCallMethod(["招生老师"], "students.refundEnrollment"));
   ok("机构确认③：普通教师能看自己学生的课时余额",
-    canAccess(["普通教师"], STUDENT_ACTION_ACCESS["students.read"]!));
+    canCallMethod(["普通教师"], "students.get") &&
+      !canCallMethod(["普通教师"], "students.remove"));
+  ok("界面判定与服务端同源：没登记归属的方法对谁都不放行",
+    canCallMethod(["技术管理员"], "根本没这个方法") === false);
   ok("机构确认④：一个账号兼任多个角色时，按「有一个允许就允许」判定",
     canAccess(["普通教师", "财务管理员"], GROUP_ACCESS.pricing!) &&
       canAccess(["普通教师", "技术管理员"], GROUP_ACCESS.ops!) &&
@@ -7250,6 +7260,140 @@ console.log("\n=== 18. P1：账目与审计一致性 ===");
     [counts.active, counts.activeMinutes, counts.cancelled, counts.cancelledMinutes], [1, 60, 1, 90]);
   ok("「3 节 · 2 小时」这类说法由同一个函数生成（取消的多一句说明）",
     describeLessonCounts(counts).includes("另有 1 节已取消"));
+}
+
+console.log("\n=== 19. P2：界面不能「点了没反应」 ===");
+
+/*
+ * 这一节对应审计的第三档：界面上的坑。它们单个都不致命，但**指向同一件事** ——
+ * 用户点了之后得不到任何反馈，于是只能反复点、并得出"系统坏了"的结论：
+ *
+ *   ① 10 个页面的 `load()` 没有 try/catch → 读失败停在「加载中…」，一个字都不说
+ *   ② 按钮对四个角色一律渲染 → 没权限的人点下去 403，而调用是裸 `await`（无人接的拒绝）
+ *   ③ 课程库页把 `pricing.get()` 放进同一个 `Promise.all` → 普通教师（403）整页打不开
+ *   ④ 报价页一挂载就自动试算，而其中 `teacherFee` 对招生老师是 403 → 试算结果永远空白
+ *   ⑤ 整库导入"选中文件就替换"，唯一没有二次确认的破坏性操作，且备份只有一个槽
+ *
+ * 这些都是**源码结构**上的性质，因此这一节是源码级断言（不需要浏览器）——
+ * 与第 13 节（就地动作不滚页）同一类。真正"看起来对不对"仍然要靠人肉目视。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const read = (file: string) => readFileSync(new URL(file, rootUrl), "utf8");
+
+  const ADMIN_PAGES = [
+    "app/admin/(dashboard)/page.tsx",
+    "app/admin/(dashboard)/calendar/page.tsx",
+    "app/admin/(dashboard)/finance/page.tsx",
+    "app/admin/(dashboard)/followups/page.tsx",
+    "app/admin/(dashboard)/inquiries/page.tsx",
+    "app/admin/(dashboard)/lessons/page.tsx",
+    "app/admin/(dashboard)/scripts/page.tsx",
+    "app/admin/(dashboard)/stats/page.tsx",
+    "app/admin/(dashboard)/students/page.tsx",
+    "app/admin/(dashboard)/timetable/page.tsx",
+  ];
+
+  // ── ① 读失败必须说出来（不许停在「加载中…」）──────────────────────────
+  const noCatch = ADMIN_PAGES.filter((file) => {
+    const source = read(file);
+    const start = source.indexOf("const load = useCallback(");
+    if (start === -1) return true;
+    const end = source.indexOf("  }, [", start);
+    return !/try \{[\s\S]*\} catch/.test(source.slice(start, end === -1 ? undefined : end));
+  });
+  eq(`每个带加载态的后台页面的 load 都有 try/catch（${ADMIN_PAGES.length} 页）`, noCatch, []);
+  const noFailureUi = ADMIN_PAGES.filter((file) => !read(file).includes("<LoadFailure"));
+  eq("并且把失败原因渲染出来（LoadFailure：服务端原话 + 重试）", noFailureUi, []);
+  ok("LoadFailure 自己写着「屏幕上的内容是上一次读到的」（不假装数据是新的）",
+    read("components/admin/LoadFailure.tsx").includes("上一次成功读到的"));
+
+  // ── ② 没权限的按钮不该渲染 ─────────────────────────────────────────────
+  /*
+   * 判据用 `canCallMethod(roles, "具体方法名")` —— 与服务端闸门**同一个判定函数**。
+   * 审计发现原先界面对四个角色一律渲染按钮（普通教师看到「新增 / 编辑 / 删除」、
+   * 财务管理员看到「标记已上」），点下去 403 而界面什么都不说。
+   */
+  const gated: Array<[string, string]> = [
+    ["app/admin/(dashboard)/students/page.tsx", "students.create"],
+    ["app/admin/(dashboard)/students/page.tsx", "students.remove"],
+    ["app/admin/(dashboard)/lessons/page.tsx", "lessons.markCompleted"],
+    ["app/admin/(dashboard)/lessons/page.tsx", "lessons.remove"],
+    ["app/admin/(dashboard)/pricing/page.tsx", "pricing.update"],
+    ["components/admin/BulkImport.tsx", "imports.apply"],
+  ];
+  for (const [file, method] of gated) {
+    ok(`${file.split("/").slice(-2).join("/")}：按权限决定「${method}」的按钮`,
+      read(file).includes(`canCallMethod(roles, "${method}")`) ||
+        read(file).includes(`canCallMethod(importRoles, "${method}")`) ||
+        read(file).includes(`canCallMethod(importRoles, "${method}"`),
+      file);
+  }
+  ok("界面判定与服务端同源（canCallMethod 直接问 allowedRolesForMethod）",
+    read("lib/auth/roles.ts").includes("const allowed = allowedRolesForMethod(method);"));
+  ok("没权限时给一句「这件事归谁」而不是静默（methodOwnerText）",
+    read("app/admin/(dashboard)/lessons/page.tsx").includes("methodOwnerText("));
+
+  // ── ③ 课程库页：报价 403 不许拖垮整页 ──────────────────────────────────
+  const courses = read("app/admin/(dashboard)/courses/page.tsx");
+  ok("课程库页单独 catch 报价（普通教师对 pricing.get 是 403，课程仍应看得见）",
+    courses.includes("api.pricing.get().catch("));
+  ok("报价读不到时单独说一句（不借用「网站正文」那条错误，免得说错地方）",
+    courses.includes("pricingLoadError"));
+
+  // ── ④ 报价页：试算块不许因为一个 403 整块空白 ──────────────────────────
+  const pricing = read("app/admin/(dashboard)/pricing/page.tsx");
+  ok("报价页把「家长价」与「教师课时费」分开取（后者对招生老师是 403）",
+    pricing.includes("const parent = await api.pricing.quote(selection);") &&
+      !pricing.includes("api.pricing.quote(selection),\n      api.pricing.teacherFee"));
+  ok("导出 / 恢复默认都补了 catch（原先点了没反应）",
+    pricing.includes("catch (error) {\n      setMessage(error instanceof Error ? error.message : \"导出失败。\");") &&
+      pricing.includes("catch (error) {\n      // 失败要说出来：裸 await 会让 403/500 变成\"点了没反应\""));
+  /*
+   * 这条要查的是**渲染出去的文案**，不是注释：注释里正解释着"原先写的是……"，
+   * 直接 `includes` 会把注释也算进去。因此先去掉注释再查（与第 13 节扫源码时同一套做法）。
+   */
+  const stripComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  ok("报价页与数据页不再说「数据存在浏览器本地」（同一屏上 DataNotice 说的是反话）",
+    !stripComments(pricing).includes("后台数据存在浏览器本地") &&
+      !stripComments(read("app/admin/(dashboard)/data/page.tsx")).includes("数据只保存在这台电脑的浏览器里"));
+
+  // ── ⑤ 整库导入：先看清再替换 + 备份不止一份 ────────────────────────────
+  const data = read("app/admin/(dashboard)/data/page.tsx");
+  /*
+   * **不能只查字符串**：第一版只断言"那句话存在 + 有个 describeImportText"，
+   * 于是把整个确认包进 `if (false && !window.confirm(…))` 照样全绿（反向验证抓到了）。
+   * 因此这里查的是**结构与顺序**：确认框的否定式判断后面必须紧跟 `return`，
+   * 而且真正写库的 `api.importDatabase(text)` 必须出现在确认**之后**。
+   */
+  /*
+   * **只看 importFile 这一个函数**（第一版在全文件里 `indexOf("!window.confirm(")`，
+   * 结果匹配到的是「清空日志」那个确认 —— 断言因此恒真，反向验证当场抓到）。
+   */
+  const importFn = data.slice(data.indexOf("async function importFile("), data.indexOf("async function restore("));
+  ok("整库导入有二次确认，而且那个确认真的在挡人（不是被 && 短路掉的摆设）",
+    // 确认必须是 if 的**直接条件**：`if (false && !window.confirm(…))` 这种短路写法过不了
+    /\bif\s*\(\s*!window\.confirm\(/.test(importFn) &&
+      // 拒绝时要真的 return（而不是"确认完了照样往下走"）
+      /!window\.confirm\([\s\S]{0,900}?\)\s*\{\s*\n\s*return;/.test(importFn) &&
+      importFn.indexOf("!window.confirm(") < importFn.indexOf("await api.importDatabase(text)") &&
+      importFn.includes("describeImportText("));
+  ok("确认框里带上「文件里有什么」与「库里现在有什么」",
+    data.includes("describeImportText(text)") && data.includes("当前库："));
+  ok("备份是滚动保留多份（而不是一个槽，选错两次就回不去）",
+    read("lib/backend/api.ts").includes("export const BACKUP_SLOTS") &&
+      read("lib/backend/api.ts").includes("for (const slot of merged.slice(BACKUP_SLOTS))"));
+  ok("界面上的份数与实现同源（用 BACKUP_SLOTS，不各写一个数）",
+    data.includes("{BACKUP_SLOTS}"));
+
+  // ── 顺手修掉的那几处显示层小口径 ───────────────────────────────────────
+  const inquiries = read("app/admin/(dashboard)/inquiries/page.tsx");
+  ok("咨询列表显示了家长联系方式（原先收了、存了，后台任何地方都看不到）",
+    inquiries.includes("{inquiry.guardian}") || inquiries.includes("inquiry.guardian"));
+  ok("教师 / 教室页支持全局搜索的「直达」（?teacherId= / ?classroomId=）",
+    read("app/admin/(dashboard)/teachers/page.tsx").includes('get("teacherId")') &&
+      read("app/admin/(dashboard)/classrooms/page.tsx").includes('get("classroomId")'));
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

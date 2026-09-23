@@ -12,6 +12,7 @@ import {
 import { getClassHoursWindow } from "@/lib/backend/options";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { FOLLOWUP_RULES } from "@/lib/backend/followup";
+import { LoadFailure } from "@/components/admin/LoadFailure";
 import {
   api,
   type Classroom,
@@ -43,6 +44,11 @@ export default function AdminTodayPage() {
   const [students, setStudents] = useState<Student[]>([]);
   const [classrooms, setClassrooms] = useState<Classroom[]>([]);
   const [loading, setLoading] = useState(true);
+  /**
+   * 读不出来时的原因（审计抓到的那条：这里原先没有 try/catch ——
+   * 后端没开 / 登录过期 / 权限不足时 setLoading(false) 永远走不到，界面就停在「加载中…」）。
+   */
+  const [loadError, setLoadError] = useState("");
 
   /**
    * 读数据（今日概览）。
@@ -54,19 +60,36 @@ export default function AdminTodayPage() {
    */
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
     if (options.quiet !== true) setLoading(true);
-    const [today, todayLessons, teacherList, studentList, classroomList] = await Promise.all([
-      api.today(),
-      api.lessons.listByDate(new Date()),
-      api.teachers.list(),
-      api.students.list(),
-      api.classrooms.list(),
-    ]);
-    setSummary(today);
-    setLessons(todayLessons);
-    setTeachers(teacherList);
-    setStudents(studentList);
-    setClassrooms(classroomList);
-    setLoading(false);
+    try {
+      const [today, todayLessons, teacherList, studentList, classroomList] = await Promise.all([
+        api.today(),
+        api.lessons.listByDate(new Date()),
+        api.teachers.list(),
+        api.students.list(),
+        api.classrooms.list(),
+      ]);
+      setSummary(today);
+      setLessons(todayLessons);
+      setTeachers(teacherList);
+      setStudents(studentList);
+      setClassrooms(classroomList);
+      setLoading(false);
+
+      setLoadError("");
+    } catch (cause) {
+      /*
+       * 失败要把话说出来：服务端那句通常写着「该找谁 / 该先做什么」（403 说角色、
+       * 400 说哪个参数不对），比界面自己编一句准。**屏幕上的旧数据不动** ——
+       * 它可能是对的，只是这次没刷新成功。
+       */
+      setLoadError(
+        cause instanceof Error && cause.message.trim() !== ""
+          ? cause.message
+          : `读取失败（${String(cause)}）—— 请重试；仍然不行就去看后端日志。`,
+      );
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -94,6 +117,14 @@ export default function AdminTodayPage() {
           await load({ quiet: true });
         }}
       />
+
+      {loadError !== "" && (
+        <LoadFailure
+          error={loadError}
+          onRetry={() => void load({ quiet: true })}
+          className="mt-4"
+        />
+      )}
 
       {/* 四个数字，一眼看到规模 */}
       <dl className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

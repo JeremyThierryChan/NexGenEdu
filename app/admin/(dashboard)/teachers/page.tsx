@@ -57,6 +57,19 @@ export default function AdminTeachersPage() {
     void load();
   }, [load]);
 
+  /*
+   * 支持从全局搜索直达：/admin/teachers?teacherId=xxx 直接展开这位老师。
+   *
+   * 全局搜索的文案写着"点进去直达"，而这里原先不读参数 —— 点一条教师结果只是跳到页顶，
+   * 还得自己找人（同一个组件里"学生 / 排课"却是真直达，对比之下更像坏了）。
+   * 用 `window.location` 而不是 `useSearchParams`：后者在静态导出下会触发 CSR bailout
+   * （与 students / lessons 两页同一个理由）。
+   */
+  useEffect(() => {
+    const value = new URLSearchParams(window.location.search).get("teacherId");
+    if (value !== null && value !== "") setOpenId(value);
+  }, []);
+
   /** 每位教师的排课量（今日 / 全部）。 */
   const load_ = useMemo(() => {
     const todayKey = new Date().toDateString();
@@ -316,7 +329,12 @@ function TeacherLessons({
     <Panel
       className={className}
       title={`${teacherName}的课`}
-      description={lessons === null ? "加载中…" : `共 ${lessons.length} 节，其中 ${upcoming.length} 节待上。`}
+      description={
+        lessons === null
+          ? "加载中…"
+          : `共 ${lessons.length} 节（含已取消），其中 ${upcoming.length} 节待上；` +
+            `下面列出最近 ${Math.min(10, lessons.length)} 节`
+      }
     >
       {lessons !== null && lessons.length > 0 ? (
         <ul className="divide-y divide-ink-100">

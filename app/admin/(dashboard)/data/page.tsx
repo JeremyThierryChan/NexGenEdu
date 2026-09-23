@@ -35,7 +35,7 @@ import {
 } from "@/lib/backend/backup";
 import { formatDayLabel } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
-import { LOG_LIMIT } from "@/lib/backend/api";
+import { BACKUP_SLOTS, LOG_LIMIT } from "@/lib/backend/api";
 
 /**
  * 数据与备份。
@@ -46,9 +46,38 @@ import { LOG_LIMIT } from "@/lib/backend/api";
  *   3. 导入是唯一能一次性毁掉全部数据的操作，因此这里配了三道保险：
  *      结构校验、导入前自动备份、一键恢复导入前的数据。
  */
+/**
+ * 尽力描述"这份导入文件里有什么"（给确认框用）。
+ *
+ * 只做**最粗**的判断：看得出是数据库导出就报条数，看不出就说明看不出 ——
+ * 结构校验不在这里重复（那是服务端 `importDatabase` 的事，这里重复一遍只会出现两套口径）。
+ */
+function describeImportText(text: string): string {
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const db = (typeof parsed === "object" && parsed !== null && typeof parsed.db === "object"
+      ? (parsed.db as Record<string, unknown>)
+      : parsed) as Record<string, unknown>;
+    const count = (key: string): number => (Array.isArray(db[key]) ? (db[key] as unknown[]).length : 0);
+    const parts = [
+      `${count("students")} 名学生`,
+      `${count("lessons")} 节课`,
+      `${count("payments")} 条收款`,
+      `${count("transactions")} 条课时流水`,
+    ];
+    const version = typeof db.version === "number" ? `结构版本 v${db.version}` : "没写结构版本";
+    if (parts.every((part) => part.startsWith("0 "))) return `文件里${version}，但看不出学生 / 排课 / 收款（格式可能不对）。`;
+    return `文件里：${parts.join("、")}（${version}）`;
+  } catch {
+    return "这份文件不是合法 JSON —— 点确认也会被服务端拒绝（现有数据不会被改动）。";
+  }
+}
+
 export default function AdminDataPage() {
   const [stats, setStats] = useState<DatabaseStats | null>(null);
   const [hasBackup, setHasBackup] = useState(false);
+  /** 导入前备份的清单（最近的在最前）—— 让人看到"有几份、什么时候的"。 */
+  const [backupList, setBackupList] = useState<Array<{ at: string; summary: string }>>([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -56,13 +85,16 @@ export default function AdminDataPage() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
-    const [db, logList, backupExists] = await Promise.all([
+    const [db, logList, backupExists, slots] = await Promise.all([
       api.exportDatabase(),
       api.logs.list(100),
       api.hasBackup(),
+      // 备份清单只是为了显示"有几份"；读不到不影响这一页别的功能
+      api.backupSlots().catch(() => []),
     ]);
     setStats(databaseStats(db));
     setHasBackup(backupExists);
+    setBackupList(slots);
     setLogs(logList);
   }, []);
 
@@ -145,11 +177,33 @@ export default function AdminDataPage() {
   }
 
   async function importFile(file: File) {
-    setBusy(true);
     setError("");
     setMessage("");
 
     const text = await file.text();
+    /*
+     * **先看清再替换**（审计抓到的那条：这是全系统破坏力最大的动作，
+     * 却是唯一没有二次确认的破坏性操作 —— 选中文件就直接整体替换整库）。
+     *
+     * 这里在客户端先尽力数一下"这份文件里有多少东西、现在库里有多少"，
+     * 让人对着数字点确认；真正的结构校验仍在服务端（`importDatabase`），
+     * 这里数不出来就退回一句"看不出内容"而不是拦住人。
+     */
+    const incoming = describeImportText(text);
+    const current = stats === null
+      ? "当前库里的条数还没读出来"
+      : `当前库：${stats.students} 名学生、${stats.lessons} 节课、${stats.transactions} 条课时流水`;
+    if (
+      !window.confirm(
+        `用这份文件整体替换当前数据？\n\n` +
+          `文件：${file.name}\n${incoming}\n${current}\n\n` +
+          "导入前会自动留一份备份（最近 5 份，可以恢复），但导入之后当前数据就没了。",
+      )
+    ) {
+      return;
+    }
+
+    setBusy(true);
     const result = await api.importDatabase(text);
     setBusy(false);
 
@@ -162,7 +216,16 @@ export default function AdminDataPage() {
   }
 
   async function restore() {
-    if (!window.confirm("恢复导入前的数据？当前数据会被替换回去。")) return;
+    const newest = backupList[0];
+    if (
+      !window.confirm(
+        `恢复导入前的数据？当前数据会被替换回去。\n\n` +
+          `恢复的是最新那一份备份${newest === undefined || newest.at === "" ? "（升级前留下的）" : `（${newest.at.slice(0, 16).replace("T", " ")}）`}` +
+          `${newest === undefined || newest.summary === "" ? "" : ` · ${newest.summary}`}。`,
+      )
+    ) {
+      return;
+    }
     setBusy(true);
     const result = await api.restoreBackup();
     setBusy(false);
@@ -183,7 +246,11 @@ export default function AdminDataPage() {
       />
 
       {/* 数据概览 */}
-      <Panel className="mt-6" title="当前数据" description="数据只保存在这台电脑的浏览器里。">
+      <Panel
+        className="mt-6"
+        title="当前数据"
+        description="数据保存在服务端数据库里（不在浏览器里）；下面这些数字是服务端刚算出来的。"
+      >
         <dl className="grid gap-3 px-4 py-4 sm:grid-cols-3 lg:grid-cols-4">
           <Stat label="学生" value={stats?.students} />
           <Stat label="教师" value={stats?.teachers} />
@@ -274,8 +341,14 @@ export default function AdminDataPage() {
           )}
         </div>
         <p className="px-4 pb-4 text-xs leading-relaxed text-ink-500">
-          导入会整体替换当前数据（不是合并）。文件结构不对会直接拒绝，现有数据不受影响；
-          版本较旧的文件会自动升级到当前结构。
+          导入会整体替换当前数据（不是合并）。选中文件后会先告诉你「这份文件里有多少东西、库里现在有多少」，
+          确认之后才替换。文件结构不对会直接拒绝，现有数据不受影响；版本较旧的文件会自动升级到当前结构。
+          <br />
+          导入前会自动留一份备份，滚动保留最近 {BACKUP_SLOTS} 份
+          {backupList.length > 0
+            ? `：最近一份是 ${backupList[0]?.at.slice(0, 16).replace("T", " ") ?? ""}（共 ${backupList.length} 份）`
+            : "（现在还没有）"}
+          。「恢复导入前的数据」恢复的是最新那一份。
         </p>
       </Panel>
 

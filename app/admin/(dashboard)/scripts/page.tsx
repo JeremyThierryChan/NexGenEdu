@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { LoadFailure } from "@/components/admin/LoadFailure";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/admin/AdminFields";
@@ -39,6 +40,8 @@ export default function AdminScriptsPage() {
   const [subject, setSubject] = useState("");
   const [copied, setCopied] = useState("");
   const [loading, setLoading] = useState(true);
+  /** 读不出来时的原因（原先没有 try/catch：读失败会停在「加载中…」，什么都不说）。 */
+  const [loadError, setLoadError] = useState("");
 
   /**
    * 读数据。
@@ -49,8 +52,19 @@ export default function AdminScriptsPage() {
    */
   const load = useCallback(async (options: { quiet?: boolean } = {}) => {
     if (options.quiet !== true) setLoading(true);
-    setStudents(await api.students.list());
-    setLoading(false);
+    try {
+      setStudents(await api.students.list());
+      setLoadError("");
+    } catch (cause) {
+      // 服务端那句通常写着该找谁 / 该先做什么（例如登录过期、权限不足）
+      setLoadError(
+        cause instanceof Error && cause.message.trim() !== ""
+          ? cause.message
+          : `读取失败（${String(cause)}）—— 请重试；仍然不行就去看后端日志。`,
+      );
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -116,6 +130,15 @@ export default function AdminScriptsPage() {
         title="话术"
         description="接待、报价、试课、请假、续费、欠费、反馈、投诉、退费、教师相关的说法，按场景摆好，点一下就能复制。"
       />
+
+      {loadError !== "" && (
+        <LoadFailure
+          error={loadError}
+          /* 走安静刷新：页面上可能还留着上一次读到的学生名单 */
+          onRetry={() => void load({ quiet: true })}
+          className="mt-4"
+        />
+      )}
 
       <div className="mt-4 rounded-md border border-ink-200 bg-white px-3.5 py-2.5 text-xs leading-relaxed text-ink-600">
         这些是<strong className="font-medium text-ink-800">通用草稿</strong>，不是逐字稿：

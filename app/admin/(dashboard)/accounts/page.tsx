@@ -378,14 +378,26 @@ export default function AdminAccountsPage() {
                       >
                         {row.disabled ? "启用" : "停用"}
                       </button>
-                      <button
-                        type="button"
-                        disabled={busy || readOnly}
-                        onClick={() => void remove(row)}
-                        className="text-xs text-ink-500 transition-colors hover:text-danger-600 disabled:opacity-50"
-                      >
-                        删除
-                      </button>
+                      {(() => {
+                        // 注定失败的动作不该让人走完两次确认：先算清"是不是最后一位管理员"
+                        const lastAdmin =
+                          row.roles.includes("技术管理员") && !row.disabled && activeAdmins <= 1;
+                        return (
+                          <button
+                            type="button"
+                            disabled={busy || readOnly || lastAdmin}
+                            title={
+                              lastAdmin
+                                ? "这是最后一位还能登录的技术管理员，删掉就没人能进后台了 —— 先给接任的人加上这个角色"
+                                : ""
+                            }
+                            onClick={() => void remove(row)}
+                            className="text-xs text-ink-500 transition-colors hover:text-danger-600 disabled:opacity-50"
+                          >
+                            {lastAdmin ? "删除（最后一位管理员，先加接任的人）" : "删除"}
+                          </button>
+                        );
+                      })()}
                     </div>
                   </td>
                 </tr>
@@ -484,6 +496,18 @@ export default function AdminAccountsPage() {
   }
 
   /** 删除（最危险的一个：删掉之后他再也登不进来，所以问两次）。 */
+  /**
+   * 还能登录的技术管理员有几位。
+   *
+   * 服务端本来就会拦住"删掉最后一位"（`server/accounts.mts` 的 `lockoutReason`），
+   * 但界面上**连问两次确认之后才被拒** —— 审计说那是"白走两步"。
+   * 这里先算出来，把按钮禁掉并写明原因：注定失败的动作不该让人走完确认流程。
+   */
+  const activeAdmins = (table?.accounts ?? []).filter(
+    (row) => !row.disabled && row.roles.includes("技术管理员"),
+  ).length;
+
+
   async function remove(row: AccountRow) {
     if (
       !window.confirm(

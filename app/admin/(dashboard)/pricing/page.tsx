@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAuth, rolesOrAll } from "@/components/admin/AuthContext";
+import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
 import { DataNotice } from "@/components/admin/DataNotice";
@@ -44,6 +46,8 @@ export default function AdminPricingPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  /** 试算这一块的失败原因（教师课时费 403、后端问题等）。 */
+  const [quoteError, setQuoteError] = useState("");
   const [problems, setProblems] = useState<string[]>([]);
   const [exported, setExported] = useState("");
   /** 课程库：报价要跟着它走（改名跟随、停开跟随）。 */
@@ -175,6 +179,22 @@ export default function AdminPricingPage() {
     setPickedCourses([]);
   }
 
+  /*
+   * 这个角色能做什么（`canCallMethod` = 服务端用的同一个判定函数）。
+   *
+   * 审计实测：招生老师进得来这一页（`PAGE_ACCESS["/admin/pricing"]` 允许），
+   * 但 `pricing.update/reset/exportMarkdown/teacherFee` 对他全是 403 ——
+   * 于是页面一挂载的自动试算就抛（`teacherFee` 403），**「试算结果」整块永远空白**、
+   * 「导出配置」点了没反应。现在：读得到就显示、读不到就说清原因；
+   * 没权限的写按钮不渲染，并写一句"归谁"。
+   */
+  const roles = rolesOrAll(useAuth());
+  const canQuote = canCallMethod(roles, "pricing.quote");
+  const canTeacherFee = canCallMethod(roles, "pricing.teacherFee");
+  const canSave = canCallMethod(roles, "pricing.update");
+  const canExport = canCallMethod(roles, "pricing.exportMarkdown");
+  const canReset = canCallMethod(roles, "pricing.reset");
+
   async function save() {
     if (draft === null) return;
     setProblems(validatePricingConfig(draft));
@@ -196,13 +216,24 @@ export default function AdminPricingPage() {
     if (!window.confirm("恢复为站点内容（data/site/pricing.md）里的价格？后台改过的价格会丢失。")) {
       return;
     }
-    const next = await api.pricing.reset();
-    setSaved(next);
-    setDraft(next);
-    setMessage("已恢复为站点内容里的价格。");
+    try {
+      const next = await api.pricing.reset();
+      setSaved(next);
+      setDraft(next);
+      setMessage("已恢复为站点内容里的价格。");
+    } catch (error) {
+      // 失败要说出来：裸 await 会让 403/500 变成"点了没反应"
+      setMessage(error instanceof Error ? error.message : "恢复失败。");
+    }
   }
 
   async function runQuote() {
+    // 试算本身没权限就不试了（否则 Promise.all 一抛，"试算结果"整块永远空白且不说原因）
+    if (!canQuote) {
+      setQuoteError(`你的角色（${roles.join(" · ")}）不能试算报价 —— 这件事归 ${methodOwnerText("pricing.quote")}。`);
+      return;
+    }
+    setQuoteError("");
     const selection = {
       courseName,
       subjectName,
@@ -212,20 +243,38 @@ export default function AdminPricingPage() {
       studentCount,
       classCost,
     };
-    const [parent, teacher] = await Promise.all([
-      api.pricing.quote(selection),
-      api.pricing.teacherFee({ ...selection, students }),
-    ]);
+    /*
+     * 家长价与教师课时费**分开取**：教师课时费对某些角色是 403（它属于教师分成），
+     * 而"家长价"是所有人都该看到的。早先放在同一个 `Promise.all` 里，
+     * 一个 403 就让整块试算结果空白（审计实测到的那条）。
+     */
+    const parent = await api.pricing.quote(selection);
     setQuote(parent);
-    setTeacherQuote(teacher);
 
-    // 人数对照表：把 1–8 人各算一遍，老师问「这个班多少钱」时直接看表
-    const rows = await Promise.all(
-      Array.from({ length: TEACHER_SHARE_MAX_STUDENTS }, (_, index) =>
-        api.pricing.teacherFee({ ...selection, students: index + 1 }),
-      ),
-    );
-    setShareRows(rows);
+    if (!canTeacherFee) {
+      setTeacherQuote(null);
+      setShareRows([]);
+      return;
+    }
+    try {
+      setTeacherQuote(await api.pricing.teacherFee({ ...selection, students }));
+      // 人数对照表：把 1–8 人各算一遍，老师问「这个班多少钱」时直接看表
+      setShareRows(
+        await Promise.all(
+          Array.from({ length: TEACHER_SHARE_MAX_STUDENTS }, (_, index) =>
+            api.pricing.teacherFee({ ...selection, students: index + 1 }),
+          ),
+        ),
+      );
+    } catch (error) {
+      setTeacherQuote(null);
+      setShareRows([]);
+      setQuoteError(
+        error instanceof Error && error.message.trim() !== ""
+          ? error.message
+          : "教师课时费没算出来（权限或后端问题）。",
+      );
+    }
   }
 
   // 打开页面就先按默认选择算一次：规则表与金额立刻是可看的，不用先点按钮
@@ -235,9 +284,13 @@ export default function AdminPricingPage() {
   }, [loading, draft, quote]);
 
   async function exportMarkdown() {
-    const text = await api.pricing.exportMarkdown();
-    setExported(text);
-    setCopied(false);
+    try {
+      const text = await api.pricing.exportMarkdown();
+      setExported(text);
+      setCopied(false);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "导出失败。");
+    }
   }
 
   async function copyExport() {
@@ -270,25 +323,41 @@ export default function AdminPricingPage() {
         }}
       />
 
-      {/* 伪后端的边界：必须写在最显眼的地方 */}
+      {/*
+        这段原先写的是"价格只有这台电脑能看到 / 后台数据存在浏览器本地" —— 那是**接后端之前**的
+        实情，现在数据在服务端 SQLite 里（同一屏上方的 `DataNotice` 就写着"数据保存在服务端数据库"），
+        两句话互相打脸。现在如实说清"什么时候需要导出上线"。
+      */}
       <div className="mt-4 rounded-md border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs leading-relaxed text-amber-900">
-        <strong className="font-medium">这里的价格暂时只有这台电脑能看到。</strong>
-        后台数据存在浏览器本地，而家长看到的报价页读的是内容文件
+        <strong className="font-medium">价格改完就保存在服务端了。</strong>
+        家长看到的报价页是构建时生成的静态页面：构站那台机器能连上后端时，直接用库里的价格；
+        连不上（例如线上 GitHub Pages 那份）才需要点「导出配置」，把片段替换进
         <code className="mx-1 rounded bg-white/70 px-1">data/site/pricing.md</code>
-        。改完价格后请点「导出配置」，把导出的片段替换进该文件（页面文案字段不要动），
-        才会真正上线。接上服务端后，这一步会自动消失。
+        （页面文案字段不要动）再发布。
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        <Button onClick={() => void save()} disabled={saving || !dirty}>
-          {saving ? "保存中…" : dirty ? "保存修改" : "已保存"}
-        </Button>
-        <Button variant="outline" onClick={() => void exportMarkdown()}>
-          导出配置
-        </Button>
-        <Button variant="outline" onClick={() => void resetToContent()}>
-          恢复为站点内容
-        </Button>
+        {/* 没权限的按钮不渲染（点了 403 而界面不说话，人只会以为系统坏了） */}
+        {canSave && (
+          <Button onClick={() => void save()} disabled={saving || !dirty}>
+            {saving ? "保存中…" : dirty ? "保存修改" : "已保存"}
+          </Button>
+        )}
+        {canExport && (
+          <Button variant="outline" onClick={() => void exportMarkdown()}>
+            导出配置
+          </Button>
+        )}
+        {canReset && (
+          <Button variant="outline" onClick={() => void resetToContent()}>
+            恢复为站点内容
+          </Button>
+        )}
+        {!canSave && (
+          <span className="text-xs text-ink-500">
+            你的角色（{roles.join(" · ")}）只能看与试算：改价归 {methodOwnerText("pricing.update")}
+          </span>
+        )}
         <span className="text-xs text-ink-500">
           来源：{draft.source}
           {draft.updatedAt === "" ? "" : ` · 最后修改 ${draft.updatedAt.slice(0, 16).replace("T", " ")}`}
@@ -298,6 +367,11 @@ export default function AdminPricingPage() {
 
       {message !== "" && (
         <p className="mt-2 text-xs leading-relaxed text-ink-600">{message}</p>
+      )}
+      {quoteError !== "" && (
+        <p role="alert" className="mt-2 rounded-md border border-warning-100 bg-warning-50 px-3 py-2 text-xs leading-relaxed text-warning-700">
+          {quoteError}
+        </p>
       )}
       {problems.length > 0 && (
         <ul className="mt-2 list-disc space-y-1 rounded-md border border-red-300 bg-red-50 px-5 py-2.5 text-xs text-red-800">
