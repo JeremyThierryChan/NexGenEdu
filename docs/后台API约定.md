@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 105 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 108 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -42,7 +42,7 @@ lib/backend/api.ts        服务层实现（当前 105 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 105 个方法）
+## 二、接口分组（当前 108 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -76,6 +76,7 @@ lib/backend/api.ts        服务层实现（当前 105 个方法）；数据一�
 | 阶段测评 | `assessments.add` · `assessments.remove` · `assessments.listByStudent` | `add` 会自动带出同科目上一次分数（`previousScore`） |
 | 收款记录 | `payments.list` · `payments.listByStudent` · `payments.listByEnrollment` | **没有通用写方法**：写入口只有 `payments.record`（见下面那条） |
 | 课程库 | `courses.list` · `courses.create` · `courses.update` · `courses.remove` · `courses.options` · `courses.summary` · `courses.syncFromSite` · `courses.setPartition` | 课程是几十条的量级，页面用 `list` + 前端筛选；`remove` 先过 `canRemoveCourse`；`setPartition` 是"把一批课移到另一个分区"（一次事务、一条日志） |
+| 课程类型 | `catalog.list` · `catalog.save` · `catalog.resetToSeed` | 课程类型的**维度表**（学段 / 学科 / 模块 / 班型 / 交付形态）。只有「读整份 + 存整份 + 恢复种子」三个方法（不做 5 张表各一套 CRUD）；`validateCatalog` 拦悬空引用、重名、非法人数区间 |
 | 课程分区 | `coursePartitions.list` · `coursePartitions.create` · `coursePartitions.update` · `coursePartitions.reorder` · `coursePartitions.remove` | 课程库的分组结构（栏目 → 子栏目，也是网站课程页的栏目）。删除**有课 / 有子栏目就拒绝**；`reorder` 一次交一组的完整顺序 |
 | 网站内容 | `site.publicContent` · `site.saveContent` · `site.saveBlocks` · `site.importFromContent` | `saveContent` 保存课程正文/教师页标题/报价文案（技术管理员）；`saveBlocks` 保存**课程正文以外**的块（目前是学生案例，招生老师也能改）—— 两个方法各写各的块，互不覆盖 |
 
@@ -592,7 +593,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 2. 它会进入 `API_CONTRACT` —— 而自检要求"服务层每个方法都必须在契约里"，
    于是契约里出现一个"只有服务端才有意义"的方法，契约就不再是"页面对服务层的形状"了。
 
-**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 105 个方法，
+**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 108 个方法，
 这四条路由**刻意不登记**（它们不是服务层方法）；页面的客户端是 `lib/auth/accounts.ts`，
 与 `lib/auth/session.ts` 调 `/api/login`、`/api/session` 是同一个做法。
 自检里对它们的要求写在 `scripts/check-auth.mts` 的 [10] 节（真实 HTTP、真实写盘），

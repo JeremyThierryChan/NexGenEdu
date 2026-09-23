@@ -72,6 +72,13 @@ export const API_CONTRACT: ContractGroup[] = [
       "coursePartitions.list", "coursePartitions.create", "coursePartitions.update",
       "coursePartitions.reorder", "coursePartitions.remove",
       "courses.setPartition",
+      /*
+       * 课程类型的维度表（v23）：学段 / 学科 / 模块 / 班型 / 交付形态。
+       *
+       * 只有"读整份 + 存整份 + 恢复种子"三个方法（不做 5 张表各一套 CRUD）：
+       * 后台那一页是"打开 → 在这一份草稿上增删改排序 → 保存"，整份交最省事。
+       */
+      "catalog.list", "catalog.save", "catalog.resetToSeed",
     ],
   },
   {

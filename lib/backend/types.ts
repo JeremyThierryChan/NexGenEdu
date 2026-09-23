@@ -134,6 +134,129 @@ export type CoursePartition = {
 export const COURSE_SITE_KINDS = ["学科", "选修", "不展示"] as const;
 export type CourseSiteKind = (typeof COURSE_SITE_KINDS)[number];
 
+/* ── 课程类型：维度模型（v23） ───────────────────────────────────────────────
+ *
+ * ## 为什么不是"一门课一条记录"
+ *
+ * 机构那份课程类型清单铺开有 400 多条叶子，而它们全是五个维度的**乘积**：
+ * 学段 × 学科 × 内容模块 × 班型 × 交付形态。枚举法的代价在"加一个语种 / 加一级等级"
+ * 时立刻显现：记录数翻倍、价格要逐条改、AI 排课与诊断推荐只能靠"一个诊断项硬绑几门课"。
+ *
+ * 因此这里只存**维度**（下面五张表的行），组合是**查询结果**：
+ * "哪一条组合开放"由机构在后台的矩阵里勾，不勾的组合在系统里就是"不开课"。
+ *
+ * | 表 | 是什么 | 例子 |
+ * | --- | --- | --- |
+ * | `catalog.stages` | 学段 | 小学 / 初中 / 高中 / 大学 / 其他类型 |
+ * | `catalog.subjects` | 学科与项目（两级：分组 → 科目） | 语文 / 数学 / 雅思 / 网课；分组：外语等级考试 |
+ * | `catalog.modules` | 内容模块（属于某个学科） | 一年级…九年级教材 / 客观题·阅读·作文 / CEFR-A1…B2 / N5…N1 |
+ * | `catalog.formats` | 班型（**全系统唯一口径**） | 一对一 / 一对二 / 一对三 / 一对多（4-8）/ 班课（9-20） |
+ * | `catalog.deliveries` | 交付形态（怎么上，不是班型） | 面授 / 网课 / 网课+答疑 / 托管 / 全日托管 |
+ *
+ * `stageIds` 这类"归属"字段存在行上（不是单独的关联表）：每个学科/模块最多挂几个学段，
+ * 关系基数很小，单独一张表只会多一层 join 与一处要维护的一致性。
+ */
+
+/** 学段（小学 / 初中 / 高中 / 大学 / 其他类型）。 */
+export type CatalogStage = {
+  id: string;
+  name: string;
+  order: number;
+  note: string;
+};
+
+/** 学科的类别：正式学科 / 语言 / 项目（预习班、托管、纯网课这类可售卖的产品形态）。 */
+export const CATALOG_SUBJECT_KINDS = ["学科", "语言", "项目"] as const;
+export type CatalogSubjectKind = (typeof CATALOG_SUBJECT_KINDS)[number];
+
+/**
+ * 学科或项目。
+ *
+ * **学科与学段解耦**：机构清单里写的「小学语文 / 初中语文」是"语文 × 小学 / 初中"，
+ * 因此这里只存「语文」，学段由 `stageIds` 表达 —— 加一个学段不需要新增学科。
+ *
+ * `parentIds` 支持一层分组（清单里的「外语等级考试 → 雅思」「专业外语 → 商务英语」
+ * 「不分班型项目 → 网课」）。分组自己也是一个 `项目` 行，`stageIds` 记它属于哪个学段。
+ *
+ * 为什么是**列表**而不是一个 `parentId`：同一个学科可以在两个分组语境里出现 ——
+ * 「日语」在高中是高考外语（直接挂在学段下），在「其他类型」里又在「外语等级考试」下
+ * （N5…N1）。一个字段装不下"它属于哪个分组"这件事，而分成两行又会把
+ * "日语只有一个学科"这件事破坏掉（模块与报价引用的是学科 id）。分组是**学段内的桶**：
+ * 某个分组不属于当前学段时，它下面的学科在那一栏里就按顶层显示（见 `catalog.ts` 的注释）。
+ */
+export type CatalogSubject = {
+  id: string;
+  name: string;
+  kind: CatalogSubjectKind;
+  /** 所属分组 id 列表；空数组＝顶层科目/项目。只允许一层（分组不能再套分组）。 */
+  parentIds: string[];
+  order: number;
+  /** 这个学科/项目在哪些学段开（学段 id 列表）。 */
+  stageIds: string[];
+  note: string;
+};
+
+/**
+ * 内容模块的类别 —— 这一层分类不是洁癖，**诊断推荐要用它**：
+ *
+ *   - `教材进度`：一年级…九年级教材、必修/选修教材 → 回答"跟上课内进度"；
+ *   - `能力点`：客观题 / 阅读 / 文言文 / 作文 / 听力 → 回答"补哪个能力短板"；
+ *   - `语言等级`：CEFR-A1…B2 / N5…N1 / CET-4·6 → 回答"考到哪个等级"。
+ *
+ * 三类的筛选维度、推荐话术、排课节奏都不一样，混成一类就没法按需筛。
+ */
+export const CATALOG_MODULE_KINDS = ["教材进度", "能力点", "语言等级"] as const;
+export type CatalogModuleKind = (typeof CATALOG_MODULE_KINDS)[number];
+
+/** 内容模块（属于某个学科；`parentId` 留着一层细分，例如「九年级教材 → 上册」）。 */
+export type CatalogModule = {
+  id: string;
+  /** 上级模块 id；空串＝直接挂在学科下。 */
+  parentId: string;
+  /** 所属学科 id（模块不跨学科复用；跨语种的 CEFR 等级是"每个语种各有一条"）。 */
+  subjectId: string;
+  name: string;
+  kind: CatalogModuleKind;
+  order: number;
+  /** 这个模块适用哪些学段（通常与学科一致，但高考外语与等级考试会不同）。 */
+  stageIds: string[];
+};
+
+/** 班型（**全系统唯一口径**：一对一 / 一对二 / 一对三 / 一对多（4-8）/ 班课（9-20））。 */
+export type CatalogFormat = {
+  id: string;
+  name: string;
+  /** 最少人数 / 最多人数（1 对 1 就是 1–1；一对多（4-8）是 4–8）。 */
+  minSize: number;
+  maxSize: number;
+  /**
+   * 计价模式：`系数`＝单价按班级系数打折（一对一 1.0 / 一对二 0.7 / …）；
+   * `分摊`＝按班上人数分摊教师课时费（现有报价配置里的「班课（9-20）」就是这种）。
+   */
+  mode: "系数" | "分摊";
+  order: number;
+};
+
+/** 交付形态：面授 / 网课 / 网课+答疑 / 托管 / 全日托管。 */
+export type CatalogDelivery = {
+  id: string;
+  name: string;
+  /** 能不能排进课表（托管与全日托管仍然占用教室与教师时间，因此默认都能排）。 */
+  schedulable: boolean;
+  order: number;
+};
+
+/** 课程类型的全部维度。 */
+export type Catalog = {
+  stages: CatalogStage[];
+  subjects: CatalogSubject[];
+  modules: CatalogModule[];
+  formats: CatalogFormat[];
+  deliveries: CatalogDelivery[];
+  /** 这份维度表是照着哪一版种子灌进来的（便于"要不要重新灌"的判断）。 */
+  seededAt: string;
+};
+
 /**
  * 网站内容的整体。
  *
@@ -963,6 +1086,13 @@ export type Database = {
   logs: OperationLog[];
   /** 咨询线索。 */
   inquiries: Inquiry[];
+  /**
+   * **课程类型的维度表**（v23）：学段 / 学科 / 内容模块 / 班型 / 交付形态。
+   *
+   * 它是课程库的"坐标系"：`Course` 描述"实际开的那门课"，这里描述
+   * "可以有哪些维度、彼此怎么组织"。见上面的类型说明。
+   */
+  catalog: Catalog;
   /** 课程库：后台的课程台账（网站课程 + 后台新增）。 */
   courses: Course[];
   /**

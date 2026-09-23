@@ -1,4 +1,5 @@
 import { getTeachersPageFromTemplate } from "@/lib/data/site";
+import { catalogFromSeed } from "./catalog-seed";
 import { materializeSiteCourses } from "./courses";
 import { pricingConfigFromContent } from "./pricing";
 import { siteContentFromContent } from "./site-content";
@@ -264,6 +265,7 @@ export function createSeedDatabase(now: Date = new Date()): Database {
      */
     courses: siteCourses.courses,
     coursePartitions: siteCourses.partitions,
+    catalog: catalogFromSeed(),
     /*
      * 报价配置：用站点内容（data/site/pricing.md）初始化，而不是在种子里
      * 再抄一份价格。抄一份的后果是「宣传页一个价、后台算出来另一个价」，

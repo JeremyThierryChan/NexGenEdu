@@ -53,6 +53,13 @@ export const PAGE_ACCESS: Record<string, Role[]> = {
   "/admin/teachers": ["技术管理员", "财务管理员", "招生老师", "普通教师"],
   "/admin/classrooms": ["技术管理员", "财务管理员", "招生老师", "普通教师"],
   "/admin/courses": ["技术管理员", "招生老师", "普通教师"],
+  /*
+   * 课程类型（后台「课程类型」页）：五个维度表是**配置**，与课程库写入同一档
+   * （技术管理员 / 财务管理员 / 招生老师），普通教师只读 —— 教师要用「班型」下拉，
+   * 但"本机构开哪些班型"不该由每位老师各改一份。
+   * 这与 `GROUP_ACCESS.crud` 对 `catalog.save` 的判定是同一个答案（该分组不给普通教师）。
+   */
+  "/admin/catalog": ["技术管理员", "财务管理员", "招生老师"],
   "/admin/lessons": ["技术管理员", "招生老师", "普通教师"],
   "/admin/calendar": ["技术管理员", "财务管理员", "招生老师", "普通教师"],
   "/admin/timetable": ["技术管理员", "财务管理员", "招生老师", "普通教师"],
@@ -377,6 +384,15 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
   "courses.summary": "global",
   // 分区（栏目 → 子栏目）与课程库同样是参考数据：清单要按它分组、下拉要选它
   "coursePartitions.list": "global",
+  /*
+   * 课程类型的**维度表**（学段 / 学科 / 模块 / 班型 / 交付形态）同理：
+   * 它描述的是"本机构开什么"，不含任何学生 / 金额信息，
+   * 而且现在就被前台与后台的下拉用到（`useFormOptions` 的班型候选）。
+   * 两个写方法（`catalog.save` / `catalog.resetToSeed`）**刻意不在这里登记**：
+   * 角色层 `GROUP_ACCESS.crud` 本来就不给普通教师，登记成 `hidden` 是没人维护的假配置
+   * （下面课程分区那段写了同一条取舍，自检也盯着这种死条目）。
+   */
+  "catalog.list": "global",
   "site.publicContent": "global",
 
   /* 我的课：列表、单条、按日期 / 区间 / 教室 / 学生 / 教师取 */

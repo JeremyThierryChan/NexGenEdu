@@ -1,5 +1,7 @@
 import { createKeyValueStore, type KeyValueStore } from "./storage";
 import { createEmptyDatabase } from "./initial";
+import { catalogFromSeed, catalogSeedSummary } from "./catalog-seed";
+import { catalogSummary, validateCatalog } from "./catalog";
 import {
   emptySiteContent,
   siteContentFromContent,
@@ -139,6 +141,12 @@ import type {
   CoursePartition,
   SiteCase,
   SiteCasesPage,
+  Catalog,
+  CatalogStage,
+  CatalogSubject,
+  CatalogModule,
+  CatalogFormat,
+  CatalogDelivery,
   SiteCopyBlock,
   SiteCopyGroup,
   SiteCopyItem,
@@ -911,6 +919,20 @@ function migrate(db: Database): Database | null {
     db.version = 22;
   }
 
+  if (db.version === 22) {
+    /*
+     * v22 → v23：**课程类型改为维度模型**。
+     *
+     * 老库里没有这张表 —— 从种子灌一份进去（机构给的那份分类清单），而不是留空：
+     * 空着的话后台「课程类型」页一打开就是一片空白，而机构要的是"能把清单上的东西一条条改"。
+     *
+     * 种子用**确定性 id**（`st_小学` / `subj_语文` / `mod_语文·一年级`…），
+     * 因此重复灌不会造出重复行（见 `catalog-seed.ts` 的文件头）。
+     */
+    db.catalog = catalogFromSeed();
+    db.version = 23;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -937,7 +959,71 @@ function migrate(db: Database): Database | null {
    */
   db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
 
+  /*
+   * 收尾归一：**维度表必须存在**（与分区表、网站内容同一条纪律）。
+   * 一份"自称 v23"却缺 `catalog` 的文件（手改过的导出、半份恢复）会让后台
+   * 「课程类型」页整页打不开 —— 读 `db.catalog.stages.filter` 直接 TypeError。
+   * 缺了就从种子补一份（确定性 id，不会与人工改过的行混在一起）。
+   */
+  if (db.catalog === undefined || !Array.isArray(db.catalog.stages)) db.catalog = catalogFromSeed();
+
   return db.version === CURRENT_VERSION ? db : null;
+}
+
+/**
+ * 维度表归一：去空白、补默认值、**丢掉不认识的字段**。
+ *
+ * 与 `normalizeCourse` / `normalizePartition` 同一条纪律：调用方（后台表单、脚本、
+ * 自检夹具）未必带全字段，缺了就在这一处补 —— 而不是让下游读到 `undefined`。
+ */
+function normalizeCatalog(input: Catalog): Catalog {
+  const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+  const order = (value: unknown, fallback: number): number =>
+    Number.isFinite(Number(value)) ? Number(value) : fallback;
+  const ids = (value: unknown): string[] =>
+    Array.isArray(value) ? value.map((item) => String(item)).filter((item) => item !== "") : [];
+
+  return {
+    stages: (input.stages ?? []).map((stage, index) => ({
+      id: text(stage.id),
+      name: text(stage.name),
+      order: order(stage.order, index + 1),
+      note: text(stage.note),
+    })),
+    subjects: (input.subjects ?? []).map((subject, index) => ({
+      id: text(subject.id),
+      name: text(subject.name),
+      kind: subject.kind === "语言" || subject.kind === "项目" ? subject.kind : "学科",
+      parentIds: ids(subject.parentIds),
+      order: order(subject.order, index + 1),
+      stageIds: ids(subject.stageIds),
+      note: text(subject.note),
+    })),
+    modules: (input.modules ?? []).map((item, index) => ({
+      id: text(item.id),
+      parentId: text(item.parentId),
+      subjectId: text(item.subjectId),
+      name: text(item.name),
+      kind: item.kind === "能力点" || item.kind === "语言等级" ? item.kind : "教材进度",
+      order: order(item.order, index + 1),
+      stageIds: ids(item.stageIds),
+    })),
+    formats: (input.formats ?? []).map((format, index) => ({
+      id: text(format.id),
+      name: text(format.name),
+      minSize: Number.isFinite(Number(format.minSize)) ? Number(format.minSize) : 1,
+      maxSize: Number.isFinite(Number(format.maxSize)) ? Number(format.maxSize) : 1,
+      mode: format.mode === "分摊" ? "分摊" : "系数",
+      order: order(format.order, index + 1),
+    })),
+    deliveries: (input.deliveries ?? []).map((delivery, index) => ({
+      id: text(delivery.id),
+      name: text(delivery.name),
+      schedulable: delivery.schedulable !== false,
+      order: order(delivery.order, index + 1),
+    })),
+    seededAt: text(input.seededAt),
+  };
 }
 
 function persist(db: Database): void {
@@ -2680,6 +2766,72 @@ const localApi = {
    *
    * 注意边界：这里加课程**不会**让宣传网站上多出一张卡片 —— 网站是静态内容。
    */
+  /*
+   * ── 课程类型的维度表（v23）────────────────────────────────────────────────
+   *
+   * 只有两个方法：**读整份** + **存整份**。
+   *
+   * 为什么不做成"每张表各一套 CRUD"（学段/学科/模块/班型/交付 5×3 = 15 个方法）：
+   * 后台那一页本来就是"打开 → 在这一份草稿上增删改排序 → 保存"，整份交上来最省事，
+   * 也避免出现"改了三处、只有两处落库"那种半截状态。维度表很小（几百行），
+   * 整份写的代价可以忽略；`validateCatalog` 会把悬空引用与重名一次说清。
+   *
+   * 权限刻意**没有单独分**（机构说"先不分维护角色"）：它落在 `crud` 这一组，
+   * 与课程库写入同一档（技术管理员 / 财务管理员 / 招生老师），教师只读。
+   */
+  catalog: {
+    /** 整份维度表（后台维护页与将来的组合解析都读它）。 */
+    async list(): Promise<Catalog> {
+      await delay();
+      return clone(load().catalog);
+    },
+
+    /**
+     * 存整份维度表（校验后整体替换）。
+     *
+     * 与"分区/课程"那类不同，这里**不做乐观锁**：维度表是配置（不是逐条编辑的业务记录），
+     * 而整份替换本身已经是"我看到的这一份就是我要的"——两个人同时改会以后保存的为准，
+     * 日志里记下规模变化，出问题看得出是哪一次改的。
+     */
+    async save(input: Catalog): Promise<Catalog> {
+      await delay();
+      const db = load();
+      const normalized = normalizeCatalog(input);
+      const problems = validateCatalog(normalized);
+      if (problems.length > 0) throw new Error(problems.join("；"));
+
+      const before = catalogSummary(db.catalog);
+      const after = catalogSummary(normalized);
+      db.catalog = normalized;
+      writeLog(db, {
+        entity: "课程类型",
+        action: "保存",
+        targetId: "",
+        summary: `课程类型的维度表：${after}` + (before === after ? "（规模未变）" : `（原 ${before}）`),
+      });
+      persist(db);
+      return clone(db.catalog);
+    },
+
+    /** 把维度表恢复成机构那份清单的种子（"改乱了想回到初值"用；会覆盖人工改动）。 */
+    async resetToSeed(): Promise<Catalog> {
+      await delay();
+      const db = load();
+      db.catalog = catalogFromSeed();
+      const seed = catalogSeedSummary();
+      writeLog(db, {
+        entity: "课程类型",
+        action: "恢复种子",
+        targetId: "",
+        summary:
+          `课程类型的维度表恢复成种子：${String(seed.stages)} 个学段 / ` +
+          `${String(seed.subjects)} 个学科项目 / ${String(seed.modules)} 个内容模块`,
+      });
+      persist(db);
+      return clone(db.catalog);
+    },
+  },
+
   courses: {
     /*
      * 课程库：从带版本号的工厂里取需要的几个（`list` / `create` / `update` / `remove`）。
@@ -5290,6 +5442,12 @@ export type {
   CoursePartition,
   SiteCase,
   SiteCasesPage,
+  Catalog,
+  CatalogStage,
+  CatalogSubject,
+  CatalogModule,
+  CatalogFormat,
+  CatalogDelivery,
   SiteFeaturedCourse,
   SiteFeaturedPage,
   SiteCopyBlock,
@@ -5318,5 +5476,7 @@ export {
   COURSE_ORIGINS,
   COURSE_STATUSES,
   COURSE_SITE_KINDS,
+  CATALOG_SUBJECT_KINDS,
+  CATALOG_MODULE_KINDS,
   SUBMISSION_OPTIONS,
 } from "./types";

@@ -117,10 +117,18 @@ import { siteTeachers as siteTeachersFromContent } from "@/lib/backend/site-impo
 import { coursesFromSite } from "@/lib/backend/courses";
 import { SITE_COPY_KEYS, validateCopy } from "@/lib/backend/site-copy-model";
 import { copyBlocksFromContent } from "@/lib/backend/site-copy";
+import { featuredDeleteRefusal } from "@/lib/backend/featured-tree";
+import { getFormOptionsFromTemplate } from "@/lib/backend/options";
 import {
-  featuredDeleteRefusal,
-  featuredFormOptions,
-} from "@/lib/backend/featured-tree";
+  assignCatalogIds,
+  catalogGroups,
+  catalogSummary,
+  stageNamesOf,
+  subjectsInGroup,
+  subjectsOfStage,
+  validateCatalog,
+} from "@/lib/backend/catalog";
+import { catalogFromSeed, catalogId, catalogSeedSummary } from "@/lib/backend/catalog-seed";
 import { validateFeaturedPage } from "@/lib/backend/site-content";
 import {
   childPartitions,
@@ -8509,16 +8517,27 @@ console.log("\n=== 27. 特色课程进库（v20：机构要求「特色课程也
   eq("既没子课程、也没被引用：可以删（护栏不误伤）",
     featuredDeleteRefusal(guardPage, "f2", []), "");
 
-  // ⑤ 后台「可开班型」候选取自库里的树（不再是网站内容文件）
-  eq("班型候选 = 库里特色课程的二级课程名",
-    featuredFormOptions(afterFeatured.siteContent.featuredPage).includes("一对多小班课"), true);
+  /*
+   * ⑤ 后台「班型」候选的口径（v23 改成维度表）。
+   *
+   * 这一条原先钉的是"班型候选 = 库里特色课程的二级课程名"（一对一定制课 / 一对二 / 一对三小组课…）。
+   * 机构确认「班型以系统现行的那一套为准，全部改过来」之后，班型的唯一口径是
+   * `catalog.formats`（一对一 / 一对二 / 一对三 / 一对多（4-8）/ 班课（9-20），
+   * 与 `data/site/pricing.md` 的「班级类型」逐个同名）—— 特色课程树那套写法废弃。
+   */
+  eq("班型候选的同步种子 = 课程类型里的班型（不再是特色课程的二级课程名）",
+    getFormOptionsFromTemplate(), catalogFromSeed().formats.map((format) => format.name));
+  eq("而且就是报价里那五个班型（同一件事不再有两套写法）",
+    catalogFromSeed().formats.map((format) => format.name),
+    ["一对一", "一对二", "一对三", "一对多（4-8）", "班课（9-20）"]);
   const optionsSource = readFileSync(new URL("../lib/backend/options.ts", import.meta.url), "utf8");
-  ok("那一份只读模版的班型候选**明确写着是同步种子**（名字里带 FromTemplate）",
-    optionsSource.includes("getFormOptionsFromTemplate"));
+  ok("那一份只读种子的班型候选**明确写着是同步种子**（名字里带 FromTemplate）",
+    optionsSource.includes("getFormOptionsFromTemplate") && optionsSource.includes("catalogFromSeed()"));
   const hookSource = readFileSync(new URL("../components/admin/useFormOptions.ts", import.meta.url), "utf8");
-  ok("后台表单的班型候选改成问后端（库里的树），不再是读文件",
-    /\.publicContent\(\)/.test(hookSource) &&
-    hookSource.includes("featuredFormOptions(data.siteContent.featuredPage)"));
+  ok("后台表单的班型候选问的是课程类型（维度表），不再是特色课程树",
+    /\.catalog\s*\n?\s*\.list\(\)/.test(hookSource) &&
+    hookSource.includes("catalog.formats.map((format) => format.name)") &&
+    !hookSource.includes("featuredFormOptions"));
   const formUsers = ["app/admin/(dashboard)/courses/page.tsx", "components/admin/StudentForm.tsx",
     "components/admin/EnrollmentPanel.tsx", "components/admin/LessonForm.tsx",
     "components/admin/LessonSeriesForm.tsx"]
@@ -8815,15 +8834,243 @@ console.log("\n=== 29. 页面文案块进库（v22：品牌 / 首页 / 关于 / 
     contentPage.includes("SiteCopyEditor"));
 }
 
+console.log("\n=== 30. 课程类型：五张维度表（v23）===");
+
+/*
+ * 机构给的那份课程清单铺开有四百多条叶子，但它们是**五个维度的乘积**：
+ * 学段 × 学科 / 项目 × 内容模块 × 班型 × 交付形态。这一节守四件事：
+ *
+ *   1. **种子自洽**：id 不重复、引用不悬空、名字不重名 —— 灌进去的那一份必须
+ *      **立刻**能通过 `catalog.save` 的同一道闸门（否则机构打开后台第一眼就是一片红字）；
+ *   2. **合并语义**：清单里「小学语文 / 初中语文 / 高中语文」是**一行**语文 + 一个学段列表
+ *      （不合并就会出现重复 id，而报价 / 排课 / 诊断引用的是学科 id）；
+ *   3. **校验真的拦**：重名 / 悬空引用 / 两层分组 / 班型人数区间反向 / 删空 / 空 id；
+ *   4. **API 与迁移**：v22 老库升到 v23 时维度表被灌进去，`save` 落库并留痕，
+ *      `resetToSeed` 回初值，而"自称当前版本却缺这张表"的文件也要被兜住。
+ */
+{
+  __useStoreForTesting(memory);
+
+  // ① 种子自洽
+  const seedCatalog = catalogFromSeed();
+  const seedSummary = catalogSeedSummary();
+  eq("种子的规模与 catalogSeedSummary 一致",
+    [seedCatalog.stages.length, seedCatalog.subjects.length, seedCatalog.modules.length,
+      seedCatalog.formats.length, seedCatalog.deliveries.length],
+    [seedSummary.stages, seedSummary.subjects, seedSummary.modules, seedSummary.formats, seedSummary.deliveries]);
+  ok(`种子规模就是机构清单那一份（${catalogSummary(seedCatalog)}）`,
+    seedCatalog.stages.length === 5 && seedCatalog.formats.length === 5 &&
+    seedCatalog.subjects.length > 30 && seedCatalog.modules.length > 80);
+  const duplicatesOf = (ids: string[]): string[] => ids.filter((id, index) => ids.indexOf(id) !== index);
+  eq("五张表的 id 都不重复",
+    [duplicatesOf(seedCatalog.stages.map((item) => item.id)).length,
+      duplicatesOf(seedCatalog.subjects.map((item) => item.id)).length,
+      duplicatesOf(seedCatalog.modules.map((item) => item.id)).length,
+      duplicatesOf(seedCatalog.formats.map((item) => item.id)).length,
+      duplicatesOf(seedCatalog.deliveries.map((item) => item.id)).length],
+    [0, 0, 0, 0, 0]);
+  eq("种子**自己就能过闸门**（否则后台打开第一眼是一片红字）", validateCatalog(seedCatalog), []);
+  eq("班型就是报价里的「班级类型」（一件事不再有两套写法）",
+    seedCatalog.formats.map((format) => format.name), pricing.classTypes.map((item) => item.name));
+  ok("每个模块都属于一个存在的学科、每个引用都指向存在的学段",
+    seedCatalog.modules.every((item) => seedCatalog.subjects.some((subject) => subject.id === item.subjectId)) &&
+    seedCatalog.subjects.every((item) =>
+      item.parentIds.every((id) => seedCatalog.subjects.some((subject) => subject.id === id))));
+
+  // ② 合并语义（学科与学段解耦，这正是"不枚举"的落脚点）
+  const named = (name: string) => seedCatalog.subjects.find((item) => item.name === name);
+  const stagesOf = (ids: readonly string[]): string[] => stageNamesOf(seedCatalog, ids);
+  eq("「语文」只有一行，小学 / 初中 / 高中挂在这一行上",
+    [seedCatalog.subjects.filter((item) => item.name === "语文").length, stagesOf(named("语文")?.stageIds ?? [])],
+    [1, ["小学", "初中", "高中"]]);
+  eq("「英语」横跨四个学段（小学 / 初中 / 高中 / 大学）",
+    stagesOf(named("英语")?.stageIds ?? []), ["小学", "初中", "高中", "大学"]);
+  eq("「日语」既在高中（高考外语）又在其他类型（等级考试），并且挂在「外语等级考试」下",
+    [stagesOf(named("日语")?.stageIds ?? []), named("日语")?.parentIds],
+    [["高中", "其他类型"], [catalogId("subj", "外语等级考试")]]);
+  const chineseModules = seedCatalog.modules.filter((item) => item.subjectId === catalogId("subj", "语文"));
+  const objective = chineseModules.find((item) => item.name === "客观题");
+  eq("语文里「客观题」只有一行（初中与高中并到这一行上）",
+    [chineseModules.filter((item) => item.name === "客观题").length, objective?.kind, stagesOf(objective?.stageIds ?? [])],
+    [1, "能力点", ["初中", "高中"]]);
+  eq("小学语文的模块是教材进度（一年级…六年级）",
+    chineseModules.filter((item) => item.kind === "教材进度").map((item) => item.name),
+    ["一年级", "二年级", "三年级", "四年级", "五年级", "六年级"]);
+  ok("「听力」在两个学科里各有一条（模块不跨学科复用，这不算重名）",
+    new Set(seedCatalog.modules.filter((item) => item.name === "听力").map((item) => item.subjectId)).size >= 2);
+
+  // ③ 分组是「学段内的桶」
+  const stageIdOf = (name: string): string =>
+    seedCatalog.stages.find((item) => item.name === name)?.id ?? "";
+  const examGroup = catalogGroups(seedCatalog).find((group) => group.name === "外语等级考试");
+  ok("「外语等级考试」这个分组只属于「其他类型」",
+    examGroup !== undefined && !(named("外语等级考试")?.stageIds.includes(stageIdOf("高中")) ?? true));
+  eq("在「其他类型」那一栏里，日语在分组里",
+    examGroup !== undefined &&
+      subjectsInGroup(seedCatalog, stageIdOf("其他类型"), examGroup.id).some((item) => item.name === "日语"),
+    true);
+  eq("在「高中」那一栏里，这个分组是空桶",
+    examGroup === undefined ? ["missing"] : subjectsInGroup(seedCatalog, stageIdOf("高中"), examGroup.id), []);
+  ok("而日语仍然出现在「高中」那一栏的顶层（否则高考外语那一支整条消失）",
+    subjectsInGroup(seedCatalog, stageIdOf("高中"), "").some((item) => item.name === "日语"));
+  eq("「其他类型」那一栏 = 顶层桶 + 各分组，不重不漏",
+    subjectsOfStage(seedCatalog, stageIdOf("其他类型")).length,
+    subjectsInGroup(seedCatalog, stageIdOf("其他类型"), "").length +
+      catalogGroups(seedCatalog)
+        .filter((group) => group.stageIds.includes(stageIdOf("其他类型")))
+        .reduce((sum, group) => sum + subjectsInGroup(seedCatalog, stageIdOf("其他类型"), group.id).length, 0));
+
+  /** 跑一次"应当被拒绝"的保存，把服务端的原话取回来（没抛错就返回空串，断言会因此报红）。 */
+  const refusalOf = async (run: () => Promise<unknown>): Promise<string> => {
+    try {
+      await run();
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+
+  // ④ 校验真的拦（每一种都给得出理由）
+  const draftOf = (): Catalog => JSON.parse(JSON.stringify(seedCatalog)) as Catalog;
+  const problemsOf = (mutate: (draft: Catalog) => void): string[] => {
+    const draft = draftOf();
+    mutate(draft);
+    return validateCatalog(draft);
+  };
+  ok("学科重名被拒",
+    problemsOf((draft) => draft.subjects.push({ ...draft.subjects[0]!, id: "subj_另一个" }))
+      .some((text) => text.includes("出现了两次")));
+  ok("学科没有名字被拒",
+    problemsOf((draft) => { draft.subjects[0]!.name = "  "; }).some((text) => text.includes("没有名字")));
+  ok("学科的空 id 被拒（保存后没有任何东西能引用它）",
+    problemsOf((draft) => { draft.subjects[0]!.id = ""; }).some((text) => text.includes("没有 id")));
+  ok("学科引用不存在的学段被拒",
+    problemsOf((draft) => { draft.subjects[0]!.stageIds = ["st_不存在"]; })
+      .some((text) => text.includes("不存在的学段")));
+  ok("学科挂在不存在的分组上被拒",
+    problemsOf((draft) => { draft.subjects[0]!.parentIds = ["subj_不存在"]; })
+      .some((text) => text.includes("不存在的分组")));
+  ok("分组只允许一层（把学科挂到「雅思」下面被拒）", (() => {
+    const inGroup = named("雅思");
+    if (inGroup === undefined) return false;
+    return problemsOf((draft) => {
+      const target = draft.subjects.find((item) => item.name === "语文");
+      if (target !== undefined) target.parentIds = [inGroup.id];
+    }).some((text) => text.includes("分组只允许一层"));
+  })());
+  ok("模块属于不存在的学科被拒",
+    problemsOf((draft) => { draft.modules[0]!.subjectId = "subj_不存在"; })
+      .some((text) => text.includes("不存在的学科")));
+  ok("模块挂在一个不存在的上级模块上被拒",
+    problemsOf((draft) => { draft.modules[0]!.parentId = "mod_不存在"; })
+      .some((text) => text.includes("不存在的上级模块")));
+  ok("模块挂到**别的学科**的模块下被拒", (() => {
+    const first = seedCatalog.modules[0];
+    const other = seedCatalog.modules.find((item) => item.subjectId !== first?.subjectId);
+    if (first === undefined || other === undefined) return false;
+    return problemsOf((draft) => { draft.modules[0]!.parentId = other.id; })
+      .some((text) => text.includes("别的学科"));
+  })());
+  ok("模块的上级是它自己被拒",
+    problemsOf((draft) => {
+      const item = draft.modules[0]!;
+      item.parentId = item.id;
+    }).some((text) => text.includes("上级是它自己")));
+  ok("同一学科同一上级下模块重名被拒",
+    problemsOf((draft) => draft.modules.push({ ...draft.modules[0]!, id: "mod_另一个" }))
+      .some((text) => text.includes("同一层内不能重复")));
+  ok("班型最少人数小于 1 被拒",
+    problemsOf((draft) => { draft.formats[0]!.minSize = 0; }).some((text) => text.includes("最少人数")));
+  ok("班型最多人数小于最少人数被拒",
+    problemsOf((draft) => { draft.formats[0]!.maxSize = 0; }).some((text) => text.includes("最多人数")));
+  ok("班型重名被拒",
+    problemsOf((draft) => draft.formats.push({ ...draft.formats[0]!, id: "fmt_另一个" }))
+      .some((text) => text.includes("出现了两次")));
+  ok("交付形态重名被拒",
+    problemsOf((draft) => draft.deliveries.push({ ...draft.deliveries[0]!, id: "dlv_另一个" }))
+      .some((text) => text.includes("出现了两次")));
+  ok("学段删空被拒",
+    problemsOf((draft) => { draft.stages = []; }).some((text) => text.includes("学段至少")));
+  ok("班型删空被拒",
+    problemsOf((draft) => { draft.formats = []; }).some((text) => text.includes("班型至少")));
+
+  // ⑤ 新增行补 id（保存前的那一次扫描）
+  const fresh = draftOf();
+  fresh.stages.push({ id: "", name: "研究生", order: 9, note: "" });
+  fresh.subjects.push({
+    id: "", name: "统计", kind: "学科", parentIds: [], order: 99,
+    stageIds: [catalogId("st", "研究生")], note: "",
+  });
+  fresh.modules.push({
+    id: "", parentId: "", subjectId: catalogId("subj", "统计"), name: "回归", kind: "教材进度", order: 1,
+    stageIds: [catalogId("st", "研究生")],
+  });
+  fresh.formats.push({ id: "", name: "一对六", minSize: 6, maxSize: 6, mode: "系数", order: 9 });
+  fresh.deliveries.push({ id: "", name: "录播", schedulable: true, order: 9 });
+  assignCatalogIds(fresh, catalogId);
+  eq("新加的行按名字派生 id（模块带学科名，两个学科的同名模块才不会撞）",
+    [fresh.stages.at(-1)?.id, fresh.subjects.at(-1)?.id, fresh.modules.at(-1)?.id,
+      fresh.formats.at(-1)?.id, fresh.deliveries.at(-1)?.id],
+    [catalogId("st", "研究生"), catalogId("subj", "统计"), catalogId("mod", "统计·回归"),
+      catalogId("fmt", "一对六"), catalogId("dlv", "录播")]);
+  eq("补完 id 之后整份仍然通过校验", validateCatalog(fresh), []);
+  const freshBefore = JSON.stringify(fresh);
+  assignCatalogIds(fresh, catalogId);
+  eq("再补一次不会动已经落地的 id（幂等）", JSON.stringify(fresh), freshBefore);
+
+  // ⑥ API 与迁移
+  const legacyCatalogDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & { version: number };
+  delete legacyCatalogDb.catalog;
+  legacyCatalogDb.version = 22;
+  eq("v22 老库（没有课程类型这一块）能升级导入",
+    (await api.importDatabase(JSON.stringify(legacyCatalogDb))).ok, true);
+  const afterCatalog = await api.exportDatabase();
+  eq("升级后版本号是当前版本", afterCatalog.version, CURRENT_VERSION);
+  eq("迁移把种子灌进了库（与 catalogFromSeed 一致）",
+    catalogSummary(afterCatalog.catalog), catalogSummary(seedCatalog));
+
+  const listed = await api.catalog.list();
+  eq("catalog.list 读出来的是库里那一份", catalogSummary(listed), catalogSummary(seedCatalog));
+
+  const invalidDraft = JSON.parse(JSON.stringify(listed)) as Catalog;
+  invalidDraft.formats[0]!.minSize = 0;
+  const catalogRefusal = await refusalOf(async () => await api.catalog.save(invalidDraft));
+  ok("catalog.save 拦住非法维度表并把理由说清（不是静默保存）",
+    catalogRefusal.includes("最少人数"));
+
+  const grown = JSON.parse(JSON.stringify(listed)) as Catalog;
+  grown.stages.push({ id: "", name: "研究生", order: grown.stages.length + 1, note: "" });
+  assignCatalogIds(grown, catalogId);
+  const savedCatalog = await api.catalog.save(grown);
+  eq("合法的维度表能保存（新学段进去了）",
+    savedCatalog.stages.some((item) => item.name === "研究生"), true);
+  const catalogLog = await api.logs.list();
+  eq("保存课程类型写了操作日志", catalogLog[0]?.entity, "课程类型");
+  ok("日志里写了规模（「原本几条、现在几条」看得出是哪一次改的）",
+    (catalogLog[0]?.summary ?? "").includes("学段"));
+  eq("再读一次，库里确实是那一份（不是只改了返回值）",
+    (await api.catalog.list()).stages.length, listed.stages.length + 1);
+
+  const restoredCatalog = await api.catalog.resetToSeed();
+  eq("恢复种子把维度表还原（新加的那个学段没了）",
+    [restoredCatalog.stages.length, catalogSummary(restoredCatalog)],
+    [listed.stages.length, catalogSummary(seedCatalog)]);
+  eq("恢复种子也留痕", (await api.logs.list())[0]?.action, "恢复种子");
+
+  /*
+   * 尾闸门（与分区表 / 网站内容同一条纪律）：**声称的版本号不是证据**。
+   * 一份"自称当前版本却缺 catalog"的文件（手改过的导出、半份恢复）如果直接进库，
+   * 后台「课程类型」页会整页 TypeError。这里走真实的导入路径验一次。
+   */
+  const brokenCatalogDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & { version: number };
+  delete brokenCatalogDb.catalog;
+  brokenCatalogDb.version = CURRENT_VERSION;
+  eq("自称当前版本、却缺课程类型的文件也能导入",
+    (await api.importDatabase(JSON.stringify(brokenCatalogDb))).ok, true);
+  const repaired = await api.exportDatabase();
+  ok("导入后被兜成种子那一份（后台不会整页打不开）",
+    Array.isArray(repaired.catalog.stages) && repaired.catalog.stages.length === seedSummary.stages);
+}
+
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
-process.exit(failures === 0 ? 0 : 1);
-
-process.exit(failures === 0 ? 0 : 1);
-
-process.exit(failures === 0 ? 0 : 1);
-
-process.exit(failures === 0 ? 0 : 1);
-
-process.exit(failures === 0 ? 0 : 1);
-
 process.exit(failures === 0 ? 0 : 1);

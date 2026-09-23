@@ -1,6 +1,6 @@
-import { getFeaturedContentFromTemplate } from "@/lib/data/featured";
 import { getScheduleContent } from "@/lib/data/pages";
 import { getCourseColumnsFromTemplate, getSiteBrand } from "@/lib/data/site";
+import { catalogFromSeed } from "./catalog-seed";
 import { parseGapWindow, type GapWindow } from "./timetable";
 
 /**
@@ -68,17 +68,20 @@ export function getClassHoursWindow(): GapWindow | null {
 }
 
 /**
- * 班型候选（**只读模版**，作为下拉的同步种子）。
+ * 班型候选（**只读种子**，作为下拉的同步第一帧）。
  *
- * 真正的候选来自**库里的特色课程树**（`useFormOptions` 挂载后会用后端那一份替换掉它）：
- * v20 把特色课程搬进库之后，机构在后台加班型就该在后台的下拉里出现 ——
- * 而这里读的模版是**构建期**的一份，改不了。留着它的唯一理由是"表单第一帧不为空"。
+ * 真正的候选来自**库里的课程类型维度表**（`useFormOptions` 挂载后会用后端那一份替换掉它）：
+ * v23 起「班型」在全系统只有一个口径 —— `catalog.formats`（一对一 / 一对二 / 一对三 /
+ * 一对多（4-8）/ 班课（9-20）），机构在后台「课程类型」页加一个班型，
+ * 所有下拉里立刻都有它。这里取的是**同一份种子的同步副本**，留着它只有一个理由：
+ * 表单第一帧不为空（构建期读不到库）。
+ *
+ * 以前这里取的是特色课程树的二级课程名（一对一定制课 / 一对二 / 一对三小组课…）——
+ * 那是同一个概念的第二套写法，机构确认"以系统现行的那一套为准"之后已经废弃。
  */
 export function getFormOptionsFromTemplate(): string[] {
   try {
-    return getFeaturedContentFromTemplate().courses.flatMap((course) =>
-      course.children.map((child) => child.name),
-    );
+    return catalogFromSeed().formats.map((format) => format.name);
   } catch {
     return [];
   }

@@ -25,6 +25,12 @@ export const ADMIN_NAV: readonly AdminNavItem[] = [
     description: "课程台账：网站课程 + 机构自己加的课（围棋、书法），排课与教师科目都取自这里",
   },
   {
+    href: "/admin/catalog",
+    label: "课程类型",
+    description:
+      "课程由五个维度组合而成（学段 × 学科 / 项目 × 内容模块 × 班型 × 交付形态）。这里是那五张维度表：加课、改名、排序、勾学段都在这一页",
+  },
+  {
     href: "/admin/content",
     label: "网站内容",
     description: "宣传网站上的对外文案：学生案例（/cases 与首页那块的来源）",

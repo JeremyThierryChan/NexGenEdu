@@ -9,7 +9,14 @@ import { cn } from "@/lib/utils/cn";
  * 避免每个模块各写一套 input 样式。
  */
 
-const CONTROL_CLASS =
+/**
+ * 输入控件的统一样式。
+ *
+ * 导出它是给**表格里的行内编辑**用的（课程类型页那种"一行若干控件、表头已经写了名字"的
+ * 场景）：那里用 `TextField` 会多出一行空标签（标签在上，空串也占位），
+ * 而直接用裸 `<input>` 又会丢掉这套样式。于是样式在一处，页面自己拼控件。
+ */
+export const CONTROL_CLASS =
   "block w-full rounded-md border border-ink-300 bg-white px-2.5 py-1.5 text-sm text-ink-900 " +
   "outline-none transition-colors placeholder:text-ink-400 " +
   "focus:border-brand-500 focus:ring-2 focus:ring-brand-100 disabled:bg-ink-50 disabled:text-ink-400";

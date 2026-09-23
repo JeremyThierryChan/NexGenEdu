@@ -359,6 +359,86 @@ await check("网站内容", "字段键重复被拒", async () => {
   }
 }, (text: string) => text === "已拒绝");
 
+/* ── 1.6 课程类型（五张维度表：加学段 / 加学科 / 加模块 / 加班型）── */
+/*
+ * 这一节按机构在后台的真实顺序走一遍：读 → 加一个学段 + 学科 + 模块 + 班型 → 再读确认落库
+ * → 非法的一份被拒（人数区间反向 / 悬空引用）→ 恢复种子收尾。
+ *
+ * 收尾**必须回到种子**：验收用的就是这个机构自己的库，留着「验收学段」会让后面每次构站
+ * 都多出一截，而且下一次验收时 `subjects` 里会多一条重名的行（id 是写死的）。
+ */
+await check("课程类型", "维度表读得到（五张表都在）", async () => {
+  const catalog = await api.catalog.list();
+  return [catalog.stages.length, catalog.formats.length, catalog.deliveries.length];
+}, (value: number[]) => value[0] > 0 && value[1] > 0 && value[2] > 0);
+await check("课程类型", "班型与报价里的班级类型是同一套（一件事只有一套写法）", async () => {
+  const catalog = await api.catalog.list();
+  const pricing = await api.pricing.get();
+  return catalog.formats.map((item) => item.name).join("|") === pricing.classTypes.map((item) => item.name).join("|");
+});
+await check("课程类型", "加一个学段 + 学科 + 模块 + 班型，整份保存", async () => {
+  const catalog = await api.catalog.list();
+  const draft = JSON.parse(JSON.stringify(catalog)) as typeof catalog;
+  draft.stages.push({ id: "st_验收学段", name: "验收学段", order: 99, note: "验收用，跑完恢复种子" });
+  draft.subjects.push({
+    id: "subj_验收学科", name: "验收学科", kind: "学科", parentIds: [], order: 99,
+    stageIds: ["st_验收学段"], note: "",
+  });
+  draft.modules.push({
+    id: "mod_验收学科·验收模块", parentId: "", subjectId: "subj_验收学科", name: "验收模块",
+    kind: "能力点", order: 1, stageIds: ["st_验收学段"],
+  });
+  draft.formats.push({ id: "fmt_验收班型", name: "验收班型", minSize: 5, maxSize: 5, mode: "系数", order: 99 });
+  const saved = await api.catalog.save(draft);
+  return [
+    saved.stages.some((item) => item.id === "st_验收学段"),
+    saved.subjects.some((item) => item.name === "验收学科"),
+    saved.modules.some((item) => item.name === "验收模块"),
+    saved.formats.some((item) => item.name === "验收班型"),
+  ];
+}, (value: boolean[]) => value.every(Boolean));
+await check("课程类型", "改动真的落库了（再读一次还在）", async () => {
+  const catalog = await api.catalog.list();
+  return (
+    catalog.stages.some((item) => item.name === "验收学段") &&
+    catalog.formats.some((item) => item.name === "验收班型")
+  );
+});
+await check("课程类型", "班级人数区间写反会被拒（不是静默保存）", async () => {
+  const catalog = await api.catalog.list();
+  const draft = JSON.parse(JSON.stringify(catalog)) as typeof catalog;
+  draft.formats[0]!.minSize = 0;
+  try {
+    await api.catalog.save(draft);
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("最少人数") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+await check("课程类型", "悬空引用会被拒（引用了不存在的学段）", async () => {
+  const catalog = await api.catalog.list();
+  const draft = JSON.parse(JSON.stringify(catalog)) as typeof catalog;
+  draft.subjects[0]!.stageIds = ["st_不存在"];
+  try {
+    await api.catalog.save(draft);
+    return "没有被拒绝";
+  } catch (cause) {
+    return cause instanceof Error && cause.message.includes("不存在的学段") ? "已拒绝" : cause;
+  }
+}, (text: string) => text === "已拒绝");
+await check("课程类型", "保存写了操作日志", async () => {
+  const logs = await api.logs.list();
+  return logs.some((item) => item.entity === "课程类型");
+});
+await check("课程类型", "恢复种子（收尾：验收加的那几行必须清掉）", async () => {
+  const restored = await api.catalog.resetToSeed();
+  return [
+    restored.stages.some((item) => item.name === "验收学段"),
+    restored.subjects.some((item) => item.name === "验收学科"),
+    restored.formats.some((item) => item.name === "验收班型"),
+  ];
+}, (value: boolean[]) => value.every((item) => item === false));
+
 /* ── 2 教室 ── */
 let classroomId = "";
 await check("教室", "新建教室（含可用时段）", async () => {

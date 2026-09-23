@@ -1,3 +1,4 @@
+import { catalogFromSeed } from "./catalog-seed";
 import { materializeSiteCourses } from "./courses";
 import { pricingConfigFromContent } from "./pricing";
 import { siteContentFromContent } from "./site-content";
@@ -52,6 +53,8 @@ export function createEmptyDatabase(now: Date = new Date()): Database {
     // 课程库与报价配置**不是"示例数据"**：它们来自网站内容，是真实的初始值
     courses: coursesFromContent.courses,
     coursePartitions: coursesFromContent.partitions,
+    // 课程类型的维度表（学段/学科/模块/班型/交付形态）：照种子灌一份
+    catalog: catalogFromSeed(),
     pricing: pricingConfigFromContent(),
     siteContent: siteContentFromContent(),
     updatedAt: now.toISOString(),
