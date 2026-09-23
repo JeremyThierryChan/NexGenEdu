@@ -104,6 +104,7 @@ await check("课程库", "新建课程（围棋，挂到子栏目）", async () 
   const created = await api.courses.create({
     name: "围棋", partitionId: subId, forms: ["一对一定制课"], origin: "后台",
     status: "开放", note: "验收用", createdAt: new Date().toISOString(),
+    path: "", tags: [], target: "", order: 990, intro: "", siteKind: "不展示",
     /*
      * 维度引用（v28）：新建课程**必须挂上**（机构口径："课程以维度法为主安排"）。
      * 这里顺手验一次"新建时就带维度"，并把「围棋」挂到「其他类型 × 3D建模与3D打印」之外的
@@ -149,7 +150,7 @@ await check("课程库", "空栏目可以删掉（护栏不误伤）", async () 
   return await api.coursePartitions.remove(empty.id);
 }, (removed: boolean) => removed === true);
 await check("课程库", "课程列表与统计", async () => (await api.courses.list()).length > 0);
-await check("课程库", "修改课程", async () => (await api.courses.update(courseId, { note: "已改" })).note === "已改");
+await check("课程库", "修改课程", async () => (await api.courses.update(courseId, { note: "已改" }))?.note === "已改");
 
 /* ── 1.5 网站内容（学生案例）── */
 let casesPageId = "";
@@ -441,7 +442,7 @@ await check("课程", "收尾：删掉验收建的那门课", async () => {
 await check("课程类型", "维度表读得到（四张表都在）", async () => {
   const catalog = await api.catalog.list();
   return [catalog.stages.length, catalog.formats.length, catalog.modules.length];
-}, (value: number[]) => value[0] > 0 && value[1] > 0 && value[2] > 0);
+}, (value: number[]) => (value[0] ?? 0) > 0 && (value[1] ?? 0) > 0 && (value[2] ?? 0) > 0);
 await check("课程类型", "班型与报价里的班级类型是同一套（一件事只有一套写法）", async () => {
   const catalog = await api.catalog.list();
   const pricing = await api.pricing.get();
@@ -611,12 +612,16 @@ await check("教室", "新建教室（含可用时段）", async () => {
   classroomId = created.id;
   return created;
 }, (r: { name: string }) => r.name === "验收教室");
-await check("教室", "修改教室容量", async () => (await api.classrooms.update(classroomId, { capacity: 8 })).capacity === 8);
+await check("教室", "修改教室容量", async () => (await api.classrooms.update(classroomId, { capacity: 8 }))?.capacity === 8);
 
 /* ── 3 教师 ── */
 let teacherId = "";
 await check("教师", "新建教师（可带科目用课程名）", async () => {
-  const created = await api.teachers.create({ name: "验收老师", role: "数学", subjects: ["围棋", "初中数学"], phone: "138", active: true });
+  const created = await api.teachers.create({
+    name: "验收老师", role: "数学", subjects: ["围棋", "初中数学"], phone: "138", active: true,
+    years: "", summary: "", bio: "", recommendation: "", order: 900, siteVisible: false,
+    origin: "后台", kind: "教师",
+  });
   teacherId = created.id;
   return created;
 }, (t: { subjects: string[] }) => t.subjects.includes("围棋"));
@@ -628,7 +633,7 @@ let enrollmentId = "";
 await check("学生", "建档", async () => {
   const created = await api.students.create({
     name: "验收学生", grade: "初二", guardian: "138-0000-0000", subjects: [], profile: {},
-    enrollments: [], status: "在读", note: "", createdAt: new Date().toISOString(),
+    enrollments: [], status: "在读", note: "",
   });
   studentId = created.id;
   return created;
@@ -670,28 +675,28 @@ await check("学生", "建档并报多门课（含课时流水）", async () => 
     (rows, index) =>
       rows.length === 1 && rows[0]?.[0] === "报课" && rows[0]?.[1] === (index === 0 ? 10 : 20),
   ));
-await check("学生", "信息采集表保存", async () => (await api.students.saveProfile(studentId, { school: "验收中学" })).profile.school === "验收中学");
+await check("学生", "信息采集表保存", async () => (await api.students.saveProfile(studentId, { school: "验收中学" }))?.profile.school === "验收中学");
 await check("学生", "报课（真实字段 lessons）", async () => {
   const updated = await api.students.enroll(studentId, {
     subject: "围棋", form: "一对一定制课", teacherId, lessons: 4, startedAt: iso(0),
     note: "", unitPrice: 200, agreedAmount: 800, paidNow: 800, method: "微信",
   });
-  enrollmentId = updated.enrollments[0].id;
-  return updated.enrollments[0];
-}, (e: { totalLessons: number; paidAmount: number }) => e.totalLessons === 4 && e.paidAmount === 800);
+  enrollmentId = updated?.enrollments[0]?.id ?? "";
+  return updated?.enrollments[0];
+}, (e: { totalLessons: number; paidAmount: number } | undefined) => e?.totalLessons === 4 && e?.paidAmount === 800);
 await check("学生", "续费", async () => {
   const updated = await api.students.renewEnrollment(studentId, enrollmentId, 2, "续费", { amount: 400, method: "微信", agreedDelta: 400 });
-  return updated.enrollments[0];
-}, (e: { totalLessons: number; paidAmount: number }) => e.totalLessons === 6 && e.paidAmount === 1200);
+  return updated?.enrollments[0];
+}, (e: { totalLessons: number; paidAmount: number } | undefined) => e?.totalLessons === 6 && e?.paidAmount === 1200);
 await check("收费", "记一笔独立退款", async () => {
   await api.payments.record({ studentId, enrollmentId, amount: 100, kind: "退款", method: "微信", note: "验收" });
   const student = await api.students.get(studentId);
-  return student.enrollments[0].paidAmount;
+  return student?.enrollments[0]?.paidAmount;
 }, (paid: number) => paid === 1100);
 await check("收费", "退费试算（两种口径）", async () => {
   const student = await api.students.get(studentId);
-  const total = student.enrollments[0].totalLessons;
-  return { total, remaining: total - student.enrollments[0].usedLessons };
+  const total = student?.enrollments[0]?.totalLessons ?? 0;
+  return { total, remaining: total - (student?.enrollments[0]?.usedLessons ?? 0) };
 }, (v: { total: number }) => v.total === 6);
 
 /* ── 4.5 按周批量排课（页面上的「按周批量排课」面板走的就是这两个方法）── */
@@ -750,10 +755,26 @@ await check("课程安排", "冲突检测（同一教师同一时段）", async 
   return Array.isArray(report) ? report.length : report;
 }, (v: unknown) => (Array.isArray(v) ? v.length > 0 : JSON.stringify(v).length > 2));
 await check("课程安排", "课堂记录（提前请假）", async () => api.lessonRecords.save({
-  lessonId, studentId, attendance: "请假", leaveRequestedAt: iso(0, 10), focus: "高", interaction: "好", rating: 4, note: "",
+  lessonId, studentId, attendance: "请假", leaveRequestedAt: iso(0, 10), focus: "高", interaction: "一般", rating: 4, note: "",
 }));
-await check("课程安排", "标记已上（不扣课时：提前请假）", async () => (await api.students.get(studentId)).enrollments[0].usedLessons, (n: number) => n === 0);
-await check("课程安排", "标记已上动作", async () => (await api.lessons.markCompleted(lessonId)).skipped === false);
+await check("课程安排", "标记已上（不扣课时：提前请假）", async () => (await api.students.get(studentId))?.enrollments[0]?.usedLessons, (n: number | undefined) => n === 0);
+/*
+ * 这条原先写的是 `(await api.lessons.markCompleted(lessonId)).skipped === false` ——
+ * **什么都没断言**：`skipped` 是数组（永远不等于 false），而 `check()` 在没有 `expect`
+ * 时只看"抛没抛错"，所以那个 false 被丢掉了。类型检查开起来之后当场暴露。
+ *
+ * 现在断言真正要验的事：**提前请假 → 一个都没扣**，而且原因写在 skipped 里
+ * （`skipped` 不是"失败"，是"这节课没扣课时，以及为什么"）。
+ */
+await check(
+  "课程安排",
+  "标记已上：提前请假 → 一个都没扣，且原因写着请假",
+  async () => {
+    const result = await api.lessons.markCompleted(lessonId);
+    return { deducted: result.deducted.length, reasons: result.skipped.map((item) => item.reason).join("；") };
+  },
+  (v: { deducted: number; reasons: string }) => v.deducted === 0 && v.reasons.includes("请假"),
+);
 await check("课程安排", "安排补课", async () => {
   const makeup = await api.lessons.createMakeup({
     originalLessonId: lessonId, startsAt: iso(3, 10), durationMinutes: 60,
@@ -803,7 +824,7 @@ await check("咨询", "可行性判定", async () => {
   const report = await api.inquiries.evaluate(inquiryId);
   return { slots: report?.slots?.length ?? 0, anyOk: report?.slots?.some((s) => s.ok) ?? false };
 }, (v: { slots: number }) => v.slots > 0);
-await check("咨询", "放弃咨询", async () => (await api.inquiries.abandon(inquiryId, "验收结束")).status === "已放弃");
+await check("咨询", "放弃咨询", async () => (await api.inquiries.abandon(inquiryId, "验收结束"))?.status === "已放弃");
 
 /* ── 8 统计 / 待跟进 / 今日 ── */
 await check("今日概览", "today()", async () => typeof (await api.today()).lessonCount === "number");

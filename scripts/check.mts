@@ -45,7 +45,6 @@ import {
   type CalendarPlanInput,
   type DayPlan,
 } from "@/lib/backend/calendar-plan";
-import type { HolidayDay } from "@/lib/backend/holidays";
 import type { VacationPeriod } from "@/lib/backend/types";
 import {
   getCasesContent,
@@ -62,6 +61,25 @@ import {
 } from "@/lib/data/featured";
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
 import { __removeFixture, __useStoreForTesting, api } from "@/lib/backend/api";
+/*
+ * 夹具里用到的**类型**也要显式 import。
+ *
+ * 这些名字以前在 check.mts 里是"裸用"的（`const lessons: Lesson[] = …`）—— 因为
+ * `scripts/**\/*.mts` 从来没被 `tsc` 检查过（见 tsconfig 里那段注释），
+ * 缺 import 也照样跑（`node --experimental-strip-types` 会把类型注解整段剥掉）。
+ * 2026-09 把 scripts 纳入类型检查之后，这一批"看不见的错误"才浮出来 —— 这是其中之一。
+ */
+import type {
+  Assessment,
+  Classroom,
+  Database,
+  HomeworkRecord,
+  Inquiry,
+  Lesson,
+  LessonRecord,
+  Student,
+  Teacher,
+} from "@/lib/backend/types";
 import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
 import { createMemoryStore } from "@/lib/backend/storage";
 import {
@@ -659,7 +677,7 @@ ok("首页案例区块有文案", homeContent.cases.title !== "" && homeContent.
 const { courses } = getCoursesPageFromTemplate();
 // 学科数量不写死：增删课程是正常编辑（当前含新增的 日语 / 俄语 / 3D建模 / 编程）
 ok("课程页学科数量合理", courses.length >= 15);
-ok("每门学科都有学段内容", courses.every((c) => c.bands.length > 0 && c.bands[0].content.length > 50));
+ok("每门学科都有学段内容", courses.every((c) => c.bands.length > 0 && (c.bands[0]?.content.length ?? 0) > 50));
 
 // 选修课程（成人 / 课外兴趣）：与学科分开返回，当前全部标注暂未开放
 const { electiveGroups, electiveTitle } = getCoursesPageFromTemplate();
@@ -1135,6 +1153,7 @@ ok("示例学生有报课记录", target.enrollments.length >= 1);
 const enrolled = await api.students.enroll(target.id, {
   subject: "自检科目", form: "一对一定制课", teacherId: "",
   lessons: 10, startedAt: new Date().toISOString(), note: "自检",
+  unitPrice: 0, agreedAmount: 0, paidNow: 0, method: "微信",
 });
 eq("报课后剩余合计增加 10 节", remainingTotal(enrolled!.enrollments), beforeTotal + 10);
 
@@ -1218,7 +1237,7 @@ const anchorSubject = pupil.subjects[0] ?? "未指定科目";
 const anchorLesson = await api.lessons.create({
   subject: anchorSubject, form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
   studentIds: [pupil.id], startsAt: first.start, durationMinutes: first.duration,
-  status: "已排", note: "",
+  status: "已排", note: "", makeupForLessonId: "",
 });
 
 // 科目刻意用该教师可带的科目：否则「教师科目不符」会混进冲突计数，
@@ -1227,7 +1246,7 @@ const conflictsFor = (start: string, duration = 60) =>
   api.lessons.findConflicts({
     subject: anchorSubject, form: "", teacherId: teacher.id, classroomId: room.id,
     studentIds: [pupil.id], startsAt: start, durationMinutes: duration,
-    status: "已排", note: "",
+    status: "已排", note: "", makeupForLessonId: "",
   });
 
 // 完全重叠：三类冲突都应该报出来
@@ -1256,7 +1275,7 @@ const tightRoom = (await api.classrooms.list()).reduce((smallest, item) =>
 const overfilled = await api.lessons.findConflicts({
   subject: anchorSubject, form: "", teacherId: teacher.id, classroomId: tightRoom.id,
   studentIds: (await api.students.list()).slice(0, tightRoom.capacity + 2).map((item) => item.id),
-  startsAt: slot(7, 30).start, durationMinutes: 60, status: "已排", note: "",
+  startsAt: slot(7, 30).start, durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
 });
 eq("超过教室容量会被报出", overfilled.overCapacity,
   { capacity: tightRoom.capacity, students: tightRoom.capacity + 2 });
@@ -1265,7 +1284,7 @@ ok("超容量计入冲突总数", overfilled.total >= 1);
 const fitsRoom = await api.lessons.findConflicts({
   subject: anchorSubject, form: "", teacherId: teacher.id, classroomId: tightRoom.id,
   studentIds: (await api.students.list()).slice(0, tightRoom.capacity).map((item) => item.id),
-  startsAt: slot(7, 30).start, durationMinutes: 60, status: "已排", note: "",
+  startsAt: slot(7, 30).start, durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
 });
 eq("刚好坐满不算超容量", fitsRoom.overCapacity, null);
 
@@ -1276,14 +1295,14 @@ if (mathTeacher !== undefined) {
     // 「编程入门」不在任何教师的可带科目里，用它才能测出「科目不符」
     subject: "编程入门", form: "", teacherId: mathTeacher.id, classroomId: room.id,
     studentIds: [pupil.id], startsAt: slot(7, 30).start, durationMinutes: 60,
-    status: "已排", note: "",
+    status: "已排", note: "", makeupForLessonId: "",
   });
   eq("科目与教师不符会被报出", wrongSubject.teacherSubjectMismatch, true);
 
   const rightSubject = await api.lessons.findConflicts({
     subject: "初中数学", form: "", teacherId: mathTeacher.id, classroomId: room.id,
     studentIds: [pupil.id], startsAt: slot(7, 30).start, durationMinutes: 60,
-    status: "已排", note: "",
+    status: "已排", note: "", makeupForLessonId: "",
   });
   eq("科目匹配时不报", rightSubject.teacherSubjectMismatch, false);
 }
@@ -1292,7 +1311,7 @@ if (mathTeacher !== undefined) {
 const selfReport = await api.lessons.findConflicts({
   id: anchorLesson.id, subject: anchorSubject, form: "", teacherId: teacher.id,
   classroomId: room.id, studentIds: [pupil.id], startsAt: first.start,
-  durationMinutes: first.duration, status: "已排", note: "",
+  durationMinutes: first.duration, status: "已排", note: "", makeupForLessonId: "",
 });
 eq("编辑自己不算冲突", selfReport.total, 0);
 
@@ -1308,7 +1327,7 @@ if (otherTeacher !== undefined) {
     subject: otherTeacher.subjects[0] ?? anchorSubject, form: "",
     teacherId: otherTeacher.id, classroomId: room.id,
     studentIds: [pupil.id], startsAt: quiet.start, durationMinutes: 60,
-    status: "已排", note: "",
+    status: "已排", note: "", makeupForLessonId: "",
   });
   eq("空闲时段不误报冲突", quietReport.total, 0);
 }
@@ -1341,7 +1360,7 @@ try {
   await api.lessons.create({
     subject: "自检·无人报课的科目", form: "", teacherId: teacher.id, classroomId: room.id,
     studentIds: [pupil.id], startsAt: slot(9, 0).start, durationMinutes: 60,
-    status: "已排", note: "",
+    status: "已排", note: "", makeupForLessonId: "",
   });
 } catch (cause) {
   blockedMessage = cause instanceof Error ? cause.message : String(cause);
@@ -1354,7 +1373,7 @@ ok("拒绝理由里点名了是谁不够、还能排几节",
 // 没有学生的课（占位 / 教室安排）：没有课时可欠，不该被"课时不足"挡住
 const noStudentLesson = await api.lessons.create({
   subject: "自检·没有学生的课", form: "", teacherId: teacher.id, classroomId: room.id,
-  studentIds: [], startsAt: slot(18, 0).start, durationMinutes: 60, status: "已排", note: "",
+  studentIds: [], startsAt: slot(18, 0).start, durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
 });
 eq("没有学生的课可以建（没有课时可欠）", noStudentLesson.studentIds, []);
 await dropFixture("lessons", noStudentLesson.id);
@@ -1370,17 +1389,18 @@ const editStudent = await api.students.create({
 const editEnroll = await api.students.enroll(editStudent.id, {
   subject: "自检改课科目", form: "一对一定制课", teacherId: teacher.id, lessons: 2,
   startedAt: new Date().toISOString(), note: "自检",
+  unitPrice: 0, agreedAmount: 0, paidNow: 0, method: "微信",
 });
 const editEnrollmentId = editEnroll!.enrollments[0]!.id;
 const editLesson = await api.lessons.create({
   subject: "自检改课科目", form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
   studentIds: [editStudent.id], startsAt: slot(16, 0).start, durationMinutes: 60,
-  status: "已排", note: "",
+  status: "已排", note: "", makeupForLessonId: "",
 });
 const editSecond = await api.lessons.create({
   subject: "自检改课科目", form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
   studentIds: [editStudent.id], startsAt: slot(17, 0).start, durationMinutes: 60,
-  status: "已排", note: "",
+  status: "已排", note: "", makeupForLessonId: "",
 });
 
 // 只改备注：不能被自己的影子挡住（复核时会把这节课自己排除掉）
@@ -1429,7 +1449,7 @@ eq("自检改课学生已清理", await api.students.get(editStudent.id), null);
 const orphanLesson = await api.lessons.create({
   subject: anchorSubject, form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
   studentIds: [pupil.id], startsAt: slot(9, 0).start, durationMinutes: 60,
-  status: "已排", note: "",
+  status: "已排", note: "", makeupForLessonId: "",
 });
 const orphanEnrollment = (await api.students.get(pupil.id))!.enrollments
   .find((enrollment) => enrollment.subject === anchorSubject && enrollment.status === "在读")!;
@@ -1452,11 +1472,12 @@ const overflowStudent = await api.students.create({
 const overflowEnroll = await api.students.enroll(overflowStudent.id, {
   subject: "自检超用科目", form: "一对一定制课", teacherId: teacher.id, lessons: 5,
   startedAt: new Date().toISOString(), note: "自检",
+  unitPrice: 0, agreedAmount: 0, paidNow: 0, method: "微信",
 });
 const overflowLesson = await api.lessons.create({
   subject: "自检超用科目", form: "一对一定制课", teacherId: teacher.id, classroomId: room.id,
   studentIds: [overflowStudent.id], startsAt: slot(11, 0).start, durationMinutes: 60,
-  status: "已排", note: "",
+  status: "已排", note: "", makeupForLessonId: "",
 });
 await api.students.adjustEnrollmentLessons(
   overflowStudent.id, overflowEnroll!.enrollments[0]!.id, -5, "自检：把课时调到 0",
@@ -1530,7 +1551,7 @@ ok("结束早于开始的无效行不匹配",
 const closedReport = await api.lessons.findConflicts({
   subject: "测试", form: "", teacherId: teacher.id, classroomId: limited.id,
   studentIds: [pupil.id], startsAt: monday2030.toISOString(), durationMinutes: 120,
-  status: "已排", note: "",
+  status: "已排", note: "", makeupForLessonId: "",
 });
 eq("超出教室可用时段会被标记", closedReport.classroomClosed, true);
 ok("教室不开放计入冲突总数", closedReport.total >= 1);
@@ -1538,7 +1559,7 @@ ok("教室不开放计入冲突总数", closedReport.total >= 1);
 const openReport = await api.lessons.findConflicts({
   subject: "测试", form: "", teacherId: teacher.id, classroomId: limited.id,
   studentIds: [pupil.id], startsAt: monday17.toISOString(), durationMinutes: 90,
-  status: "已排", note: "",
+  status: "已排", note: "", makeupForLessonId: "",
 });
 eq("时段内排课不报教室不开放", openReport.classroomClosed, false);
 
@@ -1891,7 +1912,7 @@ ledgerLessonStart.setHours(7, 0, 0, 0);
 const ledgerLesson = await api.lessons.create({
   subject: ledgerEnrollment.subject, form: "", teacherId: teacher.id, classroomId: room.id,
   studentIds: [ledgerStudent.id], startsAt: ledgerLessonStart.toISOString(),
-  durationMinutes: 60, status: "已排", note: "",
+  durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
 });
 await api.lessons.markCompleted(ledgerLesson.id);
 const afterComplete = await api.transactions.listByEnrollment(ledgerEnrollment.id);
@@ -1940,12 +1961,12 @@ const trackLesson = (await api.lessons.list())[0]!;
 const trackStudent = trackLesson.studentIds[0]!;
 const firstRecord = await api.lessonRecords.save({
   lessonId: trackLesson.id, studentId: trackStudent,
-  attendance: "到课", focus: "高", interaction: "主动", rating: 4, note: "自检第一条",
+  attendance: "到课", focus: "高", interaction: "主动", rating: 4, note: "自检第一条", leaveRequestedAt: "",
 });
 ok("课堂记录返回 id", firstRecord.id !== "");
 const secondRecord = await api.lessonRecords.save({
   lessonId: trackLesson.id, studentId: trackStudent,
-  attendance: "请假", focus: "低", interaction: "被动", rating: 2, note: "自检改过",
+  attendance: "请假", focus: "低", interaction: "被动", rating: 2, note: "自检改过", leaveRequestedAt: "",
 });
 eq("重复保存是同一条记录（不是新增）", secondRecord.id, firstRecord.id);
 eq("一课一生只有一条记录", (await api.lessonRecords.listByLesson(trackLesson.id)).length, 1);
@@ -2017,7 +2038,7 @@ const gapLesson = (
   durationMinutes: number,
   status: Lesson["status"] = "已排",
 ): Lesson => ({
-  id, subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1", studentIds: [],
+  id, version: 1, subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1", studentIds: [],
   startsAt: new Date(startsAt).toISOString(), durationMinutes, status, note: "", makeupForLessonId: "",
 });
 
@@ -2322,6 +2343,7 @@ await api.restoreBackup();
   // ③ 删除护栏：让一张卡片的**标签**指向刚加的小节，然后试着删掉它
   const card = await api.courses.create({
     name: "自检·指向小节", partitionId: "", forms: [], origin: "后台", status: "开放", note: "",
+    stageIds: [], subjectIds: [], moduleIds: [],
     path: "self-check-band", tags: [{ label: "自检", target: anchor }], target: "",
     order: 999, intro: "", siteKind: "学科", createdAt: new Date().toISOString(),
   });
@@ -2458,17 +2480,17 @@ await api.restoreBackup();
   const pastDone = await api.lessons.create({
     subject: editEnroll.subject, form: "一对一定制课", teacherId: teacherA.id, classroomId: room.id,
     studentIds: [editStudent.id], startsAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
-    durationMinutes: 60, status: "已上", note: "",
+    durationMinutes: 60, status: "已上", note: "", makeupForLessonId: "",
   });
   const pastOpen = await api.lessons.create({
     subject: editEnroll.subject, form: "一对一定制课", teacherId: teacherA.id, classroomId: room.id,
     studentIds: [editStudent.id], startsAt: new Date(Date.now() - 86_400_000).toISOString(),
-    durationMinutes: 60, status: "已排", note: "",
+    durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
   });
   const futureLesson = await api.lessons.create({
     subject: editEnroll.subject, form: "一对一定制课", teacherId: teacherA.id, classroomId: room.id,
     studentIds: [editStudent.id], startsAt: new Date(Date.now() + 2 * 86_400_000).toISOString(),
-    durationMinutes: 60, status: "已排", note: "",
+    durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
   });
 
   // ① 只改记录：课节一节都不动
@@ -2513,12 +2535,12 @@ await api.restoreBackup();
   const blockStart = new Date(Date.now() + 5 * 86_400_000);
   await api.lessons.create({
     subject: "自检·占位科目", form: "", teacherId: busyTeacher.id, classroomId: room.id,
-    studentIds: [], startsAt: blockStart.toISOString(), durationMinutes: 60, status: "已排", note: "",
+    studentIds: [], startsAt: blockStart.toISOString(), durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
   });
   const conflicting = await api.lessons.create({
     subject: editEnroll.subject, form: "", teacherId: teacherA.id, classroomId: room.id,
     studentIds: [editStudent.id], startsAt: blockStart.toISOString(), durationMinutes: 60,
-    status: "已排", note: "",
+    status: "已排", note: "", makeupForLessonId: "",
   });
   const clash = await api.students.updateEnrollment(
     editStudent.id, editEnroll.id, { teacherId: busyTeacher.id }, "future-lessons",
@@ -2732,6 +2754,7 @@ const followNow = new Date("2026-09-18T10:00:00");
 /** 造一个最小可用的学生（带一条报课）。 */
 const makeStudent = (over: Partial<Student> = {}): Student => ({
   id: "fs1",
+  version: 1,
   name: "自检学生",
   grade: "初二",
   guardian: "138-0000-0000",
@@ -2762,10 +2785,10 @@ const makeStudent = (over: Partial<Student> = {}): Student => ({
  */
 const scheduledLessons = (studentId: string): Lesson[] => [
   {
-    id: `fl_${studentId}`, subject: "初中数学", form: "", teacherId: "", classroomId: "",
+    id: `fl_${studentId}`, version: 1, subject: "初中数学", form: "", teacherId: "", classroomId: "",
     studentIds: [studentId],
     startsAt: new Date(followNow.getTime() + 2 * 86_400_000).toISOString(),
-    durationMinutes: 60, status: "已排", note: "",
+    durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
   },
 ];
 
@@ -2869,14 +2892,14 @@ const attendanceStudent = makeStudent();
 const lr = (daysAgo: number, attendance: LessonRecord["attendance"]): { record: LessonRecord; lesson: Lesson } => ({
   record: {
     id: `lr${daysAgo}`, lessonId: `fl${daysAgo}`, studentId: "fs1",
-    attendance, focus: "中", interaction: "一般", rating: 3, note: "",
+    attendance, focus: "中", interaction: "一般", rating: 3, note: "", leaveRequestedAt: "",
     recordedAt: followNow.toISOString(),
   },
   lesson: {
-    id: `fl${daysAgo}`, subject: "初中数学", form: "", teacherId: "", classroomId: "",
+    id: `fl${daysAgo}`, version: 1, subject: "初中数学", form: "", teacherId: "", classroomId: "",
     studentIds: ["fs1"],
     startsAt: new Date(followNow.getTime() - daysAgo * 86_400_000).toISOString(),
-    durationMinutes: 60, status: "已上", note: "",
+    durationMinutes: 60, status: "已上", note: "", makeupForLessonId: "",
   },
 });
 const attendanceCase = [lr(1, "请假"), lr(2, "请假"), lr(3, "到课")];
@@ -2908,10 +2931,10 @@ const staleStudent = makeStudent({
 eq("未来 7 天没课 → 久未排课",
   build({ students: [staleStudent] }).some((item) => item.kind === "久未排课"), true);
 const futureLesson: Lesson = {
-  id: "fl_future", subject: "初中数学", form: "", teacherId: "", classroomId: "",
+  id: "fl_future", version: 1, subject: "初中数学", form: "", teacherId: "", classroomId: "",
   studentIds: ["fs1"],
   startsAt: new Date(followNow.getTime() + 2 * 86_400_000).toISOString(),
-  durationMinutes: 60, status: "已排", note: "",
+  durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
 };
 eq("已排课则不报久未排课",
   build({ students: [staleStudent], lessons: [futureLesson] }).some((item) => item.kind === "久未排课"), false);
@@ -2950,7 +2973,7 @@ __useStoreForTesting(memory);
 
 const leaveLessonStart = new Date("2026-09-20T17:00:00");
 const leaveLesson: Lesson = {
-  id: "lv1", subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1",
+  id: "lv1", version: 1, subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1",
   studentIds: ["s1"], startsAt: leaveLessonStart.toISOString(), durationMinutes: 60,
   status: "已排", note: "", makeupForLessonId: "",
 };
@@ -3000,7 +3023,7 @@ reconcileStart.setHours(9, 0, 0, 0);
 const reconcileLesson = await api.lessons.create({
   subject: leaveEnrollment.subject, form: "", teacherId: teacher.id, classroomId: room.id,
   studentIds: [leaveStudent.id], startsAt: reconcileStart.toISOString(),
-  durationMinutes: 60, status: "已排", note: "",
+  durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
 });
 
 // 先填「到课」→ 标记已上 → 扣 1
@@ -3104,7 +3127,7 @@ const statLesson = (
   const day = new Date(statsDays[dayIndex]!);
   day.setHours(hour, 0, 0, 0);
   return {
-    id, subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1",
+    id, version: 1, subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1",
     studentIds: ["s1"], startsAt: day.toISOString(), durationMinutes: duration,
     status: "已排", note: "", makeupForLessonId: "", ...over,
   };
@@ -3112,12 +3135,12 @@ const statLesson = (
 
 const statRooms: Classroom[] = [
   {
-    id: "c1", name: "301", kind: "上课用教室", capacity: 8,
+    id: "c1", version: 1, name: "301", kind: "上课用教室", capacity: 8,
     // 周一至周五 17:00–21:00 → 每天 4 小时，一周 20 小时 = 1200 分钟
     availability: [{ id: "a1", weekdays: [1, 2, 3, 4, 5], start: "17:00", end: "21:00" }],
     note: "",
   },
-  { id: "c2", name: "不限时段教室", kind: "自习室", capacity: 4, availability: [], note: "" },
+  { id: "c2", version: 1, name: "不限时段教室", kind: "自习室", capacity: 4, availability: [], note: "" },
 ];
 const statLessons: Lesson[] = [
   statLesson("sl1", 0, 17, 120),           // 周一 2 小时
@@ -3147,8 +3170,8 @@ ok("时段按小时升序", hourly.every((row, index) => index === 0 || hourly[i
 
 // 教师课时：按科目拆分 + 平均人数
 const statTeachers: Teacher[] = [
-  { id: "t1", name: "自检老师A", subjects: ["数学"], role: "", phone: "", active: true },
-  { id: "t2", name: "自检老师B", subjects: ["英语"], role: "", phone: "", active: true },
+  { id: "t1", version: 1, name: "自检老师A", subjects: ["数学"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 1, siteVisible: true, origin: "后台", kind: "教师" },
+  { id: "t2", version: 1, name: "自检老师B", subjects: ["英语"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 2, siteVisible: true, origin: "后台", kind: "教师" },
 ];
 const workload = teacherWorkload(statTeachers, [
   statLesson("wl1", 0, 17, 60, { studentIds: ["s1", "s2"] }),
@@ -3162,12 +3185,12 @@ eq("教师时长合计", teacherA.minutes, 150);
 eq("教师涉及学生数（去重）", teacherA.studentCount, 2);
 eq("平均每节课人数", teacherA.avgStudents, 1.5);
 eq("按科目拆分（按时长降序）", teacherA.bySubject.map((item) => item.subject), ["初中物理", "初中数学"]);
-ok("按课时降序排列（老师A 在前）", workload[0]?.teacher.id, "t1");
+ok("按课时降序排列（老师A 在前）", (workload[0]?.teacher.id ?? "") === "t1");
 
 // 退课与流失：口径按「退掉的课时」而不是条数
 const churnStudents: Student[] = [
   {
-    id: "cs1", name: "退课学生", grade: "初二", guardian: "", subjects: [], profile: {},
+    id: "cs1", version: 1, name: "退课学生", grade: "初二", guardian: "", subjects: [], profile: {},
     enrollments: [
       {
         id: "ce1", subject: "初中数学", form: "", teacherId: "",
@@ -3192,7 +3215,7 @@ const churnStudents: Student[] = [
     status: "在读", note: "", createdAt: new Date().toISOString(),
   },
   {
-    id: "cs2", name: "暂停学生", grade: "初三", guardian: "", subjects: [], profile: {},
+    id: "cs2", version: 1, name: "暂停学生", grade: "初三", guardian: "", subjects: [], profile: {},
     enrollments: [], status: "暂停", note: "", createdAt: new Date().toISOString(),
   },
 ];
@@ -3224,32 +3247,45 @@ ok("统计里的利用率不超过 1（已排不该超过可用）",
 // ── 全局搜索与操作日志（第七组）───────────────────────────────────────
 __useStoreForTesting(memory);
 
+/*
+ * 全局搜索的夹具。
+ *
+ * ⚠️ 这些对象以前是"缺字段也能过"的：`scripts/**\/*.mts` 从没被类型检查过，
+ * 而 `searchAll()` 只读它用到的几个字段。纳入类型检查之后才要求它们**真的是**
+ * Student / Teacher / Classroom / Lesson（补 `version` 与档案字段）——
+ * 这不是为了讨好 tsc：夹具与真实记录形状一致，才不会出现
+ * "按夹具写对了、按真实数据崩了"这种假绿。
+ */
 const searchInput = {
   keyword: "",
   students: [
     {
-      id: "s1", name: "张小明", grade: "初二", guardian: "138-0000-0000",
+      id: "s1", version: 1, name: "张小明", grade: "初二", guardian: "138-0000-0000",
       subjects: ["初中数学"], profile: {}, enrollments: [],
       status: "在读" as const, note: "", createdAt: new Date().toISOString(),
     },
     {
-      id: "s2", name: "张小红", grade: "初三", guardian: "", subjects: [],
+      id: "s2", version: 1, name: "张小红", grade: "初三", guardian: "", subjects: [],
       profile: {}, enrollments: [], status: "在读" as const, note: "",
       createdAt: new Date().toISOString(),
     },
   ],
   teachers: [
-    { id: "t1", name: "陈老师", subjects: ["数学"], role: "全科教师", phone: "", active: true },
+    {
+      id: "t1", version: 1, name: "陈老师", subjects: ["数学"], role: "全科教师", phone: "",
+      active: true, years: "", summary: "", bio: "", recommendation: "", order: 1,
+      siteVisible: true, origin: "网站" as const, kind: "教师" as const,
+    },
   ],
   classrooms: [
     {
-      id: "c1", name: "301 教室", kind: "上课用教室" as const, capacity: 8,
+      id: "c1", version: 1, name: "301 教室", kind: "上课用教室" as const, capacity: 8,
       availability: [], note: "白板",
     },
   ],
   lessons: [
     {
-      id: "l1", subject: "初中数学", form: "一对一定制课", teacherId: "t1", classroomId: "c1",
+      id: "l1", version: 1, subject: "初中数学", form: "一对一定制课", teacherId: "t1", classroomId: "c1",
       studentIds: ["s1"], startsAt: new Date("2026-09-18T17:30:00").toISOString(),
       durationMinutes: 60, status: "已排" as const, note: "", makeupForLessonId: "",
     },
@@ -3495,7 +3531,7 @@ const walkApi = (value: unknown, prefix: string) => {
     }
   }
 };
-walkApi(api, "", realMethods);
+walkApi(api, "");
 realMethods.sort();
 
 const documented = API_CONTRACT.flatMap((group) => group.methods).sort();
@@ -3862,20 +3898,20 @@ eq("起始日之后的第一个周六才算第一次",
 
 // 教师匹配：科目名出现在教师可带科目里
 const iqTeachers: Teacher[] = [
-  { id: "it1", name: "数学老师", subjects: ["数学"], role: "", phone: "", active: true },
-  { id: "it2", name: "英语老师", subjects: ["英语"], role: "", phone: "", active: true },
-  { id: "it3", name: "离职数学", subjects: ["数学"], role: "", phone: "", active: false },
+  { id: "it1", version: 1, name: "数学老师", subjects: ["数学"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 1, siteVisible: true, origin: "后台", kind: "教师" },
+  { id: "it2", version: 1, name: "英语老师", subjects: ["英语"], role: "", phone: "", active: true, years: "", summary: "", bio: "", recommendation: "", order: 2, siteVisible: true, origin: "后台", kind: "教师" },
+  { id: "it3", version: 1, name: "离职数学", subjects: ["数学"], role: "", phone: "", active: false, years: "", summary: "", bio: "", recommendation: "", order: 3, siteVisible: true, origin: "后台", kind: "教师" },
 ];
 eq("按科目筛教师（在职且科目匹配）",
   teachersForSubject(iqTeachers, "初中数学").map((t) => t.id), ["it1"]);
 
 const iqRooms: Classroom[] = [
-  { id: "ic1", name: "小教室", kind: "上课用教室", capacity: 4, availability: [], note: "" },
-  { id: "ic2", name: "限时教室", kind: "上课用教室", capacity: 8,
+  { id: "ic1", version: 1, name: "小教室", kind: "上课用教室", capacity: 4, availability: [], note: "" },
+  { id: "ic2", version: 1, name: "限时教室", kind: "上课用教室", capacity: 8,
     availability: [{ id: "r", weekdays: [6], start: "09:00", end: "12:00" }], note: "" },
 ];
 const iqLessons: Lesson[] = [
-  { id: "il1", subject: "初中数学", form: "", teacherId: "it1", classroomId: "ic2",
+  { id: "il1", version: 1, subject: "初中数学", form: "", teacherId: "it1", classroomId: "ic2",
     studentIds: ["s1"], startsAt: "2026-09-19T10:00:00", durationMinutes: 60,
     status: "已排", note: "", makeupForLessonId: "" },
 ];
@@ -3906,7 +3942,7 @@ ok("阻塞里带上受影响的已有学生（界面要先显示再决定动不�
 
 // 关键：冲突发生在**系列的中间那一节**，也不能漏
 const laterClash: Lesson[] = [
-  { id: "il2", subject: "初中数学", form: "", teacherId: "it1", classroomId: "ic1",
+  { id: "il2", version: 1, subject: "初中数学", form: "", teacherId: "it1", classroomId: "ic1",
     studentIds: ["s2"], startsAt: "2026-10-03T10:00:00", durationMinutes: 60,
     status: "已排", note: "", makeupForLessonId: "" },
 ];
@@ -4013,7 +4049,7 @@ blockingStart.setHours(10, 0, 0, 0);
 const blockingLesson = await api.lessons.create({
   subject: blockedStudent.subjects[0] ?? "初中数学", form: "", teacherId: blockedTeacher.id,
   classroomId: blockedRoom.id, studentIds: [blockedStudent.id],
-  startsAt: blockingStart.toISOString(), durationMinutes: 60, status: "已排", note: "自检·挡路课",
+  startsAt: blockingStart.toISOString(), durationMinutes: 60, status: "已排", note: "自检·挡路课", makeupForLessonId: "",
 });
 
 const e2eInquiry = await api.inquiries.create({
@@ -4399,6 +4435,8 @@ eq("新建的分区排在同级最后（不抢到最前面）",
 const pbWeiqi = await api.courses.create({
   name: "围棋", partitionId: pbHobby.id, forms: ["一对一定制课"], origin: "后台",
   status: "开放", note: "自检用", createdAt: new Date().toISOString(),
+  stageIds: [], subjectIds: [], moduleIds: [],
+  path: "", tags: [], target: "", order: 999, intro: "", siteKind: "不展示",
 });
 eq("新建课程的来源是「后台」", pbWeiqi.origin, "后台");
 ok("新课程立刻出现在科目候选里（排课马上能选到）",
@@ -4412,6 +4450,8 @@ try {
   await api.courses.create({
     name: "围棋", partitionId: pbHobby.id, forms: [], origin: "后台",
     status: "开放", note: "", createdAt: new Date().toISOString(),
+    stageIds: [], subjectIds: [], moduleIds: [],
+    path: "", tags: [], target: "", order: 999, intro: "", siteKind: "不展示",
   });
 } catch {
   pbDupRejected = true;
@@ -4422,6 +4462,8 @@ try {
   await api.courses.create({
     name: "  ", partitionId: pbHobby.id, forms: [], origin: "后台",
     status: "开放", note: "", createdAt: new Date().toISOString(),
+    stageIds: [], subjectIds: [], moduleIds: [],
+    path: "", tags: [], target: "", order: 999, intro: "", siteKind: "不展示",
   });
 } catch {
   pbEmptyRejected = true;
@@ -4450,6 +4492,8 @@ ok("删除后不再出现在科目候选里",
 // 教师可带科目直接存课程名（含后台新增的课）
 const pbTeacher = await api.teachers.create({
   name: "自检老师", role: "", subjects: ["初中数学", "围棋"], phone: "", active: true,
+  years: "", summary: "", bio: "", recommendation: "", order: 999, siteVisible: false,
+  origin: "后台", kind: "教师",
 });
 eq("教师可带科目可以写后台新增的课程名", pbTeacher.subjects, ["初中数学", "围棋"]);
 await dropFixture("teachers", pbTeacher.id);
@@ -4528,6 +4572,8 @@ eq("认领后再次同步不再产生变更", syncLibraryLinks(pbClaimed.config,
 const pbGo = await api.courses.create({
   name: "围棋", partitionId: "", forms: ["一对一定制课"], origin: "后台",
   status: "开放", note: "", createdAt: new Date().toISOString(),
+  stageIds: [], subjectIds: [], moduleIds: [],
+  path: "", tags: [], target: "", order: 999, intro: "", siteKind: "不展示",
 });
 const pbPriced = addLibraryCourseToPricing(await api.pricing.get(), {
   courseId: pbGo.id, name: "围棋", stageName: "兴趣才艺", basePrice: 200,
@@ -4928,7 +4974,8 @@ ok("预览里的日期是人话（月日 + 星期 + 时间）",
 const seriesSubject = "自检批量排课科目";
 const seriesTeacher = await api.teachers.create({
   name: "自检批量排课老师", subjects: [seriesSubject], role: "授课教师", phone: "",
-  active: true, years: "", summary: "", bio: "", origin: "后台", kind: "教师",
+  active: true, years: "", summary: "", bio: "", recommendation: "", order: 999,
+  siteVisible: false, origin: "后台", kind: "教师",
 });
 const seriesRoom = await api.classrooms.create({
   name: "自检批量排课教室", kind: "上课用教室", capacity: 8, availability: [], note: "",
@@ -4940,6 +4987,7 @@ const seriesStudent = await api.students.create({
 await api.students.enroll(seriesStudent.id, {
   subject: seriesSubject, form: "一对一定制课", teacherId: seriesTeacher.id, lessons: 12,
   startedAt: new Date().toISOString(), note: "自检",
+  unitPrice: 0, agreedAmount: 0, paidNow: 0, method: "微信",
 });
 // 起排日取**远期的一个周一**：夹具的课都在"现在"附近，这里要测的是机制本身
 const farMonday = (() => {
@@ -5051,8 +5099,8 @@ const fakeReport = (over: Record<string, unknown> = {}) => ({
 {
   let writeCount = 0;
   const result = await runTwoPhaseImport({
-    ask: async () => fakeReport({ summary: "检查完成：4 条都能导入" }) as never,
-    write: async () => { writeCount += 1; return fakeReport({ added: 4, summary: "新增 4 条教师" }) as never; },
+    ask: async () => fakeReport({ summary: "检查完成：4 条都能导入" }),
+    write: async () => { writeCount += 1; return fakeReport({ added: 4, summary: "新增 4 条教师" }); },
   });
   eq("体检无冲突时：确实写了，且只写一次", [result.status, writeCount], ["done", 1]);
   eq("报告用的是写入那一次的结果（不是体检的）",
@@ -5064,8 +5112,8 @@ const fakeReport = (over: Record<string, unknown> = {}) => ({
 {
   let wrote = false;
   const result = await runTwoPhaseImport({
-    ask: async () => fakeReport({ ok: false, error: "缺少必填列：姓名" }) as never,
-    write: async () => { wrote = true; return fakeReport() as never; },
+    ask: async () => fakeReport({ ok: false, error: "缺少必填列：姓名" }),
+    write: async () => { wrote = true; return fakeReport(); },
   });
   eq("体检失败时不写入", [result.status, wrote, result.status === "done" ? result.report.ok : null],
     ["done", false, false]);
@@ -5342,6 +5390,8 @@ try {
       siteVisible: true,
       origin: "网站" as const,
       kind: teacher.kind,
+      // v17 起每条记录带乐观锁版本号：夹具也要与真实记录同形
+      version: 1,
     })),
   };
   const snapshot = buildPublicSite(fixture);
@@ -6774,7 +6824,7 @@ console.log("\n=== 17. P0：数据与钱的五道护栏 ===");
   } as never);
   const lesson = await api.lessons.create({
     subject: "数学", form: "", teacherId: teacher.id, classroomId: room.id, studentIds: [student.id],
-    startsAt: new Date(Date.now() - 3_600_000).toISOString(), durationMinutes: 60, status: "已排", note: "",
+    startsAt: new Date(Date.now() - 3_600_000).toISOString(), durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
   } as never);
   await api.lessons.markCompleted(lesson.id);
   await api.lessonRecords.save({
@@ -6832,7 +6882,7 @@ console.log("\n=== 17. P0：数据与钱的五道护栏 ===");
   } as never);
   const cleanLesson = await api.lessons.create({
     subject: "数学", form: "", teacherId: "", classroomId: "", studentIds: [],
-    startsAt: new Date(Date.now() + 86_400_000).toISOString(), durationMinutes: 60, status: "已排", note: "",
+    startsAt: new Date(Date.now() + 86_400_000).toISOString(), durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
   } as never);
   eq("只建档、没有任何记录的学生：仍然可以删", await api.students.remove(cleanStudent.id), true);
   eq("没上过、没记录的排课：仍然可以删", await api.lessons.remove(cleanLesson.id), true);
@@ -7023,7 +7073,7 @@ console.log("\n=== 18. P1：账目与审计一致性 ===");
   } as never);
   const lesson = await api.lessons.create({
     subject: "数学", form: "", teacherId: teacher.id, classroomId: "", studentIds: [student.id],
-    startsAt: new Date(Date.now() - 3_600_000).toISOString(), durationMinutes: 60, status: "已排", note: "",
+    startsAt: new Date(Date.now() - 3_600_000).toISOString(), durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
   } as never);
   await api.lessonRecords.save({
     lessonId: lesson.id, studentId: student.id, attendance: "到课", focus: 4, interaction: 4, note: "",
@@ -7052,7 +7102,7 @@ console.log("\n=== 18. P1：账目与审计一致性 ===");
    */
   const futureLesson = await api.lessons.create({
     subject: "数学", form: "", teacherId: teacher.id, classroomId: "", studentIds: [student.id],
-    startsAt: new Date(Date.now() + 3 * 86_400_000).toISOString(), durationMinutes: 60, status: "已排", note: "",
+    startsAt: new Date(Date.now() + 3 * 86_400_000).toISOString(), durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
   } as never);
   await api.lessons.markCompleted(futureLesson.id);
   eq("标已上后扣到 2 节", (await api.students.get(student.id))!.enrollments[0]!.usedLessons, 2);
@@ -7111,7 +7161,7 @@ console.log("\n=== 18. P1：账目与审计一致性 ===");
    */
   const cancelled = await api.lessons.create({
     subject: "数学", form: "", teacherId: teacher.id, classroomId: "", studentIds: [],
-    startsAt: todayAt(14), durationMinutes: 90, status: "已排", note: "",
+    startsAt: todayAt(14), durationMinutes: 90, status: "已排", note: "", makeupForLessonId: "",
   } as never);
   const beforeCancel = await api.today(new Date());
   await api.lessons.update(cancelled.id, { status: "已取消" } as never);
@@ -7617,6 +7667,8 @@ console.log("\n=== 23. 课程分区：分区是数据，不是每门课上的一
   const orphanRefusal = await refusalOf(() => api.courses.create({
     name: "自检·挂到不存在的分区", partitionId: "cp_不存在", forms: [], origin: "后台",
     status: "开放", note: "", createdAt: new Date().toISOString(),
+    stageIds: [], subjectIds: [], moduleIds: [],
+    path: "", tags: [], target: "", order: 999, intro: "", siteKind: "不展示",
   }));
   ok("课程挂到一个不存在的分区被拒绝（第二道闸门，防的是恢复半份备份）",
     orphanRefusal.includes("分区"), orphanRefusal.slice(0, 90));
@@ -8979,7 +9031,7 @@ console.log("\n=== 31. 开放矩阵：本机构开哪些组合（v24）===");
   const touched = applyDecision([], keys, "open", now);
   eq("按学科查引用它的组合", offersOfDimension(touched, "subject", oneKey.subjectId).length, 2);
   eq("按班型查引用它的组合", offersOfDimension(touched, "format", oneKey.formatId).length, 1);
-  eq("没人引用的维度返回空", offersOfDimension(touched, "delivery", catalogId("dlv", "托管")), []);
+  eq("没人引用的维度返回空", offersOfDimension(touched, "format", catalogId("fmt", "班课（9-20）")), []);
 
   // ⑥ API 与迁移
   const legacyOffersDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & { version: number };
@@ -9070,9 +9122,9 @@ console.log("\n=== 32. 报价的班型挂到课程类型的维度表上（v25）
    * 那种改法把夹具自己变成了另一份配置，验的就不是迁移了。
    */
   legacyPricingDb.pricing.classTypes = legacyPricingDb.pricing.classTypes.map((row) => {
-    const { formatId, ...rest } = row as { formatId?: string };
-    void formatId;
-    return rest;
+    const rest: Record<string, unknown> = { ...row };
+    delete rest.formatId;
+    return rest as { name: string; mode: "coefficient" | "cost-share"; coefficient: number | null };
   });
   eq("v24 老库（报价里没有班型 id）能升级导入",
     (await api.importDatabase(JSON.stringify(legacyPricingDb))).ok, true);
@@ -9999,6 +10051,36 @@ console.log("\n=== 38. 课程挂到维度上（v28：课程 ←→ 课程类型�
     ok(`提示文案里保留了「${label}」这句（改文案时会被提醒）`,
       readFileSync(new URL("../lib/backend/course-dimensions.ts", import.meta.url), "utf8").includes(pattern));
   }
+}
+
+console.log("\n=== 38.5 自检与验收脚本也纳入类型检查（2026-09 清账）===");
+
+/*
+ * 这一段曾经是**最大的一个洞**：`scripts/**\/*.mts` 从来没被 `tsc` 检查过
+ * （`**\/*.ts` 通配不匹配 `.mts`），而"自检脚本出错是响亮失败"这个理由让它一直排在
+ * 后端后面。清账时那 115 处里藏着**四处真错误**，它们全都是"看起来在断言、其实没有"：
+ *
+ *   1. `markCompleted(...).skipped === false` —— `skipped` 是数组，永远不等于 false，
+ *      而 `check()` 在没有 `expect` 时只看抛不抛错，于是那条断言什么都没验；
+ *   2. `walkApi(api, "", realMethods)` —— 函数只收两个参数，第三个参数被静默忽略；
+ *   3. `offersOfDimension(rows, "delivery", …)` —— v26 删掉"交付形态"之后留下的一处，
+ *      查不到的字段返回空数组，于是断言**空转通过**；
+ *   4. `diff-site-content.mts` 读 `publicSite.coursePartitions` —— 真实字段叫 `partitions`，
+ *      脚本一跑就抛（没人跑过它）。
+ *
+ * 这一条把"纳入"钉住：tsconfig 的 include 里必须有 scripts，而且真的没有历史债。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  /*
+   * tsconfig 里带注释（JSON with comments），因此不能用 `JSON.parse` —— 直接读文本断言，
+   * 这也正好是这一条要验的东西："include 那一行里到底有没有 scripts"。
+   */
+  const tsconfig = readFileSync(new URL("tsconfig.json", rootUrl), "utf8");
+  const includeLine = /"include"\s*:\s*\[([^\]]*)\]/.exec(tsconfig)?.[1] ?? "";
+  ok("tsconfig 的 include 里有 scripts/**\\/*.mts（否则 .mts 通配不匹配，等于没检查）",
+    includeLine.includes("scripts/**/*.mts"));
+  ok("服务端与脚本都在里面", includeLine.includes("server/**/*.mts"));
 }
 
 console.log("\n=== 39. 课程台账按维度分组（v33：默认按维度，分区视图保留）===");

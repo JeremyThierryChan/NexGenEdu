@@ -151,7 +151,7 @@ export async function startServer(options: StartServerOptions): Promise<ServerHa
     } catch {
       server.kill("SIGTERM");
     }
-    await new Promise((resolve) => {
+    await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 3000);
       server.once("close", () => { clearTimeout(timer); resolve(); });
     });

@@ -31,16 +31,17 @@
     }
   },
     /*
-     * 服务端的 .mts 必须显式包含：`**&#47;*.ts` 这类通配**不匹配** .mts（那一行只覆盖
-     * .ts 与 .tsx），而服务端全是 .mts。补这一行之前，`npm run typecheck` 对**后端一行都
-     * 没检查过** —— 实测：往 server/kv-store.mts 里塞一句「const x: number = "字符串"」，
-     * tsc --noEmit 照样 rc=0。而服务端正是最需要类型保护的那一半：它直接改数据。
+     * 服务端与脚本的 .mts 必须显式包含：`**&#47;*.ts` 这类通配**不匹配** .mts（那一行只覆盖
+     * .ts 与 .tsx），而服务端与自检脚本全是 .mts。补这一行之前，`npm run typecheck` 对
+     * **后端一行都没检查过** —— 实测：往 server/kv-store.mts 里塞一句
+     * 「const x: number = "字符串"」，tsc --noEmit 照样 rc=0。
      *
-     * scripts 下的 .mts 暂时**没有**纳入：那里有 115 处历史类型债（check.mts 93 处、
-     * accept-check.mts 21 处，多是 strict 下的 null 收窄与宽松 cast），一次清完风险大于收益。
-     * 这是待办事项、不是"不需要"：自检脚本出错是**响亮**失败（断言报红、非 0 退出），
-     * 而后端出错是静默改数据，所以先保后端。
+     * **scripts 也在里面了**（2026-09 清账）：那里曾有 115 处历史类型债，当时的取舍是
+     * "脚本出错是响亮失败（断言报红、非 0 退出），后端出错是静默改数据，所以先保后端"。
+     * 那些债的根因其实很集中（缺几个类型 import、夹具少几个新字段、少数 null 收窄），
+     * 清完之后 `npm run typecheck` 才算真的覆盖了全仓库的 .ts / .tsx / .mts。
+     * 自检里第 1 节有一条断言盯着它（"scripts 也纳入类型检查"）。
      */
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", "server/**/*.mts", ".next/types/**/*.ts"],
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", "server/**/*.mts", "scripts/**/*.mts", ".next/types/**/*.ts"],
   "exclude": ["node_modules"]
 }

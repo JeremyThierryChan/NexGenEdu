@@ -113,7 +113,7 @@ const dbCards = db.courses.filter((course) => course.siteKind !== "不展示" &&
      * 库里的分区存的是 id，比对要换成名字（`partitionPlace` 给出的正是"栏目 + 子栏目"）。
      * 拿 id 去比会永远不等（模版那头是名字），报出来的是几十条假差异。
      */
-    const place = partitionPlace(db.coursePartitions, other.partitionId);
+    const place = partitionPlace(db.partitions, other.partitionId);
     const pairs: Array<[string, unknown, unknown]> = [
       ["栏目", item.column, place.column === null ? "" : place.column.name],
       ["子栏目", item.subgroup, place.leaf === null || place.leaf.parentId === "" ? "" : place.leaf.name],
@@ -154,7 +154,7 @@ const dbCards = db.courses.filter((course) => course.siteKind !== "不展示" &&
    * 机构在后台调过的顺序反而会被当成差异。现在两边都是"各自的顺序"，
    * 顺序不同就是**真的不同**（这一条正是机构想知道的）。
    */
-  const orderedPartitions = [...db.coursePartitions].sort(
+  const orderedPartitions = [...db.partitions].sort(
     (a, b) => a.order - b.order || a.name.localeCompare(b.name, "zh"),
   );
   const cardsOf = (partitionId: string): string[] =>

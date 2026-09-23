@@ -1400,7 +1400,7 @@ Student.profile                  键 → 值（文本 / 多选 / 表格）
   而服务端全是 `.mts` —— 也就是说在此之前 `npm run typecheck` **对后端一行都没检查过**
   （实测：往 `server/kv-store.mts` 里塞一句 `const x: number = "字符串"`，`tsc --noEmit` 照样 rc=0）。
   现在显式包含 `server/**/*.mts` 并开了 `allowImportingTsExtensions`，**后端类型检查全绿**。
-  （`scripts/**/*.mts` 还有 115 处历史类型债，暂时排除并写在 tsconfig 注释里 —— 待办事项，
+  （`scripts/**/*.mts` 当时还有 115 处历史类型债，已在 2026-09 清账、现在也纳入类型检查 —— 当时是待办事项，
   不是"不需要"：自检脚本出错是响亮失败，而后端出错是静默改数据，所以先保后端。）
 
 剩下的三块也做完了：
@@ -1654,6 +1654,34 @@ v26 的更正：**维度只剩四个**（学段 / 学科与项目 / 内容模块
 寒暑假校验（写反 / 非法日期 / 2026-02-30 / 没勾学段 / 悬空学段 / 重叠只提示）、
 **"排课一行没动"**（断言 `recurrence.ts` 里没有 `dayPlanFor`）、迁移与读写。
 逐页验收新增 7 条（**112/112**）。
+
+### E6：自检与验收脚本纳入类型检查（清掉最后一块"看不见的地方"）
+
+`tsconfig.json` 的 include 一直是 `**/*.ts` + `**/*.tsx` + `server/**/*.mts` ——
+**通配不匹配 `.mts`**，所以 `scripts/*.mts`（自检 8.8k 行 + 逐页验收 1k 行）从来没被 `tsc` 碰过。
+当时的取舍写在注释里："自检出错是响亮失败，后端出错是静默改数据，所以先保后端"，
+还记着"115 处历史类型债（check.mts 93、accept-check.mts 21）"。
+
+那些债的**根因其实很集中**，清完只花了一轮：缺 9 个类型 import（`Lesson` / `Student` /
+`Classroom` / `Teacher` / `Inquiry` / `LessonRecord` / `HomeworkRecord` / `Assessment` / `Database`
+—— 类型注解会被 strip，所以裸用也照样跑）；夹具少几个新字段（`version`、`makeupForLessonId`、
+`leaveRequestedAt`、`unitPrice/agreedAmount/paidNow/method`、课程的 `stageIds/subjectIds/moduleIds`）；
+以及十几处 strict 下的 null 收窄。
+
+**清账时抓到四处真错误，全都是"看起来在断言、其实没有"**：
+
+| 位置 | 错在哪 | 后果 |
+| --- | --- | --- |
+| `accept-check.mts` 「标记已上动作」 | `markCompleted(...).skipped === false` —— `skipped` 是数组，永远不等于 false；而 `check()` 在没有 `expect` 时**只看抛不抛错** | 那条断言什么都没验（现在是"提前请假 → 一个都没扣，且原因写着请假"，并且它当场抓出我对 `skipped` 语义的误解） |
+| `accept-check.mts` 课堂记录 | `interaction: "好"` —— 合法值只有 主动 / 一般 / 被动 | 一直往库里写了一个非法枚举值 |
+| `check.mts` 开放矩阵那一节 | `offersOfDimension(rows, "delivery", …)` —— v26 删掉"交付形态"之后留下的 | 查不到的字段返回空数组 → 断言**空转通过** |
+| `scripts/diff-site-content.mts` | 读 `publicSite.coursePartitions`，真实字段叫 `partitions` | 脚本一跑就抛（`npm run site:diff` 之前是坏的） |
+
+另外清掉两处"静默忽略"：`walkApi(api, "", realMethods)`（函数只收两个参数）与
+`check.mts` 里重复 import 的 `HolidayDay`。
+
+现在 `npm run typecheck` = `tsc --noEmit`，覆盖 `app/` / `components/` / `lib/` / `server/` / `scripts/`
+的**全部** `.ts` / `.tsx` / `.mts`；自检新增第 38.5 节两条断言盯住 include 不再回退。
 
 ### E5：课程台账按维度分组（v33）—— E2-B 落地，分区视图保留
 
