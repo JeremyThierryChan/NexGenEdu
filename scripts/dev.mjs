@@ -70,7 +70,17 @@ const dev = spawn(nextBin, ["dev"], { cwd: root, stdio: "inherit" });
  * （本机、几毫秒），比漏更新强。默认 2 秒，可用 `SITE_LIVE_POLL_MS` 调。
  */
 const POLL_MS = Number(process.env.SITE_LIVE_POLL_MS ?? 2000);
-const LIVE = process.env.SITE_LIVE !== "0";
+/*
+ * **默认关闭**（要开就 `SITE_LIVE=1 npm run dev`）。
+ *
+ * 为什么改默认值（这是踩出来的）：它每 2 秒比对一次后端内容，一旦变化就重写
+ * `data/site/.backend-snapshot.ts` —— 而那个模块被网站页面 import，于是 **Next 会重编译并
+ * 整页重载**。在后台做着日常操作（切「开放/暂未开放」、改教师、改报价…）时，这些都会改变
+ * 后端公开数据，于是"点一下 → 过 1~5 秒页面自己跳回顶部"（机构真实反馈）。
+ * 也就是说：这个功能的收益只在"**正在编辑网站内容**"时才存在，代价却是**每次改数据都重载后台**。
+ * 因此改成显式开启：写网站文案时开它，做日常运营时别开。
+ */
+const LIVE = process.env.SITE_LIVE === "1";
 const backendBase = (
   process.env.SITE_API_BASE ??
   process.env.NEXT_PUBLIC_API_BASE ??
@@ -93,7 +103,11 @@ let backendWasDown = false;
 
 async function watchBackendContent() {
   if (!LIVE) {
-    console.log("[site-data] 已关闭「盯着后端」（SITE_LIVE=0）：网站内容只在启动时取一次");
+    console.log(
+      "[site-data] 默认不盯后端（网站内容只在启动时取一次）。" +
+        "正在写网站文案时要网站跟着变，用 `SITE_LIVE=1 npm run dev` 启动 —— " +
+        "注意它每次检测到内容变化都会重编译并**整页重载**，做日常运营时会让页面自己跳回顶部。",
+    );
     return;
   }
   console.log(
