@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/Button";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { NumberInput, Panel, SelectInput, TextField } from "@/components/admin/AdminFields";
 import { api, type Catalog, type Course } from "@/lib/backend/api";
+import { unavailableLast } from "@/lib/backend/availability-order";
 import { classTypeIssuesText, syncClassTypes } from "@/lib/backend/class-types";
 import { MultiSelect } from "@/components/admin/MultiSelect";
 import {
@@ -161,6 +162,31 @@ export default function AdminPricingPage() {
   );
 
   const selectedClassType = draft?.classTypes.find((item) => item.name === classTypeName);
+
+  /**
+   * 试算器「课程」下拉的选项：**暂未开放的排到最后**（机构：把暂未开放的内容自动往后排）。
+   *
+   * 两件事刻意这么做：
+   *   - 排的是**这一份选项**，不是 `draft.stages` 本身 —— `draft` 是"要存回去的那一份"，
+   *     就地重排它等于把显示顺序写进数据库（而顺序是显示规则，见
+   *     `lib/backend/availability-order.ts` 的文件头）；
+   *   - 阶段之间**不重排**，每个阶段的课在**它自己那一段里**把暂未开放的往后挪
+   *     （下拉里每项写着「阶段 · 课程」，按阶段分组才是人找课的方式）。
+   * 判据是 `course.available`（与「基础价」面板里那个「暂未开放」勾选框同一个字段），
+   * 排序用的是网站报价页同一个纯函数。
+   */
+  const courseChoices = useMemo(
+    () =>
+      (draft?.stages ?? []).flatMap((stage) =>
+        unavailableLast(stage.courses, (course) => !course.available).map((course) => ({
+          value: course.name,
+          label: `${stage.name} · ${course.name}${
+            course.basePrice === null ? "（未开放）" : ` ¥${course.basePrice}`
+          }`,
+        })),
+      ),
+    [draft],
+  );
 
   /** 课程库里还没定价的课程（家长问价时答不上来的那些）。 */
   const unpricedCourses = useMemo(() => {
@@ -427,14 +453,7 @@ export default function AdminPricingPage() {
             label="课程"
             value={courseName}
             onChange={(event) => setCourseName(event.target.value)}
-            options={draft.stages.flatMap((stage) =>
-              stage.courses.map((course) => ({
-                value: course.name,
-                label: `${stage.name} · ${course.name}${
-                  course.basePrice === null ? "（未开放）" : ` ¥${course.basePrice}`
-                }`,
-              })),
-            )}
+            options={courseChoices}
           />
           <SelectInput
             label="班型"

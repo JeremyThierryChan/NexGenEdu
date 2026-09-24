@@ -32,6 +32,9 @@ import {
   getCoursePageData,
   getCoursesPage,
   getCoursesPageFromTemplate,
+  // 两条"暂未开放往后排"的显示出口（第 48 节要比"页面出口 = 原始出口 + 同一条规则"）
+  columnsWithUnavailableLast,
+  coursesPageWithUnavailableLast,
   getHomeContent,
   getSiteBrand,
   getTeachersPage,
@@ -41,6 +44,7 @@ import {
   getPricingData,
   getPricingDataFromTemplate,
   parsePricingSource,
+  pricingWithUnavailableLast,
   type PricingData,
 } from "@/lib/data/pricing";
 import type { PricingConfig, QuoteInput, QuoteSelection } from "@/lib/backend/pricing";
@@ -183,11 +187,15 @@ import {
   siteCoreFromViews,
   type SiteExportFile,
 } from "@/lib/backend/site-export";
-import { coursesFromSite } from "@/lib/backend/courses";
+import { courseOptions, coursesFromSite } from "@/lib/backend/courses";
 import { SITE_COPY_KEYS, validateCopy } from "@/lib/backend/site-copy-model";
 import { copyBlocksFromContent } from "@/lib/backend/site-copy";
 import { featuredDeleteRefusal } from "@/lib/backend/featured-tree";
-import { getFormOptionsFromTemplate } from "@/lib/backend/options";
+import { getFormOptionsFromTemplate, getSubjectOptions } from "@/lib/backend/options";
+import {
+  stableByAvailability,
+  unavailableLast,
+} from "@/lib/backend/availability-order";
 import {
   assignCatalogIds,
   catalogGroups,
@@ -8755,13 +8763,27 @@ console.log("\n=== 25. 网站内容来源：后端 / 空白 /（显式）模版 
   // ② template：显式要求 → 那五块用模版（本地对照 / 需要一份模版站时）
   __useSiteContentSourceForTesting("template");
   const fromTemplate = fiveBlocks();
-  eq("显式 template：那五块与「只读模版」那几个出口逐项一致",
+  /*
+   * ⚠️ 2026-09 起，**栏目 / 课程页 / 报价**这三块的页面出口多了一层**显示排序**
+   * （机构：「把暂未开放的内容自动往后排」）。这一层刻意套在页面出口，
+   * `...FromTemplate()` 那几个"只读模版"出口仍是**原始顺序** —— 它们是
+   * "内容文件 ⇄ 数据"那条通道（导出回读、`site:export` / `site:diff` 对账都读它），
+   * 在那里排序就是把显示顺序写进数据。因此这一条比的是
+   * "页面出口 == 原始出口 + 同一条显示规则"，用的是**页面上真正在跑的那个函数**
+   * （不是在这里再排一遍 —— 那样"两条路径顺序一致"会因为两边共用同一份代码而恒真）。
+   * 三块的"确实排好了"由第 48 节单独钉住。
+   */
+  eq("显式 template：那五块与「只读模版」那几个出口逐项一致（栏目 / 课程页 / 报价多一层"
+    + "「暂未开放往后排」的显示规则，教师与学生案例原样）",
     [
-      JSON.stringify(fromTemplate.columns) === JSON.stringify(getCourseColumnsFromTemplate()),
-      JSON.stringify(fromTemplate.courses) === JSON.stringify(getCoursesPageFromTemplate()),
+      JSON.stringify(fromTemplate.columns) ===
+        JSON.stringify(columnsWithUnavailableLast(getCourseColumnsFromTemplate())),
+      JSON.stringify(fromTemplate.courses) ===
+        JSON.stringify(coursesPageWithUnavailableLast(getCoursesPageFromTemplate())),
       JSON.stringify(fromTemplate.teachers) === JSON.stringify(getTeachersPageFromTemplate()),
       JSON.stringify(fromTemplate.cases) === JSON.stringify(getCasesContentFromTemplate()),
-      JSON.stringify(fromTemplate.pricing) === JSON.stringify(getPricingDataFromTemplate()),
+      JSON.stringify(fromTemplate.pricing) ===
+        JSON.stringify(pricingWithUnavailableLast(getPricingDataFromTemplate())),
     ],
     [true, true, true, true, true]);
   __useSiteContentSourceForTesting(undefined);
@@ -11566,15 +11588,24 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
   };
 
   /* ① 回读 == 网站现成的解析口径（真实的六个文件） */
+  /*
+   * ⚠️ 2026-09 起，这里比的是"**网站上真正渲染的那一份**"，而不是 `...FromTemplate()`
+   * 那几个"只读模版"出口的**原始顺序**：机构要求「把暂未开放的内容自动往后排」，
+   * 页面出口因此多套了一层显示排序（`columnsWithUnavailableLast` /
+   * `coursesPageWithUnavailableLast` / `pricingWithUnavailableLast`），
+   * 而 `readSiteCore()` 是"回读网站看到的那一份"，两边必须同口径才会比得平。
+   * 下面那条"库改过的内容导出后回读"用的是**后端视图模型**（已经排过），
+   * 两条断言因此说的是同一件事：**回读 = 网站上的那一份**。
+   */
   eq(
     "回读真实文件的结果与网站现成的解析口径完全一致",
     coreDifferences(
       siteCoreFromViews({
         copy: copyBlocksFromContent(),
         teachersPage: getTeachersPageFromTemplate(),
-        courseColumns: getCourseColumnsFromTemplate(),
-        coursesPage: getCoursesPageFromTemplate(),
-        pricing: getPricingDataFromTemplate(),
+        courseColumns: columnsWithUnavailableLast(getCourseColumnsFromTemplate()),
+        coursesPage: coursesPageWithUnavailableLast(getCoursesPageFromTemplate()),
+        pricing: pricingWithUnavailableLast(getPricingDataFromTemplate()),
         faq: getFaqContentFromTemplate(),
         cases: getCasesContentFromTemplate(),
         featured: getFeaturedContentFromTemplate(),
@@ -12900,6 +12931,235 @@ console.log("\n=== 47. 报价跟着课程库走：删掉的课不该再出现（
     !Object.keys(statusRow).includes("dangling"), JSON.stringify(Object.keys(statusRow)));
   ok("「这门课还没定价」仍然由 `priced` 表达（课程库页面的「未定价 N 门」用它）",
     typeof statusRow.priced === "boolean");
+}
+
+console.log(
+  "\n=== 48. 「暂未开放」一律排到最后（机构：「自动排序，把暂未开放的内容自动往后排」）===",
+);
+
+/*
+ * 机构原话：「**在报价器和其他部分加一个小功能，自动排序，把暂未开放的内容自动往后排**」。
+ *
+ * 这一节守四件事，缺一条这个功能就会以某种方式悄悄不对：
+ *
+ *   ① **纯函数本身**（`lib/backend/availability-order.ts`）：稳定（只把不可用的往后挪，
+ *      其余相对顺序一字不动）、幂等（全开放 / 全关闭时顺序不变）、**不过滤**；
+ *   ② **报价的两条取数路径顺序一致**，而且两边都把暂未开放的排到了最后 ——
+ *      "本地看是一个顺序、线上 Pages 看是另一个顺序"是这套双来源架构最贵的错，
+ *      而它不报错，只会让机构觉得"我改了顺序怎么没生效"；
+ *   ③ **课程总览的卡片**在同一个子栏目内也是暂未开放排最后（两条路径各比一次）；
+ *   ④ **反向断言：暂未开放的项仍然在列表里**（不是被过滤掉了）——
+ *      这条最要紧：把"往后排"写成"删掉"在页面上看起来像是"清爽了"，
+ *      而机构看到的是"我明明有这门课、报价页上却没有"。
+ *
+ * 刻意**不在这里重写一遍排序**：要比的是"页面上真正在跑的那份数据已经把不可用的
+ * 排到了最后"，以及"两条路径产出同一顺序"。自检里再排一次等于规则有了第二份实现，
+ * 将来两边一起写错时这些断言仍然全绿。
+ */
+{
+  /** 某个特征是不是都集中在末尾（一个都没有 / 全都有都算）。 */
+  const closedAtEnd = <T,>(items: readonly T[], isClosed: (item: T) => boolean): boolean => {
+    const first = items.findIndex(isClosed);
+    return first === -1 || items.slice(first).every(isClosed);
+  };
+  /** 对象数组的名字数组。 */
+  const namesOf = <T extends { name: string }>(items: readonly T[]): string[] =>
+    items.map((item) => item.name);
+  /** 课程总览的全部卡片（按渲染顺序拉平）。 */
+  const allCards = (columns: ReturnType<typeof getCourseColumns>) =>
+    columns.flatMap((column) => column.subgroups.flatMap((subgroup) => subgroup.cards));
+
+  /* ── ① 纯函数本体 ───────────────────────────────────────────────────────── */
+  const sample = [
+    { name: "甲", available: true },
+    { name: "乙", available: false },
+    { name: "丙", available: true },
+    { name: "丁", available: false },
+    { name: "戊", available: true },
+  ];
+  eq("暂未开放的排到最后，其余的**保持原有相对顺序**（不是重新按名字排）",
+    namesOf(unavailableLast(sample, (item) => !item.available)),
+    ["甲", "丙", "戊", "乙", "丁"]);
+  eq("同一个规则的另一种写法（判据是「可用」）结果一样",
+    namesOf(stableByAvailability(sample, (item) => item.available)),
+    ["甲", "丙", "戊", "乙", "丁"]);
+  eq("**一项都不少**（只往后挪，不是过滤掉）",
+    unavailableLast(sample, (item) => !item.available).length, sample.length);
+  eq("不改调用方传进来的数组（不是就地 sort —— 就地改会把显示顺序漏进数据）",
+    namesOf(sample), ["甲", "乙", "丙", "丁", "戊"]);
+
+  const allOpen = [
+    { name: "甲", available: true },
+    { name: "乙", available: true },
+    { name: "丙", available: true },
+  ];
+  const allClosed = [
+    { name: "甲", available: false },
+    { name: "乙", available: false },
+    { name: "丙", available: false },
+  ];
+  eq("全开放时顺序一字不动（幂等）",
+    namesOf(stableByAvailability(allOpen, (item) => item.available)), ["甲", "乙", "丙"]);
+  eq("全关闭时顺序也一字不动（幂等）",
+    namesOf(stableByAvailability(allClosed, (item) => item.available)), ["甲", "乙", "丙"]);
+  eq("排过一次再排一次结果不变（幂等）",
+    namesOf(stableByAvailability(
+      stableByAvailability(sample, (item) => item.available),
+      (item) => item.available,
+    )),
+    namesOf(stableByAvailability(sample, (item) => item.available)));
+
+  /* ── ② 报价：两条取数路径的顺序 ─────────────────────────────────────────── */
+  // 模版那条路（`getPricingDataFromTemplate` 仍是**原始顺序**：它是导出对账那条通道）
+  __useBackendSnapshotForTesting(null);
+  __useSiteContentSourceForTesting("template");
+  const pricingTemplateRaw = getPricingDataFromTemplate();
+  const pricingTemplate = getPricingData();
+
+  /*
+   * 库里那条路：用**示例库生成的公开快照**（与第 12 节同一个夹具做法）。
+   *
+   * 为什么不用磁盘上那份 `.backend-snapshot.ts`：它是"上次构站那一刻"的快照，
+   * 在没连后端的机器上会是空的一份 —— 拿它比会让这条断言随构建环境变红变绿，
+   * 而这里要守的是"两条取数路径的顺序规则一致"，与那台机器连没连后端无关。
+   */
+  const pricingSnapshot = buildPublicSite(seedDb);
+  __useBackendSnapshotForTesting(pricingSnapshot);
+  const pricingBackend = getPricingData();
+  __useBackendSnapshotForTesting(null);
+
+  eq("报价的两条取数路径：**阶段顺序一致**",
+    namesOf(pricingTemplate.stages), namesOf(pricingBackend.stages));
+  eq("报价的两条取数路径：**每个阶段里的课程顺序一致**",
+    pricingTemplate.stages.map((stage) => namesOf(stage.courses)),
+    pricingBackend.stages.map((stage) => namesOf(stage.courses)));
+  eq("库里那条路也**每一组都把暂未开放的排到了最后**（同一个纯函数）",
+    [
+      pricingBackend.stages.filter((stage) => !closedAtEnd(stage.courses, (course) => !course.available)).length,
+      closedAtEnd(pricingBackend.stages, (stage) => !stage.available),
+    ],
+    [0, true]);
+
+  eq("报价页出口：**每一组里暂未开放的课程都排到了最后**",
+    pricingTemplate.stages
+      .filter((stage) => !closedAtEnd(stage.courses, (course) => !course.available))
+      .map((stage) => stage.name),
+    []);
+  eq("报价页出口：**整组都没有可选课程的阶段排到最后**",
+    closedAtEnd(pricingTemplate.stages, (stage) => !stage.available), true);
+
+  /*
+   * 非空转：**原始顺序里确实有"夹在中间"的暂未开放课程**（初中社会 / 日语 / 俄语 /
+   * 意大利语 / 那一堆成人课）。没有这一条，"已经排到最后"在任何数据上都成立。
+   */
+  const rawStagesNotTrailing = pricingTemplateRaw.stages
+    .filter((stage) => !closedAtEnd(stage.courses, (course) => !course.available))
+    .map((stage) => stage.name);
+  ok(`真实内容里确实有暂未开放的课**原本不在末尾**（这一节不是空转的：${rawStagesNotTrailing.join("、")}）`,
+    rawStagesNotTrailing.length > 0);
+
+  /* ── ③ 课程总览的卡片：同一个子栏目内，暂未开放排最后 ───────────────────── */
+  const columnsRaw = getCourseColumnsFromTemplate();
+  __useSiteContentSourceForTesting("template");
+  const columnsTemplate = getCourseColumns();
+  __useBackendSnapshotForTesting(pricingSnapshot);
+  const columnsBackend = backendCourseColumns(pricingSnapshot);
+  __useBackendSnapshotForTesting(null);
+
+  const notTrailingIn = (columns: ReturnType<typeof getCourseColumns>): string[] =>
+    columns.flatMap((column) =>
+      column.subgroups
+        .filter((subgroup) => !closedAtEnd(subgroup.cards, (card) => card.unavailable))
+        .map((subgroup) => `${column.title} / ${subgroup.title}`),
+    );
+  const cardTitles = (columns: ReturnType<typeof getCourseColumns>): string[] =>
+    allCards(columns).map((card) => card.title);
+
+  eq("课程总览：同一个子栏目里，暂未开放的卡片都排到了最后（模版那条路）",
+    notTrailingIn(columnsTemplate), []);
+  eq("课程总览：同一个子栏目里，暂未开放的卡片都排到了最后（库里那条路）",
+    notTrailingIn(columnsBackend), []);
+  eq("两条路的卡片结构（栏目 / 子栏目 / 卡片次序）**逐项一致**",
+    JSON.stringify(columnsTemplate.map((column) => ({
+      column: column.title,
+      subgroups: column.subgroups.map((subgroup) => ({
+        subgroup: subgroup.title,
+        cards: subgroup.cards.map((card) => card.title),
+      })),
+    }))),
+    JSON.stringify(columnsBackend.map((column) => ({
+      column: column.title,
+      subgroups: column.subgroups.map((subgroup) => ({
+        subgroup: subgroup.title,
+        cards: subgroup.cards.map((card) => card.title),
+      })),
+    }))));
+
+  const rawCardsNotTrailing = notTrailingIn(columnsRaw);
+  ok(`真实内容里确实有暂未开放的卡片**原本不在末尾**（这一节不是空转的：${rawCardsNotTrailing.join("、")}）`,
+    rawCardsNotTrailing.length > 0);
+
+  /* ── ④ 反向断言：暂未开放的项**仍然在列表里**（不许被过滤掉）───────────── */
+  const rawCards = allCards(columnsRaw);
+  eq("卡片一张都没少（排序不是过滤）", cardTitles(columnsTemplate).length, rawCards.length);
+  eq("卡片名逐项仍在（顺序可变、集合不可变）",
+    [...cardTitles(columnsTemplate)].sort(), [...cardTitles(columnsRaw)].sort());
+
+  const unavailableCardTitles = rawCards.filter((card) => card.unavailable).map((card) => card.title);
+  ok(`暂未开放的卡片仍然在课程总览里（${String(unavailableCardTitles.length)} 张：${unavailableCardTitles.join("、")}）`,
+    unavailableCardTitles.length > 0 &&
+      unavailableCardTitles.every((title) => cardTitles(columnsTemplate).includes(title)));
+
+  eq("暂未开放的**课程一条都没少**（报价页出口 vs 模版原始：集合相同，只有顺序被改）",
+    [...pricingTemplate.stages.flatMap((stage) => namesOf(stage.courses))].sort(),
+    [...pricingTemplateRaw.stages.flatMap((stage) => namesOf(stage.courses))].sort());
+  const unavailableCourseNames = pricingTemplateRaw.stages
+    .flatMap((stage) => stage.courses)
+    .filter((course) => !course.available)
+    .map((course) => course.name);
+  ok(`暂未开放的课程仍然在下拉里（${String(unavailableCourseNames.length)} 门：` +
+    `${unavailableCourseNames.slice(0, 6).join("、")}…）`,
+    unavailableCourseNames.length > 0 &&
+      unavailableCourseNames.every((name) =>
+        pricingTemplate.stages.some((stage) => stage.courses.some((course) => course.name === name))));
+
+  /* ── ⑤ 科目候选（排课 / 报课 / 教师可带科目）也能排，而且一门都不少 ──────── */
+  const subjectOptions = getSubjectOptions();
+  eq("科目候选一门都没少（暂未开放的课照旧可选 —— 它们随时可能重新开放）",
+    [...subjectOptions].sort(), [...cardTitles(columnsRaw)].sort());
+  eq("科目候选里暂未开放的排到了最后（判据是卡片的 `unavailable`）",
+    closedAtEnd(subjectOptions, (name) =>
+      rawCards.find((card) => card.title === name)?.unavailable === true),
+    true);
+
+  const libraryOptions = courseOptions(seedDb.courses, seedDb.coursePartitions);
+  ok("服务层那份科目候选（`courseOptions`：排课 / 报课 / 教师科目都用它）也把暂未开放的排到最后",
+    closedAtEnd(libraryOptions, (option) => {
+      const course = seedDb.courses.find((item) => item.name === option.name);
+      return course !== undefined && course.status !== "开放";
+    }));
+  ok("而且候选数量不少于课程库的课程数（排序不改数量）",
+    libraryOptions.length >= seedDb.courses.length,
+    `候选 ${String(libraryOptions.length)} / 课程库 ${String(seedDb.courses.length)}`);
+
+  /* ── ⑥ 一处实现：两条取数路径都 import 同一个纯函数，而不是各写一遍 sort ── */
+  const orderUsers = [
+    "lib/site/backend-source.ts",
+    "lib/data/site.ts",
+    "lib/data/pricing.ts",
+    "lib/backend/courses.ts",
+    "lib/backend/options.ts",
+  ];
+  eq("排序规则只有一处实现：这几条取数路径都 import 了 `availability-order`",
+    orderUsers.filter((file) =>
+      !readFileSync(new URL(`../${file}`, import.meta.url), "utf8").includes("availability-order")),
+    []);
+
+  /*
+   * 收尾：把测试注入恢复成"真实取值"（§48 是最后一节，其后只打印结果）。
+   */
+  __useBackendSnapshotForTesting(undefined);
+  __useSiteContentSourceForTesting(undefined);
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

@@ -56,6 +56,7 @@
  */
 
 import { backendSiteSnapshot, backendSiteSource } from "@/data/site/.backend-snapshot";
+import { unavailableLast, unavailableLastInGroups } from "@/lib/backend/availability-order";
 import { deriveSlug } from "@/lib/backend/featured-tree";
 import { groupByPartition, partitionPlace } from "@/lib/backend/course-partitions";
 import type { CoursePartition } from "@/lib/backend/types";
@@ -419,9 +420,17 @@ export function backendCourseColumns(snapshot: PublicSite): CourseColumn[] {
       const items = byOrder(group.items, (course) => sortOrder(course.order));
       // 空组（含"没有子标题"那一组）不渲染：见上面「空栏目不上网」
       if (items.length === 0) continue;
+      /*
+       * **同一个子栏目内，暂未开放的卡片排到最后**（机构：把暂未开放的内容自动往后排）。
+       *
+       * 排序放在"已经按 `order` 排好之后"，而且用的是**稳定**的那一个纯函数
+       * （`lib/backend/availability-order.ts`）：机构自己排的卡片顺序在"开放的那几张"内部
+       * 一字不动，只有暂未开放的被挪到本组末尾 —— 不是重新按名字排一遍。
+       * 卡片本身一张都不删：它们在网站上照旧显示（卡片右上角标着「暂未开放」），只是靠后。
+       */
       subgroups.push({
         title: group.subgroup === null ? "" : text(group.subgroup.name).trim(),
-        cards: items.map((course) => toCard(course, anchors)),
+        cards: unavailableLast(items.map((course) => toCard(course, anchors)), (card) => card.unavailable),
       });
     }
     if (subgroups.length === 0) continue;
@@ -490,6 +499,15 @@ function toElectiveGroups(
  * `orders`：学科按 `order` 升序（稳定）。站点 `Course` 类型里没有 order 字段，
  * 页面只能按数组顺序渲染，因此顺序信息必须在映射时就落到数组上
  * （后端导入时 order = 数组下标，因此这一步对导入数据是恒等的）。
+ *
+ * ## 「暂未开放」往后排（机构：把暂未开放的内容自动往后排）
+ *
+ * 两处、两个字段名，但用的是**同一个纯函数**（`lib/backend/availability-order.ts`）：
+ *   - **学科列表**（`courses`，卡片页的锚点索引也读它）：整组标了暂未开放的往后排（`unavailable`）；
+ *   - **选修课**：不可选的往后排（`available`），而且是在**它所在的栏目分组内部**排
+ *     （栏目本身的顺序来自分区表，不动）。
+ * `getCoursesPage()` 的模版那一条路必须做同一件事（`coursesPageWithUnavailableLast`），
+ * 否则"本地看到的是这个顺序、线上 Pages 那份是那个顺序"（自检 §12 逐字节比两条路径）。
  */
 export function backendCoursesPage(snapshot: PublicSite): {
   heading: SectionHeading;
@@ -498,17 +516,20 @@ export function backendCoursesPage(snapshot: PublicSite): {
   electiveTitle: string;
   electiveGroups: Array<{ title: string; items: ElectiveCourse[] }>;
 } {
-  const courses = byOrder(courseSubjects(snapshot), (subject) => sortOrder(subject.order)).map<Course>(
-    (subject) => ({
-      id: text(subject.name),
-      nameZh: text(subject.name),
-      unavailable: subject.unavailable === true,
-      lead: text(subject.lead),
-      bands: (subject.bands ?? []).map((band) => ({
-        title: text(band.title),
-        content: text(band.body),
-      })),
-    }),
+  const courses = unavailableLast(
+    byOrder(courseSubjects(snapshot), (subject) => sortOrder(subject.order)).map<Course>(
+      (subject) => ({
+        id: text(subject.name),
+        nameZh: text(subject.name),
+        unavailable: subject.unavailable === true,
+        lead: text(subject.lead),
+        bands: (subject.bands ?? []).map((band) => ({
+          title: text(band.title),
+          content: text(band.body),
+        })),
+      }),
+    ),
+    (course) => course.unavailable,
   );
 
   const electiveTitle = text(snapshot.siteContent?.coursePage?.electiveTitle);
@@ -522,7 +543,12 @@ export function backendCoursesPage(snapshot: PublicSite): {
     courses,
     columns: backendCourseColumns(snapshot),
     electiveTitle,
-    electiveGroups: toElectiveGroups(electives, electiveTitle, snapshotPartitions(snapshot)),
+    electiveGroups: unavailableLastInGroups(
+      toElectiveGroups(electives, electiveTitle, snapshotPartitions(snapshot)),
+      (group) => group.items,
+      (group, items) => ({ ...group, items }),
+      (item) => !item.available,
+    ),
   };
 }
 
@@ -689,7 +715,11 @@ function toStageCourse(course: BackendPriceCourse): StageCourse {
  * 页面上整阶段置灰，家长就不会点进去发现里面全是「暂未开放」。
  */
 function toStage(stage: BackendPriceStage): PricingStage {
-  const courses = (stage.courses ?? []).map(toStageCourse);
+  /*
+   * 阶段内：暂未开放的课程排到最后（稳定 —— 机构在后台排的课程顺序在可选的那几门之间不变）。
+   * 与模版那一条路（`lib/data/pricing.ts`）用的是同一个纯函数，两条路产出同样的顺序。
+   */
+  const courses = unavailableLast((stage.courses ?? []).map(toStageCourse), (course) => !course.available);
   return {
     name: text(stage.name),
     // 键序刻意与模版 `parsePricingSource` 写下的 `{ name, available, courses }` 一致：
@@ -757,10 +787,17 @@ function toPricingLabels(labels: BackendPricingLabels | undefined): PricingData[
  * （那样机构会以为"价格已经按库里的走了"，其实看到的是文件里的旧价目）。
  *
  * 也刻意**不看课程正文**：报价来自 `pricing` 配置，与"后端有没有导入过课程页正文"无关。
+ *
+ * ## 「暂未开放」往后排
+ *
+ * **阶段**：整组都没有可选课程的那些排到最后（例如某一栏目下的课全都没定价）——
+ * 家长先看到的是"能报的"；**阶段内部**：`available === false` 的课排最后。
+ * 两处都用 `lib/backend/availability-order.ts` 的同一个纯函数，与模版那条路一致。
+ * 一条都不删：暂未开放的课照旧出现在下拉里（页面上是灰的、标着「暂未开放」）。
  */
 export function backendPricingData(snapshot: PublicSite): PricingData {
   const pricing = snapshot.pricing;
-  const stages = (pricing.stages ?? []).map(toStage);
+  const stages = unavailableLast((pricing.stages ?? []).map(toStage), (stage) => !stage.available);
 
   return {
     labels: toPricingLabels(snapshot.siteContent?.pricingPage?.labels),

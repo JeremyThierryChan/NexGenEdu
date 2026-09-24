@@ -1,4 +1,5 @@
 import { pricingSource } from "@/data/site/pricing";
+import { unavailableLast } from "@/lib/backend/availability-order";
 import { backendPricingData, backendSnapshot, siteContentSource } from "@/lib/site/backend-source";
 import { parseDocument, type PageBlock, type Section } from "@/lib/data/content";
 
@@ -376,6 +377,10 @@ export function parsePricingSource(source: string): PricingData {
  * 页面与报价公式都不用知道数据是从哪来的。
  *
  * `parsePricingSource` 仍然导出给自检用：等价性断言要能单独跑模版这一条路。
+ * 注意**排序不在这里往下沉**（见 `pricingWithUnavailableLast` 的说明）：
+ * `getPricingDataFromTemplate()` / `parsePricingSource` 是"内容文件 ⇄ 数据"那条
+ * **原始**通道（导出回读、`site:export` / `site:diff` 比对都用它），
+ * 往里加显示排序就会让"导出不一致"——那是把显示顺序写进了数据。
  */
 export function getPricingData(): PricingData {
   /*
@@ -385,7 +390,7 @@ export function getPricingData(): PricingData {
   const snapshot = backendSnapshot();
   if (siteContentSource() === "backend" && snapshot !== null) return backendPricingData(snapshot);
   const frame = getPricingDataFromTemplate();
-  if (siteContentSource() === "template") return frame;
+  if (siteContentSource() === "template") return pricingWithUnavailableLast(frame);
   /*
    * 没连上后端（默认）：**文案用模版、价格数据为空**。
    * `labels` 是按钮与标签的文字（"算一算""课单价"这类），属于页面骨架 ——
@@ -397,6 +402,40 @@ export function getPricingData(): PricingData {
     // 计费规则不算"条目"：它决定页面上"怎么算"的说明文字，模版那一份是公开口径
     rules: frame.rules,
     trial: frame.trial,
+  };
+}
+
+/**
+ * 「暂未开放」往后排（**显示**规则，实现见 `lib/backend/availability-order.ts`）。
+ *
+ * 导出给自检用：它要比的是"页面出口 == 只读模版那个原始出口 + 同一条显示规则"，
+ * 而不是让自检自己再排一遍（那样规则就有了第二份实现，"两条路径一致"会因为
+ * 两边共用同一份错代码而永远为真）。
+ *
+ * 报价页下拉里两处要排：
+ *   - **学习阶段**：整组都没有可选课程的阶段排到最后（例如曾经那一版「课外兴趣」，
+ *     两门课都还没定价 —— 家长先看到的应该是能报的学段）；
+ *   - **阶段内部的课程**：`available === false` 的课排最后（高中政治 / 历史 / 地理 / 技术、
+ *     日语 / 俄语 / 意大利语…），可选的课之间**保持机构排的顺序**不动。
+ *
+ * 刻意**只在这一层套**（页面的取数出口），不往下沉到 `parsePricingSource`：
+ * 那个函数是"内容文件 → 数据"的原始解析，`getPricingDataFromTemplate()` 是它给
+ * 导出回读 / `site:diff` 对账用的出口；在那里排序 = 把显示顺序混进数据，
+ * `npm run site:export -- --check` 会立刻报"不一致"。后端那一条路在
+ * `lib/site/backend-source.ts` 里套的是同一个纯函数，两条路因此顺序一致。
+ *
+ * 一门课都不删：暂未开放的课照旧出现在下拉里（`EstimateForm` 把它们渲染成禁选并标注）。
+ */
+export function pricingWithUnavailableLast(data: PricingData): PricingData {
+  return {
+    ...data,
+    stages: unavailableLast(
+      data.stages.map((stage) => ({
+        ...stage,
+        courses: unavailableLast(stage.courses, (course) => !course.available),
+      })),
+      (stage) => !stage.available,
+    ),
   };
 }
 

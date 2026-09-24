@@ -36,6 +36,7 @@
  */
 
 import { getCourseColumnsFromTemplate, getCoursesPageFromTemplate } from "@/lib/data/site";
+import { stableByAvailability } from "./availability-order";
 import { versionOf } from "./concurrency";
 import { ensurePartitions, partitionPathLabel } from "./course-partitions";
 import { nextId } from "./ids";
@@ -221,6 +222,16 @@ export function materializeSiteCourses(
  *
  * `category` 给的是**分区名**（拿 id 换来的）：下拉里要按栏目分组显示，
  * 而调用方（学员/教师表单）拿到的必须是人看得懂的名字，不该自己去查分区表。
+ *
+ * ## 「暂未开放」的排到最后（机构：把暂未开放的内容自动往后排）
+ *
+ * 排课 / 批量排课 / 报课 / 教师可带科目这几处的科目候选都是这一份。暂未开放的课
+ * **仍然在候选里**（机构自己建的课、或暂时不接单的课随时可能重新开放 —— 去掉它们
+ * 会让"这门课其实存在"这件事在后台看不见），只是排在最后，用的是
+ * `lib/backend/availability-order.ts` 那个唯一的纯函数（稳定：可选课之间不动）。
+ *
+ * 判据取**库里那一行**的状态（它才是当前口径，改名 / 开放状态都以后端为准）；
+ * 库里没有那就用网站内容那一份。
  */
 export function courseOptions(
   stored: Course[],
@@ -229,6 +240,8 @@ export function courseOptions(
 ): CourseOption[] {
   const seen = new Set<string>();
   const options: CourseOption[] = [];
+  /** 每个候选是不是「开放」——排序用（键是课程名）。 */
+  const availability = new Map<string, boolean>();
   /** 库里的同一条课程（按名字认）：它的分区与来源才是**当前**的口径。 */
   const inLibrary = new Map<string, Course>();
   for (const course of stored) {
@@ -249,6 +262,7 @@ export function courseOptions(
     if (name === "" || seen.has(name)) continue;
     seen.add(name);
     const current = inLibrary.get(name);
+    availability.set(name, (current?.status ?? course.status) === "开放");
     options.push({
       name,
       category: current === undefined ? course.category : partitionPathLabel(partitions, current.partitionId),
@@ -259,9 +273,11 @@ export function courseOptions(
     const name = course.name.trim();
     if (name === "" || seen.has(name)) continue;
     seen.add(name);
+    availability.set(name, course.status === "开放");
     options.push({ name, category: partitionPathLabel(partitions, course.partitionId), origin: course.origin });
   }
-  return options;
+  // 稳定：可选的那几门之间保持上面的顺序，只有暂未开放的被挪到最后
+  return stableByAvailability(options, (option) => availability.get(option.name) === true);
 }
 
 /**

@@ -9,6 +9,7 @@ import {
 } from "@/lib/data/content";
 import { scheduleSource } from "@/data/site/schedule";
 import { COURSES_HREF } from "@/lib/site/featured-routes";
+import { unavailableLast, unavailableLastInGroups } from "@/lib/backend/availability-order";
 import {
   backendCourseColumns,
   backendCoursesPage,
@@ -237,10 +238,37 @@ export function getCourseColumns(): CourseColumn[] {
    *
    * 「空」只表示**没有卡片**：栏目本身（标题、顺序）是**后端数据**，没连后端时也不存在，
    * 因此这里返回空数组、由页面把「课程总览」那一块渲染成空状态（标题照常有，见 §空态口径）。
+   *
+   * ## 「暂未开放」往后排（两条路径都排）
+   *
+   * 卡片在**同一个子栏目内**、暂未开放的排到最后 —— 排序规则只写在
+   * `lib/backend/availability-order.ts` 一处，两条路径各调一次（这里是模版那条，
+   * `backendCourseColumns` 是库里那条）。刻意排在这里（页面出口）而**不排进
+   * `getCourseColumnsFromTemplate()`**：后者是"内容文件 → 数据"的原始解析，
+   * `lib/backend/courses.ts` 建库、`site:diff` 对账都读它，往里加显示排序会把
+   * 显示顺序写进数据（`npm run site:export -- --check` 会当场报不一致）。
    */
   const snapshot = backendSnapshot();
   if (siteContentSource() === "backend" && snapshot !== null) return backendCourseColumns(snapshot);
-  return siteContentSource() === "template" ? getCourseColumnsFromTemplate() : [];
+  return siteContentSource() === "template" ? columnsWithUnavailableLast(getCourseColumnsFromTemplate()) : [];
+}
+
+/**
+ * 课程栏目里的卡片「暂未开放」往后排（**显示**规则，判据与实现在
+ * `lib/backend/availability-order.ts`）。
+ *
+ * 只动卡片在**本子栏目内**的位置：栏目顺序、子栏目顺序、以及"开放的那几张"之间的
+ * 先后（机构在后台用 ↑↓ 排的）一律不变 —— 这是稳定排序，不是重新排一遍。
+ * 一张卡片都不删：暂未开放的卡片在网站上加着「暂未开放」标记照旧显示，只是靠后。
+ */
+export function columnsWithUnavailableLast(columns: readonly CourseColumn[]): CourseColumn[] {
+  return columns.map((column) => ({
+    ...column,
+    subgroups: column.subgroups.map((subgroup) => ({
+      ...subgroup,
+      cards: unavailableLast(subgroup.cards, (card) => card.unavailable),
+    })),
+  }));
 }
 
 /**
@@ -440,13 +468,42 @@ export function getCoursesPage(): {
   const snapshot = backendSnapshot();
   if (siteContentSource() === "backend" && snapshot !== null) return backendCoursesPage(snapshot);
   const frame = getCoursesPageFromTemplate();
-  if (siteContentSource() === "template") return frame;
+  if (siteContentSource() === "template") return coursesPageWithUnavailableLast(frame);
   return {
     heading: frame.heading,
     courses: [],
     columns: [],
     electiveTitle: frame.electiveTitle,
     electiveGroups: [],
+  };
+}
+
+/**
+ * 课程页「暂未开放往后排」（**显示**规则，判据与实现在 `lib/backend/availability-order.ts`）。
+ *
+ * 两处要排，用的是同一个纯函数（与后端快照那条路、与 `getCourseColumns()` 完全一致）：
+ *   - **学科列表**（`courses`）：整组标了「暂未开放」的学科排到最后（`Course.unavailable`）
+ *     —— 注意 `/courses` 页 2026-09 起不再内联渲染这一份（课程详情改成"一张卡片一个页面"），
+ *     但它是**同一份课程页数据**的一部分（卡片页的锚点索引读它），两条取数路径必须一致；
+ *   - **选修课列表**：不可选的选修课排到**它所在栏目分组内**的最后（`ElectiveCourse.available`），
+ *     分组本身（外语 / 课外兴趣 / 成人课程）的顺序来自分区表，不动；
+ *   - 顺带把栏目树也过一遍（`columnsWithUnavailableLast`）—— 课程总览同一页要用。
+ *
+ * 只排序、不过滤：暂未开放的学科与选修课照旧列出（页面上灰掉 / 标注），只是靠后。
+ */
+export function coursesPageWithUnavailableLast(
+  frame: ReturnType<typeof getCoursesPageFromTemplate>,
+): ReturnType<typeof getCoursesPageFromTemplate> {
+  return {
+    ...frame,
+    courses: unavailableLast(frame.courses, (course) => course.unavailable),
+    columns: columnsWithUnavailableLast(frame.columns),
+    electiveGroups: unavailableLastInGroups(
+      frame.electiveGroups,
+      (group) => group.items,
+      (group, items) => ({ ...group, items }),
+      (item) => !item.available,
+    ),
   };
 }
 

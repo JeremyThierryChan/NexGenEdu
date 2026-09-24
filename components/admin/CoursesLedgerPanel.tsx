@@ -22,6 +22,7 @@ import {
 } from "@/lib/backend/api";
 import { isCourseLinked, opennessHint } from "@/lib/backend/course-dimensions";
 import { sortedStages } from "@/lib/backend/catalog";
+import { stableByAvailability, unavailableLast } from "@/lib/backend/availability-order";
 import {
   bandsForCard,
   cardTargets,
@@ -1306,8 +1307,26 @@ export function CoursesLedgerPanel() {
    *
    * `unpartitioned`：没有有效分区的课（未归类、或引用了一条已经被删掉的分区）。
    * 它们**不参与分组**（"没有分区"不是一个分区），单独列在清单最后。
+   *
+   * ## 「暂未开放」的排到每一组最后（机构：把暂未开放的内容自动往后排）
+   *
+   * 排在这里（`groupByPartition` **之后**）而不是之前：那个函数内部按课程的
+   * `order` 重排，先排一遍是白排的。规则本身只有一处实现
+   * （`lib/backend/availability-order.ts`），网站课程页用的是同一个纯函数 ——
+   * 于是"后台台账里看到的顺序"与"网站课程页上的顺序"是同一套。
+   * **一门课都不去掉**：暂未开放的课照旧列出来（卡片上写着「暂未开放」），只是靠后。
    */
-  const grouped = useMemo(() => groupByPartition(visible, partitions), [visible, partitions]);
+  const grouped = useMemo(
+    () =>
+      groupByPartition(visible, partitions).map((entry) => ({
+        ...entry,
+        groups: entry.groups.map((group) => ({
+          ...group,
+          items: unavailableLast(group.items, (course) => course.status !== "开放"),
+        })),
+      })),
+    [visible, partitions],
+  );
 
   /**
    * 按维度分组的清单：**学段 → 学科 → 课程**。
@@ -1319,6 +1338,9 @@ export function CoursesLedgerPanel() {
    *     **「多学科卡片」**那一桶，**不重复列出五次**（同一个 id 出现五次会让人以为有五门课）。
    *   - 没挂维度的课**不进这个分组**：它们由上面那块黄色提示 + 「只看未挂维度」处理，
    *     免得"未挂"变成一个看起来像学科的分组。
+   *
+   * 「暂未开放」的课同样排到**每个学科桶的最后**（与分区视图同一个判据、同一个纯函数）：
+   * 两个视图说的都是同一份清单，"按维度看时夹在中间、按分区看时在最后"会让人以为系统不一致。
    */
   const dimensionGroups = useMemo(() => {
     if (catalog === null) return [];
@@ -1328,7 +1350,11 @@ export function CoursesLedgerPanel() {
     const stages = sortedStages(catalog);
     return stages
       .map((stage) => {
-        const mine = visible.filter((course) => course.stageIds.includes(stage.id));
+        // 先按"开放在前、暂未开放在后"稳定排一遍，下面按学科分桶时桶内的先后就自然跟着
+        const mine = stableByAvailability(
+          visible.filter((course) => course.stageIds.includes(stage.id)),
+          (course) => course.status === "开放",
+        );
         const buckets = new Map<string, Course[]>();
         for (const course of mine) {
           const key =
@@ -1351,7 +1377,11 @@ export function CoursesLedgerPanel() {
   /** 正在筛选（搜索框有字 / 来源不是「全部」）—— 空分区在筛选结果里不显示，见下面的渲染。 */
   const filtering = keyword.trim() !== "" || originFilter !== "全部";
   const unpartitioned = useMemo(
-    () => visible.filter((course) => partitionPlace(partitions, course.partitionId).leaf === null),
+    () =>
+      unavailableLast(
+        visible.filter((course) => partitionPlace(partitions, course.partitionId).leaf === null),
+        (course) => course.status !== "开放",
+      ),
     [visible, partitions],
   );
 

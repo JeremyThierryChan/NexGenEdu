@@ -53,14 +53,29 @@
  * `siteCoreFromViews()` 把网站视图模型转成同一形状。`scripts/check.mts` 第 43 节
  * 用这两者做两件事：① 库 → Markdown → 回读 与库里那一份逐字段一致；
  * ② 回读的口径与 `lib/data/*` 现成的解析口径一致（拿真实的 `.md` 对一遍）。
+ *
+ * ## 回读要带上"显示顺序"（2026-09：暂未开放往后排）
+ *
+ * `readSiteCore()` 回读出来的是**网站上看到的那一份**，因此它也套用网站上那条显示规则
+ * （`lib/backend/availability-order.ts`）：卡片在子栏目内、学科整组、选修课在栏目内、
+ * 报价的阶段与课程，暂未开放的一律排到最后。
+ *
+ * 为什么回读也必须排：`siteCoreFromViews()` 那一侧吃的是**网站视图模型**
+ * （`backendCourseColumns` / `backendCoursesPage` / `backendPricingData`），
+ * 它们已经排过了；回读这边不排的话，自检 §43 的两条断言会拿"两侧都对的数据"
+ * 报出几十条假差异（我第一版就是这样：导出明明是好的，却看起来像丢了卡片）。
+ * **写文件那条路（`exportSiteMarkdown`）一个字都没动** —— 排序是显示规则，
+ * 不能因此改变导出到 `data/site/*.md` 的内容。
  */
 import { parseDocument, type PageBlock, type Section } from "@/lib/data/content";
 import {
   DEFAULT_TEACHER_SHARE_RULES,
   parsePricingSource,
+  pricingWithUnavailableLast,
   type PricingData,
   type TeacherShareRules,
 } from "@/lib/data/pricing";
+import { unavailableLast, unavailableLastInGroups } from "./availability-order";
 import { readString } from "@/lib/markdown";
 import { configFromPricingData, pricingConfigCore, pricingConfigToMarkdown, type PricingConfig } from "./pricing";
 import { groupByPartition, partitionPlace } from "./course-partitions";
@@ -1425,7 +1440,10 @@ export function readSiteCore(sources: Readonly<Record<SiteExportFile, string>>):
     teachersPage: readTeachersPage(pageOf("教师")),
     courseColumns,
     coursesPage: readCoursesPage(pageOf("课程")),
-    pricing: pricingConfigCore(configFromPricingData(parsePricingSource(sources.pricing), "")),
+    // 报价同样按"网站上看到的那一份"回读（阶段 / 课程都把暂未开放的排到最后）
+    pricing: pricingConfigCore(
+      configFromPricingData(pricingWithUnavailableLast(parsePricingSource(sources.pricing)), ""),
+    ),
     faq: readFaq(faqDoc.pages.get("常见问题")),
     cases: toCaseCore(readCases(casesDoc.pages.get("学生案例"))),
     featured: readFeatured(featuredDoc.pages.get("特色课程")),
@@ -1495,7 +1513,14 @@ function readCourseColumns(source: string): CourseColumn[] {
     subgroup.cards.push(card);
   }
 
-  return columns;
+  // 回读要给出**网站上看到的那一份**：子栏目内暂未开放的卡片排到最后（见文件头那段）
+  return columns.map((column) => ({
+    ...column,
+    subgroups: column.subgroups.map((subgroup) => ({
+      ...subgroup,
+      cards: unavailableLast(subgroup.cards, (card) => card.unavailable),
+    })),
+  }));
 }
 
 /** 短字段三件套（口径同 `pageHeading`）。 */
@@ -1541,9 +1566,16 @@ function readCoursesPage(page: PageBlock | undefined): SiteCore["coursesPage"] {
 
   return {
     heading: headingOf(page),
-    courses,
+    // 同样回读"网站上看到的那一份"：整组暂未开放的学科排最后
+    courses: unavailableLast(courses, (course) => course.unavailable),
     electiveTitle: electiveGroup?.name ?? "",
-    electiveGroups,
+    // 选修课：不可选的排到**它所在栏目分组内**的最后（分组本身的顺序不动）
+    electiveGroups: unavailableLastInGroups(
+      electiveGroups,
+      (group) => group.items,
+      (group, items) => ({ ...group, items }),
+      (item) => !item.available,
+    ),
   };
 }
 

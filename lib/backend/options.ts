@@ -1,5 +1,6 @@
 import { getScheduleContent } from "@/lib/data/pages";
 import { getCourseColumnsFromTemplate, getSiteBrand } from "@/lib/data/site";
+import { unavailableLast } from "./availability-order";
 import { catalogFromSeed } from "./catalog-seed";
 import { parseGapWindow, type GapWindow } from "./timetable";
 
@@ -14,12 +15,21 @@ import { parseGapWindow, type GapWindow } from "./timetable";
  * 不会因为候选项取不到就把整个后台打不开。
  */
 
-/** 科目候选：课程总览里全部卡片名（小学语文 / 初中数学 / 高中物理 / 雅思 …）。 */
+/**
+ * 科目候选：课程总览里全部卡片名（小学语文 / 初中数学 / 高中物理 / 雅思 …）。
+ *
+ * **暂未开放的排到最后**（机构：把暂未开放的内容自动往后排）：判据是卡片的
+ * `unavailable`，排序用 `lib/backend/availability-order.ts` 那个唯一的纯函数
+ * （稳定 —— 可选的那几门之间保持内容文件里的顺序）。
+ * **一门都不去掉**：暂未开放的课照旧在候选里（它们随时可能重新开放，
+ * 藏着反而让人以为"这门课没了"）。服务层那一份（`courseOptions()`）排的是同一件事。
+ */
 export function getSubjectOptions(): string[] {
   try {
-    return getCourseColumnsFromTemplate().flatMap((column) =>
-      column.subgroups.flatMap((subgroup) => subgroup.cards.map((card) => card.title)),
+    const cards = getCourseColumnsFromTemplate().flatMap((column) =>
+      column.subgroups.flatMap((subgroup) => subgroup.cards),
     );
+    return unavailableLast(cards, (card) => card.unavailable).map((card) => card.title);
   } catch {
     return [];
   }
