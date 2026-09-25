@@ -18,6 +18,16 @@ import { cn } from "@/lib/utils/cn";
  */
 export type MultiSelectOption = {
   value: string;
+  /**
+   * 给人看的名字；**不填就等于 `value`**。
+   *
+   * 什么时候两者不同：值必须是**库里存的东西**，而人认的是另一个写法 ——
+   * 学生的「教材」（v32）就是这样：库里存的是课程类型里那个内容模块的 id
+   * （`mod_物理·必修教材`），而机构认的是显示口径 `学科·模块名`（`物理·必修教材`）。
+   * 泛型地给所有候选用 `label`，好过让调用方先把值换成标签、提交时再换回来
+   * （那种做法会在"库里那条已经失效"时把标签当成值写回去）。
+   */
+  label?: string;
   /** 分组名（可不填）；相同分组会排在一起并显示组标题。 */
   group?: string;
 };
@@ -64,10 +74,28 @@ export function MultiSelect({
     };
   }, [open]);
 
+  /**
+   * 显示名（`label` 缺省就是 `value`）。
+   *
+   * ⚠️ 下拉里的候选、右上角那句"已选 N 项"、下面那一排可点掉的胶囊**三处都走它** ——
+   * 漏掉任何一处，界面上就会出现一半是「物理·必修教材」、一半是 `mod_物理·必修教材`
+   * （同一条选择两种写法，人第一反应是"我是不是选了两遍"）。
+   *
+   * 已经选中、但**不在候选里**的值（库里那条后来被删了）回落到 `value`：宁可显示一个
+   * 认不出的 id，也不要显示成空白 —— 空白会被读成"没选"。
+   */
+  const labelOf = useMemo(() => {
+    const map = new Map(options.map((option) => [option.value, option.label ?? option.value]));
+    return (value: string) => map.get(value) ?? value;
+  }, [options]);
+
   const filtered = useMemo(() => {
     const key = keyword.trim();
     if (key === "") return options;
-    return options.filter((option) => option.value.includes(key));
+    // 搜索要**同时**匹配值与显示名：库里的值是 id，而人只会搜他记得的名字
+    return options.filter(
+      (option) => option.value.includes(key) || (option.label ?? "").includes(key),
+    );
   }, [options, keyword]);
 
   /** 按分组排列（没有分组的排在最后），保持传入顺序。 */
@@ -87,7 +115,9 @@ export function MultiSelect({
   };
 
   const summary =
-    value.length === 0 ? placeholder : `已选 ${value.length} 项：${value.join("、")}`;
+    value.length === 0
+      ? placeholder
+      : `已选 ${value.length} 项：${value.map((item) => labelOf(item)).join("、")}`;
 
   return (
     <div className={cn("block", className)} ref={boxRef}>
@@ -144,7 +174,9 @@ export function MultiSelect({
                           checked={value.includes(option.value)}
                           onChange={() => toggle(option.value)}
                         />
-                        <span className="min-w-0 flex-1 break-words">{option.value}</span>
+                        <span className="min-w-0 flex-1 break-words">
+                          {option.label ?? option.value}
+                        </span>
                       </label>
                     ))}
                   </div>
@@ -185,7 +217,7 @@ export function MultiSelect({
               title="点击移除"
               className="rounded-sm border border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[11px] text-ink-600 hover:border-danger-100 hover:text-danger-600"
             >
-              {item} ×
+              {labelOf(item)} ×
             </button>
           ))}
         </span>

@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/admin/AdminFields";
-import { api } from "@/lib/backend/api";
+import { api, type Catalog } from "@/lib/backend/api";
 import { runTwoPhaseImport } from "@/lib/backend/import-flow";
 import { useAuth, rolesOrAll } from "@/components/admin/AuthContext";
 import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
@@ -102,12 +102,40 @@ function BulkImportPanel({
 
   const spec = ENTITY_SPECS[entity];
 
+  /**
+   * 课程类型（v32）：学生的「教材」列写的是**课程类型里那些内容模块**
+   * （`物理·必修教材` 或模块 id），解析要对着它才做得出来。
+   *
+   * 为什么在面板里读一次、再传进解析（而不是让解析自己去读）：
+   * `parseImport` 是纯函数（自检、脚本、服务端都在用它），它不该知道"库在哪"；
+   * 而这里与服务端 `imports.apply` 传进去的是**同一份东西**（`load().catalog` / `catalog.list()`），
+   * 所以"面板上预览过不了、点导入却能导"这种事不会发生。
+   *
+   * 没读到时预演里会逐行说明「「教材」列要对着「课程类型」才认得出」——
+   * 宁可当场说清，也不要默默按"能导"报到导完才发现。
+   */
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void api.catalog
+      .list()
+      .then((data) => {
+        if (alive) setCatalog(data);
+      })
+      .catch(() => {
+        // 读不到就按"没有课程类型"解析（教材那一列会给出那句话）；别的列不受影响
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   /** 预览：纯函数解析（与点"导入"时服务端跑的是同一份实现）。 */
   const preview = useMemo(() => {
     if (text.trim() === "") return null;
     const resolved = format === "auto" ? detectFormat(text) : format;
-    return parseImport(entity, text, resolved);
-  }, [text, format, entity]);
+    return parseImport(entity, text, resolved, catalog ?? undefined);
+  }, [text, format, entity, catalog]);
 
   const onPickFile = useCallback(async (file: File | undefined) => {
     if (file === undefined) return;

@@ -7,13 +7,30 @@ import { EnrollmentPanel } from "@/components/admin/EnrollmentPanel";
 import { HomeworkPanel } from "@/components/admin/HomeworkPanel";
 import { StudentProfileForm } from "@/components/admin/StudentProfileForm";
 import { StudentProfileView } from "@/components/admin/StudentProfileView";
-import { api, type Classroom, type Lesson, type Student, type Teacher } from "@/lib/backend/api";
+import { api, type Catalog, type Classroom, type Lesson, type Student, type Teacher } from "@/lib/backend/api";
 import { remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
 // 教室名的唯一显示口径（「校区·教室名」，v31）
 import { classroomLabel } from "@/lib/backend/classrooms";
+// 教材的唯一显示口径（`学科·模块名`，v32）
+import { textbookSummary } from "@/lib/backend/textbooks";
 import { cn } from "@/lib/utils/cn";
 import { FOLLOWUP_RULES } from "@/lib/backend/followup";
+
+/**
+ * **教材未填**的待补小标（v32）：虚线边框 + 灰底 + 更浅的字色。
+ *
+ * 与学生列表上那一列、教师卡片的「用工未填」、教室卡片的「校区未填」**同一档样式**
+ * （同一个类名，`scripts/check.mts` §49 有断言盯着）。
+ *
+ * 详情页这一处尤其不能省成"不显示"：详情是老师备课时看的那一页，
+ * 「没登记教材」与「还没填」是两件事，前者不该看起来像后者。
+ */
+const TEXTBOOK_TODO_CLASS =
+  "rounded-sm border border-dashed border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[10px] text-ink-400";
+
+/** 灰标上的悬停提示：告诉人"去哪儿补"。 */
+const TEXTBOOK_TODO_HINT = "在上方的「编辑」里补教材";
 
 /**
  * 学生详情。
@@ -37,6 +54,14 @@ export function StudentDetail({
 }) {
   const [student, setStudent] = useState<Student | null>(null);
   const [teachers, setTeachers] = useState<Teacher[]>([]);
+  /**
+   * 课程类型（v32）：学生详情上的教材要把模块 id 写成 `学科·模块名`。
+   *
+   * **单独读、单独失败**：并进下面那个 `Promise.all` 的话，读不到维度表会让
+   * `student` 一直是 null（页面停在「加载中…」）—— 一份参考数据读不到，
+   * 不该把整张详情卡住。
+   */
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [tab, setTab] = useState<
     "enrollments" | "profile" | "lessons" | "homework" | "assessments"
   >("enrollments");
@@ -51,6 +76,21 @@ export function StudentDetail({
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    let alive = true;
+    void api.catalog
+      .list()
+      .then((data) => {
+        if (alive) setCatalog(data);
+      })
+      .catch(() => {
+        // 读不到课程类型时教材那一行显示"…"，其余照旧
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   async function refresh() {
     await load();
@@ -82,6 +122,23 @@ export function StudentDetail({
           <p className="mt-0.5 text-xs text-ink-500">
             家长：{student.guardian !== "" ? student.guardian : "未填写"}
             {student.subjects.length > 0 && ` · 在读：${student.subjects.join("、")}`}
+          </p>
+          {/*
+            现阶段使用的教材（v32）：**没填就挂待补灰标**（不是不显示、也不是空白）——
+            老师备课要看"在读哪几本"，"没填"与"没有教材"必须一眼分得开。
+            显示口径走 `textbookSummary`（带学科）。
+          */}
+          <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-500">
+            <span>教材：</span>
+            {student.textbooks.length === 0 ? (
+              <span className={TEXTBOOK_TODO_CLASS} title={TEXTBOOK_TODO_HINT}>
+                教材未填
+              </span>
+            ) : catalog === null ? (
+              <span className="text-ink-400">…</span>
+            ) : (
+              <span className="text-ink-700">{textbookSummary(catalog, student.textbooks)}</span>
+            )}
           </p>
         </div>
 

@@ -691,6 +691,20 @@ export type Student = {
    */
   subjects: string[];
   /**
+   * **现阶段使用的教材**（v32）：课程类型里「内容模块」的 id 列表
+   * （`catalog.modules`，见 `lib/backend/textbooks.ts`）。
+   *
+   * 为什么是 id 列表而不是名字：教材就是课程类型页上的那一层模块，它本来就挂在学科上
+   * （`CatalogModule.subjectId`），因此"一个学生多本教材、跨科目"用 id 列表正好表达；
+   * 模块改名时这里跟着变（存名字的话，机构改一次模块名，所有学生的教材就全对不上了）。
+   *
+   * ⚠️ **它不是"报名/报课"**：不参与报价、不参与排课冲突判定、不参与课时账本 ——
+   * 它只回答"这个学生现在在读哪些教材"。报课仍然只认 `enrollments`。
+   *
+   * 空数组＝还没填（老库迁移一律补空数组，不猜）。
+   */
+  textbooks: string[];
+  /**
    * 信息采集表（键 → 值），字段定义见 lib/backend/student-profile.ts。
    * 用键值对存储是为了加字段不用迁移数据：老档案读不到新字段就是空。
    */
@@ -1343,9 +1357,17 @@ export type NewStudentEnrollment = {
  */
 export type NewStudent = Omit<
   Student,
-  "id" | "createdAt" | "enrollments" | "subjects" | "version"
+  "id" | "createdAt" | "enrollments" | "subjects" | "version" | "textbooks"
 > & {
   subjects?: string[];
+  /**
+   * 现阶段使用的教材（模块 id 列表，v32）；省掉就是空数组＝还没填。
+   *
+   * 与 `subjects` 同一个做法：老调用方（脚本、验收、自检、别处的表单）不知道这个字段存在，
+   * 让它在类型上必填等于把一批本来能编过的调用方一棒打死 —— 而"缺字段就给空数组"
+   * 正是迁移与导入对同一件事的口径。
+   */
+  textbooks?: string[];
   enrollments?: NewStudentEnrollment[];
 };
 export type NewTeacher = Omit<Teacher, "id" | "version">;

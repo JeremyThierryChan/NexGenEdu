@@ -23,6 +23,14 @@
 import { partitionPathLabel, partitionPlace } from "./course-partitions";
 // 教室名的唯一显示口径（「校区·教室名」，v31）：排课表与 ICS 的「地点」都用它
 import { classroomLabel } from "./classrooms";
+/*
+ * 教材的唯一显示口径（`学科·模块名`，v32）：学生那张表的「教材」列用它。
+ *
+ * 与导入那侧（`import.ts` 的「教材」列 → `resolveTextbookList` → `resolveTextbookRef`）
+ * 是同一套写法：**导出 → 改 → 导回去**必须对得上，而"两边各写一份标签拼接"
+ * 正是那种导出来看着对、导回去报"认不出来"的分叉。
+ */
+import { textbookRefText } from "./textbooks";
 import type { Database } from "./types";
 import {
   createCsv,
@@ -115,11 +123,11 @@ export const EXPORT_DATASETS: ExportDataset[] = [
   {
     id: "students",
     label: "学生",
-    description: "每名学生一行：年级、监护人、状态、剩余课时合计、在读科目。",
+    description: "每名学生一行：年级、监护人、状态、剩余课时合计、在读科目、现阶段使用的教材。",
     formats: ["csv", "json"],
     rows: (db) => db.students,
-    columns: () => ({
-      headers: ["姓名", "年级", "监护人", "状态", "剩余课时", "在读科目", "备注", "建档时间"],
+    columns: (db) => ({
+      headers: ["姓名", "年级", "监护人", "状态", "剩余课时", "在读科目", "教材", "备注", "建档时间"],
       row: (item: never) => {
         const student = item as Database["students"][number];
         /*
@@ -134,6 +142,14 @@ export const EXPORT_DATASETS: ExportDataset[] = [
           student.status,
           String(remainingTotal(student.enrollments)),
           active.map((row) => row.subject).join("、"),
+          /*
+           * 「教材」（v32）：与批量导入那一列（`ENTITY_SPECS.students` 的「教材」）
+           * **同形、同一个写法**，导出来改完再导回去才对得上：
+           *   - 写的是**显示口径** `学科·模块名`（`textbookRefText`，模块名重名时也必须带学科）；
+           *   - 多本之间用 `|`（导入那侧就是按 `|` 拆的），没填就是**空单元格**（不是「—」：
+           *     那个破折号会被导入当成一本叫「—」的教材而整行被拒）。
+           */
+          student.textbooks.map((id) => textbookRefText(db.catalog, id)).join("|"),
           student.note,
           localDateTime(student.createdAt),
         ];

@@ -217,6 +217,14 @@ import {
   needsCampusSplit,
   normalizeClassroom,
 } from "./classrooms";
+/*
+ * 学生的「教材」（v32）同样是**一处实现**：
+ *   - `textbookLabels` / `textbookSummary`：显示口径（`学科·模块名`），界面各页都走它；
+ *   - `normalizeTextbooks`：迁移、收尾归一、服务层写入共用（去空去重，**不校验**）；
+ *   - `textbookIssues`：服务层那道闸（非法模块 id 报错拒绝，并指出正规写法）；
+ *   - `resolveTextbookRef`：批量导入的「学科·模块名」→ 模块 id（含重名时的"请带学科"报错）。
+ */
+import { normalizeTextbooks, textbookIssues } from "./textbooks";
 
 /*
  * 冲突错误在这里**对外再导出一次**：界面与将来的调用方只认 `lib/backend/api`
@@ -1222,6 +1230,36 @@ function migrate(db: Database): Database | null {
     }
   }
 
+  if (db.version === 31) {
+    /*
+     * v31 → v32：学生增加「现阶段使用的教材」（`Student.textbooks`）。
+     *
+     * 机构原话：「**新建学生应该有一个年级、生日以及现阶段使用的教材
+     * （可以有多本，因为一个学生可能有多个科目）**」。
+     *
+     * 这一步**一律补空数组，不猜内容**（与 v12 → v13 补教师资料、v29 → v30 补内部字段
+     * 同一条纪律）。这一次尤其不能猜，因为"猜"的诱惑很大：
+     *
+     *   - 按**年级**推？年级是自由文本（机构自己就有「初二」「小学五年级」几种写法），
+     *     而且"初二"对应的教材在数学 / 科学 / 社会下各有一本，推不出唯一的一本；
+     *   - 按**报课科目**推？报的是"初中数学"这种课，而教材是数学下面的"八年级教材 /
+     *     必修教材"，两者没有一一对应（真实库 100 个模块里重名的就有 18 个）；
+     *   - 空数组的含义是明确的（＝还没填），页面上会显示成"未填"，
+     *     人一条条勾即可 —— 补字段这件事宁可留一堆空，也不要留一堆看着像真的的错值
+     *     （空的会被看见，错的看着像真的）。
+     *
+     * **没有第二个「生日」字段**：这一版同时被要求的"生日"不新增 `Student.birthday` ——
+     * 出生日期在信息采集表里已经有了（`Student.profile.birthDate`），
+     * 新建表单把它写进**同一处**（见 `components/admin/StudentForm.tsx`）。
+     * 一个事实只有一处，否则"采集表里改过、新建时又填了一遍"就说不清哪个算。
+     */
+    db.students = db.students.map((student) => ({
+      ...student,
+      textbooks: normalizeTextbooks(student.textbooks),
+    }));
+    db.version = 32;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1365,6 +1403,25 @@ function migrate(db: Database): Database | null {
    */
   db.teachers = db.teachers.map((teacher) => normalizeTeacherRecord(teacher));
   db.classrooms = db.classrooms.map((room) => normalizeClassroom(room));
+
+  /*
+   * 收尾归一：学生的**教材必须是一个数组**（v32，与分区表、维度表、寒暑假段同一条纪律）。
+   *
+   * 为什么在收尾再兜一次而不是只留在 v31 → v32 那一步：一份"自称 v32"却缺这个字段的文件
+   * 照样会出现 —— 手改过的导出、只跑了一半的恢复、以及**导入**都长这样。缺了它的后果是
+   * **看得见的坏**：学生列表 / 详情读 `student.textbooks.map(...)` 直接 TypeError
+   * （整页打不开），而新建表单勾一下保存又会被 `normalizeStudentStrict` 补上空数组
+   * —— 于是"这一个学生能不能打开"取决于它有没有被重新保存过。补成空数组（＝还没填）是
+   * 明确的、看得见的状态；按年级或报课科目推一本则是猜（理由见 v31 → v32 那一步的注释）。
+   *
+   * 这里**不做严格校验**（不存在的模块 id 原样留着、由界面显示成「已失效教材（id）」）：
+   * 抛错会让整库读不出来，而"课程类型里删掉了一个模块"是机构自己的操作，
+   * 不该让它变成一次数据事故 —— 拒绝非法值的那道闸在服务层（`normalizeStudentStrict`）。
+   */
+  db.students = db.students.map((student) => ({
+    ...student,
+    textbooks: normalizeTextbooks(student.textbooks),
+  }));
 
   return db.version === CURRENT_VERSION ? db : null;
 }
@@ -1537,6 +1594,29 @@ function normalizeTeacherRecord(input: Teacher): Teacher {
     employment: isTeacherEmployment(input.employment) ? input.employment : "",
     source: trimText(input.source),
   };
+}
+
+/*
+ * ── 学生的归一与校验（v32：现阶段使用的教材）────────────────────────────────
+ *
+ * 与上面那一组同一套做法，只有一处不同：**校验要看整库**（教材是课程类型里的模块 id，
+ * "还在不在"只有对着 `catalog` 才判得出来），因此 `normalizeStudentStrict` 收第二个参数
+ * （`versionedCollection` 的钩子签名在 v32 扩了一个 `db`，见那里的说明）。
+ *
+ * 顺序是**先校验后归一**（与教师那条一样、与教室那条相反）：这里归一**会抹掉**要判的东西吗？
+ * 不会 —— `normalizeTextbooks` 只去空去重，不存在的 id 会原样留着。但仍然先校验，
+ * 原因是报错要说**原始值**（「你写的『物理·必修教材』是名字，id 是 mod_物理·必修教材」），
+ * 归一之后再报就只剩一个被 trim 过的字符串了。
+ */
+function normalizeStudentStrict(student: Student, db: Database): Student {
+  const problems = textbookIssues(db.catalog, student.textbooks);
+  if (problems.length > 0) throw new Error(problems.join("；"));
+  /*
+   * ⚠️ `textbooks` 缺失时（老调用方 / 只改一个字段的 patch 合并前的形状）补**空数组**，
+   * 与迁移、收尾归一、批量导入同一个口径：**不猜**（按年级或报课科目推一本教材
+   * 等于凭空记下一条学业事实）。空数组的含义是明确的：还没填。
+   */
+  return { ...student, textbooks: normalizeTextbooks(student.textbooks) };
 }
 
 /** 教室归一（v31 起在 `lib/backend/classrooms.ts`：它是"显示 / 拆分 / 归一"的唯一一处实现）。 */
@@ -2141,7 +2221,13 @@ function versionedCollection<T extends { id: string; version: number }>(
   prefix: string,
   label = "",
   guardDelete: DeleteGuard<T> | null = null,
-  normalize: ((record: T) => T) | null = null,
+  /*
+   * 归一 / 校验钩子。第二个参数是**整库**（v32 起）：学生的「教材」要拿 `catalog`
+   * 判那个模块 id 还在不在 —— 只给记录本身的钩子做不到这件事，而"在别处再补一道"
+   * 就等于把唯一的写入闸劈成两半（见 `normalizeStudentStrict`）。
+   * 已有的钩子都只用一个参数，因此这次扩参数**一个调用点都不用改**。
+   */
+  normalize: ((record: T, db: Database) => T) | null = null,
 ) {
   const base = collection<T>(pick, prefix, label, guardDelete);
   return {
@@ -2160,7 +2246,7 @@ function versionedCollection<T extends { id: string; version: number }>(
        * 不该能改这两样，否则"这条记录从第 7 版开始"这种数据会从归一里冒出来。
        */
       const saved: T =
-        normalize === null ? created : { ...normalize(created), id: created.id, version: 1 };
+        normalize === null ? created : { ...normalize(created, db), id: created.id, version: 1 };
       pick(db).push(saved);
       if (label !== "") {
         writeLog(db, {
@@ -2211,7 +2297,7 @@ function versionedCollection<T extends { id: string; version: number }>(
        * `version: current.version` 再钉一次：钩子是别人写的，不能让它顺手改掉锁。
        */
       const next: T =
-        normalize === null ? updated : { ...normalize(updated), version: current.version };
+        normalize === null ? updated : { ...normalize(updated, db), version: current.version };
       bumpVersion(next);
       list[index] = next;
       if (label !== "") {
@@ -2327,7 +2413,14 @@ const lessonDeleteRefusal: DeleteGuard<Lesson> = (db, lesson) => {
   );
 };
 
-const studentCollection = versionedCollection<Student>((db) => db.students, "s", "学生", studentDeleteRefusal);
+const studentCollection = versionedCollection<Student>(
+  (db) => db.students,
+  "s",
+  "学生",
+  studentDeleteRefusal,
+  // 教材（v32）：先校验模块 id 还在不在、再归一（理由见 normalizeStudentStrict）
+  normalizeStudentStrict,
+);
 const inquiryCollection = collection<Inquiry>((db) => db.inquiries, "iq", "咨询");
 
 /** 按周批量排课的入参（见 lib/backend/recurrence.ts 与 lessons.planSeries）。 */
@@ -2881,15 +2974,25 @@ const localApi = {
       const { subjects, enrollments, ...rest } = input;
       const wanted = normalizeNewEnrollments(enrollments ?? [], db);
 
-      const student: Student = {
-        ...rest,
-        id: nextId("s"),
-        version: 1,
-        subjects: subjects ?? [],
-        profile: input.profile ?? {},
-        enrollments: [],
-        createdAt: nowIso(),
-      };
+      /*
+       * 归一定在 `push` **之前**，且与 `students.update` 走**同一个**钩子
+       * （`normalizeStudentStrict`）—— 这个方法覆盖了工厂默认的 `create`（它要一次性报课），
+       * 因此必须自己过那道闸，否则"同一个字段从新建进来不校验、从编辑进来才校验"。
+       * 钩子抛错时这一行还没进数组，所以**什么都不会写**（连日志都不写）。
+       */
+      const student: Student = normalizeStudentStrict(
+        {
+          ...rest,
+          id: nextId("s"),
+          version: 1,
+          subjects: subjects ?? [],
+          textbooks: input.textbooks ?? [],
+          profile: input.profile ?? {},
+          enrollments: [],
+          createdAt: nowIso(),
+        } as Student,
+        db,
+      );
       db.students.push(student);
 
       for (const item of wanted) addEnrollment(db, student, item);
@@ -5283,8 +5386,14 @@ const localApi = {
     }): Promise<ImportReport> {
       await delay();
       const entity = input.entity;
-      const parsed = parseImport(entity, input.text, input.format);
-      return runImport(load(), parsed, {
+      /*
+       * ⚠️ `load()` 提到解析**之前**：学生的「教材」列要对着一份 `catalog` 才解析得出来
+       * （它写的是课程类型里那些内容模块），而服务层这里是**唯一**能给出"库里那一份"
+       * 的地方。`runImport` 拿到的还是同一个 `db` 对象（`load()` 有缓存，不会读两次盘）。
+       */
+      const db = load();
+      const parsed = parseImport(entity, input.text, input.format, db.catalog);
+      return runImport(db, parsed, {
         strategy: input.onConflict ?? "skip",
         perRow: input.perRow,
         source: input.fileName ?? "",

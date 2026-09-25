@@ -13,6 +13,8 @@
 import { api } from "../lib/backend/api.ts";
 // 教室名的唯一显示口径（「校区·教室名」，v31）—— 逐页验收要按用户看到的样子核对
 import { classroomLabel } from "../lib/backend/classrooms.ts";
+// 教材的唯一显示口径（`学科·模块名`，v32）
+import { textbookSummary } from "../lib/backend/textbooks.ts";
 import { applyDecision, offerKey, offersByKey, resolveOffer } from "../lib/backend/offers.ts";
 import { isRemoteMode, remoteBase } from "../lib/backend/remote.ts";
 
@@ -758,6 +760,95 @@ await check("学生", "建档", async () => {
   studentId = created.id;
   return created;
 }, (s: { name: string }) => s.name === "验收学生");
+/*
+ * v32：**生日 + 两本跨学科教材**（机构原话：「新建学生应该有一个年级、生日以及
+ * 现阶段使用的教材（可以有多本，因为一个学生可能有多个科目）」）。
+ *
+ * 这一条走的是**真实 HTTP 写入**，因此它验的不只是服务层：教材存的是模块 id、
+ * 生日落在**同一条记录**的 `profile.birthDate`（不是新字段），两条都要读回来一致。
+ * 教材取的是**真实课程类型**里的两本、**两个不同学科**（跨学科正是机构说的那种情形）。
+ */
+await check("学生", "建档：生日 + 两本跨学科教材（v32）", async () => {
+  const first = acceptCatalog.modules[0];
+  const second = acceptCatalog.modules.find((item) => item.subjectId !== first?.subjectId);
+  const created = await api.students.create({
+    name: "验收教材学生", grade: "初二", guardian: "", status: "在读", note: "",
+    textbooks: [first?.id ?? "", second?.id ?? ""],
+    profile: { birthDate: "2012-05-06" },
+    enrollments: [],
+  });
+  const readBack = (await api.students.get(created.id))!;
+  return {
+    同一条记录: readBack.id === created.id,
+    教材: readBack.textbooks,
+    跨学科: first?.subjectId !== second?.subjectId,
+    生日: readBack.profile.birthDate,
+    采集表只有生日: JSON.stringify(Object.keys(readBack.profile)) === JSON.stringify(["birthDate"]),
+    显示: textbookSummary(acceptCatalog, readBack.textbooks),
+  };
+}, (v: {
+  同一条记录: boolean; 教材: string[]; 跨学科: boolean; 生日: string;
+  采集表只有生日: boolean; 显示: string;
+}) =>
+  v.同一条记录 && v.跨学科 &&
+  v.采集表只有生日 &&
+  v.生日 === "2012-05-06" &&
+  // 显示出来的一行必须带学科（`学科·模块名、学科·模块名`），否则看不出是哪一科的教材
+  v.显示.split("、").length === 2 &&
+  v.显示.split("、").every((part) => part.includes("·")) &&
+  !v.显示.includes("已失效教材"));
+/*
+ * 服务层那道闸（v32）：写**名字**（`物理·必修教材`）而不是模块 id 时必须被拒，
+ * 而且要把"本库里它是哪个 id"说出来 —— 只说"错了"等于让人对着一个字符串发呆。
+ */
+await check("学生", "教材写成名字会被拒，并指出正规写法", async () => {
+  const before = (await api.students.list()).length;
+  try {
+    await api.students.create({
+      name: "验收·不该建出来", grade: "初二", guardian: "", status: "在读", note: "",
+      textbooks: ["物理·必修教材"], profile: {}, enrollments: [],
+    });
+    return { 拒绝: false, 原话: "", 学生数没变: false };
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    const resolved = acceptCatalog.modules.find((item) => item.name === "必修教材")?.id ?? "";
+    return {
+      拒绝: true,
+      原话: message,
+      指出正规写法: message.includes("模块 id") && resolved !== "" && message.includes(resolved),
+      学生数没变: (await api.students.list()).length === before,
+    };
+  }
+}, (v: { 拒绝: boolean; 指出正规写法: boolean; 学生数没变: boolean }) =>
+  v.拒绝 && v.指出正规写法 && v.学生数没变);
+/*
+ * 批量导入的「教材」列（v32）：真实走一次 `/api/call` 的 `imports.apply` ——
+ * 合法写法（`学科·模块名`）落库成模块 id；重名的模块名（`必修教材`）那一行被拒，
+ * 报告里点出行号并说清"没说清是哪个学科"。
+ */
+await check("学生", "批量导入「教材」列：认写法、拦重名", async () => {
+  const duplicated = acceptCatalog.modules.find(
+    (item) => acceptCatalog.modules.filter((other) => other.name === item.name).length >= 2,
+  );
+  const csv = [
+    "姓名,年级,教材",
+    "验收·导入教材学生,初二,物理·必修教材|数学·八年级教材",
+    `验收·导入教材学生2,初二,${duplicated?.name ?? "必修教材"}`,
+  ].join("\n") + "\n";
+  const applied = await api.imports.apply({ entity: "students", text: csv, fileName: "验收-教材.csv" });
+  const imported = (await api.students.list()).find((item) => item.name === "验收·导入教材学生");
+  return {
+    新增: applied.added,
+    问题行: applied.problems.map((item) => item.line),
+    拒绝理由: applied.problems[0]?.reason ?? "",
+    教材: imported?.textbooks ?? [],
+  };
+}, (v: { 新增: number; 问题行: number[]; 拒绝理由: string; 教材: string[] }) =>
+  v.新增 === 1 &&
+  v.问题行.join(",") === "3" &&
+  v.拒绝理由.includes("没说清是哪个学科") &&
+  v.教材.length === 2 &&
+  v.教材.every((id) => id.startsWith("mod_") && id.includes("·")));
 /*
  * 建档时就报课（一个学生多门、每门节数各自独立）。
  * 「数学 10 节、英语 20 节」是最常见的报名说法，因此这里同时验两件事：

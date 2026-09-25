@@ -12,10 +12,29 @@ import { StudentForm } from "@/components/admin/StudentForm";
 import { StudentDetail } from "@/components/admin/StudentDetail";
 import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
-import { api, type Lesson, type Student } from "@/lib/backend/api";
+import { api, type Catalog, type Lesson, type Student } from "@/lib/backend/api";
 import { remainingTotal } from "@/lib/backend/enrollment";
 import { FOLLOWUP_RULES } from "@/lib/backend/followup";
 import { LoadFailure } from "@/components/admin/LoadFailure";
+// 教材的唯一显示口径（`学科·模块名`，v32）
+import { textbookSummary } from "@/lib/backend/textbooks";
+
+/**
+ * **教材未填**的待补小标（v32）：虚线边框 + 灰底 + 更浅的字色。
+ *
+ * 与教师卡片上的「用工未填」/「来源未填」、教室卡片上的「校区未填」**同一档样式、同一个思路**
+ * （机构口径：「没填的时候也看得出来」）：教材不是必填，但"这个孩子现在在读哪几本"
+ * 是排课与备课要看的一条信息 —— 没填就该像个待办，而不是一片空白。
+ *
+ * 与已填的教材**必须一眼分得开**（这一条比好看重要）：同一个样式的话，
+ * 「教材未填」会被读成"这个学生在读一本叫『教材未填』的教材"—— 一条**假的学业信息**
+ * 比不显示更糟。`scripts/check.mts` §49 盯着"这一页与另外两页用的是同一个类"。
+ */
+const TEXTBOOK_TODO_CLASS =
+  "rounded-sm border border-dashed border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[10px] text-ink-400";
+
+/** 灰标上的悬停提示：告诉人"去哪儿补"（这一行末尾那个「编辑」就是入口）。 */
+const TEXTBOOK_TODO_HINT = "点编辑补教材";
 
 /**
  * 学生模块。
@@ -28,6 +47,13 @@ import { LoadFailure } from "@/components/admin/LoadFailure";
 export default function AdminStudentsPage() {
   const [students, setStudents] = useState<Student[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
+  /*
+   * 课程类型（v32）：学生列表上那列「教材」要把模块 id 显示成 `学科·模块名`。
+   *
+   * 与教师、教室那两页读"参考数据"是同一件事；取不到就只影响这一列的写法
+   * （下面渲染的是"…"），列表本身照常显示 —— 不该因为读不到维度表就整页空掉。
+   */
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(true);
   /**
@@ -92,6 +118,29 @@ export default function AdminStudentsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /*
+   * 课程类型读一次（教材那一列要用它把模块 id 换成 `学科·模块名`）。
+   *
+   * 单独一个 effect 而不是并进 `load()`：`load()` 是"业务数据刷新"，
+   * 而课程类型是参考数据（改它之后要刷新的是课程类型页），混在一起会让每次点删除
+   * 都多读一份维度表。失败也不进 `loadError` —— 那一列的写法是次要信息，
+   * 不该把"读取失败"的红条挂在整页上。
+   */
+  useEffect(() => {
+    let alive = true;
+    void api.catalog
+      .list()
+      .then((data) => {
+        if (alive) setCatalog(data);
+      })
+      .catch(() => {
+        // 读不到课程类型时那一列显示"…"，其余一切照旧
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   /*
    * 支持从全局搜索直达：/admin/students?studentId=xxx 会直接展开这位学生的详情。
@@ -255,6 +304,8 @@ export default function AdminStudentsPage() {
               <th className="px-4 py-2.5 font-medium">姓名</th>
               <th className="px-4 py-2.5 font-medium">年级</th>
               <th className="px-4 py-2.5 font-medium">报读科目</th>
+              {/* 现阶段使用的教材（v32）：多本时按 `学科·模块名` 列出来，没填挂待补灰标 */}
+              <th className="px-4 py-2.5 font-medium">教材</th>
               <th className="px-4 py-2.5 font-medium">剩余课时</th>
               <th className="px-4 py-2.5 font-medium">状态</th>
               <th className="px-4 py-2.5 font-medium">家长</th>
@@ -279,6 +330,23 @@ export default function AdminStudentsPage() {
                 <td className="px-4 py-2.5 text-ink-700">{student.grade}</td>
                 <td className="px-4 py-2.5 text-ink-600">
                   {student.subjects.join("、") || "—"}
+                </td>
+                <td className="px-4 py-2.5">
+                  {/*
+                    教材（v32）：**没填时挂一个待补灰标**，不是留成空白格 ——
+                    空白格会被读成"这一页不显示教材"，而机构要的是"还差这一条，去补"。
+                    显示口径走 `textbookSummary`（带学科：`数学·八年级教材、物理·必修教材`），
+                    因为「必修教材」在数学/物理/化学…下都有，不带学科认不出是哪本。
+                  */}
+                  {catalog === null ? (
+                    <span className="text-ink-400">…</span>
+                  ) : student.textbooks.length === 0 ? (
+                    <span className={TEXTBOOK_TODO_CLASS} title={TEXTBOOK_TODO_HINT}>
+                      教材未填
+                    </span>
+                  ) : (
+                    <span className="text-ink-600">{textbookSummary(catalog, student.textbooks)}</span>
+                  )}
                 </td>
                 <td className="px-4 py-2.5">
                   {(() => {
@@ -337,7 +405,8 @@ export default function AdminStudentsPage() {
 
             {!loading && visible.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-sm text-ink-500">
+                {/* 列数 = 表头那几个：姓名 / 年级 / 报读科目 / 教材 / 剩余课时 / 状态 / 家长 / 操作 */}
+                <td colSpan={8} className="px-4 py-8 text-center text-sm text-ink-500">
                   {students.length === 0
                     ? "还没有学生档案，点右上角「新增学生」建档。"
                     : "没有匹配的学生。"}
@@ -352,6 +421,15 @@ export default function AdminStudentsPage() {
       {editingId !== null && (
         <Panel className="mt-4" title="编辑学生">
           <StudentForm
+            /*
+             * `key` 不是装饰：表单里姓名 / 年级 / 生日 / 教材 / 版本号都是
+             * `useState(student?…)` 的**初始化器**（只在挂载时算一次）。
+             * 没有这个 key，"编辑 A → 直接点 B 的编辑"不会重新挂载，
+             * 表单里留着的还是 **A 的值**（版本号也是 A 的）——
+             * 保存时要么把 A 的资料写到 B 上，要么被乐观锁拒绝却让人看不懂为什么。
+             * 换成学生 id 就让每次编辑都是干净的一次挂载。
+             */
+            key={editingId}
             student={students.find((item) => item.id === editingId) ?? undefined}
             onCancel={() => setEditingId(null)}
             onSaved={async () => {

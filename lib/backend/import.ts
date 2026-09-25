@@ -9,7 +9,16 @@ import { bumpVersion } from "./concurrency";
 import { normalizeClassroom, splitCampusFields } from "./classrooms";
 import { ensurePartitions, partitionName } from "./course-partitions";
 import { nextId } from "./ids";
+/*
+ * 学生的「教材」列（v32）：解析只有一处实现，就在 `lib/backend/textbooks.ts`。
+ *
+ *   - `resolveTextbookList`：一格的若干写法（`物理·必修教材|数学·八年级教材`）→ 模块 id 列表，
+ *     认不出来时给的是"人能照着改"的那句话（重名模块名会要求带上学科并列出可选写法）；
+ *   - `normalizeTextbooks`：落库前的去空去重（与迁移、服务层同一处）。
+ */
+import { normalizeTextbooks, resolveTextbookList } from "./textbooks";
 import type {
+  Catalog,
   Classroom,
   Course,
   CoursePartition,
@@ -125,11 +134,34 @@ export const ENTITY_SPECS: Record<ImportEntity, EntitySpec> = {
     fields: [
       { key: "name", header: "姓名", required: true, kind: "text", example: "张三" },
       { key: "grade", header: "年级", kind: "text", example: "初二" },
+      /*
+       * 教材（v32，机构原话：「新建学生应该有一个年级、生日以及现阶段使用的教材
+       * （可以有多本，因为一个学生可能有多个科目）」）。
+       *
+       * 为什么是 `kind: "list"`：教材可以有多本，`convertCell` 已经会把
+       * `|` / `、` / `;` / 换行拆成数组 —— 与「可带科目」「班型」列同一套写法，
+       * 用户在 Excel 里的习惯不用改。
+       *
+       * 但**每一格的写法还要解析**（`物理·必修教材` 或模块 id，模块名重名时必须带学科），
+       * 这一步在 `parseImport` 的行循环里做（见那里的 `resolveTextbookList`）——
+       * 它需要 `catalog`，而 `convertCell` 是纯格子转换、拿不到库。
+       */
+      {
+        key: "textbooks",
+        header: "教材",
+        aliases: ["现阶段使用的教材", "使用教材"],
+        kind: "list",
+        example: "物理·必修教材|数学·八年级教材",
+      },
       { key: "guardian", header: "家长联系方式", aliases: ["家长电话", "联系方式", "电话"], kind: "text", example: "138-0000-0000" },
       { key: "status", header: "状态", kind: "enum", options: ["在读", "暂停", "已结课", "退课"], example: "在读" },
       { key: "note", header: "备注", kind: "text", example: "" },
     ],
-    warning: "只导入档案（姓名/年级/家长/状态/备注）。**报课与收款不导入** —— 那些要在学生的「报课与课时」页走正规流程，否则课时与账本会对不上。",
+    warning: "只导入档案（姓名/年级/家长/状态/备注/教材）。**报课与收款不导入** —— 那些要在学生的「报课与课时」页走正规流程，否则课时与账本会对不上。" +
+      "「教材」指的是**现阶段使用的教材**（一门或多门，多个用 `|` 分隔）：写法是「学科·模块名」（例如 物理·必修教材），" +
+      "也就是「课程 → 课程类型」里那一层内容模块；只写模块名（如 八年级教材）在**全库唯一**时才认，" +
+      "重名的（如 必修教材 在数学/物理/化学…下都有）必须带上学科，否则这一行会被拒并列出可选写法。" +
+      "教材**不是报课**：它不参与报价、不参与排课冲突、也不扣课时，只记「这个学生在读哪几本」。",
   },
   teachers: {
     key: "teachers",
@@ -493,8 +525,26 @@ function jsonRows(entity: ImportEntity, text: string): { rows: RawRow[]; headers
  * 唯一不进这道闸的是带 `derivableFrom` 的列 —— 目前只有教室的「校区」（v31 收紧）：
  * 它的值可能是从「名称」里拆出来的，因此只在**行归一之后**逐行判
  * （见行循环里"先拆后判"那一段与 `FieldSpec.derivableFrom`）。
+ *
+ * ## `catalog` 为什么是可选参数（v32）
+ *
+ * 学生的「教材」列写的是**课程类型里那些内容模块**（`物理·必修教材` 或模块 id），
+ * 因此那一格的写法要对着 `catalog` 才解析得出来（重名模块名还得靠它说清是哪个学科）。
+ *
+ * 做成可选而不是必填：另外三个实体（教师 / 教室 / 课程）与这份解析都**用不到**它，
+ * 老调用方（脚本、自检、别处的面板）一行都不用改；而且"解析要一份维度表"这件事
+ * 只在**真的填了教材那一列**时才需要（见下面行循环里的判据）。
+ *
+ * 谁传了它：服务层的 `imports.apply`（`load().catalog`）与批量导入面板的预览
+ * （`api.catalog.list()`）—— **两处传的是同一个东西**，因此"面板上预览通过、导入却被拒"
+ * 这种事不会发生（面板上那句话就是按这条路径算出来的）。
  */
-export function parseImport(entity: ImportEntity, text: string, format?: ImportFormat): ParsedImport {
+export function parseImport(
+  entity: ImportEntity,
+  text: string,
+  format?: ImportFormat,
+  catalog?: Catalog,
+): ParsedImport {
   const spec = ENTITY_SPECS[entity];
   const kind = format ?? detectFormat(text);
   const { rows, headers, problems } = kind === "json" ? jsonRows(entity, text) : csvRows(entity, text);
@@ -541,6 +591,43 @@ export function parseImport(entity: ImportEntity, text: string, format?: ImportF
       record[field.key] = converted.value;
     }
     if (rowFailed) continue;
+
+    /*
+     * **教材那一格要解析成模块 id**（v32，学生的「教材」列）。
+     *
+     * 为什么必须在这里（解析阶段）做、而不是等落库的 `finalize`：
+     *   - 落库是"一次事务、几百行一落"，那时再发现某个写法认不出来，只能整批失败或
+     *     静默吞掉那一格 —— 而人需要的是"**第 7 行**那一格写错了"；
+     *   - 界面的"体检"预览跑的就是这份解析（`BulkImport` 传的是同一份 `catalog`），
+     *     在这里判，"预览说过不了、导入也过不了"才成立。
+     *
+     * 判据是"这一格**有内容**"（`convertCell` 又把空单元格变成 `[]`，因此空数组不算填了），
+     * 因此一份完全没有教材列、或教材列全空的名单**不需要** `catalog` 也能解析 ——
+     * 这也是这个参数做成可选的理由（见 `parseImport` 的说明）。
+     */
+    if (entity === "students" && record.textbooks !== undefined) {
+      const cells = Array.isArray(record.textbooks) ? (record.textbooks as string[]) : [];
+      if (cells.length > 0) {
+        if (catalog === undefined) {
+          convertedProblems.push({
+            line: row.line,
+            reason:
+              "「教材」列要对着「课程类型」里那些内容模块才认得出（写法：物理·必修教材 或模块 id）—— " +
+              "这次解析没读到课程类型，请稍后重试。",
+          });
+          continue;
+        }
+        const resolved = resolveTextbookList(catalog, cells);
+        if (!resolved.ok) {
+          convertedProblems.push({ line: row.line, reason: `「教材」：${resolved.reason}` });
+          continue;
+        }
+        record.textbooks = resolved.ids;
+      } else {
+        // 空单元格＝还没填（与迁移给老库补的口径一致），不要把一个空数组当成"选了 0 本"
+        record.textbooks = [];
+      }
+    }
 
     /*
      * **先拆后判**（v31，机构口径「校区必须填」）。
@@ -641,6 +728,17 @@ export type ApplyOutcome = {
 /** 覆盖时**不能动**的字段：结构性或派生的数据，改了就破坏不变式。 */
 const STRUCTURAL_FIELDS: Record<ImportEntity, string[]> = {
   // 报课记录、采集表、科目（由报课推导）都不属于"档案基础字段"
+  /*
+   * ⚠️ `textbooks`（学生教材，v32）**刻意不在这一份清单里**，理由与上面几个正好相反：
+   * 它是**人填的档案字段**（不是派生、也不是账），而表格里那一列的存在意义就是
+   * "导出 → 在 Excel 里改 → 导回来" —— 列进 STRUCTURAL_FIELDS 会让覆盖时**静默忽略**
+   * 教材那一列（用户会以为改生效了）。
+   *
+   * 顺带一句真话（写在这里免得后来的人以为是漏了）：覆盖时"这一格空着就不覆盖"
+   * 那道保护只认**字符串**空值，`list` 类型的空数组算"给了值"，
+   * 因此与「可带科目」「班型」列同一个行为 —— 空着的那一格会把已有值清成空。
+   * 这是既有口径、三列一致；要改就得三列一起改（自检里有对应的断言盯着）。
+   */
   students: ["id", "enrollments", "profile", "subjects", "createdAt", "version"],
   teachers: ["id", "version"],
   // 可用时段是单独在页面上设的，导入不该把它清掉
@@ -779,6 +877,13 @@ function finalize(
         status: (record.status as string) ?? "在读",
         note: String(record.note ?? ""),
         subjects: [],
+        /*
+         * 教材（v32）：解析阶段已经换成了模块 id（`resolveTextbookList`），
+         * 这里只做去空去重（与迁移、服务层同一处实现）。
+         * 表里没有这一列 / 这一格空着时是空数组＝还没填 —— **不猜**
+         * （按年级或报课科目推一本等于凭空记下一条学业事实，见 v31 → v32 的迁移注释）。
+         */
+        textbooks: normalizeTextbooks(record.textbooks),
         enrollments: [],
         profile: {},
         createdAt: new Date().toISOString(),

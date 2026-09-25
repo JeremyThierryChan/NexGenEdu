@@ -371,6 +371,8 @@ function student(
     guardian,
     // 报读科目由报课推导，与 syncSubjects() 的口径一致
     subjects: enrollments.filter((item) => item.status === "在读").map((item) => item.subject),
+    // v32：教材是"机构后来才开始登记"的东西，夹具里一律不填（与老库迁移同一个口径：不猜）
+    textbooks: [],
     profile: {},
     enrollments,
     status,

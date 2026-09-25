@@ -110,6 +110,20 @@ import {
   hasCampus,
   splitCampusFields,
 } from "@/lib/backend/classrooms";
+/*
+ * 学生的「教材」（v32）也是**值**，口径只有一处（`lib/backend/textbooks.ts`）：
+ * 第 49 节要用 `textbookSummary` 比显示写法、用 `textbookLabel` 比"已失效"那一句、
+ * 用 `resolveTextbookRef` / `resolveTextbookList` 验导入那一列的解析
+ * （服务层那道闸 `textbookIssues` 与它共用同一套说法，因此不另写一遍）。
+ */
+import {
+  normalizeTextbooks,
+  resolveTextbookList,
+  resolveTextbookRef,
+  textbookIssues,
+  textbookLabel,
+  textbookSummary,
+} from "@/lib/backend/textbooks";
 import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
 import { createMemoryStore } from "@/lib/backend/storage";
 import {
@@ -3307,6 +3321,8 @@ const makeStudent = (over: Partial<Student> = {}): Student => ({
   grade: "初二",
   guardian: "138-0000-0000",
   subjects: ["初中数学"],
+  // v32 学生的「教材」：这一组用例验的是待跟进规则，与教材无关，因此留空
+  textbooks: [],
   profile: {},
   enrollments: [
     {
@@ -3739,6 +3755,7 @@ ok("按课时降序排列（老师A 在前）", (workload[0]?.teacher.id ?? "") 
 const churnStudents: Student[] = [
   {
     id: "cs1", version: 1, name: "退课学生", grade: "初二", guardian: "", subjects: [], profile: {},
+    textbooks: [],
     enrollments: [
       {
         id: "ce1", subject: "初中数学", form: "", teacherId: "",
@@ -3764,6 +3781,7 @@ const churnStudents: Student[] = [
   },
   {
     id: "cs2", version: 1, name: "暂停学生", grade: "初三", guardian: "", subjects: [], profile: {},
+    textbooks: [],
     enrollments: [], status: "暂停", note: "", createdAt: new Date().toISOString(),
   },
 ];
@@ -3809,12 +3827,12 @@ const searchInput = {
   students: [
     {
       id: "s1", version: 1, name: "张小明", grade: "初二", guardian: "138-0000-0000",
-      subjects: ["初中数学"], profile: {}, enrollments: [],
+      subjects: ["初中数学"], textbooks: [], profile: {}, enrollments: [],
       status: "在读" as const, note: "", createdAt: new Date().toISOString(),
     },
     {
       id: "s2", version: 1, name: "张小红", grade: "初三", guardian: "", subjects: [],
-      profile: {}, enrollments: [], status: "在读" as const, note: "",
+      textbooks: [], profile: {}, enrollments: [], status: "在读" as const, note: "",
       createdAt: new Date().toISOString(),
     },
   ],
@@ -5587,12 +5605,20 @@ eq("JSON 里用中文列名也认", jsonWrapped.records[0]?.name, "302 教室");
 eq("空 JSON 对象会说明缺什么",
   parseImport("students", JSON.stringify({ teachers: [] })).problems.length, 1);
 
-// 模板与解析器同源：模板必须能被自己解析
+/*
+ * 模板与解析器同源：模板必须能被自己解析。
+ *
+ * v32 起要**带上课程类型**（第四个参数）：学生的模板里有「教材」那一列，
+ * 而它的示例值是 `物理·必修教材|数学·八年级教材`——那一格要对着 `catalog`
+ * 才认得出是哪个模块（服务端与批量导入面板传的也是同一份东西）。
+ * 不带的话，模板示例会被判成"没读到课程类型"，这条断言当场变红 ——
+ * 那不是模板错了，是调用方少给了一个参数。
+ */
 for (const entity of IMPORT_ENTITIES) {
-  const fromTemplate = parseImport(entity, csvTemplate(entity));
+  const fromTemplate = parseImport(entity, csvTemplate(entity), undefined, seedDb.catalog);
   eq(`CSV 模板能被自己解析（${ENTITY_SPECS[entity].label}）`,
     [fromTemplate.missingRequiredHeaders, fromTemplate.records.length], [[], 1]);
-  const jsonFromTemplate = parseImport(entity, jsonTemplate(entity));
+  const jsonFromTemplate = parseImport(entity, jsonTemplate(entity), undefined, seedDb.catalog);
   eq(`JSON 模板能被自己解析（${ENTITY_SPECS[entity].label}）`,
     [jsonFromTemplate.missingRequiredHeaders, jsonFromTemplate.records.length], [[], 1]);
 }
@@ -13160,6 +13186,383 @@ console.log(
    */
   __useBackendSnapshotForTesting(undefined);
   __useSiteContentSourceForTesting(undefined);
+}
+
+console.log(
+  "\n=== 49. 学生的「教材」与生日（机构：「新建学生应该有一个年级、生日以及现阶段使用的教材」）===",
+);
+
+/*
+ * 机构原话：「**新建学生应该有一个年级、生日以及现阶段使用的教材（可以有多本，
+ * 因为一个学生可能有多个科目）**」。
+ *
+ * 这一节守六件事，缺一条这个功能就会以某种方式悄悄不对：
+ *
+ *   ① **迁移**：v31（没有这个字段）的老库补成 `[]`、版本变成 32，且**别的字段一个没动**；
+ *   ② **服务层那道闸**：合法模块 id 收下、不存在的 id 拒绝，而且"你写的是名字、
+ *      id 是这个"这种**能照着改**的错必须说出来（否则人只会对着一个字符串发呆）；
+ *   ③ **批量导入的「教材」列**：`物理·必修教材` 认；只写重名的模块名（`必修教材`
+ *      在 9 个学科下都有）**必须报"没说清是哪个学科"**并列出可选写法 ——
+ *      这条是机构自己的口径（「科目名要与课程库一致」那类"把选择讲清楚"的报错）；
+ *   ④ **显示口径带学科**：`textbookSummary` 给的是 `数学·八年级教材、英语·听力`，
+ *      不是两个看不出学科的模块名；模块被删掉时显示「已失效教材（id）」而不是空串；
+ *   ⑤ **反向断言：教材不进报价、不进排课冲突、不进课时账本** —— 这三条是这一版最要紧的边界
+ *      （教材不是报名/报课，一次勾选不该悄悄影响钱与课时）；
+ *   ⑥ **界面源码里真的有三样**：年级候选（datalist，**不是**固定枚举）、生日（`type="date"`，
+ *      写进 `profile.birthDate`）、教材多选（按学科分组）。
+ *
+ * 刻意**不在这里重写一遍解析或显示**：要比的是"页面上/接口里真正在跑的那一份"
+ * （`textbookSummary` / `parseImport` / 服务层），自检里再写一份等于口径有了第二处实现。
+ */
+{
+  const textbookRoot = new URL("../", import.meta.url);
+  const readTextbookFile = (file: string) => readFileSync(new URL(file, textbookRoot), "utf8");
+  /** 去掉注释再查源码（与 §22 / §44 同一个坑：注释里的词不算代码）。 */
+  const stripTextbookComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  /*
+   * 这一节从头到尾只碰**自己的**一份内存库：先灌入示例数据（`seedDb`），
+   * 与前面几十节留下的状态无关（`importDatabase` 会连备份一起替换）。
+   */
+  const textbookMemory = createMemoryStore();
+  __useStoreForTesting(textbookMemory);
+  await api.importDatabase(serializeDatabase(seedDb));
+
+  const textbookCatalog = await api.catalog.list();
+  /** 某个学科下某个模块的 id（找不到就直接把断言弄红，别静默用空串）。 */
+  const moduleId = (subject: string, name: string): string => {
+    const subjectId = textbookCatalog.subjects.find((item) => item.name === subject)?.id ?? "";
+    return (
+      textbookCatalog.modules.find((item) => item.subjectId === subjectId && item.name === name)?.id ??
+      `（课程类型里没有 ${subject}·${name}）`
+    );
+  };
+  const MATH_GRADE8 = moduleId("数学", "八年级教材");
+  const ENGLISH_LISTENING = moduleId("英语", "听力");
+  const PHYSICS_REQUIRED = moduleId("物理", "必修教材");
+
+  /* ── ① 迁移：v31 的老学生补成 `[]`，版本变 32，别的字段一个没动 ───────────── */
+  const legacyStudentsDb = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+    students: Array<Record<string, unknown>>;
+    version: number;
+  };
+  legacyStudentsDb.version = 31;
+  legacyStudentsDb.students = legacyStudentsDb.students.map((student) => {
+    const copy = { ...student };
+    delete copy.textbooks;
+    return copy;
+  });
+  const legacyWithoutTextbooks = legacyStudentsDb.students.map((student) => JSON.stringify(student));
+  eq("夹具确实是「没有 textbooks 这个字段的 v31 学生」",
+    [legacyStudentsDb.version, legacyStudentsDb.students.every((s) => !("textbooks" in s))],
+    [31, true]);
+
+  const upgradedTextbooks = await api.importDatabase(JSON.stringify(legacyStudentsDb));
+  eq("v31 的老库能升级导入", upgradedTextbooks.ok, true);
+  const migratedStudents = await api.students.list();
+  eq("v31 → v32 给每个老学生补上空数组（一条不落）",
+    migratedStudents.map((student) => student.textbooks),
+    migratedStudents.map(() => []));
+  /** 去掉 textbooks 之后的形状（用来比"别的字段一个字没动"）。 */
+  const withoutTextbooks = (student: Record<string, unknown>): string => {
+    const copy = { ...student };
+    delete copy.textbooks;
+    return JSON.stringify(copy);
+  };
+  eq("学生的其它字段逐字节没动（迁移不是「顺手改档案」）",
+    migratedStudents.map((student) => withoutTextbooks(student)),
+    legacyWithoutTextbooks);
+  eq("迁移后版本就是当前版本（32）", (await api.exportDatabase()).version, 32);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 32);
+  ok("版本记录里写着这一步（`VERSION_NOTES[32]`，后来的人不用翻提交历史）",
+    (VERSION_NOTES[32] ?? "").includes("教材"));
+  /*
+   * **不猜**：空数组的含义是"还没填"，界面上会显示成待补灰标。
+   * 按年级或报课科目推一本（"初二 → 八年级教材"）看着更贴心，实际是凭空记下一条学业事实，
+   * 而且推不出唯一一本（八年级教材在数学 / 科学 / 社会下都有）。
+   */
+  ok("迁移**不猜**内容：没有哪个老学生被塞进一本「看起来像真的」的教材",
+    migratedStudents.every((student) => student.textbooks.length === 0));
+
+  /* ── ② 服务层：收下合法 id、拒绝不存在的 id（并把"正规写法"说出来）────────── */
+  const textbookStudent = await api.students.create({
+    name: "自检·两本跨学科教材", grade: "初二", guardian: "", status: "在读", note: "",
+    textbooks: [MATH_GRADE8, ENGLISH_LISTENING],
+    // 生日写进**采集表已有的那一格**（v32 不新增 `Student.birthday`）
+    profile: { birthDate: "2012-05-06" },
+    enrollments: [],
+  });
+  eq("合法模块 id 收下（两本、跨学科）",
+    textbookStudent.textbooks, [MATH_GRADE8, ENGLISH_LISTENING]);
+  eq("生日落在同一条记录的 `profile.birthDate` 上",
+    (await api.students.get(textbookStudent.id))?.profile.birthDate, "2012-05-06");
+  ok("记录里**没有**第二个生日字段（一个事实只有一处）",
+    !Object.keys(textbookStudent).includes("birthday") &&
+      !/^\s*birthday:/.test(stripTextbookComments(readTextbookFile("lib/backend/types.ts"))));
+
+  const textbookCountBefore = (await api.students.list()).length;
+  /** 建一个"教材写成这样"的学生，返回服务端那句原话（没有被拒绝就返回空串）。 */
+  const refuseTextbooks = async (value: unknown): Promise<string> => {
+    try {
+      await api.students.create({
+        name: "自检·不该建出来", grade: "初二", guardian: "", status: "在读", note: "",
+        textbooks: value as string[], profile: {}, enrollments: [],
+      });
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+  const nameInsteadOfId = await refuseTextbooks(["物理·必修教材"]);
+  ok("写**名字**（`物理·必修教材`）被拒绝", nameInsteadOfId !== "");
+  ok("拒绝时**指出正规写法**：本库里它是哪个模块 id（这一句决定人能不能一次改对）",
+    nameInsteadOfId.includes("模块 id") && nameInsteadOfId.includes(PHYSICS_REQUIRED),
+    nameInsteadOfId);
+  const unknownId = await refuseTextbooks(["mod_早就删掉的教材"]);
+  ok("写不存在的模块 id 也被拒绝，并指到「课程 → 课程类型」去选（不是静默存下）",
+    unknownId.includes("不存在") && unknownId.includes("课程类型"), unknownId);
+  const notAList = await refuseTextbooks("物理·必修教材");
+  ok("整个字段写成一串文本也被拒绝，并说明「要是一个列表」",
+    notAList.includes("列表"), notAList);
+  eq("被拒的那几次什么都没写进去", (await api.students.list()).length, textbookCountBefore);
+  /* 编辑那条路走的是**同一个钩子**（`normalizeStudentStrict`）：不能"新建时校验、编辑时不校验" */
+  const editRefusal = await api.students
+    .update(textbookStudent.id, { textbooks: ["必修教材"] })
+    .then(() => "")
+    .catch((cause: unknown) => (cause instanceof Error ? cause.message : String(cause)));
+  ok("编辑接口同样被拦下（重名的「必修教材」没说清学科）",
+    editRefusal.includes("没说清是哪个学科") && editRefusal.includes("物理·必修教材"), editRefusal);
+  eq("被拦下之后那条记录上的教材没变（不是「先改了一半」）",
+    (await api.students.get(textbookStudent.id))?.textbooks, [MATH_GRADE8, ENGLISH_LISTENING]);
+
+  /* ── ③ 批量导入的「教材」列 ───────────────────────────────────────────── */
+  const textbookCsvHeader = (csvTemplate("students").split("\n")[0] ?? "")
+    .replace(/^\uFEFF/, "")
+    .trim();
+  ok("学生 CSV 模板里自动多了「教材」这一列（模板跟着列定义走）",
+    textbookCsvHeader.includes("教材"), textbookCsvHeader);
+  ok("JSON 模板里多了 `textbooks`（示例就是两本、用 `|` 分隔）",
+    jsonTemplate("students").includes('"textbooks"') &&
+      jsonTemplate("students").includes("物理·必修教材|数学·八年级教材"));
+
+  const textbookCsv = [
+    "姓名,年级,教材",
+    "自检·教材导入一,初二,物理·必修教材|数学·八年级教材",
+    "自检·教材导入二,初二,必修教材",
+    "自检·教材导入三,初二,不存在的教材甲",
+  ].join("\n") + "\n";
+  const parsedTextbookCsv = parseImport("students", textbookCsv, "csv", textbookCatalog);
+  eq("「学科·模块名」的写法认出来就是那个模块（顺序也照原样）",
+    parsedTextbookCsv.records[0]?.textbooks, [PHYSICS_REQUIRED, MATH_GRADE8]);
+  eq("写错的两行不进记录（那一行整行不导）", parsedTextbookCsv.records.length, 1);
+  const ambiguousProblem = parsedTextbookCsv.problems.find((item) => item.line === 3)?.reason ?? "";
+  ok("只写重名的模块名（`必修教材`）报的是「**没说清是哪个学科**」",
+    ambiguousProblem.includes("没说清是哪个学科"), ambiguousProblem);
+  ok("并且把可选写法列出来（人照着抄一次就好）",
+    ambiguousProblem.includes("物理·必修教材") && ambiguousProblem.includes("数学·必修教材"),
+    ambiguousProblem);
+  ok("不存在的教材名也报清是哪一行、错在哪（并指到「课程 → 课程类型」）",
+    (parsedTextbookCsv.problems.find((item) => item.line === 4)?.reason ?? "").includes("课程类型"));
+  /* 一格多本、去重：同一本写两遍不该在库里变成两条 */
+  eq("同一本教材写两遍只留一条",
+    resolveTextbookList(textbookCatalog, ["物理·必修教材", "物理·必修教材"]),
+    { ok: true, ids: [PHYSICS_REQUIRED] });
+  eq("`resolveTextbookRef` 也认模块 id 本身（导出/接口里拿回来的就是它）",
+    resolveTextbookRef(textbookCatalog, MATH_GRADE8), { ok: true, id: MATH_GRADE8 });
+
+  const importedTextbooks = await api.imports.apply({
+    entity: "students",
+    text: textbookCsv,
+    fileName: "自检-教材.csv",
+  });
+  eq("导入落库：只进合法的那一行", importedTextbooks.added, 1);
+  eq("写错的那些行走的是「没通过校验」报告（不是静默丢弃）",
+    importedTextbooks.problems.map((item) => item.line).sort(), [3, 4]);
+  const importedTextbookStudent = (await api.students.list()).find(
+    (student) => student.name === "自检·教材导入一",
+  );
+  eq("导入的教材在库里是模块 id（不是那一串名字）",
+    importedTextbookStudent?.textbooks, [PHYSICS_REQUIRED, MATH_GRADE8]);
+  eq("重复导入同一份文件不会重复建（「教材」列不改变判重键：姓名 + 家长）",
+    (await api.imports.apply({ entity: "students", text: textbookCsv })).added, 0);
+
+  /*
+   * **导出 → 改 → 导回去**必须对得上（机构最常做的事）：
+   * 导出那列写的是显示口径（`学科·模块名`，多个用 `|` 分隔），导入那侧正好认这个写法。
+   */
+  const textbookExport = exportDataset(await api.exportDatabase(), {
+    datasetId: "students",
+    format: "csv",
+  });
+  ok("学生导出里有「教材」这一列", textbookExport.ok && textbookExport.content.includes("教材"));
+  const exportedCsv = textbookExport.ok ? textbookExport.content : "";
+  ok("导出写的是**带学科的**写法（不带的话导回来认不出是哪一科的）",
+    exportedCsv.includes("物理·必修教材|数学·八年级教材"), exportedCsv.split("\n").slice(0, 4).join("\n"));
+  const reimported = parseImport("students", exportedCsv, "csv", textbookCatalog);
+  eq("导出的那份**能被自己导回来**（逐条比对教材）",
+    reimported.records.map((record) => record.textbooks),
+    (await api.students.list()).map((student) => student.textbooks));
+
+  /* ── ④ 显示口径：带学科；模块被删掉时也看得懂 ───────────────────────────── */
+  eq("`textbookSummary` 带学科（`必修教材` 这类重名模块全靠它才认得出）",
+    textbookSummary(textbookCatalog, [MATH_GRADE8, ENGLISH_LISTENING]),
+    "数学·八年级教材、英语·听力");
+  eq("没填时是「—」（列表上不显示空白单元格）", textbookSummary(textbookCatalog, []), "—");
+  eq("模块被删掉之后显示「已失效教材（id）」（不是空串：空串会被读成「没填」）",
+    textbookLabel(textbookCatalog, "mod_早就删掉的"), "已失效教材（mod_早就删掉的）");
+  eq("`normalizeTextbooks` 只去空去重、**不校验**（老库里的失效 id 不该让整库读不出来）",
+    normalizeTextbooks([" a ", "", "a", null, "b"]), ["a", "b"]);
+  eq("服务层那道闸对「空数组＝还没填」放行（教材不是必填）",
+    textbookIssues(textbookCatalog, []), []);
+
+  /* ── ⑤ 反向断言：教材不参与报价、不参与排课冲突、不参与课时账本 ───────────── */
+  /*
+   * 这一组是**这一版最要紧的边界**（写进 `lib/backend/types.ts` 与 textbooks.ts 的文件头）：
+   * 教材只是"这个学生现在在读哪些教材"，**不是报名、不是报课**。
+   * 把它做成"报名关系"会让一次勾选悄悄影响钱与课时 —— 那是这份数据最不该有的副作用。
+   *
+   * 所以这里同时从两边钉：
+   *   - **行为**：改教材前后，报价配置逐字节相同、同一节课的冲突报告逐字节相同、课时账本逐字节相同；
+   *   - **源码**：那三条链路的文件里根本不出现 `textbook`（判据是"没有第二处实现"，
+   *     而不是"这一版没写错"）；冲突判定核心在 api.ts 里，因此单独抠它的函数体来查。
+   */
+  const pricingBeforeTextbooks = JSON.stringify(await api.pricing.get());
+  const ledgerBeforeTextbooks = JSON.stringify(
+    (await api.students.get(textbookStudent.id))?.enrollments ?? [],
+  );
+  const conflictProbe = {
+    subject: "初中数学", form: "一对一", teacherId: "", classroomId: "",
+    studentIds: [textbookStudent.id],
+    startsAt: new Date(Date.now() + 86_400_000).toISOString(),
+    durationMinutes: 60, status: "已排" as const, note: "", makeupForLessonId: "",
+  };
+  const conflictsWithTextbooks = await api.lessons.findConflicts(conflictProbe);
+  await api.students.update(textbookStudent.id, { textbooks: [] });
+  const conflictsWithoutTextbooks = await api.lessons.findConflicts(conflictProbe);
+  const pricingAfterTextbooks = JSON.stringify(await api.pricing.get());
+  const ledgerAfterTextbooks = JSON.stringify(
+    (await api.students.get(textbookStudent.id))?.enrollments ?? [],
+  );
+  eq("教材不影响排课冲突判定（有教材 / 清空教材，同一节课的冲突报告逐字节相同）",
+    conflictsWithoutTextbooks, conflictsWithTextbooks);
+  eq("教材不进报价（改教材前后，报价配置逐字节相同）",
+    pricingAfterTextbooks, pricingBeforeTextbooks);
+  eq("教材不进课时账本（改教材前后，报课与课时逐字节相同）",
+    ledgerAfterTextbooks, ledgerBeforeTextbooks);
+  await api.students.update(textbookStudent.id, { textbooks: [MATH_GRADE8, ENGLISH_LISTENING] });
+  eq("（收尾）教材改回来了", (await api.students.get(textbookStudent.id))?.textbooks,
+    [MATH_GRADE8, ENGLISH_LISTENING]);
+
+  const pricingSource = stripTextbookComments(readTextbookFile("lib/backend/pricing.ts"));
+  const financeSource = stripTextbookComments(readTextbookFile("lib/backend/finance.ts"));
+  const enrollmentSource = stripTextbookComments(readTextbookFile("lib/backend/enrollment.ts"));
+  eq("报价 / 收费 / 课时账本这三个纯模块里根本不出现 `textbook`（没有第二处实现）",
+    [pricingSource, financeSource, enrollmentSource].filter((source) => source.includes("textbook")),
+    []);
+  {
+    /*
+     * 冲突判定的核心是 api.ts 里那个私有函数 `conflictsFor`（`lessons.findConflicts`
+     * 与按周批量排课共用它）。抠它的函数体：只要它不碰 `textbook`，
+     * "教材不进冲突判定"就不是"这一版恰好没写"，而是这条链路上没有那个输入。
+     */
+    const apiSource = readTextbookFile("lib/backend/api.ts");
+    const body = /function conflictsFor\(db: Database, input: LessonInput\): ConflictReport \{([\s\S]*?)\n\}/.exec(apiSource);
+    ok("冲突判定核心（`conflictsFor`）的函数体里没有 `textbook`",
+      body !== null && !body[1]!.includes("textbook"),
+      body === null ? "没抠到 conflictsFor 的函数体（函数签名改过？）" : body[1]!.slice(0, 120));
+    /*
+     * 排课表单交上来的那些格（`LessonInput`，定义在 types.ts）里也没有教材：
+     * 冲突判定的**输入**里根本没有这一项，所以"教材影响不了排课"是结构上的事实，
+     * 不是"这一版恰好没读它"。
+     */
+    const lessonInputBlock =
+      /export type LessonInput = \{[\s\S]*?\n\};/.exec(
+        readTextbookFile("lib/backend/types.ts"),
+      )?.[0] ?? "";
+    ok("`LessonInput`（排课表单交上来的那些格）里也没有教材",
+      lessonInputBlock !== "" && !lessonInputBlock.includes("textbook"),
+      lessonInputBlock === "" ? "没抠到 LessonInput 的类型定义（改名了？）" : lessonInputBlock.slice(0, 80));
+  }
+
+  /* ── ⑥ 界面源码：三个字段都在新建表单里，且口径对得上 ───────────────────── */
+  const studentFormSource = stripTextbookComments(
+    readTextbookFile("components/admin/StudentForm.tsx"),
+  );
+  const studentsPageSource = stripTextbookComments(
+    readTextbookFile("app/admin/(dashboard)/students/page.tsx"),
+  );
+  const studentDetailSource = stripTextbookComments(
+    readTextbookFile("components/admin/StudentDetail.tsx"),
+  );
+  ok("新建学生表单里有「生日」，而且是 `type=\"date\"`",
+    studentFormSource.includes('label="生日"') && /label="生日"[\s\S]{0,300}?type="date"/.test(studentFormSource));
+  ok("生日读的是采集表那一格（`profile.birthDate`），不是新字段",
+    studentFormSource.includes('profileText(student?.profile ?? {}, "birthDate")'));
+  ok("提交时把生日**整份**写回 `profile`（`{ ...profile, birthDate }`：不抹掉采集表里别的字段）",
+    /profile: nextProfile/.test(studentFormSource) &&
+      /const nextProfile: StudentProfile = \{ \.\.\.profile, birthDate: birthDate\.trim\(\) \}/.test(studentFormSource));
+  ok("打开表单时把那一份 `profile` 存成 state（与 version 同一次读）—— profile 是整份覆盖，不能拿别人的那份去交",
+    /const \[profile\] = useState<StudentProfile>\(\(\) => structuredClone\(student\?\.profile \?\? \{\}\)\)/.test(studentFormSource));
+  /*
+   * 年级必须是**自由文本 + 候选**，不能是固定枚举（`<select>`）：
+   * 机构自己就有「初二」「小学五年级」这几种写法，枚举会把它们挡在门外。
+   * 判据是"那一格是 TextField（input）且挂的是 list"，而不是"文件里出现过 datalist"。
+   */
+  const gradeField = /<TextField\s+label="年级"[\s\S]{0,300}?\/>/.exec(studentFormSource)?.[0] ?? "";
+  ok("年级仍然是自由文本（TextField / input），只是挂了候选 —— **不是**固定枚举",
+    gradeField !== "" &&
+      gradeField.includes("list={gradeListId}") &&
+      !studentFormSource.includes('<SelectInput\n          label="年级"'),
+    gradeField === "" ? "没抠到年级那一格" : gradeField.replace(/\s+/g, " ").slice(0, 160));
+  ok("候选挂在 `<datalist>` 上（点了就填，也不拦着写别的）",
+    studentFormSource.includes("<datalist") && studentFormSource.includes("GRADE_SUGGESTIONS"));
+  ok("年级候选里同时有小学 / 初中 / 高中三种写法（机构自己就有「初二」「小学五年级」）",
+    ["一年级", "六年级", "七年级", "九年级", "高一", "高三"].every((grade) =>
+      studentFormSource.includes(`"${grade}"`)));
+  ok("教材是一个**多选**控件（复用 MultiSelect，不是一排手打的输入框）",
+    studentFormSource.includes("MultiSelect") &&
+      studentFormSource.includes('label="现阶段使用的教材"') &&
+      studentFormSource.includes("textbookOptions"));
+  ok("教材候选按**学科**分组（组名＝学科名，组内是模块）",
+    studentFormSource.includes("group: subject.name"));
+  ok("候选来自 `catalog.list()`（课程类型那一层，全部模块、不限制类型）",
+    studentFormSource.includes("api.catalog") && studentFormSource.includes("catalog.modules"));
+  ok("候选的显示名走 `textbookLabel`（`学科·模块名`），值是模块 id",
+    // 变量名不重要（不许叫 `module`：Next 那条 lint 规则会报错），因此这里只认形状
+    /label: textbookLabel\(catalog, \w+\.id\)/.test(studentFormSource) &&
+      /value: \w+\.id/.test(studentFormSource));
+  ok("表单里也用 `textbookSummary` 给人看一遍（显示口径只有一处）",
+    studentFormSource.includes("textbookSummary(catalog, textbooks)"));
+  ok("提交时把教材一起交上去（新建与编辑两条路都交）",
+    (studentFormSource.match(/textbooks,/g) ?? []).length >= 2);
+  ok("表单里写明了教材**不参与报价 / 排课 / 课时**（免得有人以为勾了就是报课）",
+    studentFormSource.includes("不参与报价") && studentFormSource.includes("报课"));
+
+  /*
+   * 显示：学生列表与详情都能看到教材；**没填时是灰色的「教材未填」待办标**，
+   * 不是空白单元格（机构口径：「没填的时候也看得出来」）。
+   *
+   * 与教师卡片的「用工未填」、教室卡片的「校区未填」**必须同一个样式**：
+   * 同一个样式的话，「教材未填」会被读成"这个学生在读一本叫『教材未填』的教材"。
+   */
+  const textbookTodoClass =
+    "rounded-sm border border-dashed border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[10px] text-ink-400";
+  ok("学生列表上有「教材」这一列，走 `textbookSummary`（带学科）",
+    studentsPageSource.includes("<th") && studentsPageSource.includes(">教材<") &&
+      studentsPageSource.includes("textbookSummary(catalog, student.textbooks)"));
+  ok("列表上没填时渲染的是「教材未填」灰标（不是空白格、也不是不渲染）",
+    studentsPageSource.includes('student.textbooks.length === 0') &&
+      studentsPageSource.includes("教材未填"));
+  ok("详情页也能看到教材，同样走 `textbookSummary`",
+    studentDetailSource.includes("textbookSummary(catalog, student.textbooks)") &&
+      studentDetailSource.includes("教材未填"));
+  ok("两处的待补灰标与教师 / 教室那两页**用同一个样式**（各写一套会被读成两个不同的待办）",
+    studentsPageSource.includes(textbookTodoClass) && studentDetailSource.includes(textbookTodoClass));
+
+  /* 收尾：把这一节动过的库恢复成示例数据（与 §11.1 那一套一致）。 */
+  await api.importDatabase(serializeDatabase(seedDb));
+  eq("收尾：库回到示例数据", (await api.students.list()).length, seedDb.students.length);
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
