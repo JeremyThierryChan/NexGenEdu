@@ -42,13 +42,29 @@ export function freePort(): Promise<number> {
   });
 }
 
-export type RunResult = { code: number; output: string };
+export type RunResult = {
+  code: number;
+  output: string;
+  /** 到了 `timeoutMs` 还没结束、被这里停掉了 —— 调用方要据此给一句人话报错。 */
+  timedOut?: boolean;
+};
 
-/** 跑一个命令并收全输出（失败原因都在输出里，不能只留最后几行）。 */
+/**
+ * 跑一个命令并收全输出（失败原因都在输出里，不能只留最后几行）。
+ *
+ * `stream: true` 时**边跑边把输出转发到本进程的 stdout/stderr**（同时照样整份攒在
+ * `output` 里，所以"拿完整输出做结论"的用法不受影响）。为什么需要它：逐页验收那种
+ * 一百多条断言的套件原先要跑完才一次性吐字，于是"卡住了"和"还在跑"在终端上完全
+ * 一样 —— 2026-09-25 排查那次，只能靠临时库文件的 mtime 和 `lsof` 去猜它停在哪。
+ *
+ * `timeoutMs` 是**最后一道**保障：到点 SIGTERM，再给 2 秒，还不退就 SIGKILL。
+ * 没有它的话，被调用方一旦卡住（例如服务端转进了死循环、请求永远不回），
+ * 这里就永远等不到 `close`，整个命令没有结论、也不退出。
+ */
 export function run(
   command: string,
   args: string[],
-  options: { env?: Record<string, string> } = {},
+  options: { env?: Record<string, string>; stream?: boolean; timeoutMs?: number } = {},
 ): Promise<RunResult> {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
@@ -57,9 +73,26 @@ export function run(
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
-    child.stdout.on("data", (chunk) => { output += chunk.toString(); });
-    child.stderr.on("data", (chunk) => { output += chunk.toString(); });
-    child.on("close", (code) => resolve({ code: code ?? 1, output }));
+    let timedOut = false;
+    let timer: NodeJS.Timeout | undefined;
+    const collect = (chunk: Buffer, to: NodeJS.WriteStream): void => {
+      const text = chunk.toString();
+      output += text;
+      if (options.stream === true) to.write(text);
+    };
+    child.stdout.on("data", (chunk: Buffer) => collect(chunk, process.stdout));
+    child.stderr.on("data", (chunk: Buffer) => collect(chunk, process.stderr));
+    if (options.timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        setTimeout(() => child.kill("SIGKILL"), 2000).unref();
+      }, options.timeoutMs);
+    }
+    child.on("close", (code) => {
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(timedOut ? { code: code ?? 1, output, timedOut } : { code: code ?? 1, output });
+    });
   });
 }
 
@@ -145,18 +178,69 @@ export async function startServer(options: StartServerOptions): Promise<ServerHa
   server.stdout.on("data", (chunk) => { log += chunk.toString(); });
   server.stderr.on("data", (chunk) => { log += chunk.toString(); });
 
-  const stop = async (): Promise<void> => {
+  /**
+   * 端口上还有人在应答吗。
+   *
+   * 必须带超时：**卡死的服务端"连得上、不回话"**，没有超时的 `fetch` 会让收尾也
+   * 永远等下去（2026-09-25 那次服务端被一个死循环转住，`/health` 就是这种表现）。
+   * 判据分成三种，缺一不可：
+   *   - 有应答 → 还活着；
+   *   - `ECONNREFUSED` → 端口没人监听，真停了；
+   *   - 超时 / 说不清 → **当它还在**（宁可多报一次"没停干净"，也不要谎报已停）。
+   */
+  const probe = async (): Promise<"alive" | "stopped"> => {
     try {
-      if (server.pid !== undefined) process.kill(-server.pid, "SIGTERM");
-    } catch {
-      server.kill("SIGTERM");
+      await fetch(`${base}/health`, { signal: AbortSignal.timeout(2000) });
+      return "alive";
+    } catch (cause) {
+      const name = cause instanceof Error ? cause.name : "";
+      if (name === "TimeoutError" || name === "AbortError") return "alive";
+      const code = (cause as { cause?: { code?: string } }).cause?.code;
+      return code === "ECONNREFUSED" ? "stopped" : "alive";
     }
+  };
+
+  const signalGroup = (signal: NodeJS.Signals): void => {
+    try {
+      if (server.pid !== undefined) process.kill(-server.pid, signal);
+      else server.kill(signal);
+    } catch {
+      try {
+        server.kill(signal);
+      } catch {
+        // 已经不在了
+      }
+    }
+  };
+
+  const waitClose = async (ms: number): Promise<void> => {
+    if (server.exitCode !== null || server.signalCode !== null) return;
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 3000);
-      server.once("close", () => { clearTimeout(timer); resolve(); });
+      const timer = setTimeout(resolve, ms);
+      server.once("close", () => {
+        clearTimeout(timer);
+        resolve();
+      });
     });
-    const stillUp = await fetch(`${base}/health`).then(() => true).catch(() => false);
-    if (stillUp) throw new Error(`服务端（端口 ${port}）没停干净，请检查残留进程。`);
+  };
+
+  const stop = async (): Promise<void> => {
+    signalGroup("SIGTERM");
+    await waitClose(3000);
+    if ((await probe()) === "stopped") return;
+    /*
+     * 还活着就上 SIGKILL。
+     *
+     * 为什么非要有这一步：`index.mts` 的 SIGTERM 处理函数要先 `server.close()`，
+     * 而**事件循环一旦被卡住（转进了死循环），那个回调根本没有机会运行** ——
+     * 进程收到 SIGTERM 却退不掉。2026-09-25 那次就是这样：临时服务一直占着端口与
+     * 单写者锁，收尾命令等不到它，工具链从此挂在那里。SIGKILL 不给它机会。
+     */
+    signalGroup("SIGKILL");
+    await waitClose(3000);
+    if ((await probe()) === "alive") {
+      throw new Error(`服务端（端口 ${port}）没停干净，请检查残留进程。`);
+    }
   };
 
   const health = await waitForHealth(base, options.timeoutMs ?? 30_000).catch(() => null);
@@ -196,7 +280,20 @@ export async function withTempServer<T>(
   // 形参刻意不叫 `use`：eslint 的 react-hooks 规则会把它当成 Hook 调用（误报）
   body: (
     base: string,
-    info: { port: number; dbPath: string; username: string; password: string },
+    info: {
+      port: number;
+      dbPath: string;
+      username: string;
+      password: string;
+      /**
+       * 临时服务端自己的输出（排查用）。
+       *
+       * 交给 `body` 是因为**失败时最该看的就是它**：服务端那侧出了什么事，
+       * 只有这份日志说得清。以前它只在"服务起不来"那条路径上被打印，
+       * 而"起来了、但请求不回"这种卡死恰恰不是那条路径 —— 日志就永远没人看得到。
+       */
+      log: () => string;
+    },
   ) => Promise<T>,
   options: { env?: Record<string, string> } = {},
 ): Promise<T> {
@@ -232,6 +329,7 @@ export async function withTempServer<T>(
       dbPath,
       username: handle.credentials.username,
       password: handle.credentials.password,
+      log: handle.log,
     });
   } finally {
     await handle.stop();
@@ -239,7 +337,13 @@ export async function withTempServer<T>(
   }
 }
 
-/** 探活：等到 /health 真的应答，或超时（返回 null）。 */
+/**
+ * 探活：等到 /health 真的应答，或超时（返回 null）。
+ *
+ * 每次请求都带超时（2 秒）：不带的话，"端口上有人监听但不回话"会让这一次 `fetch`
+ * 永远不返回 —— 那样下面那个 `deadline` 只是看着像超时，实际永远轮不到判断，
+ * 调用方（`startServer`）也就永远不返回。
+ */
 async function waitForHealth(
   base: string,
   timeoutMs = 30_000,
@@ -247,7 +351,7 @@ async function waitForHealth(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`${base}/health`);
+      const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(2000) });
       if (response.ok) return (await response.json()) as Record<string, unknown>;
     } catch {
       // 还没起来，继续等

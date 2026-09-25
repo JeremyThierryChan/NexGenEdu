@@ -55,6 +55,18 @@ const iso = (offsetDays = 0, hour = 10) => {
   return d.toISOString();
 };
 
+/*
+ * 星期几的口径是 **1–7（周日 = 7）**，而 JS 的 `getDay()` 里**周日是 0** ——
+ * 两者只差「周日」这一天，所以搞混了会「平时都对、一到周日就出事」。
+ *
+ * 这个坑真的踩过：候选时段原先直接传 `getDay()`，于是凡是「今天 + 2 天是周日」的日子
+ * （也就是每个周五）跑验收，「周日 17:00」就变成 `weekday: 0`，把服务端的
+ * `buildDateSeries` 转进了死循环 —— 整个后端不再应答、验收永不结束。
+ * 服务端现在会当场拒绝 0（见 `lib/backend/inquiry.ts` 的 `assertWeekday`），
+ * 这里则按正确口径把值算对。口径只有一份：`getDay() === 0 ? 7 : getDay()`。
+ */
+const isoWeekdayOf = (date: Date): number => (date.getDay() === 0 ? 7 : date.getDay());
+
 /* ── 1 课程库（含分区）── */
 /*
  * 维度引用（v28）：下面是「围棋」这门后台新增课程要挂的学段 / 学科。
@@ -811,7 +823,16 @@ await check("学生", "教材写成名字会被拒，并指出正规写法", asy
     return { 拒绝: false, 原话: "", 学生数没变: false };
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
-    const resolved = acceptCatalog.modules.find((item) => item.name === "必修教材")?.id ?? "";
+    /*
+     * ⚠️ 查这个 id 必须**锁学科**：叫「必修教材」的模块有 9 个（数学 / 物理 / 化学…），
+     * 只按名字查会查到别的学科那一本（原先查成了数学的），断言于是必然不通过 ——
+     * 而产品行为其实是对的。夹具写的是「物理·必修教材」，这里就查**物理**那一本。
+     */
+    const physicsId = acceptCatalog.subjects.find((item) => item.name === "物理")?.id ?? "";
+    const resolved =
+      acceptCatalog.modules.find(
+        (item) => item.name === "必修教材" && item.subjectId === physicsId,
+      )?.id ?? "";
     return {
       拒绝: true,
       原话: message,
@@ -1025,7 +1046,7 @@ await check("咨询", "登记咨询", async () => {
   const created = await api.inquiries.create({
     studentName: "验收咨询", grade: "初三", guardian: "139", subject: "初中数学",
     durationMinutes: 60, intervalWeeks: 1, plannedLessons: 3, startsAt: iso(2, 17),
-    candidates: [{ id: "c1", weekday: new Date(iso(2, 17)).getDay(), start: "17:00" }],
+    candidates: [{ id: "c1", weekday: isoWeekdayOf(new Date(iso(2, 17))), start: "17:00" }],
     preferredTeacherId: teacherId, preferredClassroomId: classroomId, skipDates: [], status: "待确认", note: "",
   });
   inquiryId = created.id;
@@ -1036,6 +1057,38 @@ await check("咨询", "可行性判定", async () => {
   return { slots: report?.slots?.length ?? 0, anyOk: report?.slots?.some((s) => s.ok) ?? false };
 }, (v: { slots: number }) => v.slots > 0);
 await check("咨询", "放弃咨询", async () => (await api.inquiries.abandon(inquiryId, "验收结束"))?.status === "已放弃");
+/*
+ * 回归断言（2026-09-25 那次「验收永不结束」的根因）：
+ *
+ * 星期几传成 `getDay()` 的 0 时，服务端必须**当场拒绝**，而不是转死自己的事件循环。
+ * 卡死时的表现很特别 —— 所有接口（连 `/health`）都不再应答、临时库再无写入、
+ * 验收既不报错也不结束。所以这里要断两件事：
+ *   ① 这一调被拒，且话里说清「星期几要用 1–7」；
+ *   ② 拒绝之后服务端**还活着**（再读一次列表拿得到）—— 真卡死时这一条不会有回应。
+ */
+let probeInquiryId = "";
+await check("咨询", "星期几传 getDay() 的 0：当场拒绝，且服务端不会被它转死", async () => {
+  const probe = await api.inquiries.create({
+    studentName: "验收咨询（星期几写成 0）", grade: "初三", guardian: "139", subject: "初中数学",
+    durationMinutes: 60, intervalWeeks: 1, plannedLessons: 3, startsAt: iso(2, 17),
+    candidates: [{ id: "c1", weekday: 0, start: "17:00" }], // 特意写错：0 = getDay() 的周日（正确是 7）
+    preferredTeacherId: teacherId, preferredClassroomId: classroomId, skipDates: [], status: "待确认", note: "",
+  });
+  probeInquiryId = probe.id;
+  let rejected = "";
+  try {
+    await api.inquiries.evaluate(probe.id);
+    rejected = "没有被拒绝";
+  } catch (cause) {
+    rejected = cause instanceof Error ? cause.message : String(cause);
+  }
+  const stillThere = (await api.inquiries.list()).some((item) => item.id === probe.id);
+  return { rejected, stillThere };
+}, (v: { rejected: string; stillThere: boolean }) =>
+  v.rejected.includes("星期几") && v.rejected.includes("1–7") && v.stillThere);
+// 探针用完就按产品口径收尾，别把垃圾留在临时库里（后面的「待跟进」等按状态筛数据）
+await check("咨询", "探针咨询收尾（放弃）", async () =>
+  (await api.inquiries.abandon(probeInquiryId, "回归探针用完"))?.status === "已放弃");
 
 /* ── 8 统计 / 待跟进 / 今日 ── */
 await check("今日概览", "today()", async () => typeof (await api.today()).lessonCount === "number");

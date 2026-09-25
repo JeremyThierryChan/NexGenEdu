@@ -103,6 +103,27 @@ export function minutesToTime(minutes: number): string {
   return `${`${hours}`.padStart(2, "0")}:${`${normalized % 60}`.padStart(2, "0")}`;
 }
 
+/**
+ * 星期几的口径：**1–7（1 = 周一 … 7 = 周日）**。
+ *
+ * 全项目只有这一个口径（`weekdayLabel` 取下标 `weekday - 1`、`isoWeekday` 把周日的
+ * `getDay()` 0 折成 7、界面下拉框给的就是 1–7）。
+ *
+ * 为什么专门写一个校验函数：**`getDay()` 的周日是 0，而这里要的是 7**，两者长得很像。
+ * 2026-09-25 那次就是有人（验收夹具）直接把 `getDay()` 的值传了进来，于是周五那天
+ * 传进来的候选时段是「周日 17:00 → 0」，下面那个「找第一个匹配的星期几」的循环
+ * **永远等不到 0**，把服务端的**事件循环**转死在里了：所有接口不再应答（`/health`
+ * 也超时）、临时库再无写入、验收跑不完也永不退出。宁可当场退回去并说清怎么写，
+ * 也不要让一个参数把整个后端转死。
+ */
+function assertWeekday(weekday: number, where: string): void {
+  if (Number.isInteger(weekday) && weekday >= 1 && weekday <= 7) return;
+  throw new Error(
+    `星期几要用 1–7（1 = 周一 … 7 = 周日），${where}收到的是 ${String(weekday)}。` +
+      "注意 JS 的 getDay() 里周日是 0，转换时要写成「0 → 7」。",
+  );
+}
+
 function isoWeekday(date: Date): number {
   const day = date.getDay();
   return day === 0 ? 7 : day;
@@ -116,6 +137,10 @@ function isoWeekday(date: Date): number {
  *
  * 跳过发生在生成之后（而不是减少总节数）：家长说「报 12 节」，假期那一周不上、
  * 往后顺延，总节数不变 —— 这与线下机构的实际做法一致。
+ *
+ * **两个循环都必须有界**：第二个早就有 `maxWeeks`，第一个原先没有 —— 而它才是
+ * 会把服务端转死的那个（星期几传成 0 就永远等不到）。现在第一个也限了 7 天，
+ * 且入参先过 `assertWeekday`。
  */
 export function buildDateSeries(input: {
   startsAt: string;
@@ -126,6 +151,7 @@ export function buildDateSeries(input: {
   /** 防止死循环（例如星期几填错导致永远凑不够）。 */
   maxWeeks?: number;
 }): Date[] {
+  assertWeekday(input.weekday, "算上课日期时");
   const interval = Math.max(1, Math.trunc(input.intervalWeeks));
   const total = Math.max(1, Math.trunc(input.plannedLessons));
   const skip = new Set(input.skipDates);
@@ -133,9 +159,25 @@ export function buildDateSeries(input: {
 
   const start = new Date(input.startsAt);
   const first = new Date(start);
-  // 首个不早于 startsAt 的、匹配该星期几的日期
-  while (isoWeekday(first) !== input.weekday) {
+  /*
+   * 首个不早于 startsAt 的、匹配该星期几的日期。
+   *
+   * 上限 7 次：合法的星期几（1–7）一定在 7 天之内命中，所以这个上限**不会**
+   * 少算任何一个正常的咨询；它只是让这个循环在**结构上不可能转不完**。
+   * 原先这里是无界的 `while`，一个 0 就把服务端转死了（见 `assertWeekday` 那段）。
+   */
+  for (let step = 0; step < 7 && isoWeekday(first) !== input.weekday; step += 1) {
     first.setDate(first.getDate() + 1);
+  }
+  /*
+   * 走到这里说明 `startsAt` 根本不是个能用的日期：`new Date("坏值")` 的 `getDay()`
+   * 是 NaN，与任何星期几都不相等。同样当场说清，不往下走。
+   */
+  if (isoWeekday(first) !== input.weekday) {
+    throw new Error(
+      `算不出上课日期：开始时间 ${JSON.stringify(input.startsAt)} 不是一个能用的日期。` +
+        "它要是一个能解析的日期时间（例如 2026-09-28T09:00:00.000Z）。",
+    );
   }
 
   const dates: Date[] = [];

@@ -23,11 +23,39 @@ const ACCEPT_ARGS = [
   "scripts/accept-check.mts",
 ];
 
+/*
+ * 子进程的总时限。
+ *
+ * 正常一轮十几秒到几十秒（本机还同时跑着 dev 与真后端），所以 5 分钟是很宽的余量。
+ * 它换来的是**这条命令一定会有结论**：套件里任何一处卡住（服务端转进死循环、
+ * 请求永远不回……）都不再表现为"挂在那里、什么都不输出、也不退出"——
+ * 那正是 2026-09-25 那次「`npm run accept` 永不结束」的样子，排查时完全没有抓手。
+ * 到点会停掉子进程、把服务端日志尾部打出来，并以非零码退出。
+ */
+const CHILD_TIMEOUT_MS = Number(process.env.NEXGENEDU_ACCEPT_TIMEOUT_MS ?? 300_000);
+
+/** 打印临时服务端日志的尾部（卡死/失败时最该看的证据）。 */
+function printServerLogTail(log: string, lines: number): void {
+  console.error(`\n── 临时服务端日志（尾部 ${lines} 行）──`);
+  console.error(log.split("\n").slice(-lines).join("\n"));
+}
+
 console.log("=== 逐页验收（真实服务端 + 临时 SQLite 库，真实读写）===");
 let exitCode = 1;
 try {
   exitCode = await withTempServer(async (base, info) => {
     console.log(`✓ 服务端就绪：${base}（临时库 ${info.dbPath}，不碰真实数据）\n`);
+    /*
+     * `stream: true`：子进程的输出**边跑边打印**。
+     *
+     * 原先这里是"攒完整份再一次性 `process.stdout.write`"，于是这个一百多条断言的
+     * 套件在终端上是**一声不吭地跑**：「卡在第 60 条」与「正在正常跑」看起来一模一样，
+     * 排查只能靠临时库文件的 mtime、`lsof` 这种旁证去猜（2026-09-25 那次就是这样，
+     * 结论一度还猜反了）。改成流式之后，停住的地方直接就是最后打印的那一行。
+     *
+     * 退出码与"完整输出"的用法一个字没改：输出照样整份收在 `result.output` 里，
+     * 只是不再重复打印一遍。
+     */
     const result = await run(process.execPath, ACCEPT_ARGS, {
       env: {
         NEXT_PUBLIC_API_BASE: base,
@@ -35,8 +63,19 @@ try {
         NEXGENEDU_ADMIN_USER: info.username,
         NEXGENEDU_ADMIN_PASSWORD: info.password,
       },
+      stream: true,
+      timeoutMs: CHILD_TIMEOUT_MS,
     });
-    process.stdout.write(result.output);
+    if (result.timedOut === true) {
+      console.error(
+        `\n✗ 验收脚本跑了 ${(CHILD_TIMEOUT_MS / 1000).toFixed(1)} 秒还没结束，已把它停掉。\n` +
+          "  上面最后一行就是它停住的地方（流式输出，不再需要靠猜）。",
+      );
+      printServerLogTail(info.log(), 25);
+    } else if (result.code !== 0) {
+      // 失败时也把服务端那侧发生了什么带出来（它不会自己出现在验收脚本的输出里）
+      printServerLogTail(info.log(), 15);
+    }
     return result.code;
   });
 } catch (cause) {
