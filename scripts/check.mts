@@ -7247,7 +7247,7 @@ console.log("\n=== 16. 节假日表：两个来源逐日比对一致才写入 ==
 
   /*
    * 用户可见的文案纪律：`blocking` / `notes` / 解析错误都会被后台界面**当纯文本**显示
-   * （`app/admin/(dashboard)/holidays/page.tsx` 里没有 markdown 渲染），
+   * （`app/admin/(dashboard)/calendar/page.tsx` 里没有 markdown 渲染），
    * 所以里面出现 `**` 就会原样显示成星号 —— 这一条是在实现时真犯过两次的错。
    */
   const messages = [

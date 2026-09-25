@@ -1842,6 +1842,160 @@ v26 的更正：**维度只剩四个**（学段 / 学科与项目 / 内容模块
 不排就会与视图模型对不上、报出几十条假差异。**写文件那条路一个字没改**
 （`npm run site:export -- --check` 与 `npm run site:diff` 改完仍一致）。
 
+### E16：清点「没人调用的死文件 / 死代码」（2026-09）—— 结论：死文件 **0 个**
+
+> **编号说明**：这个编号被三节点名预留过（E15「那个清理任务以后重做时取 E16」、
+> E17「做那件事的人仍然取 E16」、E18「E16 已经按机构的意思留给并行的清理任务」）。
+> 它就是这一节。**E15 / E17 / E18 那三段编号说明一个字都不用改** —— 它们记的是当时的取舍，
+> 现在这个编号被兑现了，历史记录照旧成立。
+
+**机构原话**：
+
+> 「**清理没人调用的死代码 / 死文件**」
+
+#### 先说结论（机构要的就是这一句）
+
+| 问 | 答 |
+| --- | --- |
+| 找到几个死文件？ | **0 个** —— 所以**这一轮没有删任何文件** |
+| 那差点删掉什么？ | **3 个只在文档里当命令写着的脚本** + **机构自己的一份思维导图**（下面有表） |
+| 那"死代码"呢？ | 积了 **186 个没人调用的导出**（65 个值 + 121 个类型）。**一个都没删** —— 它们全是「存疑」，理由见最后一节 |
+| 动手改了什么？ | 只改了 **2 处过时注释**（指向一个**根本不存在**的文件、和一个**已经改名**的后台页面） |
+
+#### 判据（先写死，免得"凭感觉删"）
+
+- **死** = 全库没有 `import` / `require`、不是 Next 的约定文件（`page.tsx` / `layout.tsx` /
+  `not-found.tsx` / `config` 等）、不是入口（`package.json` 脚本 / CI / 别的脚本 / 文档里当命令写着）、
+  也不被任何**路径字符串**引用（`spawn` / `readFile` / `fs` 拼出来的路径 / 夹具 / 模版）。
+- **活** = 有任意一个引用点（把位置写出来）。
+- **存疑** = 拿不准（"只在一条注释里出现过""看起来是给未来准备的"）→ **一律不删**，列出来交人拍板。
+
+**保守优先**：宁可留一个没用的文件，也别删掉一个有用的。每删一个文件，
+都要能回答"**删了它，谁会发现**"。
+
+#### 怎么查的（可复核：命令 + 命中数）
+
+查的是**当前这棵树**（`HEAD = 507626f`），没有照抄任何早先的清理结论
+（E15 记的那次回退过：它在已写入磁盘的 `lib/backend/catalog.ts` 文件头里留过一句
+「2026-09 清理（见 PROJECT.md E15）」，已随回退消失，那一轮的文件清单**不再作数**）。
+
+| # | 查法 | 结果 |
+| --- | --- | --- |
+| 1 | 把全库 213 个源码文件（`.ts/.tsx/.mts/.mjs/.js`）的每条 `import` / `require` / 动态 `import()` 解析成真实文件，按"谁 import 谁"建图 | **62 个文件零 import 方**（下面逐个过判据） |
+| 2 | 上一步**先把注释剥掉**再建一次图（防"被一条注释掉的 import 撑着"） | 图**一模一样**：没有一个文件是靠注释"活着"的 |
+| 3 | 从入口（`app/**` 全部 + `package.json` 每个脚本的目标 + CI 里 `npm run` 的链 + 三个 config）做**完整可达遍历** | **3 个源码文件从任何入口都走不到** |
+| 4 | 非源码的受版本控制文件（`.json/.md/.sql/.css/.yml/.ics` 等）按**文件名**与**相对路径**各全库搜一遍 | 只有 **1 个**零命中（`.xmind`，见下） |
+| 5 | 全库文本里"提到的路径" vs 磁盘上真有的文件（悬空引用扫描） | **13 处**悬空 → 修掉 2 处后剩 **11 处**（全是"故意留的历史记录"或占位符，见下） |
+| 6 | 全库导出名逐个搜"别的文件里有没有引用" | **186 个零引用**（65 值 + 121 类型） |
+
+#### 判断表：62 个"零 import"文件的归类（这是最容易误删的一批）
+
+| 类别 | 个数 | 判断 | 判据（为什么不是死） |
+| --- | --- | --- | --- |
+| `app/**` 的 `page.tsx` / `layout.tsx` / `not-found.tsx` | 34 | **活** | **Next 的约定文件**：靠文件位置被用，全库 grep 不到 import 是**正常现象** |
+| `next.config.ts` / `eslint.config.mjs` / `postcss.config.mjs` | 3 | **活** | 框架 / 工具的**约定配置**，按文件名被吃 |
+| `scripts/` 下的脚本 | 18 | **活** | 每一个都在 `package.json` 的 scripts 里、或被别的脚本 `spawn`/import、或被 CI 跑（逐个核过） |
+| `server/*.mts` | 6 | **活** | `index.mts`/`auth.mts`/`migrate.mts`/`holidays.mts`/`import-data.mts`/`backup-cli.mts` 都在 `package.json` 里；`loader.mjs` 被 12 处 `--import` 用 |
+| `types/*.d.ts` | 2 | **活** | 环境声明（`backend-snapshot.d.ts` 被自检读 + 断言，`sync-stamp.d.ts` 被 6 个生成文件与 `sync-content.mjs` 点名） |
+
+#### 判断表：4 个"真去查会以为它死了"的东西（**一个都没删**）
+
+| 文件 | 判断 | 证据 |
+| --- | --- | --- |
+| `scripts/compare-site-builds.mjs` | **活**（不是死） | 零 import、零 `package.json`、零 CI —— 但 `docs/技术架构.md:325` 把它**当命令写出来**了：`node scripts/compare-site-builds.mjs <产物A> <产物B>`（用来证明"后端那条路 ⇄ 模版那条路"在同一份内容下页面正文逐字相同）。**这就是"文档里当命令写着的脚本"那一类** —— 差点误删 |
+| `server/clear-payments.mts` | **活**（不是死） | 代码上不可达（没人 import、不在 scripts 里），但 `docs/技术架构.md:74/437` 与 `README.md:283` 都把它列成**运维脚本**（清理收款数据），用法写在文件头 |
+| `server/reset-data.mts` | **活**（不是死） | 同上：`docs/技术架构.md:74/437`、`README.md:283` 列为运维脚本（重置成空库起步），用法写在文件头 |
+| `辅导班系统报价流程.xmind` | **存疑**（没动） | 全库**唯一**一个文件名与相对路径**都零命中**的受版本控制文件。但它是**机构自己的文件**，而且 `docs/部署与发布.md:224` 明确写着"仓库里有你自己的源文件（`*.xmind`…）也会被 git 跟踪：提交时按路径明确列出文件" —— 也就是**已知的、有意的状态**，不是漏删。删掉它是**数据损失**。真要处理，正确做法是 `git rm --cached`（从版本库摘掉、**磁盘上那份留着**），但那要机构自己点头 |
+
+> **`docs/` 与 `README` 里点到的文件名一律不删** —— 上面那三个脚本正是靠这条判活的。
+> 这也是这一轮最值钱的结论：**"grep 不到 import" 绝不等于"死"**。
+
+#### 顺带清掉的 2 处过时注释（这就是这一轮唯一动过的"死东西"）
+
+两处都是**指向一个不存在的文件** —— 也就是 E8 那一节说的"功能删了 / 改名了、注释还在说它存在"，
+只是 E8 那轮没扫干净。改的都是**注释**，没动任何一行可执行代码：
+
+| 位置 | 原来写着 | 改成 | 为什么 |
+| --- | --- | --- | --- |
+| `lib/backend/site-content.ts`（文件头那段注释） | 「网站那侧看到「后端没有课程正文」会**回落到模版**（见 `lib/site/content-source.ts`）」 | 「……会**照空显示**（不回落到模版 —— 只有显式 `SITE_CONTENT_SOURCE=template` 才读 `data/site/*.md`；两态判据见 `lib/site/backend-source.ts`）」 | 两件都错：① `lib/site/content-source.ts` **这个文件不存在**（那套口径现在的家在 `lib/site/backend-source.ts`）；② "回落到模版"是 v24 之前的老口径，现在是"**空就空着**"（见第 25 节自检） |
+| `scripts/check.mts`（第 16 节里那条"文案不许出现 `**`"的注释） | 「`app/admin/(dashboard)/holidays/page.tsx` 里没有 markdown 渲染」 | 改成 `app/admin/(dashboard)/calendar/page.tsx` | 那个页面**已经改名**成 `calendar/page.tsx`（假期与作息现在是它里面的页签，`HolidayTablePanel` / `VacationPanel` 都挂在那儿）；注释里的路径**指向一个不存在的页面** |
+
+#### 剩的 11 处悬空路径：逐条看过，**都是故意留的**，没改
+
+| 提到的路径 | 出现在 | 为什么不算"过时引用" |
+| --- | --- | --- |
+| `data/site/site-snapshot.json`、`scripts/site-snapshot.mjs` | PROJECT.md、`scripts/sync-site-data.mjs` | 每一处都在说"**这一层已经删掉 / 不在了**"（自检 §25 还有一条断言盯着它**不许回来**）—— 是**否定式**记录，不是引用 |
+| `lib/backend/site-import.ts` | PROJECT.md | E8 里"整个文件删掉"那一行的**历史记录** |
+| `server/import-content.ts` | `docs/后端开发方案.md` | 那是**未来要做的**一句话（"写一个 `server/import-content.ts`"），不是现存文件 |
+| `data/site/xxx.md`、`docs/xxx.md` | `lib/backend/site-export.ts`、`scripts/check.mts` | 举例用的占位符（"让人先 `git checkout -- data/site/xxx.md` 把文件找回来"） |
+| `data/site.ts` / `data/pages.ts` / `data/featured.ts` | PROJECT.md（E8 那段） | **简写**：指的是 `lib/data/site.ts` 等真实文件，同一段里其它地方写的是全路径 |
+| `types/site.ts` | PROJECT.md（目录树） | 树是以 `lib/` 为根画的，`types/site.ts` 在树里**就是对的** |
+
+#### 没删的死代码：186 个"没人调用的导出"（**存疑，交人拍板**）
+
+这是这一节**真正**查出来的东西，也是 E15 记的那次回退里删过的那一类 ——
+但它**不该由我一个人拍板删**，理由逐类写在下面。**结论：一个都没删。**
+
+| 分类 | 个数 | 判断 | 为什么没删 |
+| --- | --- | --- | --- |
+| **生成的文件里的**（`data/site/*.ts` 的 `casesSyncedAt` / `contentSyncedAt` / … 6 个） | 6 | **死**（但删不得） | 那 6 个文件是 `scripts/sync-content.mjs` **生成的**（第 51 行 `export const ${name}SyncedAt = …`）—— 删了下一轮 `npm run build` 就长回来，改了等于没改 |
+| **"给未来准备的"**（`lib/backend/catalog.ts` 的 `topSubjects` / `subjectModules` / `childModules` / `sortedFormats` 等） | 若干 | **存疑** | `catalog.ts` 的**文件头自己写着**这个模块有**三个读者**，第三个是"**以后要做的组合解析（AI 排课与诊断推荐）**" —— 这正是机构说的"**看起来是给未来准备的**"，按判据**一律不删** |
+| **本文件内自用的导出**（`attendanceOf` / `freePort` / `DATA_DIR` / `MIGRATIONS_DIR` / `FEATURED_BASE` … 49 个） | 49 | **存疑** | 这些**不是死代码**（文件内部在用），只是"多了一个 `export`"。去掉 `export` 只改模块的对外面、不减一行逻辑，**价值低、铺开的面大**（30 多个文件），不值得混在这一轮里 |
+| **文档说的用途已经不存在的**（`lib/backend/site-copy.ts` 的 `missingCopyKeys`，注释写着"自检与导入核对用"而自检里其实没有它） | 1 | **存疑** | 整份清单里**最接近"真死"**的一个；但它同样是"给未来准备的"一面之词 vs 一句过时注释，谁来判都要先问一句"当初是想给谁用" |
+
+> **要不要清、清到哪一层，机构说了算。** 想清的话，最小的一刀是那 **10 个**
+> "不但没人 import、连自己文件里都没人调"的（`pageArray` / `missingCopyKeys` / `newCopyGroup` /
+> `vacationsInYear` / `partitionDepth` / `resolvePartitionId` / `topSubjects` / `subjectModules` /
+> `childModules` / `sortedFormats`）—— 但那 4 个 `catalog.ts` 的偏偏是"给未来准备的"，
+> 所以**这一刀切不下去**，得先定"组合解析还要不要做"。
+
+#### 过期文档（**点出来，没改**）
+
+`PROJECT.md` 第 3 节那张目录树里有 4 行写的是**规划期的样子**，与当前这棵树对不上
+（都不是"死文件"，所以这一轮没动它们）：
+
+| 树里那一行 | 现在的事实 |
+| --- | --- |
+| `lib/scheduling/`（注释写"排课与冲突检测（Phase 5）"） | **这个目录不存在**；排课与冲突检测现在在 `lib/backend/`（`recurrence.ts` / `timetable.ts` / `availability.ts`） |
+| `app/(site)/featured/` | **这个目录不存在**；特色课程现在是 `app/(site)/courses/featured/[[...slug]]/`，网址是 `/courses/featured`（`lib/site/nav.ts` 里也是这么写的） |
+| `components/courses/  # CourseCard` | `components/courses/` 里现在是 `CourseColumnPage.tsx` / `CourseColumns.tsx` / `CourseTree.tsx`；`CourseCard` 只在 `CoursesLedgerPanel.tsx` 里是个**函数** `renderCourseCard` |
+| `components/site/  # …EmptyState` | `EmptyState` **整个组件早就不在了**（PROJECT.md 后面自己记着它被删过），`components/site/` 现在只有 `PageHeader` / `FeatureCard` |
+
+#### 门禁（这一轮真跑过的，不是"应该没问题"）
+
+| 命令 | 结果 |
+| --- | --- |
+| `npx tsc --noEmit` | rc=0 |
+| `npx eslint .` | rc=0（无输出） |
+| `npm run check` | rc=0，**§1–§49 全绿**（`=== 结果：全部通过 ===`，2224 条 ✓） |
+| `npm run build` | rc=0，**`✓ Generating static pages (94/94)`**；`out/` 里 93 个 HTML + `404.html` = 94 |
+| `npm run check:404` | rc=0（404 产物校验：全部通过） |
+| `npm run check:links` | rc=0（站内链接 **2834** 个，问题 **0** 个） |
+| `npm run site:export -- --check` | rc=0（6 个 `data/site/*.md` 与后台**逐个一致，没动**） |
+| `npm run accept` | rc=0，**134/134 通过** |
+
+> `npm run check` 与 `npm run build` 之前**先把 3000 上的 dev 停掉**（按端口找 PID，
+> 不用宽匹配），跑完用 `SITE_LIVE=1 npm run dev` 拉回来，并确认 **3000 与 4000 都是 200**。
+
+#### 以后怎么防止再攒出死文件
+
+这一轮的 0 个死文件是**运气 + 三条已经在跑的习惯**；把这一轮用到的判据固化成习惯，才有下一次的 0：
+
+1. **删功能就在同一版里删干净**：入口 + 底层模块 + **注释里那句"还有这条路"** +
+   **文档里那行命令**，四样一起走。E8 是这么做的（还顺手清了 5 处过时注释），
+   而这一轮抓到的 2 处悬空注释就是**当时漏掉的那一类** —— 所以这条要写成"四样"，
+   而不是"把文件删了就行"。
+2. **新增一个 `scripts/` 文件，必须同时给它一个"谁在跑"的公开出口**：进 `package.json`、
+   或被别的脚本调用、**或把命令写进 `docs/`**。这一轮 3 个"代码上不可达"的脚本正是靠
+   "文档里当命令写着"判活的；反过来，一个脚本**三样都没有**就是真的该删 ——
+   这条比任何自动检查都便宜。
+3. **新增导出时先问一句"谁调它"**：自检 §21 已经在管契约方法（"契约里没有死方法"），
+   `lib/backend/catalog.ts` 这种**给未来准备的**模块则要在文件头**点名那个未来读者**
+   ——它已经点了（"组合解析 / AI 排课与诊断推荐"），于是下一轮清查时它是"存疑"而不是"死"。
+   **代价是：那个未来读者一直不出现，这一节就要一直记着这笔账**。
+4. **别用 `git add -A`**（`docs/部署与发布.md:224` 已经写着）：`.xmind` 这类机构自己的源文件
+   该不该进 git，是机构的选择，不该由一次批量提交顺手决定。
+
 ### E15：报价的「学习阶段」从「学段」改成「网站栏目」（2026-09）
 
 > **编号说明**：原本取的是 E16 —— 当时另一个并行的清理任务在自己已写入磁盘的

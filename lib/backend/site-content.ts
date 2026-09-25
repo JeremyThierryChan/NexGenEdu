@@ -54,7 +54,8 @@ function bandAnchor(title: string): string {
  * 从网站内容读出课程页正文。
  *
  * 取不到内容（文件被改坏）时返回**空结构**而不是抛错：空库/后台不该因为
- * 网站文件坏掉就打不开；网站那侧看到「后端没有课程正文」会回落到模版（见 `lib/site/content-source.ts`）。
+ * 网站文件坏掉就打不开；网站那侧看到「后端没有课程正文」会**照空显示**（不回落到模版 ——
+ * 只有显式 `SITE_CONTENT_SOURCE=template` 才读 `data/site/*.md`；两态判据见 `lib/site/backend-source.ts`）。
  */
 export function siteContentFromContent(): SiteContent {
   let coursePage: SiteCoursePage = {
