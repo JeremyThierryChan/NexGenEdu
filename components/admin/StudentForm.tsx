@@ -38,6 +38,16 @@ import { profileText, type StudentProfile } from "@/lib/backend/student-profile"
  * 提交时只改 `birthDate` 这一个键、整份交回去 —— 既不会抹掉采集表里已填的其它字段，
  * 也不会拿"别人刚改过的那一份"去覆盖（真有人改过，`expectedVersion` 会拒掉这次提交并说清原因）。
  * 详见 `profile` 那个 state 上的注释。
+ *
+ * ## v33 补的一样：「来源」
+ *
+ * 机构原话：「**学生信息里面再添加一个"来源"我自己填写内容**」。
+ * `Student.source` 是**获客来源**（这个学生从哪来的：转介绍 / 朋友介绍 / 地推 / 抖音 /
+ * 路过看到…），一格自由文本 + `<datalist>` 候选（候选＝**已经在用的**来源，
+ * 做法与教师表单里那个「来源（招聘渠道）」逐字相同：只提示、不限制），**可以留空**。
+ *
+ * ⚠️ **此来源非彼来源**：教师档案里那个「来源」是**招聘渠道**（人事口径：人从哪招来的），
+ * 学生的这个是**获客来源**（业务口径：学生从哪来的）—— 同名不同义，两件事不要混。
  */
 
 /**
@@ -60,10 +70,22 @@ export function StudentForm({
   student,
   onCancel,
   onSaved,
+  sourceOptions = [],
 }: {
   student?: Student;
   onCancel: () => void;
   onSaved: () => void | Promise<void>;
+  /**
+   * **已经在用的获客来源**（v33）：给「来源」那一格挂的 `<datalist>` 用。
+   *
+   * 由父组件（学生列表页）从**学生列表**里收集 —— 真源就是那一列，不另存一份"渠道清单"
+   * （与教师表单的 `sourceOptions` 同一个做法与理由：来源是自由文本，但同一个渠道被写成
+   * 「朋友介绍」「熟人介绍」「朋友推荐」三种，按渠道统计就失效了）。
+   * 省掉时（老调用方）只是一格没有候选的普通输入框，不影响提交 ——
+   * 默认空数组而不是让它 `undefined`：下面那处 `sourceOptions.length` 与 `sourceOptions.map`
+   * 都不该各自再兜一次。
+   */
+  sourceOptions?: string[];
 }) {
   const editing = student !== undefined;
 
@@ -72,10 +94,19 @@ export function StudentForm({
   const [guardian, setGuardian] = useState(student?.guardian ?? "");
   const [status, setStatus] = useState<Student["status"]>(student?.status ?? "在读");
   const [note, setNote] = useState(student?.note ?? "");
+  /**
+   * 来源（v33）：**获客来源**（这个学生从哪来的）—— 自由文本，可留空。
+   *
+   * ⚠️ 与教师档案里那个「来源（招聘渠道）」不是一回事（人事 vs 获客），
+   * 见文件头那一段说明。
+   */
+  const [source, setSource] = useState(student?.source ?? "");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   /** 年级候选那个 `<datalist>` 的 id（用 `useId` 而不是写死：同屏可能有两个表单）。 */
   const gradeListId = useId();
+  /** 「来源」候选那个 `<datalist>` 的 id（同上：新建与编辑表单可能同屏）。 */
+  const sourceListId = useId();
 
   /**
    * 生日（v32）：写进**信息采集表已有的** `profile.birthDate`，不另立字段。
@@ -268,6 +299,12 @@ export function StudentForm({
       guardian: guardian.trim(),
       status,
       note: note.trim(),
+      /*
+       * 来源（v33）：trim 后交给服务端（服务端还会再 trim 一次、并拒绝非字符串）。
+       * 空串是**合法**的（＝还没填）—— 因此这里不做任何"必填"检查，
+       * 也不把空串换成「其他」之类的占位值（那会把"没登记"变成一条假的获客信息）。
+       */
+      source: source.trim(),
     };
 
     /*
@@ -359,6 +396,26 @@ export function StudentForm({
           onChange={(event) => setStatus(event.target.value as Student["status"])}
           options={STUDENT_STATUSES.map((value) => ({ value, label: value }))}
         />
+        {/*
+          来源（v33，机构原话：「学生信息里面再添加一个"来源"我自己填写内容」）。
+
+          **自由文本 + 候选**（与上面那个「年级」、与教师表单里那个「来源（招聘渠道）」
+          同一处做法）：值仍然是人手打的，`<datalist>` 只负责"已经在用的渠道点一下就有"。
+          刻意**不做成 `<select>`**：获客渠道是会长出来的（今年地推 / 抖音，
+          明年可能多一个小红书），枚举会把新渠道挡在门外，逼着人把「抖音」记进「其他」。
+
+          **可以留空**（＝还没填）：机构刚建完档时往往还不知道孩子是从哪来的，
+          逼着先选一个等于把"没登记"记成一条假的获客信息。
+          留空的学生在列表与详情上显示灰色的「来源未填」待补标。
+        */}
+        <TextField
+          label="来源"
+          hint="获客来源：这个学生从哪来的（转介绍 / 朋友介绍 / 地推 / 抖音 / 路过看到…）；可留空"
+          value={source}
+          onChange={(event) => setSource(event.target.value)}
+          placeholder="例如 朋友介绍"
+          list={sourceOptions.length > 0 ? sourceListId : undefined}
+        />
       </div>
 
       {/* 年级候选：只提示、不限制（自由文本，机构自己就有「初二」「小学五年级」几种写法） */}
@@ -367,6 +424,20 @@ export function StudentForm({
           <option key={option} value={option} />
         ))}
       </datalist>
+
+      {/*
+        「已经在用的来源」候选值（v33）：与教师表单那个「招聘渠道」datalist 同一处做法与理由 ——
+        来源是自由文本，但同一个渠道写成「朋友介绍」「熟人介绍」「朋友推荐」三种，
+        按渠道统计就失效了，因此把已在用的值提示出来复用，同时不拦着写新的。
+        一个都还没填时整块不渲染（`list` 也是 undefined，那一格就是普通输入框）。
+      */}
+      {sourceOptions.length > 0 && (
+        <datalist id={sourceListId}>
+          {sourceOptions.map((option) => (
+            <option key={option} value={option} />
+          ))}
+        </datalist>
+      )}
 
       {/*
         现阶段使用的教材（v32，机构原话：「现阶段使用的教材（可以有多本，

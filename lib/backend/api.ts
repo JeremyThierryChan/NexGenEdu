@@ -1260,6 +1260,38 @@ function migrate(db: Database): Database | null {
     db.version = 32;
   }
 
+  if (db.version === 32) {
+    /*
+     * v32 → v33：学生增加「来源」（`Student.source`，获客口径）。
+     *
+     * 机构原话：「**学生信息里面再添加一个"来源"我自己填写内容**」。
+     *
+     * 这一步**一律补空串，不猜内容**（与 v12 → v13 补教师资料、v29 → v30 补教师内部字段、
+     * v31 → v32 补教材同一条纪律）。这次尤其不能猜，因为"猜"的诱惑同样很大：
+     * 库里现存的每一条学生档案都只有姓名 / 年级 / 家长 / 报课这些**结果**，
+     * 它们与"这个孩子是怎么找到我们的"没有任何推导关系 —— 按"有档案"推一个
+     * 「转介绍」或者按建档时间推一个「地推」，都是凭空记下一条**获客事实**，
+     * 而机构正是要拿这个字段看"哪个渠道招来的学生多"。空串的含义是明确的（＝还没填），
+     * 界面上会显示成灰色的「来源未填」待补标，人一条条补即可
+     * —— 宁可留一堆空（会被看见），也不要留一堆看着像真的的错值（不会有人去查）。
+     *
+     * ⚠️ **这一步不动学生的 `version`**（与 v30 给教室 / 教师补字段时同一条纪律）：
+     * `version` 是**乐观锁**（"我读到的是第几版"），它该只被**人改档案**这件事推进。
+     * 一次数据升级顺手把它 +1，会让所有打开着的表单在下一次提交时报一次
+     * 「刚被别人改过，请刷新」—— 而其实谁都没改，机构只会觉得这套东西莫名其妙。
+     * 下面的写法是展开原记录、只覆盖 `source`，因此 `version` 原样留着。
+     *
+     * ⚠️ **此来源非彼来源**（写在字段定义那里，这里再点一句免得有人按名字去改）：
+     * `Teacher.source` 是**招聘渠道**（人事口径），`Teacher.origin` 是"档案怎么进来的"
+     * （技术口径），学生的这个 `source` 是**获客来源**（业务口径）—— 三件事。
+     */
+    db.students = db.students.map((student) => ({
+      ...student,
+      source: trimText(student.source),
+    }));
+    db.version = 33;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1421,6 +1453,18 @@ function migrate(db: Database): Database | null {
   db.students = db.students.map((student) => ({
     ...student,
     textbooks: normalizeTextbooks(student.textbooks),
+    /*
+     * 「来源」（v33）在收尾再兜一次（与上面同一条纪律：**声称的版本号不是证据**）：
+     * 一份"自称 v33"却缺这个字段的文件照样会出现 —— 手改过的导出、只跑了一半的恢复、
+     * 以及**导入**都长这样。学生列表与学生详情读的是 `student.source === ""`，
+     * 缺字段时 `undefined === ""` 为假 → 那一格会渲染成 `undefined`（一行字"来源 undefined"），
+     * 而不会报错，因此只能在这一层兜住。
+     *
+     * 这里**不做严格校验**（手改文件里写着 `source: 123` 就在这一层归成空串＝未填）：
+     * 抛错会让整库读不出来（比"显示成未填"坏得多）。**拒绝非字符串的那道闸在服务层**
+     * （见 `studentSourceIssues`）：那里是"人刚填的表单 / 脚本刚发的一次调用"，可以当场顶回去。
+     */
+    source: trimText(student.source),
   }));
 
   return db.version === CURRENT_VERSION ? db : null;
@@ -1565,7 +1609,14 @@ function normalizeVacations(input: readonly VacationPeriod[]): VacationPeriod[] 
  * "我明明选了兼职，存完变成未填了"。因此服务层是**先 `teacherIssues`、后归一**。
  */
 
-/** 三位新字段的空白处理：非字符串一律当空串（不是 `String(value)` —— 那会把 null 变成 "null"）。 */
+/**
+ * 「人填的自由文本格」的空白处理：非字符串一律当空串（不是 `String(value)` —— 那会把 null 变成 "null"）。
+ *
+ * 原先是 v30 给教师那三个新字段写的（用工 / 来源 / 校区），v33 起**学生那个「来源」也走它**
+ * —— 两个字段的空白口径本来就是同一件事，各写一份迟早分叉。
+ * 注意它只做"读时归一"：**拒绝非字符串的那道闸在服务层**（`studentSourceIssues` /
+ * `teacherIssues`），因为那里的调用方是人刚点的表单，可以当场把原话顶回去。
+ */
 function trimText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -1610,13 +1661,75 @@ function normalizeTeacherRecord(input: Teacher): Teacher {
  */
 function normalizeStudentStrict(student: Student, db: Database): Student {
   const problems = textbookIssues(db.catalog, student.textbooks);
-  if (problems.length > 0) throw new Error(problems.join("；"));
+  /*
+   * 「来源」（v33）也在这道闸上。顺序必须是**先校验、后归一**（与教师那条一样）：
+   * 归一（trim）之后的非法值已经变成空串，校验就再也看不见它了。
+   */
+  const sourceProblems = studentSourceIssues(student);
+  if (problems.length > 0 || sourceProblems.length > 0) {
+    throw new Error([...problems, ...sourceProblems].join("；"));
+  }
   /*
    * ⚠️ `textbooks` 缺失时（老调用方 / 只改一个字段的 patch 合并前的形状）补**空数组**，
    * 与迁移、收尾归一、批量导入同一个口径：**不猜**（按年级或报课科目推一本教材
    * 等于凭空记下一条学业事实）。空数组的含义是明确的：还没填。
+   *
+   * `source` 同理：缺失时补**空串**（＝还没填），trim 掉前后空白。
+   * 两者都是"缺字段＝未填"这一条口径在各处（迁移 / 导入 / 这里）的同一个答案。
    */
-  return { ...student, textbooks: normalizeTextbooks(student.textbooks) };
+  return {
+    ...student,
+    textbooks: normalizeTextbooks(student.textbooks),
+    source: trimText(student.source),
+  };
+}
+
+/**
+ * 学生「来源」（v33）的**校验**（服务层用）：返回问题清单，空数组＝通过。
+ *
+ * 校验的是「已与库里那条合并、但还没归一」的那份记录，也就是
+ * `students.create` 的入参 / `students.update` 合并后的结果 ——
+ * 因此**整份表单提交**与**只改一个字段**（例如页面上点一下改状态）都走这里。
+ *
+ * ## 只有一条判据，但它是机构明确要的那一条
+ *
+ *   - **字段没给**（`undefined` / `null`）→ **不算错**，归一时补成空串＝未填。
+ *     理由与 `textbooks` 那一处逐字相同：`create` 的入参在运行时不保证带全字段
+ *     （`/api/call` 的 args 原样传进来，老调用方与脚本根本不知道这个字段存在），
+ *     而"缺字段补空串"正是迁移与导入的口径。对缺失报错等于把"不知道"当成"填错了"。
+ *   - **给了值但不是文本**（数字、布尔、对象、数组…）→ **报错拒绝**，并说清它要是一段文本。
+ *     这是这一版唯一紧的一条：来源是**一段人写的自由文本**，静默 `String(value)`
+ *     会把 `123` 存成「123」、把 `null` 存成「null」、把 `["地推"]` 存成「地推」——
+ *     存下来的东西看着像人填的，其实是一次类型事故，而且**没有任何痕迹**
+ *     （操作日志只写着"改了哪些字段"）。拒绝时把收到的值原样念出来，人能一次改对。
+ *   - **空串 / 只有空白** → **合法**（＝还没填，与迁移给老库补的值同一个状态）。
+ *     来源**不是必填**：机构刚建完档时往往还不知道孩子是从哪来的，
+ *     逼着先选一个等于把"没登记"变成一条假信息。
+ *
+ * 为什么非法值要报错而不是像收尾归一那样压成空串：调用方是人刚点的表单或一次 API 调用，
+ * 错误当场能显示给人看；而收尾归一面对的是已经躺在库里的历史数据 ——
+ * 在那里抛错等于整库读不出来（比"显示成未填"坏得多）。
+ */
+function studentSourceIssues(input: Student): string[] {
+  const issues: string[] = [];
+  const raw: unknown = input.source;
+  const provided = raw !== undefined && raw !== null;
+  if (provided && typeof raw !== "string") {
+    issues.push(
+      "学生的「来源」要是一段文本（例如 转介绍 / 朋友介绍 / 地推 / 抖音 / 路过看到），" +
+        `不能是${describeValueType(raw)}；收到「${String(raw)}」`,
+    );
+  }
+  return issues;
+}
+
+/** 说清"收到的不是一个字符串"（报错里那半句，人能照着改）。 */
+function describeValueType(value: unknown): string {
+  if (Array.isArray(value)) return "一个列表";
+  if (typeof value === "number") return "一个数字";
+  if (typeof value === "boolean") return "一个对错值";
+  if (typeof value === "object") return "一个对象";
+  return `一个 ${typeof value} 值`;
 }
 
 /** 教室归一（v31 起在 `lib/backend/classrooms.ts`：它是"显示 / 拆分 / 归一"的唯一一处实现）。 */
@@ -2987,6 +3100,12 @@ const localApi = {
           version: 1,
           subjects: subjects ?? [],
           textbooks: input.textbooks ?? [],
+          /*
+           * 来源（v33）：省掉就是空串＝还没填（与 `textbooks` 同一个做法）。
+           * 显式写出来而不是靠 `...rest` 带过来：`rest` 里有没有这个键**取决于调用方**，
+           * 而"缺字段＝未填"这条口径不该随调用方的写法变化。
+           */
+          source: input.source ?? "",
           profile: input.profile ?? {},
           enrollments: [],
           createdAt: nowIso(),

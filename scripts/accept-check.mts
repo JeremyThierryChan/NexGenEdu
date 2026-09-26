@@ -871,6 +871,64 @@ await check("学生", "批量导入「教材」列：认写法、拦重名", asy
   v.教材.length === 2 &&
   v.教材.every((id) => id.startsWith("mod_") && id.includes("·")));
 /*
+ * v33：学生的「来源」（机构原话：「**学生信息里面再添加一个"来源"我自己填写内容**」）。
+ *
+ * 口径：**获客来源**（这个学生从哪来的：转介绍 / 朋友介绍 / 地推 / 抖音…），
+ * **自由文本、机构自己填、不做固定枚举**，**可以留空**。
+ * ⚠️ **此来源非彼来源**：教师档案里那个 `source` 是**招聘渠道**（人事口径），
+ * 上面第 3 节那几条验的是它 —— 两件事、两处校验，不许合并。见 `PROJECT.md` E19。
+ *
+ * 这一条走的是**真实 HTTP 写入**，因此验的不只是服务层：落库 → 读回一致，
+ * 而且**前后空白被服务端 trim 掉**（脚本故意带空格：人从 Excel 里复制粘贴就是这个样子）。
+ */
+await check("学生", "建档：带「来源」（v33，获客渠道）", async () => {
+  const created = await api.students.create({
+    name: "验收来源学生", grade: "初二", guardian: "", status: "在读", note: "",
+    // 前后各带几个空格：服务端必须 trim 掉（不是原样存「  朋友介绍  」）
+    source: "  朋友介绍  ",
+    textbooks: [], profile: {}, enrollments: [],
+  });
+  const readBack = (await api.students.get(created.id))!;
+  const inList = (await api.students.list()).find((item) => item.id === created.id);
+  return {
+    同一条记录: readBack.id === created.id,
+    建档返回值: created.source,
+    读回来: readBack.source,
+    列表里: inList?.source ?? "（列表里找不到）",
+    已去空白: created.source === "朋友介绍" && readBack.source === "朋友介绍",
+  };
+}, (v: { 同一条记录: boolean; 建档返回值: string; 读回来: string; 列表里: string; 已去空白: boolean }) =>
+  v.同一条记录 &&
+  v.已去空白 &&
+  // 三个出口（建档返回值 / 详情 / 列表）必须读的是同一个值
+  v.读回来 === "朋友介绍" &&
+  v.列表里 === "朋友介绍");
+/*
+ * 改一次再读回，顺带验两件事：
+ *   ① 编辑那条路走的是**同一个写入闸**（trim 同样生效）；
+ *   ② **只改一个字段的 patch 不丢这个字段** —— 页面上点一下改状态，
+ *      或在详情里记一条作业，都不该让来源凭空消失。
+ */
+await check("学生", "来源改一次再读回（且只改别的字段时不丢）", async () => {
+  const target = (await api.students.list()).find((item) => item.name === "验收来源学生")!;
+  const edited = await api.students.update(target.id, { source: "  地推-校门口  " });
+  const afterEdit = (await api.students.get(target.id))!;
+  // 只改一个别的字段（状态）：patch 里根本没有 source
+  const onlyStatus = await api.students.update(target.id, { status: "暂停" });
+  const afterStatus = (await api.students.get(target.id))!;
+  return {
+    改完返回: edited?.source ?? "",
+    改完读回: afterEdit.source,
+    改状态之后: afterStatus.source,
+    状态也改了: onlyStatus?.status ?? "",
+  };
+}, (v: { 改完返回: string; 改完读回: string; 改状态之后: string; 状态也改了: string }) =>
+  v.改完返回 === "地推-校门口" &&
+  v.改完读回 === "地推-校门口" &&
+  v.状态也改了 === "暂停" &&
+  // 只改状态的那一次不许把来源一起清掉
+  v.改状态之后 === "地推-校门口");
+/*
  * 建档时就报课（一个学生多门、每门节数各自独立）。
  * 「数学 10 节、英语 20 节」是最常见的报名说法，因此这里同时验两件事：
  * 两门各自的节数不能串（不是并成一条、也不是都记成第一个数），

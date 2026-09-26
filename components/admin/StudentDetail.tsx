@@ -33,6 +33,20 @@ const TEXTBOOK_TODO_CLASS =
 const TEXTBOOK_TODO_HINT = "在上方的「编辑」里补教材";
 
 /**
+ * **来源未填**的待补小标（v33）：与上面那一档**逐字节相同的类名**，不是"看起来差不多"。
+ *
+ * 与学生列表上那一列、教师卡片的「用工未填 / 来源未填」、教室卡片的「校区未填」
+ * **同一档样式**（同一个类名，`scripts/check.mts` §50 有断言盯着）。
+ *
+ * ⚠️ 学生的这个「来源」是**获客来源**（学生从哪来的）；教师页上那个「来源」是
+ * **招聘渠道**（人从哪招来的）—— 同名不同义。两个字段互不影响。
+ */
+const SOURCE_TODO_CLASS = TEXTBOOK_TODO_CLASS;
+
+/** 灰标上的悬停提示：告诉人"去哪儿补这一条"。 */
+const SOURCE_TODO_HINT = "在上方的「编辑」里补来源（这个学生从哪来的）";
+
+/**
  * 学生详情。
  *
  * 信息量大，因此分三个页签，避免一屏拉出上千像素：
@@ -138,6 +152,25 @@ export function StudentDetail({
               <span className="text-ink-400">…</span>
             ) : (
               <span className="text-ink-700">{textbookSummary(catalog, student.textbooks)}</span>
+            )}
+          </p>
+          {/*
+            来源（v33，**获客来源**：这个学生从哪来的）：与教材那一行同一个思路 ——
+            **没填就挂待补灰标**（不是不显示、也不是空白）。"还没登记"与"没有来源"
+            必须一眼分得开，否则机构拿这个字段看"哪个渠道招来的学生多"时，
+            会把一批"没登记"读成一个来源。
+
+            `?? ""` 兜的是"后端进程还是改动之前那一份"那种时刻（记录里没有这个键）；
+            没有它，`undefined.trim()` 会让整张详情卡打不开。见学生列表页那一段的说明。
+          */}
+          <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-500">
+            <span>来源：</span>
+            {(student.source ?? "").trim() === "" ? (
+              <span className={SOURCE_TODO_CLASS} title={SOURCE_TODO_HINT}>
+                来源未填
+              </span>
+            ) : (
+              <span className="text-ink-700">{student.source}</span>
             )}
           </p>
         </div>

@@ -123,11 +123,11 @@ export const EXPORT_DATASETS: ExportDataset[] = [
   {
     id: "students",
     label: "学生",
-    description: "每名学生一行：年级、监护人、状态、剩余课时合计、在读科目、现阶段使用的教材。",
+    description: "每名学生一行：年级、监护人、状态、剩余课时合计、在读科目、现阶段使用的教材、来源。",
     formats: ["csv", "json"],
     rows: (db) => db.students,
     columns: (db) => ({
-      headers: ["姓名", "年级", "监护人", "状态", "剩余课时", "在读科目", "教材", "备注", "建档时间"],
+      headers: ["姓名", "年级", "监护人", "状态", "剩余课时", "在读科目", "教材", "来源", "备注", "建档时间"],
       row: (item: never) => {
         const student = item as Database["students"][number];
         /*
@@ -150,6 +150,18 @@ export const EXPORT_DATASETS: ExportDataset[] = [
            *     那个破折号会被导入当成一本叫「—」的教材而整行被拒）。
            */
           student.textbooks.map((id) => textbookRefText(db.catalog, id)).join("|"),
+          /*
+           * 「来源」（v33，获客渠道）：与批量导入那一列（表头「来源」）**同名、同形**
+           * —— 导入那侧按表头匹配，因此这两个字必须一模一样，导出来改完再导回去才对得上。
+           *
+           * 没填就是**空单元格**（不是「—」：那是破折号，会被当成一个叫「—」的渠道存进去；
+           * 也不是「未填」：那三个字会成为一条真的获客数据）。空着正是它该有的样子 ——
+           * 导回去仍是"未填"，与迁移给老库补的空串是同一个状态。
+           *
+           * 与 `Teacher.source`（招聘渠道，人事口径）**不是一回事**：那张教师表的「来源」
+           * 是另一个数据集（`id: "teachers"`），两者只是中文标签撞名，数据上毫无关系。
+           */
+          student.source,
           student.note,
           localDateTime(student.createdAt),
         ];

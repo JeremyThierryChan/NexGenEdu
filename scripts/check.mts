@@ -3323,6 +3323,8 @@ const makeStudent = (over: Partial<Student> = {}): Student => ({
   subjects: ["初中数学"],
   // v32 学生的「教材」：这一组用例验的是待跟进规则，与教材无关，因此留空
   textbooks: [],
+  // v33 学生的「来源」（获客渠道）：同上，与待跟进规则无关，一律空串＝还没填
+  source: "",
   profile: {},
   enrollments: [
     {
@@ -3755,7 +3757,7 @@ ok("按课时降序排列（老师A 在前）", (workload[0]?.teacher.id ?? "") 
 const churnStudents: Student[] = [
   {
     id: "cs1", version: 1, name: "退课学生", grade: "初二", guardian: "", subjects: [], profile: {},
-    textbooks: [],
+    textbooks: [], source: "",
     enrollments: [
       {
         id: "ce1", subject: "初中数学", form: "", teacherId: "",
@@ -3781,7 +3783,7 @@ const churnStudents: Student[] = [
   },
   {
     id: "cs2", version: 1, name: "暂停学生", grade: "初三", guardian: "", subjects: [], profile: {},
-    textbooks: [],
+    textbooks: [], source: "",
     enrollments: [], status: "暂停", note: "", createdAt: new Date().toISOString(),
   },
 ];
@@ -3827,12 +3829,12 @@ const searchInput = {
   students: [
     {
       id: "s1", version: 1, name: "张小明", grade: "初二", guardian: "138-0000-0000",
-      subjects: ["初中数学"], textbooks: [], profile: {}, enrollments: [],
+      subjects: ["初中数学"], textbooks: [], source: "", profile: {}, enrollments: [],
       status: "在读" as const, note: "", createdAt: new Date().toISOString(),
     },
     {
       id: "s2", version: 1, name: "张小红", grade: "初三", guardian: "", subjects: [],
-      textbooks: [], profile: {}, enrollments: [], status: "在读" as const, note: "",
+      textbooks: [], source: "", profile: {}, enrollments: [], status: "在读" as const, note: "",
       createdAt: new Date().toISOString(),
     },
   ],
@@ -13273,8 +13275,23 @@ console.log(
   eq("学生的其它字段逐字节没动（迁移不是「顺手改档案」）",
     migratedStudents.map((student) => withoutTextbooks(student)),
     legacyWithoutTextbooks);
-  eq("迁移后版本就是当前版本（32）", (await api.exportDatabase()).version, 32);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 32);
+  /*
+   * ⚠️ 这里比的是 **`CURRENT_VERSION`**，不是一个写死的数字。
+   *
+   * 原先写的是字面量 32（当时 v32 就是最新版）。v33 加了学生的「来源」之后，
+   * 一份 v31 的老库会**一路升到最新那一版**（v31 → v32 → v33），于是那条断言
+   * 变成"实际 33、期望 32"而报红 —— 报的不是 bug，是判据写死了。
+   * 「迁移链跑到头」这件事的正确判据只有一个：**等于当前版本**；
+   * "v32 那一步做了什么"由下一行的 `VERSION_NOTES[32]` 单独守着。
+   */
+  eq("迁移后版本就是当前版本（v31 的老库一路升到头）", (await api.exportDatabase()).version, CURRENT_VERSION);
+  /*
+   * 具体是第几版由 §50 钉（那里写死了 33）；这一节只需要知道"已经越过 v32 那一步"，
+   * 于是永不会因为下一次 +1 而假红。
+   */
+  ok("而且确实越过了 v32 那一步（这一节验的是 v32 补的「教材」，不是「数字恰好等于 32」）",
+    CURRENT_VERSION >= 32,
+    `CURRENT_VERSION = ${String(CURRENT_VERSION)}`);
   ok("版本记录里写着这一步（`VERSION_NOTES[32]`，后来的人不用翻提交历史）",
     (VERSION_NOTES[32] ?? "").includes("教材"));
   /*
@@ -13561,6 +13578,521 @@ console.log(
     studentsPageSource.includes(textbookTodoClass) && studentDetailSource.includes(textbookTodoClass));
 
   /* 收尾：把这一节动过的库恢复成示例数据（与 §11.1 那一套一致）。 */
+  await api.importDatabase(serializeDatabase(seedDb));
+  eq("收尾：库回到示例数据", (await api.students.list()).length, seedDb.students.length);
+}
+
+console.log(
+  "\n=== 50. 学生的「来源」（机构：「学生信息里面再添加一个\"来源\"我自己填写内容」）===",
+);
+
+/*
+ * 机构原话：「**学生信息里面再添加一个"来源"我自己填写内容**」。
+ *
+ * 口径（`lib/backend/types.ts` 的 `Student.source` 上一段写全了，这里只留要点）：
+ * **获客来源**（这个学生从哪来的：转介绍 / 朋友介绍 / 地推 / 抖音 / 路过看到…），
+ * **自由文本、机构自己填、不做固定枚举**（与教师那个「来源」同一套风格），
+ * **可以不填**，但**没填要看得出来**（灰色的「来源未填」待补标）。
+ *
+ * ⚠️ **此来源非彼来源**（这一节里凡出现 `Teacher.source` 的地方都是刻意在对比）：
+ * `Teacher.source` 是**招聘渠道**（人事口径：人从哪招来），
+ * `Teacher.origin` 是"这条档案当初怎么进来的"（技术口径：网站同步 / 后台手建），
+ * 而 `Student.source` 是**获客来源**（业务口径）。三者互不影响、不许合并。
+ *
+ * 这一节守九件事，缺一条这个字段就会以某种方式悄悄不对：
+ *
+ *   ① **迁移**：v32（没有这个字段）的老库补成 `""`、版本变成 33、且**别的字段一个没动**、
+ *      学生的 `version` **不推**（乐观锁不该被一次数据升级搅动，与 v30 同一条纪律）；
+ *   ② **服务层那道闸**：存得进、读得回、前后空白被 trim 掉；
+ *   ③ **非字符串被拒**，且被拒时**什么都没写**（连日志都不写）—— 拒绝的不是"难看的输入"，
+ *      是"一次没有痕迹的类型事故"（会把 123 存成「123」、null 存成「null」）；
+ *   ④ **空串合法**（＝还没填）：来源不是必填，逼着先选一个等于把"没登记"变成假信息；
+ *   ⑤ **只改一个字段的 patch 不丢这个字段**（页面上点一下改状态、或在详情里记一条作业，
+ *      都不该让来源消失）；
+ *   ⑥ **批量导入的「来源」列**：认「来源 / 获客来源 / 渠道」，**空单元格＝未填、不是错误**；
+ *   ⑦ **导出 → 导回逐条对得上**（机构最常做的事就是"导出来改完再导回去"）；
+ *   ⑧ **界面源码里真的有三样**：新建 / 编辑表单里有来源输入 + 候选，列表与详情有
+ *      「来源未填」灰标，而且**与教师那两页用同一个样式类**（各写一套会被读成不同的待办）；
+ *   ⑨ **反向断言**：来源不进网站公开快照、不影响报价 / 排课冲突 / 课时账本。
+ *
+ * 刻意**不在这里重写一遍归一或显示**：要比的是"接口里真正在跑的那一份"
+ * （服务层、`parseImport`、`exportDataset`），自检里再写一份等于口径有了第二处实现。
+ */
+{
+  const sourceRoot = new URL("../", import.meta.url);
+  const readSourceFile = (file: string) => readFileSync(new URL(file, sourceRoot), "utf8");
+  /** 去掉注释再查源码（与 §22 / §44 / §49 同一个坑：注释里的词不算代码）。 */
+  const stripSourceComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  /*
+   * 这一节从头到尾只碰**自己的**一份内存库：先灌入示例数据（`seedDb`），
+   * 与前面几十节留下的状态无关（`importDatabase` 会连备份一起替换）。
+   */
+  const sourceMemory = createMemoryStore();
+  __useStoreForTesting(sourceMemory);
+  await api.importDatabase(serializeDatabase(seedDb));
+
+  /* ── ① 迁移：v32 的老学生补成 `""`，版本变 33，别的字段一个没动 ─────────────── */
+  const legacySourceDb = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+    students: Array<Record<string, unknown>>;
+    version: number;
+  };
+  legacySourceDb.version = 32;
+  legacySourceDb.students = legacySourceDb.students.map((student) => {
+    const copy = { ...student };
+    delete copy.source;
+    return copy;
+  });
+  /** 去掉 `source` 之后的形状（用来比"别的字段一个字没动"）。 */
+  const withoutSource = (student: Record<string, unknown>): string => {
+    const copy = { ...student };
+    delete copy.source;
+    return JSON.stringify(copy);
+  };
+  const legacyWithoutSource = legacySourceDb.students.map(withoutSource);
+  const legacyVersions = legacySourceDb.students.map((student) => student.version);
+  eq("夹具确实是「没有 source 这个字段的 v32 学生」",
+    [legacySourceDb.version, legacySourceDb.students.every((s) => !("source" in s))],
+    [32, true]);
+
+  const upgradedSource = await api.importDatabase(JSON.stringify(legacySourceDb));
+  eq("v32 的老库能升级导入", upgradedSource.ok, true);
+  const migratedSourceStudents = await api.students.list();
+  eq("v32 → v33 给每个老学生补上空串（一条不落）",
+    migratedSourceStudents.map((student) => student.source),
+    migratedSourceStudents.map(() => ""));
+  eq("学生的其它字段逐字节没动（迁移不是「顺手改档案」）",
+    migratedSourceStudents.map((student) => withoutSource(student)),
+    legacyWithoutSource);
+  /*
+   * ⚠️ **不推 `version`**（与 v30 给教室 / 教师补字段同一条纪律，这一条最容易被"顺手"写坏）：
+   * `version` 是乐观锁（"我读到的是第几版"），它该只被人改档案这件事推进。
+   * 一次数据升级顺手 +1，会让所有打开着的表单在下一次提交时报一次"刚被别人改过，请刷新"——
+   * 而其实谁都没改，机构只会觉得这套东西莫名其妙。
+   */
+  eq("迁移**没有**推学生的 version（乐观锁不被一次数据升级搅动）",
+    migratedSourceStudents.map((student) => student.version),
+    legacyVersions);
+  eq("迁移后版本就是当前版本（33）", (await api.exportDatabase()).version, 33);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 33);
+  ok("版本记录里写着这一步（`VERSION_NOTES[33]`，后来的人不用翻提交历史）",
+    (VERSION_NOTES[33] ?? "").includes("来源"));
+  ok("而且说明了它与 `Teacher.source` 不是一回事（免得后来的人把两件事混成一件）",
+    (VERSION_NOTES[33] ?? "").includes("招聘渠道"));
+  /*
+   * **不猜**：空串的含义是"还没填"。按"有档案 / 建档时间"推一个渠道
+   * （"初二学生 → 地推"）看着更贴心，实际是凭空记下一条获客事实 ——
+   * 而机构正是要拿这个字段看"哪个渠道招来的学生多"。
+   */
+  ok("迁移**不猜**内容：没有哪个老学生被塞进一个「看起来像真的」的渠道",
+    migratedSourceStudents.every((student) => student.source === ""));
+  /*
+   * 收尾归一也要兜一次（"自称 v33 却缺字段"的文件照样会出现：手改过的导出、
+   * 只恢复了一半、以及导入的旧表）—— 缺字段时列表读 `student.source === ""` 为假，
+   * 那一格会渲染成一行字「来源 undefined」，而且**不报错**。
+   */
+  const pretendedV33 = {
+    ...(JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+      students: Array<Record<string, unknown>>;
+    }),
+    version: 33,
+  };
+  const pretendedStudents = (pretendedV33.students as Array<Record<string, unknown>>).map((student) => {
+    const copy = { ...student };
+    delete copy.source;
+    return copy;
+  });
+  await api.importDatabase(JSON.stringify({ ...pretendedV33, students: pretendedStudents }));
+  eq("一份「自称 v33 却缺 source」的文件也被收尾归一兜住（不是只靠迁移那一步）",
+    (await api.students.list()).every((student) => student.source === ""), true);
+  ok("收尾归一**不抛错**（手改文件里写着数字也不该让整库读不出来，那一档归成空串＝未填）",
+    await api
+      .importDatabase(
+        JSON.stringify({
+          ...pretendedV33,
+          students: pretendedStudents.map((student, index) =>
+            index === 0 ? { ...student, source: 123 } : student),
+        }),
+      )
+      .then((outcome) => outcome.ok)
+      .catch(() => false));
+
+  /* ── ② 服务层：存得进、读得回、trim 生效 ────────────────────────────────── */
+  /* 每一条用例都从干净的示例数据开始，避免上一条留下的学生影响计数。 */
+  await api.importDatabase(serializeDatabase(seedDb));
+  const sourceStudent = await api.students.create({
+    name: "自检·来源学生", grade: "初二", guardian: "138-0000-0000", status: "在读", note: "",
+    source: "  朋友介绍  ",
+    textbooks: [], profile: {}, enrollments: [],
+  });
+  eq("建档时带来源能存进去，而且前后空白被 trim 掉（不是原样存「  朋友介绍  」）",
+    sourceStudent.source, "朋友介绍");
+  eq("读回来一致（真的落库了，不只是返回值好看）",
+    (await api.students.get(sourceStudent.id))?.source, "朋友介绍");
+  eq("列表里也是同一个值（列表与详情读的是同一条记录）",
+    (await api.students.list()).find((student) => student.id === sourceStudent.id)?.source,
+    "朋友介绍");
+  const retrimmed = await api.students.update(sourceStudent.id, { source: "  地推-校门口  " });
+  eq("改一次也 trim（编辑那条路走的是**同一个**写入闸）", retrimmed?.source, "地推-校门口");
+  eq("再读回来还是那个值", (await api.students.get(sourceStudent.id))?.source, "地推-校门口");
+  eq("姓名里有中文与连字符都不受影响（来源是自由文本，不做任何改写）",
+    (await api.students.get(sourceStudent.id))?.name, "自检·来源学生");
+
+  /* ── ③ 非字符串被拒，且被拒时什么都没写 ─────────────────────────────────── */
+  const sourceCountBefore = (await api.students.list()).length;
+  const logsBeforeRefusal = (await api.logs.list(200)).length;
+  /** 建一个"来源写成这样"的学生，返回服务端那句原话（没有被拒绝就返回空串）。 */
+  const refuseSource = async (value: unknown): Promise<string> => {
+    try {
+      await api.students.create({
+        name: "自检·不该建出来", grade: "初二", guardian: "", status: "在读", note: "",
+        source: value as string, textbooks: [], profile: {}, enrollments: [],
+      });
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+  const numberSource = await refuseSource(123);
+  ok("来源写成**数字**被拒绝", numberSource !== "", numberSource);
+  ok("错误里点名「来源」（只说「要是一段文本」会让人不知道该改哪一格）",
+    numberSource.includes("来源"), numberSource);
+  ok("而且说清它要是一段文本、并把收到的值原样念出来",
+    numberSource.includes("一段文本") && numberSource.includes("123"), numberSource);
+  const listSource = await refuseSource(["朋友介绍"]);
+  ok("来源写成**列表**被拒绝（教材是列表，来源不是 —— 这两格很容易被一起当成数组）",
+    listSource.includes("来源") && listSource.includes("一个列表"), listSource);
+  const boolSource = await refuseSource(true);
+  ok("来源写成**对错值**也被拒绝", boolSource.includes("来源") && boolSource.includes("一个对错值"), boolSource);
+  const objectSource = await refuseSource({ channel: "朋友介绍" });
+  ok("来源写成**对象**也被拒绝（不是静默 String() 成「[object Object]」）",
+    objectSource.includes("来源") && objectSource.includes("一个对象"), objectSource);
+  eq("被拒的那几次什么都没写进去（学生数没变）",
+    (await api.students.list()).length, sourceCountBefore);
+  eq("被拒的那几次**连日志都不写**（「有人试图写错」不是一次数据改动）",
+    (await api.logs.list(200)).length, logsBeforeRefusal);
+  /* 编辑那条路走的是**同一个钩子**（`normalizeStudentStrict`）：不能"新建时校验、编辑时不校验" */
+  const editSourceRefusal = await api.students
+    .update(sourceStudent.id, { source: 123 as unknown as string })
+    .then(() => "")
+    .catch((cause: unknown) => (cause instanceof Error ? cause.message : String(cause)));
+  ok("编辑接口同样被拦下（错误里同样点名「来源」）",
+    editSourceRefusal.includes("来源") && editSourceRefusal.includes("一段文本"), editSourceRefusal);
+  eq("被拦下之后那条记录上的来源没变（不是「先改了一半」）",
+    (await api.students.get(sourceStudent.id))?.source, "地推-校门口");
+
+  /* ── ④ 空串合法（＝还没填）────────────────────────────────────────────── */
+  const blankSource = await api.students.create({
+    name: "自检·来源留空", grade: "初三", guardian: "", status: "在读", note: "",
+    source: "   ", textbooks: [], profile: {}, enrollments: [],
+  });
+  eq("来源留空／只填空白是**合法**的（＝还没填，与迁移给老库补的值同一个状态）",
+    blankSource.source, "");
+  const clearedSource = await api.students.update(sourceStudent.id, { source: "" });
+  eq("已经填过的也能改回空（＝「这条我还不知道」，不是不许改回去）", clearedSource?.source, "");
+  const omittedSource = await api.students.create({
+    name: "自检·来源整个省掉", grade: "初三", guardian: "", status: "在读", note: "",
+    textbooks: [], profile: {}, enrollments: [],
+  });
+  eq("**整个字段省掉**也合法（老调用方 / 老脚本不知道这个字段存在）",
+    omittedSource.source, "");
+  eq("省掉与显式空串落库成同一个形状（三处口径同一个答案：迁移 / 导入 / 这里）",
+    omittedSource.source, blankSource.source);
+  eq("（收尾）把来源填回去", (await api.students.update(sourceStudent.id, { source: "朋友介绍" }))?.source,
+    "朋友介绍");
+
+  /* ── ⑤ 只改一个字段的 patch 不丢这个字段 ───────────────────────────────── */
+  const patchedStatus = await api.students.update(sourceStudent.id, { status: "暂停" });
+  eq("只改状态（页面上点一下的那种小动作）之后来源还在", patchedStatus?.source, "朋友介绍");
+  eq("从库里再读一次也一样（不是只在返回值里对）",
+    (await api.students.get(sourceStudent.id))?.source, "朋友介绍");
+  const patchedNote = await api.students.update(sourceStudent.id, { note: "只改备注" });
+  eq("只改备注之后来源也还在", patchedNote?.source, "朋友介绍");
+  eq("而且改的确实只有那一格（备注变了、来源没被一起改写）",
+    [(await api.students.get(sourceStudent.id))?.note, (await api.students.get(sourceStudent.id))?.source],
+    ["只改备注", "朋友介绍"]);
+  await api.students.update(sourceStudent.id, { status: "在读" });
+
+  /* ── ⑥ 批量导入的「来源」列 ─────────────────────────────────────────────── */
+  const sourceCsvHeader = (csvTemplate("students").split("\n")[0] ?? "")
+    .replace(/^\uFEFF/, "")
+    .trim();
+  ok("学生 CSV 模板里自动多了「来源」这一列（模板跟着列定义走）",
+    sourceCsvHeader.includes("来源"), sourceCsvHeader);
+  ok("JSON 模板里也多了 `source`（示例就是一句人话的渠道名）",
+    jsonTemplate("students").includes('"source"') && jsonTemplate("students").includes("朋友介绍"));
+  /*
+   * ⚠️ 模板里的「来源」列**没有候选值**（`kind: "text"` 而不是 `"enum"`）：
+   * 这一条正是"不做固定枚举"这个口径的机器判据 —— 有人把列改成 enum 就会红。
+   */
+  const sourceFieldSpec = ENTITY_SPECS.students.fields.find((field) => field.key === "source");
+  eq("「来源」列是自由文本（`kind: \"text\"`），**不是**固定枚举",
+    [sourceFieldSpec?.header, sourceFieldSpec?.kind, sourceFieldSpec?.options ?? null],
+    ["来源", "text", null]);
+  eq("而且 aliases 认「获客来源」「渠道」（机构自己在表里最可能写的两个叫法）",
+    [...(sourceFieldSpec?.aliases ?? [])].sort(), ["渠道", "获客来源"].sort());
+
+  const sourceCsv = [
+    "姓名,年级,来源",
+    // 一格有值 → 存进去
+    "自检·来源导入一,初二,朋友介绍",
+    // 这一格**空着** → 未填，**不是错误**（只登记了姓名 / 年级的名单照样要能进库）
+    "自检·来源导入二,初二,",
+    // 只写表头之外的另一种叫法（aliases）也要认
+    "自检·来源导入三,初二,抖音来的",
+  ].join("\n") + "\n";
+  const parsedSourceCsv = parseImport("students", sourceCsv, "csv", await api.catalog.list());
+  eq("导入解析：「来源」那一格原样进记录（自由文本，不做任何改写）",
+    parsedSourceCsv.records.map((record) => record.source), ["朋友介绍", "", "抖音来的"]);
+  eq("**空单元格不是错误**（那一行照样进记录，落库成空串＝未填）",
+    parsedSourceCsv.problems, []);
+  const appliedSource = await api.imports.apply({
+    entity: "students",
+    text: sourceCsv,
+    fileName: "自检-来源.csv",
+  });
+  eq("导入落库：三行都进了（没有哪一行因为来源空着被拒）", appliedSource.added, 3);
+  eq("写了两行渠道名的落库成那两句话；空着的那一行落库成空串",
+    (await api.students.list())
+      .filter((student) => student.name.startsWith("自检·来源导入"))
+      .map((student) => student.source)
+      .sort(),
+    ["", "朋友介绍", "抖音来的"].sort());
+  /* aliases：表头写「获客来源」「渠道」都要认（机构不一定照着模板的表头写） */
+  const aliasImport = await api.imports.apply({
+    entity: "students",
+    text: ["姓名,年级,获客来源", "自检·来源别名一,初二,转介绍", "自检·来源别名二,初二,路过看到"].join("\n") + "\n",
+    fileName: "自检-来源别名.csv",
+  });
+  eq("表头写「获客来源」也认（aliases 不是写着好看的）", aliasImport.added, 2);
+  eq("两行都落对了",
+    (await api.students.list())
+      .filter((student) => student.name.startsWith("自检·来源别名"))
+      .map((student) => student.source)
+      .sort(),
+    ["转介绍", "路过看到"].sort());
+  /*
+   * 覆盖导入那一格空着会怎样：**不会**把已有的来源抹掉 —— 这是 `text` 列的既有保护
+   * （`runImport` 里那句"是字符串且 trim 之后为空、且不是 note"就跳过），
+   * 与年级 / 家长 / 备注同一个行为。
+   *
+   * ⚠️ 这里刻意**不**说"与教材那一列一样"：`list` 列（教材 / 科目 / 班型）的空数组
+   * 算"给了值"，空着的一格**会**把已有值清掉（`STRUCTURAL_FIELDS` 那段注释里写着这件事）。
+   * 两档行为都是既有的，这一版只是让「来源」落在 `text` 这一档上 —— 把差别写清楚，
+   * 免得以后有人照着教材那一列的口径改这里。
+   */
+  const overwriteBlank = await api.imports.apply({
+    entity: "students",
+    text: ["姓名,年级,来源", "自检·来源导入一,初二,"].join("\n") + "\n",
+    fileName: "自检-来源覆盖.csv",
+    onConflict: "overwrite",
+  });
+  eq("覆盖导入时，来源那一格空着**不会**把已有的来源抹掉（`text` 列的既有保护，与年级 / 家长 / 备注同一档）",
+    [
+      overwriteBlank.overwritten,
+      (await api.students.list()).find((student) => student.name === "自检·来源导入一")?.source,
+    ],
+    [1, "朋友介绍"]);
+
+  /* ── ⑦ 导出 → 导回逐条对得上 ───────────────────────────────────────────── */
+  const sourceExport = exportDataset(await api.exportDatabase(), {
+    datasetId: "students",
+    format: "csv",
+  });
+  ok("学生导出里有「来源」这一列", sourceExport.ok && sourceExport.content.includes("来源"));
+  const sourceExportCsv = sourceExport.ok ? sourceExport.content : "";
+  const exportedHeader = (sourceExportCsv.split("\n")[0] ?? "").replace(/^\uFEFF/, "").trim();
+  ok("导出与导入用的是**同一个表头**「来源」（两边不一致就导不回来）",
+    exportedHeader.split(",").includes("来源") && sourceFieldSpec?.header === "来源",
+    exportedHeader);
+  const sourceReimported = parseImport("students", sourceExportCsv, "csv", await api.catalog.list());
+  eq("导出的那份**能被自己导回来**（逐条比对来源）",
+    sourceReimported.records.map((record) => record.source),
+    (await api.students.list()).map((student) => student.source));
+  eq("而且导回时一行都不因为来源那一列被拒（空来源照样能导）",
+    sourceReimported.problems, []);
+  /*
+   * 没填的导出成**空单元格**，不是「—」也不是「未填」：
+   * 「—」会被当成一条叫「—」的渠道；「未填」会成为一条真的获客数据。
+   */
+  const blankExportRow = sourceExportCsv
+    .split("\n")
+    .find((line) => line.startsWith("自检·来源导入二,")) ?? "";
+  ok("没填来源的学生导出来是**空单元格**（不是「—」：那会被当成一个叫「—」的渠道）",
+    blankExportRow !== "" && !blankExportRow.includes("—"), blankExportRow);
+  const blankExportCells = blankExportRow.split(",");
+  eq("那一格确实是空的（列位置也对得上：表头里「来源」的下一格）",
+    blankExportCells[exportedHeader.split(",").indexOf("来源")], "");
+
+  /* ── ⑧ 界面源码：三处都在，且与教师那两页用同一个样式类 ─────────────────── */
+  const studentFormSource = stripSourceComments(
+    readSourceFile("components/admin/StudentForm.tsx"),
+  );
+  const studentsPageSource = stripSourceComments(
+    readSourceFile("app/admin/(dashboard)/students/page.tsx"),
+  );
+  const studentDetailSource = stripSourceComments(
+    readSourceFile("components/admin/StudentDetail.tsx"),
+  );
+  const teachersPageSource = stripSourceComments(
+    readSourceFile("app/admin/(dashboard)/teachers/page.tsx"),
+  );
+  ok("新建 / 编辑表单里有「来源」这一格（新建与编辑共用同一个表单）",
+    studentFormSource.includes('label="来源"'), studentFormSource.slice(0, 60));
+  /*
+   * 判据是"那一格是 TextField（自由文本）且挂着 `list`"，而**不是**"文件里出现过 datalist"：
+   * 要做成 `<select>` 就与机构"我自己填写内容"这句原话相悖了。
+   */
+  const sourceField = /<TextField\s+label="来源"[\s\S]{0,400}?\/>/.exec(studentFormSource)?.[0] ?? "";
+  ok("它仍然是**自由文本**（TextField）＋候选，不是固定枚举",
+    sourceField !== "" &&
+      sourceField.includes("list={sourceOptions") &&
+      !/<SelectInput\s+label="来源"/.test(studentFormSource),
+    sourceField === "" ? "没抠到来源那一格" : sourceField.replace(/\s+/g, " ").slice(0, 160));
+  ok("候选挂在 `<datalist>` 上（点了就填，也不拦着写别的）",
+    studentFormSource.includes("<datalist") && studentFormSource.includes("sourceOptions"));
+  ok("候选来自**已经在用的**来源（列表页从学生记录里收集，不另存一份渠道清单）",
+    studentsPageSource.includes("const sourceOptions = useMemo") &&
+      /student\.source/.test(studentsPageSource));
+  ok("提交时把来源一起交上去（新建与编辑两条路都交：两份都进了 `payload`/`create`）",
+    studentFormSource.includes("source: source.trim()") &&
+      /const payload = \{[\s\S]*?source: source\.trim\(\)/.test(studentFormSource));
+  ok("那一格的 hint 里写明了它是**获客来源**（不是「这个人的招聘渠道」）",
+    sourceField.includes("获客来源"), sourceField.replace(/\s+/g, " ").slice(0, 200));
+  /*
+   * ⚠️ **此来源非彼来源**：这一段比的是**带注释的原文** —— 机构要的正是"注释里点明这件事"，
+   * 去掉注释再查就等于把要守的东西先删掉。学生表单必须点到教师那个「来源（招聘渠道）」，
+   * 字段定义（`types.ts`）里必须把三件事并排写清（教师 source / 教师 origin / 学生 source）。
+   */
+  const studentFormRaw = readSourceFile("components/admin/StudentForm.tsx");
+  const typesRaw = readSourceFile("lib/backend/types.ts");
+  ok('学生表单的注释里点明了它与教师那个「来源（招聘渠道）」不是一回事',
+    studentFormRaw.includes("招聘渠道") && studentFormRaw.includes("此来源非彼来源"),
+    "（考的是注释，因此查的是未剥注释的原文）");
+  ok('字段定义（`types.ts`）里把三件事并排写清了（`Teacher.source` 招聘渠道 / `Teacher.origin` 档案怎么进来的 / `Student.source` 获客）',
+    typesRaw.includes("此来源非彼来源") &&
+      typesRaw.includes("招聘渠道") &&
+      typesRaw.includes("获客来源"));
+
+  /*
+   * 显示：学生列表与详情都能看到来源；**没填时是灰色的「来源未填」待办标**，
+   * 不是空白单元格（机构口径：「没填的时候也看得出来」）。
+   */
+  const sourceTodoClass =
+    "rounded-sm border border-dashed border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[10px] text-ink-400";
+  ok("学生列表上有「来源」这一列",
+    studentsPageSource.includes("<th") && studentsPageSource.includes(">来源<"),
+    studentsPageSource.split("\n").filter((line) => line.includes("<th")).join(" | ").slice(0, 200));
+  ok("列表上没填时渲染的是「来源未填」灰标（不是空白格、也不是不渲染）",
+    /student\.source \?\? ""/.test(studentsPageSource) && studentsPageSource.includes("来源未填"));
+  ok("详情页的表头区也能看到来源，同样有「来源未填」灰标",
+    /student\.source \?\? ""/.test(studentDetailSource) &&
+      studentDetailSource.includes("来源未填") &&
+      studentDetailSource.includes("来源："));
+  /*
+   * **同一个样式类**：与学生页的「教材未填」、教师页的「用工未填 / 来源未填」、
+   * 教室页的「校区未填」逐字节一样。各写一套（哪怕只是颜色差一点）会被读成两个不同的待办。
+   */
+  eq("学生列表 / 学生详情 / 教师页三处的待补灰标是**同一个样式类**",
+    [studentsPageSource, studentDetailSource, teachersPageSource].filter(
+      (source) => !source.includes(sourceTodoClass)),
+    []);
+  ok("而且这一页上两个待办灰标（教材未填 / 来源未填）用的也是同一个类",
+    studentsPageSource.includes("const SOURCE_TODO_CLASS = TEXTBOOK_TODO_CLASS") ||
+      (studentsPageSource.includes("SOURCE_TODO_CLASS") &&
+        (studentsPageSource.match(new RegExp(sourceTodoClass.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? []).length >= 2));
+  ok("列表的 `colSpan` 跟着列数改了（否则「没有学生」那一行会短一截）",
+    studentsPageSource.includes("colSpan={9}"), "没找到 colSpan={9}");
+  ok("表头列数、空态 colSpan 与表宽三者对得上（九列、别把别的列挤掉）",
+    (studentsPageSource.split("<th ").length - 1) === 9 && studentsPageSource.includes("min-w-[880px]"),
+    `表头列数 ${String(studentsPageSource.split("<th ").length - 1)}`);
+
+  /* ── ⑨ 反向断言：不进网站公开快照、不影响报价 / 排课冲突 / 课时账本 ─────────── */
+  /*
+   * 学生**本来就不在公开快照里**（`public-site.ts` 是字段白名单，里面根本没有学生这一项）。
+   * 这一组因此是**反向断言**：确认加了「来源」之后一个字节都没漏出去 ——
+   * 「这个孩子是朋友介绍来的」是机构内部的经营信息。
+   */
+  const markedSource = "自检·绝不外泄的渠道名";
+  await api.students.update(sourceStudent.id, { source: markedSource });
+  const publicSiteWithSource = buildPublicSite(await api.exportDatabase() as never);
+  const publicSiteText = JSON.stringify(publicSiteWithSource);
+  eq("这条学生**真的**带着那个来源（否则下面的断言验的是空气）",
+    (await api.students.get(sourceStudent.id))?.source, markedSource);
+  ok("学生的「来源」不进网站公开快照（一个字节都没有）",
+    !publicSiteText.includes(markedSource), publicSiteText.slice(0, 0) + "（命中了才红）");
+  ok("公开快照里**没有学生这一项**（学生不进公开数据，来源也就无从漏出去）",
+    !("students" in (publicSiteWithSource as unknown as Record<string, unknown>)));
+  eq("公开快照里也没有 `source` 这个键名（教师那侧那个招聘渠道同样不在白名单里）",
+    [...collectKeys(publicSiteWithSource)].filter((key) => key.toLowerCase() === "source"), []);
+
+  /*
+   * 行为上：改来源前后，报价配置 / 同一节课的冲突报告 / 报课与课时**逐字节相同**。
+   * 与 §49 的教材那一组同一条纪律：一次勾选（或一次填渠道）不该悄悄影响钱与课时。
+   */
+  const pricingBeforeSource = JSON.stringify(await api.pricing.get());
+  const ledgerBeforeSource = JSON.stringify(
+    (await api.students.get(sourceStudent.id))?.enrollments ?? [],
+  );
+  const sourceConflictProbe = {
+    subject: "初中数学", form: "一对一", teacherId: "", classroomId: "",
+    studentIds: [sourceStudent.id],
+    startsAt: new Date(Date.now() + 86_400_000).toISOString(),
+    durationMinutes: 60, status: "已排" as const, note: "", makeupForLessonId: "",
+  };
+  const conflictsWithSource = await api.lessons.findConflicts(sourceConflictProbe);
+  await api.students.update(sourceStudent.id, { source: "换了一个完全不同的渠道" });
+  const conflictsWithoutSource = await api.lessons.findConflicts(sourceConflictProbe);
+  eq("来源不影响排课冲突判定（改渠道前后，同一节课的冲突报告逐字节相同）",
+    conflictsWithoutSource, conflictsWithSource);
+  eq("来源不进报价（改来源前后，报价配置逐字节相同）",
+    JSON.stringify(await api.pricing.get()), pricingBeforeSource);
+  eq("来源不进课时账本（改来源前后，报课与课时逐字节相同）",
+    JSON.stringify((await api.students.get(sourceStudent.id))?.enrollments ?? []), ledgerBeforeSource);
+  await api.students.update(sourceStudent.id, { source: markedSource });
+
+  /*
+   * 源码上：报价（`pricing.ts`）、收费（`finance.ts`）、课时账本（`enrollment.ts`）
+   * 三个纯模块里根本不出现学生来源这个东西 —— 判据是"没有第二处实现"，
+   * 而不是"这一版恰好没读它"。冲突判定核心在 api.ts 里，因此单独抠它的函数体来查。
+   */
+  const pricingPureSource = stripSourceComments(readSourceFile("lib/backend/pricing.ts"));
+  const financePureSource = stripSourceComments(readSourceFile("lib/backend/finance.ts"));
+  const enrollmentPureSource = stripSourceComments(readSourceFile("lib/backend/enrollment.ts"));
+  eq("报价 / 收费 / 课时账本这三个纯模块里根本不出现 `studentSource` 或 `Student.source`（没有第二处实现）",
+    [pricingPureSource, financePureSource, enrollmentPureSource].filter(
+      (source) => source.includes("studentSource") || source.includes("Student.source"),
+    ),
+    []);
+  {
+    const apiSource = readSourceFile("lib/backend/api.ts");
+    const body = /function conflictsFor\(db: Database, input: LessonInput\): ConflictReport \{([\s\S]*?)\n\}/.exec(apiSource);
+    ok("冲突判定核心（`conflictsFor`）的函数体里没有 `source`",
+      body !== null && !/\bsource\b/.test(body[1]!.replace(/studentSource/g, "")),
+      body === null ? "没抠到 conflictsFor 的函数体（函数签名改过？）" : body[1]!.slice(0, 120));
+    const lessonInputBlock =
+      /export type LessonInput = \{[\s\S]*?\n\};/.exec(readSourceFile("lib/backend/types.ts"))?.[0] ?? "";
+    ok("`LessonInput`（排课表单交上来的那些格）里也没有来源",
+      lessonInputBlock !== "" && !lessonInputBlock.includes("source"),
+      lessonInputBlock === "" ? "没抠到 LessonInput 的类型定义（改名了？）" : lessonInputBlock.slice(0, 80));
+  }
+  /*
+   * 「此来源非彼来源」也要有机器判据：教师那个 `source`（招聘渠道）与学生的
+   * 这个 `source` 在服务层是**两处不同的校验**，不许共用一处 ——
+   * 共用会让"老师从哪招来的"与"学生从哪来的"变成同一条口径。
+   */
+  {
+    const apiSource = readSourceFile("lib/backend/api.ts");
+    ok("教师那个「来源」与学生的这个「来源」是**两处**校验（`teacherIssues` / `studentSourceIssues`）",
+      apiSource.includes("function teacherIssues(") &&
+        apiSource.includes("function studentSourceIssues(") &&
+        apiSource.includes("studentSourceIssues(student)"));
+    ok("`Teacher.origin`（这条档案怎么进来的）仍然是独立字段，没有被这次改动动过",
+      readSourceFile("lib/backend/types.ts").includes("origin: TeacherOrigin"));
+  }
+
+  /* 收尾：把这一节动过的库恢复成示例数据（与 §11.1 / §49 那一套一致）。 */
   await api.importDatabase(serializeDatabase(seedDb));
   eq("收尾：库回到示例数据", (await api.students.list()).length, seedDb.students.length);
 }

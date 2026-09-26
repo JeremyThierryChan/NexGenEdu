@@ -37,6 +37,23 @@ const TEXTBOOK_TODO_CLASS =
 const TEXTBOOK_TODO_HINT = "点编辑补教材";
 
 /**
+ * **来源未填**的待补小标（v33）：与上面那一档**逐字节相同的类名**，不是"看起来差不多"。
+ *
+ * 为什么不另立一套样式：机构看的是**待办**这件事本身。学生这一页上现在有两个待办灰标
+ * （「教材未填」「来源未填」），它们与教师卡片的「用工未填 / 来源未填」、教室卡片的
+ * 「校区未填」是同一档东西 —— 同一个类名，机构读到的就是"又缺了一条该补的信息"。
+ * 各写一套（哪怕只是颜色差一点）会被读成**两个不同的待办**。
+ *
+ * ⚠️ 这里那个「来源」是**获客来源**（学生从哪来的）；教师页上的「来源未填」是
+ * **招聘渠道**（人从哪招来的）—— 同名不同义，两个字段互不影响。
+ * `scripts/check.mts` §50 盯着"学生列表 / 学生详情 / 教师页用的是同一个类"。
+ */
+const SOURCE_TODO_CLASS = TEXTBOOK_TODO_CLASS;
+
+/** 灰标上的悬停提示：告诉人"去哪儿补这一条"。 */
+const SOURCE_TODO_HINT = "点编辑补来源（这个学生从哪来的）";
+
+/**
  * 学生模块。
  *
  * 目标是「10 秒内知道一个学生的状态」：报了什么、还剩几节课、什么时候上、有什么备注。
@@ -175,6 +192,32 @@ export default function AdminStudentsPage() {
   }, [lessons]);
 
   /**
+   * **已经在用的获客来源**（v33）：给表单里「来源」那一格挂的 `<datalist>` 用。
+   *
+   * 来源是**自由文本**（机构要自己填，不做固定枚举），但同一个渠道被写成
+   * 「朋友介绍」「熟人介绍」「朋友推荐」三种，按渠道统计就失效了 ——
+   * 因此把已在用的值提示出来复用，同时不拦着写新的。
+   * 真源就是学生列表上那一列，不另存一份"渠道清单"（与教师页的 `sourceOptions` 同一个做法）。
+   *
+   * ⚠️ 这里收集的是**学生**的获客来源，与教师页那份（招聘渠道）是两件事，**不要合并** ——
+   * 合并之后"地推招来几个学生"和"招来几个老师"就再也分不开了。
+   */
+  const sourceOptions = useMemo(() => {
+    const values = new Set<string>();
+    for (const student of students) {
+      /*
+       * `?? ""` 不是防御性编程的洁癖，是这条真实情况：**后端进程是启动时加载代码的**，
+       * 因此"前端已经重建、后端还跑着改动之前的进程"这一刻，`students.list()` 返回的
+       * 记录里**没有** `source`。没有兜底的话 `undefined.trim()` 会让整个学生页白屏 ——
+       * 而机构此刻正在用这套系统。兜成空串＝"还没填"，与迁移给老库补的值同一个状态。
+       */
+      const value = (student.source ?? "").trim();
+      if (value !== "") values.add(value);
+    }
+    return [...values].sort((a, b) => a.localeCompare(b, "zh"));
+  }, [students]);
+
+  /**
    * 删除学生。
    *
    * **服务端会拦下"名下有账"的学生**（收款、课时流水、课堂记录、测评、作业、排课 ——
@@ -237,6 +280,7 @@ export default function AdminStudentsPage() {
           description="填好姓名与年级即可建档，其余字段可以以后再补。"
         >
           <StudentForm
+            sourceOptions={sourceOptions}
             onCancel={() => setCreating(false)}
             onSaved={async () => {
               setCreating(false);
@@ -298,7 +342,14 @@ export default function AdminStudentsPage() {
 
       {/* 列表 */}
       <div className="mt-4 overflow-x-auto rounded-lg border border-ink-200 bg-white">
-        <table className="w-full min-w-[720px] border-collapse text-sm">
+        {/*
+          列宽：加「教材」（v32）与「来源」（v33）之后是**九列**。
+          `min-w` 跟着从 720px 提到 880px —— 不提的话，窄屏上那九列会被浏览器挤到
+          一格只放两三个字（姓名列折成两行、"初中数学、初中英语"每行一个科目），
+          读起来比左右滚动难受得多。外面那层 `overflow-x-auto` 本来就在，
+          因此宽屏不受影响、窄屏左右滚动。
+        */}
+        <table className="w-full min-w-[880px] border-collapse text-sm">
           <thead>
             <tr className="border-b border-ink-100 text-left text-xs text-ink-500">
               <th className="px-4 py-2.5 font-medium">姓名</th>
@@ -306,6 +357,8 @@ export default function AdminStudentsPage() {
               <th className="px-4 py-2.5 font-medium">报读科目</th>
               {/* 现阶段使用的教材（v32）：多本时按 `学科·模块名` 列出来，没填挂待补灰标 */}
               <th className="px-4 py-2.5 font-medium">教材</th>
+              {/* 来源（v33，**获客来源**）：没填挂待补灰标 */}
+              <th className="px-4 py-2.5 font-medium">来源</th>
               <th className="px-4 py-2.5 font-medium">剩余课时</th>
               <th className="px-4 py-2.5 font-medium">状态</th>
               <th className="px-4 py-2.5 font-medium">家长</th>
@@ -346,6 +399,31 @@ export default function AdminStudentsPage() {
                     </span>
                   ) : (
                     <span className="text-ink-600">{textbookSummary(catalog, student.textbooks)}</span>
+                  )}
+                </td>
+                <td className="px-4 py-2.5">
+                  {/*
+                    来源（v33，**获客来源**：这个学生从哪来的）。
+
+                    与教材那一列同一个思路：**没填时挂一个待补灰标**，不是留成空白格 ——
+                    空白格会被读成"这一页不显示来源"，而机构要的是"还差这一条，去补"。
+                    灰标里那两个字「来源未填」是**一个状态**，不是一条渠道名；
+                    它与教师页上的「来源未填」（招聘渠道）同名但不相干（见 `SOURCE_TODO_CLASS`）。
+
+                    值是自由文本，原样显示（不做任何改写：机构写「抖音来的」就显示「抖音来的」）——
+                    显示口径只有这一处，条目多到要看分布时走导出那张表去统计。
+                  */}
+                  {/*
+                    值为空时挂灰标。`?? ""` 兜的是"后端进程还是改动之前那一份"这种时刻
+                    （记录里没有 `source` 这个键）—— 没有它，`undefined.trim()` 会让整页白屏，
+                    而机构正在用；见 `sourceOptions` 那一段的说明。
+                  */}
+                  {(student.source ?? "").trim() === "" ? (
+                    <span className={SOURCE_TODO_CLASS} title={SOURCE_TODO_HINT}>
+                      来源未填
+                    </span>
+                  ) : (
+                    <span className="text-ink-600">{student.source}</span>
                   )}
                 </td>
                 <td className="px-4 py-2.5">
@@ -405,8 +483,8 @@ export default function AdminStudentsPage() {
 
             {!loading && visible.length === 0 && (
               <tr>
-                {/* 列数 = 表头那几个：姓名 / 年级 / 报读科目 / 教材 / 剩余课时 / 状态 / 家长 / 操作 */}
-                <td colSpan={8} className="px-4 py-8 text-center text-sm text-ink-500">
+                {/* 列数 = 表头那九个：姓名 / 年级 / 报读科目 / 教材 / 来源 / 剩余课时 / 状态 / 家长 / 操作 */}
+                <td colSpan={9} className="px-4 py-8 text-center text-sm text-ink-500">
                   {students.length === 0
                     ? "还没有学生档案，点右上角「新增学生」建档。"
                     : "没有匹配的学生。"}
@@ -431,6 +509,7 @@ export default function AdminStudentsPage() {
              */
             key={editingId}
             student={students.find((item) => item.id === editingId) ?? undefined}
+            sourceOptions={sourceOptions}
             onCancel={() => setEditingId(null)}
             onSaved={async () => {
               setEditingId(null);

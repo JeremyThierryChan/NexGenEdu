@@ -373,6 +373,12 @@ function student(
     subjects: enrollments.filter((item) => item.status === "在读").map((item) => item.subject),
     // v32：教材是"机构后来才开始登记"的东西，夹具里一律不填（与老库迁移同一个口径：不猜）
     textbooks: [],
+    /*
+     * v33：来源（获客渠道）同理 —— 示例数据里一律空串＝还没填。
+     * 绝不为了让界面上好看而给夹具编几个「转介绍 / 地推」：那是机构真实的经营数据，
+     * 示例数据里塞进去，人第一眼看不出哪些是真的记过的。
+     */
+    source: "",
     profile: {},
     enrollments,
     status,
