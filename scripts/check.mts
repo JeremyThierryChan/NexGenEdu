@@ -131,10 +131,18 @@ import {
  * （`lib/students/student-sort.ts`）：自检在这里比的正是"接口里真正在跑的那一份"——
  * 中文拼音序、`numeric: true`、空值恒在最后、并列稳定、三态循环、`aria-sort` 三态，
  * 都在那一个模块里判一次；自检里再写一套 comparator 等于口径有了第二处实现。
+ *
+ * 「E21 续」起又多了一份**值**：年级 → 教学顺序 的映射表（`GRADE_STAGES`）
+ * 与它的键 `gradeValue` —— ⑰ 拿它们比"哪些写法是同一段 / 纯学段在本学段末尾 /
+ * 认不出的排在所有年级之后"，也拿它们做"表与行为一致"的属性断言
+ * （因此自检里**不**再抄一遍那张表：抄了就是第二份实现，机构加一种写法要改两处）。
  */
 import {
   compareSortValues,
   displayValue,
+  GRADE_STAGES,
+  gradeValue,
+  isSortEmpty,
   nextStudentSort,
   numberValue,
   sortByValues,
@@ -14496,20 +14504,32 @@ console.log(
 }
 
 console.log(
-  "\n=== 52. 学生列表按字段排序（机构：「在学生列表里每个字段都加一个可以按升降排序的功能」）===",
+  "\n=== 52. 学生列表按字段排序（机构：「在学生列表里每个字段都加一个可以按升降排序的功能」；" +
+    "「E21 续」：「按教学顺序排（推荐）」）===",
 );
 
 /*
  * 机构原话：「**在学生列表里每个字段都加一个可以按升降排序的功能**」。
+ * 「E21 续」追加的那一句（我问他"年级现在按拼音排、初二会排在初一前面"）：
+ * 「**按教学顺序排（推荐）**」。
  *
  * ## 这一节守的是什么（为什么排序值得单开一节）
  *
  * 排序看着是"最没技术含量"的一个功能，可它的规则**全都不可见**：
  * 中文按拼音还是按码位、`学生2` 在 `学生10` 前面还是后面、空值排最前还是最后、
- * 并列的会不会每次刷新换位置 —— 屏幕上"排好了"与"排错了"**长得一模一样**。
+ * 并列的会不会每次刷新换位置、**年级按拼音还是按教学顺序** ——
+ * 屏幕上"排好了"与"排错了"**长得一模一样**。
  * 因此这里把**比较规则逐条钉死**（纯函数层，不需要浏览器、不需要 React），
  * 再盯**页面那一层**（源码级）：每个字段列都有排序按钮、**操作列没有**、
  * `aria-sort` 三态、当前列有 ▲/▼、提示文案在、页面调的是那个纯模块。
+ *
+ * ⚠️ 「E21 续」改的**只有「年级」那一列**（它现在按教学顺序），因此：
+ *   - ⑦ 那两条的期望值**翻过面**（v52 时年级键是拼音，升序是"初二在前"）；
+ *   - ⑰ 是新的：两级键、机构真会写的那些写法、纯学段排本学段末尾、认不出的排最后
+ *     （升序与降序都验）、空值仍在最后、并列仍稳定；
+ *   - ②③⑥⑧ 等**一条都没动**：它们守的是"其它列仍按拼音 / `numeric: true` / 空值 /
+ *     升降对称"，那些口径一个字都没改（⑰ 里另有一条直接对照：同一批「初二 / 初一」
+ *     在姓名 / 来源 / 状态 / 家长上仍然按拼音，只有年级那一列反过来）。
  *
  * ## 为什么"取消"那一档单独钉一条
  *
@@ -14526,8 +14546,10 @@ console.log(
  * 谁也想不到的顺序（与「暂未开放往后排」那条"显示规则不许写回数据"同一个立场）。
  *
  * 判据一律"对着**接口里真正在跑的那一份**"比（`sortStudents` / `nextStudentSort` /
- * `subjectsSummary` / `textbookSummary`），不在自检里再写一套排序 ——
- * 自检里另写一份，等于这条口径有了第二处实现。
+ * `subjectsSummary` / `textbookSummary` / `gradeValue`），不在自检里再写一套排序 ——
+ * 自检里另写一份，等于这条口径有了第二处实现。⑰ 里那条"映射表与行为一致"
+ * 是**属性**断言（级别连续 / 同一档并列 / 上一档在下一档之前 / 纯学段夹在中间），
+ * 逐条抄一遍 `GRADE_STAGES` 反而是第二份表。
  */
 {
   const sortRootUrl = new URL("../", import.meta.url);
@@ -14676,17 +14698,23 @@ console.log(
     ["u2", "u1"]);
 
   /* ── ⑦ 稳定：并列的保持**默认顺序**（tiebreak 是原来的下标）────────────── */
+  /*
+   * ⚠️ 「E21 续」把这两条的**期望值翻过面**：v52 时年级键是拼音（`初二`(chuer) < `初一`(chuyi)），
+   * 升序是"两个初二在前、初一在后"；现在年级按**教学顺序**（⑰），升序是"初一在前、初二组在后"。
+   * **两条断言守的事一个字没改**：同一档内部保持**默认顺序**（甲 在 丙 之前），
+   * 方向翻了、并列的相对顺序不翻 —— 翻的只是"初一/初二 谁在教学顺序前面"。
+   */
   const TIES = [
     student({ id: "k1", name: "甲", grade: "初二" }),
     student({ id: "k2", name: "乙", grade: "初一" }),
     student({ id: "k3", name: "丙", grade: "初二" }),
   ];
-  eq("升序：同一个年级里 **甲 在 丙 前面**（＝保持默认顺序，不是按姓名重排）",
+  eq("升序：**初一(k2) 在 初二组之前**（教学顺序），而同一个年级里 **甲 在 丙 前面**（＝保持默认顺序，不是按姓名重排）",
     idsOf(sortStudents(TIES, { field: "grade", direction: "asc" }, null)),
-    ["k1", "k3", "k2"]);
-  eq("降序：那一档内部**仍然是 甲 在 丙 前面**（方向翻了，并列的相对顺序没翻）",
-    idsOf(sortStudents(TIES, { field: "grade", direction: "desc" }, null)),
     ["k2", "k1", "k3"]);
+  eq("降序：**初二组在前、初一在后**；那一档内部**仍然是 甲 在 丙 前面**（方向翻了，并列的相对顺序没翻）",
+    idsOf(sortStudents(TIES, { field: "grade", direction: "desc" }, null)),
+    ["k1", "k3", "k2"]);
   eq("（按姓名的拼音排会是 丙 / 甲 / 乙 —— 与上面两处都不同，所以那两条真的在验「用原来的下标」）",
     sortStudents(TIES, { field: "name", direction: "asc" }, null).map((item) => item.name),
     ["丙", "甲", "乙"]);
@@ -14749,6 +14777,8 @@ console.log(
     const SAMPLES: SortValue[] = [
       textValue("甲"), textValue(""), numberValue(-3.5), numberValue(0),
       timeValue("2026-09-02"), timeValue(""),
+      // 「E21 续」加的第五档（年级）也要过同一遍：新档不参与这个扫描＝它没被验过
+      gradeValue("初二"), gradeValue("小升初"), gradeValue(""),
     ];
     const problems: string[] = [];
     for (const a of SAMPLES) {
@@ -14758,7 +14788,7 @@ console.log(
         if (result !== -compareSortValues(b, a)) problems.push(`${a.kind}/${b.kind} 不对称`);
       }
     }
-    ok(`扫描真的跑过了（${String(SAMPLES.length)} 档 × 自己）`,
+    ok(`扫描真的跑过了（${String(SAMPLES.length)} 个样本 × 自己）`,
       SAMPLES.length >= 6, String(SAMPLES.length));
     eq("任何两档键都比得出一个**确定的数**（有限、且反对称）—— 不会返回 NaN",
       problems, []);
@@ -14882,6 +14912,213 @@ console.log(
     }).sort();
     eq("全仓库只有纯模块那一处建比较器（`Intl.Collator`）—— 页面不许再起一套",
       collatorFiles, ["lib/students/student-sort.ts"]);
+  }
+
+  /* ── ⑰ 年级按**教学顺序**（机构：「按教学顺序排（推荐）」）───────────────────
+   *
+   * 这是八列里唯一**不看字怎么念**的一列：拼音序把 `初二`(chuer) 排在 `初一`(chuyi) 前面、
+   * `高一` 排在 `高三` 后面 —— 落到学校场景就是"二年级排在一年级前面"，而屏幕上
+   * "排好了"与"排错了"长得一模一样（老师只会觉得这列别扭，不会去点一下喊一声）。
+   *
+   * 键是**两段**（学段级别, 年级级别），映射表 `GRADE_STAGES` 只有一处实现。
+   * 这里钉三样：① 教学顺序本身；② 机构真会写的那几种**写法**都认得
+   * （带前缀 / 阿拉伯数字 / 全角数字 / 空白 / 纯学段）；③ **认不出的不猜也不丢**
+   * （排在所有认得出的年级之后，**升序与降序都验**），空值仍恒在最后。
+   */
+  {
+    const gradesOf = (list: readonly Student[]): string[] => list.map((item) => item.grade);
+    const sortedGrades = (list: readonly Student[], direction: "asc" | "desc"): string[] =>
+      gradesOf(sortStudents(list, { field: "grade", direction }, null));
+    /** 一串年级写法 → 一批学生（`id` 就是下标，稳定断言要对得上）。 */
+    const gradeNames = (list: readonly string[]): Student[] =>
+      list.map((grade, index) => student({ id: `q${String(index)}`, name: `学生${String(index)}`, grade }));
+    /** 两个写法是不是**同一段**（判据用接口里真正在跑的那一份：`gradeValue`）。 */
+    const sameGrade = (raw: string, anchor: string): boolean =>
+      compareSortValues(gradeValue(raw), gradeValue(anchor)) === 0;
+
+    /*
+     * 一批**真实形状**的年级（机构库里真会出现的那几种写法）+ 认不出的两种 + 空。
+     * 最后那一格是"只有空白"的串：它不是"一个空字符串"，是**没填** ——
+     * 与 `""` 同一档（空值恒在最后，见 ⑥）。
+     */
+    const GRADE_BATCH = gradeNames([
+      "一年级", "小学五年级", "小学", "初一", "七年级", "７年级", "初二", "初中",
+      "高一", "高三", "高中", "小升初", "成人", "   ",
+    ]);
+
+    eq("年级升序（逐条）：一年级 → 小学五年级 → 小学 → 初一 → 七年级 → ７年级 → 初二 → 初中 → 高一 → 高三 → 高中 → 认不出的 → （空）",
+      sortedGrades(GRADE_BATCH, "asc"),
+      // 末项是夹具里那一格"只有空白"的年级**原样**（排序不改数据，它只是被当成空值排到最后）
+      ["一年级", "小学五年级", "小学", "初一", "七年级", "７年级", "初二", "初中",
+        "高一", "高三", "高中", "成人", "小升初", "   "]);
+    eq("年级降序（逐条）：认不出的 → 高中 → 高三 → 高一 → 初中 → 初二 → 初一 → 七年级 → ７年级 → 小学 → 小学五年级 → 一年级 → （空）",
+      sortedGrades(GRADE_BATCH, "desc"),
+      ["小升初", "成人", "高中", "高三", "高一", "初中", "初二", "初一", "七年级", "７年级",
+        "小学", "小学五年级", "一年级", "   "]);
+    eq("升序与降序**互为对照**：同一批学生两条线索上都在（没丢人、没多人）",
+      [sortedGrades(GRADE_BATCH, "asc").length, sortedGrades(GRADE_BATCH, "desc").length],
+      [GRADE_BATCH.length, GRADE_BATCH.length]);
+
+    /* ① 教学顺序：学段之间 小学 < 初中 < 高中 */
+    eq("学段之间：**小学 < 初中 < 高中**（升序）—— 纯学段也照这个顺序",
+      sortedGrades(gradeNames(["高中", "初中", "小学"]), "asc"), ["小学", "初中", "高中"]);
+    eq("同一件事降序：高中 → 初中 → 小学（方向翻了，学段顺序没乱）",
+      sortedGrades(gradeNames(["小学", "初中", "高中"]), "desc"), ["高中", "初中", "小学"]);
+
+    /* ② 机构真会写的那些写法 */
+    eq("`初一` 与 `七年级` 在键上**就是同一段**（`compareSortValues` 给 0 —— 不是「拼音碰巧挨着」）",
+      compareSortValues(gradeValue("初一"), gradeValue("七年级")), 0);
+    const SAME_LEVEL = gradeNames(["初一", "七年级", "7年级"]);
+    eq("同一段的三种写法升序**保持登记顺序**（并列 → 原来的下标 tiebreak，不是按字面再排一次）",
+      sortedGrades(SAME_LEVEL, "asc"), ["初一", "七年级", "7年级"]);
+    eq("降序**也**保持登记顺序（并列不跟着方向翻）—— 因此整条降序**不等于**升序逐条倒置",
+      sortedGrades(SAME_LEVEL, "desc"), ["初一", "七年级", "7年级"]);
+    eq("（v52 的年级键就是文本键：同一批按 `textValue` 排是 7年级 / 初一 / 七年级（`numeric: true` 让「7」最前）—— 与上面两条不同，所以它们真的在验两段键）",
+      sortByValues(["初一", "七年级", "7年级"], (text) => textValue(text), "asc"),
+      ["7年级", "初一", "七年级"]);
+
+    eq("带学段前缀：`小学五年级` ≡ `五年级`（同一段）", sameGrade("小学五年级", "五年级"), true);
+    eq("阿拉伯数字：`7年级` ≡ `七年级` ≡ `初一`（初中部两套写法＋数字写法都认）",
+      [sameGrade("7年级", "七年级"), sameGrade("7年级", "初一")], [true, true]);
+    eq("全角数字 `７年级` 与半角 `7年级` 是同一段（机构不知道「全角」是什么，他会直接打出来）",
+      sameGrade("７年级", "7年级"), true);
+    eq("中间带空白 `小学 五年级` 与 `小学五年级` 是同一段（去空白在解析之前做）",
+      sameGrade("小学 五年级", "小学五年级"), true);
+    eq("初中两套写法对得上：`初中二年级` ≡ `初二` ≡ `八年级`",
+      [sameGrade("初中二年级", "初二"), sameGrade("初中二年级", "八年级")], [true, true]);
+    eq("高中全称也对得上：`高中一年级` ≡ `高一`", sameGrade("高中一年级", "高一"), true);
+    eq("两套写法叠在一起（`初中七年级`）也认得：≡ `七年级`", sameGrade("初中七年级", "七年级"), true);
+    eq("`初中一年级`（前缀＋第一套数字）≡ `初一`", sameGrade("初中一年级", "初一"), true);
+
+    /* ③ 纯学段（只写学段、没写年级）＝ **本学段末尾** */
+    eq("纯学段排在**本学段末尾**（它是「这一学段，但没细分」，不是空值）：六年级 → 小学 → 初一",
+      sortedGrades(gradeNames(["初一", "小学", "六年级"]), "asc"), ["六年级", "小学", "初一"]);
+    eq("初中 / 高中同理：初三 → 初中 → 高一；高三 → 高中",
+      [sortedGrades(gradeNames(["高一", "初中", "初三"]), "asc"),
+        sortedGrades(gradeNames(["高三", "高中"]), "asc")],
+      [["初三", "初中", "高一"], ["高三", "高中"]]);
+
+    /* ④ 认不出的：不猜、不丢，排在所有认得出的年级之后（升序 / 降序都验） */
+    eq("认不出的（小升初 / 初升高 / 学前 / 成人）在**升序**里排在所有认得出的年级之后",
+      sortedGrades(gradeNames(["小升初", "高三", "学前", "一年级", "初升高", "成人"]), "asc"),
+      ["一年级", "高三", "成人", "初升高", "小升初", "学前"]);
+    eq("它们在**降序**里排在最前（降序是升序的对照面），批内**按拼音反向**：学前 → 小升初 → 初升高 → 成人",
+      sortedGrades(gradeNames(["小升初", "高三", "学前", "一年级", "初升高", "成人"]), "desc"),
+      ["学前", "小升初", "初升高", "成人", "高三", "一年级"]);
+    ok("键上也是这样：认不出的那一档比**所有**认得出的都大（`> 纯高中`，不只是「比高三靠后」）",
+      compareSortValues(gradeValue("小升初"), gradeValue("高中")) > 0 &&
+        compareSortValues(gradeValue("成人"), gradeValue("高中")) > 0);
+    eq("带前缀但这一学段里没有这个年级（`小学七年级`）＝ 自相矛盾 → **也归认不出**（排最后，不猜成小学或初中）",
+      [sameGrade("小学七年级", "七年级"), compareSortValues(gradeValue("小学七年级"), gradeValue("高中")) > 0],
+      [false, true]);
+    eq("空值（`\"\"` / 只有空白）仍然是**空值那一档**，不是「认不出的写法」那一档（它俩在降序里位置不同）",
+      [isSortEmpty(gradeValue("")), isSortEmpty(gradeValue("   ")), isSortEmpty(gradeValue("小升初"))],
+      [true, true, false]);
+    eq("空值仍然恒在最后（升序 / 降序都最后）：放一个在升序最前、一个在最后，两向都不许动它",
+      [
+        sortedGrades(gradeNames(["", "高三", "一年级"]), "asc")[2],
+        sortedGrades(gradeNames(["", "高三", "一年级"]), "desc")[2],
+      ],
+      ["", ""]);
+
+    /* ⑤ **其它列一个字没改**：同一批「初二 / 初一」在别的列上仍然按拼音，只有年级反过来 */
+    const SECOND_GRADE = student({ id: "v1", name: "初二", grade: "初二", source: "初二", guardian: "初二" });
+    const FIRST_GRADE = student({ id: "v2", name: "初一", grade: "初一", source: "初一", guardian: "初一" });
+    eq("姓名 / 来源 / 家长这三列**仍然是文本（拼音）**键：同一批里「初二」在前（v1）",
+      (["name", "source", "guardian"] as const).map((field) =>
+        idsOf(sortStudents([FIRST_GRADE, SECOND_GRADE], { field, direction: "asc" }, null))),
+      [["v1", "v2"], ["v1", "v2"], ["v1", "v2"]]);
+    eq("状态那一列（取值只有「在读 / 暂停 / 结课」）也仍然按拼音：结课(jie) → 在读(zai) → 暂停(zan)",
+      sortStudents([
+        student({ id: "y1", status: "暂停" }),
+        student({ id: "y2", status: "在读" }),
+        student({ id: "y3", status: "结课" }),
+      ], { field: "status", direction: "asc" }, null).map((item) => item.status),
+      ["结课", "在读", "暂停"]);
+    eq("而「年级」这一列上**同一批的结论正好相反**（初一 v2 在前）—— 改的只有这一列",
+      idsOf(sortStudents([FIRST_GRADE, SECOND_GRADE], { field: "grade", direction: "asc" }, null)),
+      ["v2", "v1"]);
+    eq("`text` 那一档本身没动：拼音序仍然是 `初二` < `初一`（变的是「年级」用哪一档键，不是拼音口径）",
+      compareSortValues(textValue("初二"), textValue("初一")) < 0, true);
+    eq("`numeric: true` 对**其它列**仍然成立：家长那一列 `138-2` 在 `138-10` 前面（数字段按数值比）",
+      idsOf(sortStudents([
+        student({ id: "z1", guardian: "138-10" }),
+        student({ id: "z2", guardian: "138-2" }),
+      ], { field: "guardian", direction: "asc" }, null)),
+      ["z2", "z1"]);
+
+    /* ⑥ 映射表与比较行为**一致**（属性断言 —— 不把那张表在自检里再抄一遍） */
+    {
+      const problems: string[] = [];
+      let writeCount = 0;
+      GRADE_STAGES.forEach((stage, stageIndex) => {
+        // 级别必须是 1…n（表里的顺序就是教学顺序，缺一级或写重都是表错了）
+        const levels = stage.grades.map((grade) => grade.level);
+        if (String(levels) !== String(levels.map((_, index) => index + 1))) {
+          problems.push(`${stage.name} 的年级级别不是 1…n（顺序＝教学顺序）`);
+        }
+        /*
+         * 一律用**带学段前缀**的写法比：`初中一年级` / `高中高一` 这种是自己拼的，
+         * 不带前缀的 `一年级` 是**歧义写法**（小学与初中都有），不能拿来判"这一段"。
+         */
+        const prefixed = stage.grades.map((grade) =>
+          grade.writes.map((write) => {
+            writeCount += 1;
+            return gradeValue(stage.name + write);
+          }));
+        for (const group of prefixed) {
+          for (const a of group) {
+            // 每个写法都得认得出来（认不出的那一档排在 `纯高中` 之后）
+            if (compareSortValues(a, gradeValue("高中")) > 0) {
+              problems.push(`${stage.name} 里有一种写法认不出：${a.kind === "grade" ? a.text : a.kind}`);
+            }
+            for (const b of group) {
+              if (compareSortValues(a, b) !== 0) problems.push(`${stage.name} 同一档的写法没并列`);
+            }
+          }
+        }
+        // 上一档的每一种写法都要排在下一档的每一种写法**之前**
+        for (let index = 1; index < prefixed.length; index += 1) {
+          for (const earlier of prefixed[index - 1]!) {
+            for (const later of prefixed[index]!) {
+              if (compareSortValues(earlier, later) >= 0) {
+                problems.push(`${stage.name} 第 ${String(index)} 档没有整个排在下一档之前`);
+              }
+            }
+          }
+        }
+        // 纯学段夹在本学段所有年级之后、下一学段所有年级之前
+        const pureStage = gradeValue(stage.name);
+        for (const group of prefixed) {
+          for (const write of group) {
+            if (compareSortValues(pureStage, write) <= 0) problems.push(`纯学段「${stage.name}」没排在本学段末尾`);
+          }
+        }
+        const next = GRADE_STAGES[stageIndex + 1];
+        if (next !== undefined) {
+          for (const grade of next.grades) {
+            for (const write of grade.writes) {
+              if (compareSortValues(pureStage, gradeValue(next.name + write)) >= 0) {
+                problems.push(`纯学段「${stage.name}」没排在「${next.name}」之前`);
+              }
+            }
+          }
+        }
+      });
+      ok(`扫描真的跑过了（${String(GRADE_STAGES.length)} 个学段 / ${String(writeCount)} 种写法）`,
+        writeCount > 0, String(writeCount));
+      eq("映射表与比较行为一致：级别连续、同一档的写法并列、上一档整个排在下一档之前、纯学段夹在两段之间",
+        problems, []);
+    }
+
+    /*
+     * 页面**一个字都没改**（这一列的特殊只在纯模块里）：页面源码里没有年级字面量、
+     * 也没有为年级另写比较分支 —— ⑬⑭⑮ 那几条（八个表头 / 三态 / 箭头 / 调用纯模块）
+     * 一条都没动，因此"表头、三态、箭头都不变"这件事仍由它们守着。
+     */
+    ok("页面里没有为「年级」加特例（没有 `初一` / `七年级` / `小学` 这类字面量，也没有第二个排序分支）",
+      !/初一|七年级|小学|高中/.test(studentsPageSortCode) &&
+        studentsPageSortCode.includes('<SortableTh field="grade"'));
   }
 }
 

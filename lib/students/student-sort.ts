@@ -41,6 +41,46 @@
  * （没有它就没有显示串）—— 读不到课程类型时那一列在页面上显示 `…`，
  * 这时**整列当作没值**（全部并列 → 保持默认顺序），而不是拿 id 去猜一个顺序。
  *
+ * ## 「年级」这一列按**教学顺序**排，不按拼音（这一列专用的第五档键）
+ *
+ * 机构原话（我问他"年级现在按拼音排、初二会排在初一前面，要不要改成教学顺序"）：
+ * 「**按教学顺序排（推荐）**」。
+ *
+ * 拼音排法在学校里是**错的**，而且错得很隐蔽：`初二`(chū'èr) < `初一`(chū'yī)，
+ * 于是升序列表上**二年级排在一年级前面**、高一排在高三后面（降序时正好反过来）——
+ * 屏幕上"排好了"与"排错了"长得一模一样，老师只会觉得"这列看着别扭"，
+ * 没人会去点一下表头再喊一声。所以这一列不看字怎么念，只看**它是哪一段**。
+ *
+ * 键 ＝ **（学段级别, 年级级别）** 两段（`lib/students/student-sort.ts` 里唯一的映射表
+ * `GRADE_STAGES`，见下）：
+ *
+ * | 写法（举例） | 键 |
+ * | --- | --- |
+ * | `一年级` … `六年级`、`小学五年级`、`5年级` | （**小学**, 1…6） |
+ * | `初一` / `七年级`、`初二` / `八年级`、`初三` / `九年级` | （**初中**, 1 / 2 / 3）—— 两套写法**同一段** |
+ * | `高一` / `高中一年级`、`高二`、`高三` | （**高中**, 1…3） |
+ * | `小学` / `初中` / `高中`（只写学段、没写年级） | 该学段**末尾**（它是"这个学段，但没细分"） |
+ * | `小升初` / `初升高` / `学前` / `成人` / 以后的新词 | 认不出 → **所有学段之后**（同级内部按拼音） |
+ * | `""` | **空值**：仍然恒在最后（与其它列同一条规则） |
+ *
+ * 学段之间是 **小学 < 初中 < 高中**。之所以把"学段"单列成一段而不是把十来个年级
+ * 排成一长串：机构库里**同一件事有两套写法**（`初二` 与 `八年级`），
+ * 而 `小学五年级`、`7年级` 这种带前缀 / 阿拉伯数字的写法也真实存在；
+ * 两段键让"说得出它属于哪一段"的写法**自动**落到同一段里，不必为每一种写法各写一条规则。
+ *
+ * **认不出来的写法不猜、也不丢**：机构以后写一个新说法（`小升初`），列表里照样看得见、
+ * 排在所有认得出的年级**之后**，只是排不进教学顺序 —— 它不会变成一个"看不见的"错误
+ * （不许筛掉、不许猜成"大概是一年级"）。**以后机构多了一种写法，只改这一张表**
+ * （`GRADE_STAGES` 里那一行加一个 `writes`），别的代码一行都不动。
+ *
+ * **只影响「年级」这一列**：姓名 / 报读科目 / 教材 / 来源 / 剩余课时 / 状态 / 家长
+ * 那七列的键与规则**一个字都没改**（它们仍然按拼音 / 数值 / 显示串比，`numeric: true` 照旧）。
+ *
+ * 降序（这一列）：段内**倒过来**（高三 → … → 一年级），但**并列的仍保持登记顺序**
+ * （`初一` 与 `七年级` 是同一段，谁先登记谁在前 —— 与"并列稳定"是同一条规则，
+ * 因此整条降序**不等于**升序逐条倒置）；认不出的那一批在降序里排在**最前**
+ * （它是"比高三还大"的那一档）、批内**按拼音反向**；**空值仍在最后**。
+ *
  * ## 不排序 = 默认顺序逐条一致
  *
  * `sortStudents(students, null, …)` 返回**同序的一份拷贝**：加了排序之后，
@@ -73,14 +113,28 @@ export type SortDirection = "asc" | "desc";
  * 一个排序键。
  *
  * 为什么不是"直接给个字符串"：数字列（剩余课时）按**数值**比、日期列按**时间**比，
- * 而字符串比较的 `"10" < "2"` 是错的。四档各自对应一种比较方式，
+ * 而字符串比较的 `"10" < "2"` 是错的。五档各自对应一种比较方式，
  * 空值单独一档（它**不受方向影响**，见文件头）。
+ *
+ * 前四档是 v52 就有的；**第五档 `grade`** 是「E21 续」为「年级」那一列加的
+ * （为什么不是 `text`：见文件头"年级按教学顺序排"那一节）。
  */
 export type SortValue =
   | { readonly kind: "empty" }
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "number"; readonly value: number }
-  | { readonly kind: "time"; readonly at: number };
+  | { readonly kind: "time"; readonly at: number }
+  | {
+      readonly kind: "grade";
+      /** 学段级别：`0` 小学 / `1` 初中 / `2` 高中；`GRADE_STAGES.length` ＝ **认不出**那一档。 */
+      readonly stage: number;
+      /** 年级级别：`1…n`；**纯学段** ＝ `n + 1`（本学段末尾）；**认不出** ＝ `0`。 */
+      readonly level: number;
+      /** 这一段认不认得出来（认得出的同段＝并列；认不出的同段内**按拼音**）。 */
+      readonly known: boolean;
+      /** 归一化之后的原字（去空白、全角数字折半角）—— 认不出的那一档按它比拼音。 */
+      readonly text: string;
+    };
 
 /** 空值那一档（只造一次，免得每次比较都新建对象）。 */
 const EMPTY: SortValue = { kind: "empty" };
@@ -136,6 +190,156 @@ export function timeValue(raw: string): SortValue {
   return Number.isNaN(at) ? EMPTY : { kind: "time", at };
 }
 
+/* ── 年级：按**教学顺序**（机构：「按教学顺序排（推荐）」）──────────────────────
+ *
+ * 这一节是**全仓库唯一**一处"哪种年级写法属于哪一段"的实现（数据 + 这一小段解析），
+ * 页面不认年级、别处也不许再写一份 `if (grade === "初二")` —— 两张表的下场是
+ * "新建的学生排对了、导入进来的排错了"，而两种都在同一列上、肉眼分不出。
+ */
+
+/** 一个年级：`level` 是这一学段里的级别（1 起），`writes` 是机构会写的**全部写法**（不带学段前缀）。 */
+type GradeSpec = {
+  readonly level: number;
+  readonly writes: readonly string[];
+};
+
+/** 一个学段：`name` 既是学段名、也是"只写学段"那种写法本身。 */
+type GradeStageSpec = {
+  readonly name: string;
+  /** 这一学段的年级，**顺序＝教学顺序**（同级之间谁先写不影响：它们本来就是同一段）。 */
+  readonly grades: readonly GradeSpec[];
+};
+
+/**
+ * **年级 → 教学顺序** 的映射表（机构原话：「**按教学顺序排（推荐）**」）。
+ *
+ * 数组顺序 ＝ 学段的教学顺序：**小学 < 初中 < 高中**。
+ * 每一行的 `grades` 顺序 ＝ 该学段内的年级顺序。
+ *
+ * 两套写法**刻意并排**（`初一` 与 `七年级` 都是 `level: 1`）—— 机构库里同一件事
+ * 两种写法都有（`components/admin/StudentForm.tsx` 的候选里也是两套并排），
+ * 它们是**同一个年级**，不是两个："初一"与"七年级"之间不该有先后。
+ *
+ * 数字**两种写法都认**（`5年级` 与 `五年级`）：全角数字先在 `normalizeGradeText`
+ * 里折成半角，所以机构打成 `５年级` 也认得（他不会知道"全角"是什么）。
+ *
+ * ⚠️ **以后机构多了一种写法（例如写成「小二」「初二下」），只改这一张表**：
+ * 在那个年级那一行的 `writes` 里加一个字符串就完事了 —— 解析、比较、页面、
+ * 自检都不用动。**认不出来的写法**（`小升初` / `学前` / 以后的新词）落在表外 → 排在
+ * **所有认得出的年级之后**（见 `gradeKeyOf`），列表里照样看得见，不会被筛掉、也不会被猜。
+ */
+export const GRADE_STAGES: readonly GradeStageSpec[] = [
+  {
+    name: "小学",
+    grades: [
+      { level: 1, writes: ["一年级", "1年级"] },
+      { level: 2, writes: ["二年级", "2年级"] },
+      { level: 3, writes: ["三年级", "3年级"] },
+      { level: 4, writes: ["四年级", "4年级"] },
+      { level: 5, writes: ["五年级", "5年级"] },
+      { level: 6, writes: ["六年级", "6年级"] },
+    ],
+  },
+  {
+    name: "初中",
+    // 初中部两种写法并存：`初一/初二/初三` 与 `七年级/八年级/九年级`（同一段）
+    grades: [
+      { level: 1, writes: ["一年级", "1年级", "七年级", "7年级", "初一"] },
+      { level: 2, writes: ["二年级", "2年级", "八年级", "8年级", "初二"] },
+      { level: 3, writes: ["三年级", "3年级", "九年级", "9年级", "初三"] },
+    ],
+  },
+  {
+    name: "高中",
+    grades: [
+      { level: 1, writes: ["一年级", "1年级", "高一"] },
+      { level: 2, writes: ["二年级", "2年级", "高二"] },
+      { level: 3, writes: ["三年级", "3年级", "高三"] },
+    ],
+  },
+];
+
+/**
+ * 「认不出」那一档的学段级别 ＝ **学段表长度**（排在所有学段之后）。
+ *
+ * 不写死 `3`：以后表里再加一个学段（例如「大学」），"认不出的排最后"这一条**自动**继续成立。
+ */
+const UNKNOWN_GRADE_STAGE = GRADE_STAGES.length;
+
+/**
+ * 归一化：去掉**所有**空白、全角数字折成半角。
+ *
+ * 机构手打的是 `小学 五年级`、`７年级` 这种（全角、带空格）—— 它们与 `小学五年级`、`7年级`
+ * 是同一件事，因此**在解析之前**先抹平，不是在每种写法里各写一条。
+ */
+function normalizeGradeText(raw: string): string {
+  return raw
+    .replace(/\s+/g, "")
+    .replace(/[０-９]/g, (digit) => String.fromCharCode(digit.charCodeAt(0) - 0xfee0));
+}
+
+/** 某学段里，这个写法是几年级（不是这一学段的写法 → `null`）。 */
+function gradeLevelOf(stage: GradeStageSpec, token: string): number | null {
+  for (const grade of stage.grades) {
+    if (grade.writes.includes(token)) return grade.level;
+  }
+  return null;
+}
+
+/** 一个年级键（`stage` / `level` / `known` 三样就是比较要用的全部信息）。 */
+type GradeKey = {
+  readonly stage: number;
+  readonly level: number;
+  readonly known: boolean;
+};
+
+/**
+ * 认一段年级写法（已归一化）→ （学段级别, 年级级别）。
+ *
+ * 两条规则，都不猜：
+ *   1. **带学段前缀**（`小学五年级` / `初中二年级`）：只在这个学段里找那个年级
+ *      （`初中一年级` ＝ 初一）。**学段里没有这个年级**（`小学七年级`）＝ 自相矛盾 → 认不出
+ *      （宁可排后面，也不把它猜成"小学七年级"或"初中七年级"）；
+ *   2. **不带前缀**（`一年级` / `7年级` / `初二` / `高一`）：按学段的教学顺序**先到先得**。
+ *      于是 `一年级…六年级` → 小学（机构的小学就是"一年级"那套叫法），
+ *      `七年级` → 初中（小学没有七年级），`高一` → 高中。
+ *
+ * 只写学段（`小学`）→ 该学段**末尾**（`grades.length + 1`）：它是"这一学段，但没细分"，
+ * 排在小学六年级**之后**、初中一年级**之前**才对 —— 它不是"空值"（学段是知道的）。
+ *
+ * 其余一律认不出 → 学段级别 `UNKNOWN_GRADE_STAGE`、级别 `0`，落在**所有年级之后**。
+ */
+function gradeKeyOf(text: string): GradeKey {
+  for (let stage = 0; stage < GRADE_STAGES.length; stage += 1) {
+    const spec = GRADE_STAGES[stage]!;
+    if (!text.startsWith(spec.name)) continue;
+    const rest = text.slice(spec.name.length);
+    // 只写学段：本学段末尾
+    if (rest === "") return { stage, level: spec.grades.length + 1, known: true };
+    const level = gradeLevelOf(spec, rest);
+    if (level !== null) return { stage, level, known: true };
+    // 带前缀、但这一学段里没有这个年级（小学七年级）：自相矛盾 → 不猜
+    return { stage: UNKNOWN_GRADE_STAGE, level: 0, known: false };
+  }
+  for (let stage = 0; stage < GRADE_STAGES.length; stage += 1) {
+    const level = gradeLevelOf(GRADE_STAGES[stage]!, text);
+    if (level !== null) return { stage, level, known: true };
+  }
+  return { stage: UNKNOWN_GRADE_STAGE, level: 0, known: false };
+}
+
+/**
+ * 年级键：**（学段级别, 年级级别）**，**只给「年级」这一列用**（见文件头那一节）。
+ *
+ * 空串 / 全空白 → 空值那一档（仍然恒在最后）；认不出的写法 → 排在所有认得出的年级之后。
+ */
+export function gradeValue(raw: string | null | undefined): SortValue {
+  const text = normalizeGradeText(raw ?? "");
+  if (text === "") return EMPTY;
+  const key = gradeKeyOf(text);
+  return { kind: "grade", stage: key.stage, level: key.level, known: key.known, text };
+}
+
 /** 混档比较时（正常不会发生）用的文本形态：只为了让比较函数**全定义**，不会返回 NaN。 */
 function asText(value: SortValue): string {
   switch (value.kind) {
@@ -145,6 +349,8 @@ function asText(value: SortValue): string {
       return String(value.value);
     case "time":
       return new Date(value.at).toISOString();
+    case "grade":
+      return value.text;
     case "empty":
       return "";
   }
@@ -163,6 +369,22 @@ export function compareSortValues(a: SortValue, b: SortValue): number {
   }
   if (a.kind === "number" && b.kind === "number") return a.value - b.value;
   if (a.kind === "time" && b.kind === "time") return a.at - b.at;
+  if (a.kind === "grade" && b.kind === "grade") {
+    // 两段键：先学段（小学 < 初中 < 高中 ），再年级
+    if (a.stage !== b.stage) return a.stage - b.stage;
+    if (a.level !== b.level) return a.level - b.level;
+    /*
+     * 落到同一段：`初一` / `七年级` / `7年级` 是**同一个年级** → 并列，返回 0，
+     * 由 `sortByValues` 的下标 tiebreak 保持登记顺序（不是按字面拼音再排一次 ——
+     * 那等于说"七年级"和"初一"之间还有先后）。
+     *
+     * 认不出的那些都挤在最后一档（学段级别＝`GRADE_STAGES.length`），它们之间
+     * **按拼音**：否则"小升初 / 成人"谁在前就只剩登记顺序说了算，而这一档本来就是
+     * "系统认不出"的意思，不该再假装有教学顺序。
+     */
+    if (a.known && b.known) return 0;
+    return COLLATOR.compare(a.text, b.text);
+  }
   return COLLATOR.compare(asText(a), asText(b));
 }
 
@@ -224,7 +446,16 @@ export type StudentSortField =
 /** 八个字段列（顺序＝表头顺序；页面照着渲染排序按钮）。 */
 export const STUDENT_SORT_COLUMNS: readonly StudentSortColumn[] = [
   { field: "name", label: "姓名", valueOf: (student) => textValue(student.name) },
-  { field: "grade", label: "年级", valueOf: (student) => textValue(student.grade) },
+  {
+    field: "grade",
+    label: "年级",
+    /*
+     * **八列里唯一一个不用 `textValue` 的**：年级按**教学顺序**排（小学一年级…高三），
+     * 不按拼音 —— 拼音会把初二排到初一前面（见文件头那一节与 `GRADE_STAGES`）。
+     * 其余七列的键与规则一个字没改。
+     */
+    valueOf: (student) => gradeValue(student.grade),
+  },
   {
     field: "subjects",
     label: "报读科目",
