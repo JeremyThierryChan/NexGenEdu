@@ -89,6 +89,7 @@ import type {
   HomeworkRecord,
   Inquiry,
   Lesson,
+  Enrollment,
   LessonRecord,
   Student,
   Teacher,
@@ -125,6 +126,27 @@ import {
   textbookLabel,
   textbookSummary,
 } from "@/lib/backend/textbooks";
+/*
+ * 学生列表的排序（§52）也是**值**，而且**口径只有一处**
+ * （`lib/students/student-sort.ts`）：自检在这里比的正是"接口里真正在跑的那一份"——
+ * 中文拼音序、`numeric: true`、空值恒在最后、并列稳定、三态循环、`aria-sort` 三态，
+ * 都在那一个模块里判一次；自检里再写一套 comparator 等于口径有了第二处实现。
+ */
+import {
+  compareSortValues,
+  displayValue,
+  nextStudentSort,
+  numberValue,
+  sortByValues,
+  sortStudents,
+  STUDENT_SORT_COLUMNS,
+  studentSortAriaValue,
+  studentSortIndicator,
+  studentSortLabel,
+  textValue,
+  timeValue,
+  type SortValue,
+} from "@/lib/students/student-sort";
 import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
 import { createMemoryStore } from "@/lib/backend/storage";
 import {
@@ -172,7 +194,7 @@ import {
   toDateKey,
   type HolidayDay,
 } from "@/lib/backend/holidays";
-import { remainingOf, remainingTotal } from "@/lib/backend/enrollment";
+import { remainingOf, remainingTotal, subjectsSummary } from "@/lib/backend/enrollment";
 import { CURRENT_VERSION, VERSION_NOTES } from "@/lib/backend/version";
 import {
   bandsForTargets,
@@ -13710,9 +13732,20 @@ console.log(
    */
   const textbookTodoClass =
     "rounded-sm border border-dashed border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[10px] text-ink-400";
+  /*
+   * v52（学生列表加排序）之后，表头文案**搬进了排序纯模块**（`studentSortLabel`）：
+   * 页面上不再有「>教材<」这种字面量。判据因此改成等价的三件事：
+   * ① 页面在这一列上渲染了排序表头、② 模块给这一列的字正是「教材」、
+   * ③ 页面渲染的字确实取自模块（`studentSortLabel(field)`）——
+   * ②③ 合起来就是"用户看到的还是「教材」"（§52 另有断言钉住这条链）。
+   */
   ok("学生列表上有「教材」这一列，走 `textbookSummary`（带学科）",
-    studentsPageSource.includes("<th") && studentsPageSource.includes(">教材<") &&
-      studentsPageSource.includes("textbookSummary(catalog, student.textbooks)"));
+    studentsPageSource.includes("<th") &&
+      studentsPageSource.includes('<SortableTh field="textbooks"') &&
+      studentSortLabel("textbooks") === "教材" &&
+      studentsPageSource.includes("studentSortLabel(field)") &&
+      studentsPageSource.includes("textbookSummary(catalog, student.textbooks)"),
+    `${studentSortLabel("textbooks")} / ${String(studentsPageSource.includes('<SortableTh field="textbooks"'))}`);
   ok("列表上没填时渲染的是「教材未填」灰标（不是空白格、也不是不渲染）",
     studentsPageSource.includes('student.textbooks.length === 0') &&
       studentsPageSource.includes("教材未填"));
@@ -14126,9 +14159,17 @@ console.log(
    */
   const sourceTodoClass =
     "rounded-sm border border-dashed border-ink-200 bg-ink-50 px-1.5 py-0.5 text-[10px] text-ink-400";
+  /*
+   * 与 §49 的「教材」那一列同一个改法（v52）：表头的**字**搬进了排序纯模块，
+   * 页面渲染的是 `studentSortLabel(field)`。判据＝"页面渲染了这一列的排序表头"
+   * +「模块给的字正是「来源」」+「页面确实用的是模块那个函数」。
+   */
   ok("学生列表上有「来源」这一列",
-    studentsPageSource.includes("<th") && studentsPageSource.includes(">来源<"),
-    studentsPageSource.split("\n").filter((line) => line.includes("<th")).join(" | ").slice(0, 200));
+    studentsPageSource.includes("<th") &&
+      studentsPageSource.includes('<SortableTh field="source"') &&
+      studentSortLabel("source") === "来源" &&
+      studentsPageSource.includes("studentSortLabel(field)"),
+    studentsPageSource.split("\n").filter((line) => line.includes("SortableTh")).join(" | ").slice(0, 200));
   ok("列表上没填时渲染的是「来源未填」灰标（不是空白格、也不是不渲染）",
     /student\.source \?\? ""/.test(studentsPageSource) && studentsPageSource.includes("来源未填"));
   ok("详情页的表头区也能看到来源，同样有「来源未填」灰标",
@@ -14149,9 +14190,20 @@ console.log(
         (studentsPageSource.match(new RegExp(sourceTodoClass.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? []).length >= 2));
   ok("列表的 `colSpan` 跟着列数改了（否则「没有学生」那一行会短一截）",
     studentsPageSource.includes("colSpan={9}"), "没找到 colSpan={9}");
-  ok("表头列数、空态 colSpan 与表宽三者对得上（九列、别把别的列挤掉）",
-    (studentsPageSource.split("<th ").length - 1) === 9 && studentsPageSource.includes("min-w-[880px]"),
-    `表头列数 ${String(studentsPageSource.split("<th ").length - 1)}`);
+  /*
+   * v52 起表头有两种写法：**八个字段列**是 `<SortableTh field="…"`（它们自己渲染 `<th>`），
+   * 「操作」那一列仍是普通 `<th className="…">操作</th>`。
+   * 因此"列数"不能再数字符串 `<th `（`SortableTh` 组件里也有一处，会少数一列），
+   * 要按**页面上真正渲染出来的列**数：8 + 1 = 9。
+   */
+  const headerColumnCount =
+    (studentsPageSource.match(/<SortableTh field="/g) ?? []).length +
+    (studentsPageSource.match(/<th className="px-4 py-2\.5 font-medium">/g) ?? []).length;
+  ok("表头列数、空态 colSpan 与表宽三者对得上（九列 = 8 个排序表头 + 1 个操作表头）",
+    headerColumnCount === 9 &&
+      studentsPageSource.includes("colSpan={9}") &&
+      studentsPageSource.includes("min-w-[880px]"),
+    `表头列数 ${String(headerColumnCount)}`);
 
   /* ── ⑨ 反向断言：不进网站公开快照、不影响报价 / 排课冲突 / 课时账本 ─────────── */
   /*
@@ -14441,6 +14493,396 @@ console.log(
   /* 收尾：把这一节动过的库恢复成示例数据（与 §11.1 / §49 那一套一致）。 */
   await api.importDatabase(serializeDatabase(seedDb));
   eq("收尾：库回到示例数据", (await api.students.list()).length, seedDb.students.length);
+}
+
+console.log(
+  "\n=== 52. 学生列表按字段排序（机构：「在学生列表里每个字段都加一个可以按升降排序的功能」）===",
+);
+
+/*
+ * 机构原话：「**在学生列表里每个字段都加一个可以按升降排序的功能**」。
+ *
+ * ## 这一节守的是什么（为什么排序值得单开一节）
+ *
+ * 排序看着是"最没技术含量"的一个功能，可它的规则**全都不可见**：
+ * 中文按拼音还是按码位、`学生2` 在 `学生10` 前面还是后面、空值排最前还是最后、
+ * 并列的会不会每次刷新换位置 —— 屏幕上"排好了"与"排错了"**长得一模一样**。
+ * 因此这里把**比较规则逐条钉死**（纯函数层，不需要浏览器、不需要 React），
+ * 再盯**页面那一层**（源码级）：每个字段列都有排序按钮、**操作列没有**、
+ * `aria-sort` 三态、当前列有 ▲/▼、提示文案在、页面调的是那个纯模块。
+ *
+ * ## 为什么"取消"那一档单独钉一条
+ *
+ * 三态循环少了第三档，表现是"点过一次之后**再也回不到列表本来的顺序**"——
+ * 而那个顺序是机构自己的登记顺序（`students.list()` 给的那一份）。
+ * 这种"功能都在、只是回不去"的毛病不会报错、不会有异常日志，
+ * 只会让人每次顺手按一下 F5，因此它必须是一条断言，而不是一句"设计如此"。
+ *
+ * ## 反向断言（比"排得对"更容易被忽略的另一半）
+ *
+ * **排序不改数据**：排来排去之后学生对象**逐字节不变**、元素还是原来那些对象、
+ * 入参数组（页面里直接就是 `students`）一个字节都不动。
+ * 排序是"看的方式"：它一旦就地改了数组，导出 / 备份 / 后续保存都会带着一个
+ * 谁也想不到的顺序（与「暂未开放往后排」那条"显示规则不许写回数据"同一个立场）。
+ *
+ * 判据一律"对着**接口里真正在跑的那一份**"比（`sortStudents` / `nextStudentSort` /
+ * `subjectsSummary` / `textbookSummary`），不在自检里再写一套排序 ——
+ * 自检里另写一份，等于这条口径有了第二处实现。
+ */
+{
+  const sortRootUrl = new URL("../", import.meta.url);
+  const readSortFile = (file: string) => readFileSync(new URL(file, sortRootUrl), "utf8");
+  /** 去掉注释再查源码（与 §22 / §44 / §49 / §50 同一个坑：注释里的词不算代码）。 */
+  const stripSortComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, "");
+
+  /*
+   * ── 夹具 ──────────────────────────────────────────────────────────────
+   *
+   * 一份最小的 `Catalog`：只为了让「教材」那一列拿到**真的**显示串
+   * （`textbookSummary` 要有它才能把模块 id 变成 `学科·模块名`）。
+   * 两个模块 id 刻意取成"**id 的字母序**与**显示串的拼音序**相反"
+   * （`mod_a1`/一年级 与 `mod_z9`/九年级）：于是"按 id 排"与"按显示串排"给出两种
+   * 不同的结果 —— 断言才真的分辨得出它用的是哪一种，而不是"碰巧一样"。
+   */
+  const SORT_CATALOG: Catalog = {
+    stages: [],
+    subjects: [
+      { id: "sub_数学", name: "数学", kind: "学科", parentIds: [], order: 0, stageIds: [], note: "" },
+      { id: "sub_英语", name: "英语", kind: "学科", parentIds: [], order: 1, stageIds: [], note: "" },
+    ],
+    modules: [
+      { id: "mod_a1", name: "一年级教材", parentId: "", subjectId: "sub_数学", kind: "教材进度", order: 0, stageIds: [] },
+      { id: "mod_z9", name: "九年级教材", parentId: "", subjectId: "sub_数学", kind: "教材进度", order: 1, stageIds: [] },
+    ],
+    formats: [],
+    seededAt: "自检夹具（§52，不是真实维度表）",
+  };
+
+  /** 一条在读报课（夹具：只有"剩下几节"是本例关心的）。 */
+  const enrollment = (totalLessons: number): Enrollment => ({
+    id: `enr_${String(totalLessons)}`,
+    subject: "初中数学",
+    form: "一对一",
+    teacherId: "",
+    totalLessons,
+    usedLessons: 0,
+    unitPrice: 0,
+    agreedAmount: 0,
+    paidAmount: 0,
+    startedAt: "2026-09-01",
+    endedAt: "",
+    status: "在读",
+    note: "",
+    history: [],
+  });
+
+  /** 一个学生（夹具：没写的字段取"空"，与老库迁移补出来的那一份同形）。 */
+  const student = (over: Partial<Student> & { id: string }): Student => ({
+    version: 1,
+    name: "",
+    grade: "",
+    guardian: "",
+    subjects: [],
+    textbooks: [],
+    source: "",
+    profile: {},
+    enrollments: [],
+    status: "在读",
+    note: "",
+    createdAt: "2026-09-01T00:00:00.000Z",
+    ...over,
+  });
+
+  const idsOf = (list: readonly Student[]): string[] => list.map((item) => item.id);
+
+  /* ── ① 能排的是哪几列：八个字段列，操作列不在其中 ───────────────────────── */
+  eq("学生列表能排的是**八个字段列**（顺序＝页面上表头的顺序）",
+    STUDENT_SORT_COLUMNS.map((column) => column.field),
+    ["name", "grade", "subjects", "textbooks", "source", "remaining", "status", "guardian"]);
+  eq("这八列的表头文案＝页面上那八个表头（姓名 / 年级 / 报读科目 / 教材 / 来源 / 剩余课时 / 状态 / 家长）",
+    STUDENT_SORT_COLUMNS.map((column) => column.label),
+    ["姓名", "年级", "报读科目", "教材", "来源", "剩余课时", "状态", "家长"]);
+  eq("「操作」不在可排的列里（它不是字段，是编辑 / 删除那两个按钮 ——「按操作排序」没有含义）",
+    STUDENT_SORT_COLUMNS.filter((column) => column.label.includes("操作")).length, 0);
+
+  /* ── ② 中文按**拼音**（不是按码位）────────────────────────────────────── */
+  const NAMES = ["张三", "李四", "王五", "陈六"].map((name, index) =>
+    student({ id: `n${String(index)}`, name }));
+  eq("姓名按**拼音**排：陈(chen) < 李(li) < 王(wang) < 张(zhang)",
+    sortStudents(NAMES, { field: "name", direction: "asc" }, null).map((item) => item.name),
+    ["陈六", "李四", "王五", "张三"]);
+  eq("（同一批名字按码位排会得到 张 李 王 陈 —— 两种顺序不同，所以上面那条真的在验拼音）",
+    ["张三", "李四", "王五", "陈六"].slice().sort(),
+    ["张三", "李四", "王五", "陈六"]);
+
+  /* ── ③ `numeric: true`：带数字的写法按每一段数字的**数值**比 ───────────── */
+  const NUMERIC = ["学生10", "学生2", "学生1"].map((name, index) =>
+    student({ id: `m${String(index)}`, name }));
+  eq("`numeric: true`：学生2 排在学生10**前面**（人念的顺序）",
+    sortStudents(NUMERIC, { field: "name", direction: "asc" }, null).map((item) => item.name),
+    ["学生1", "学生2", "学生10"]);
+  eq("（按字符串比会得到 学生1 / 学生10 / 学生2 —— 两种顺序不同，所以这条真的在验 numeric）",
+    ["学生10", "学生2", "学生1"].slice().sort(),
+    ["学生1", "学生10", "学生2"]);
+
+  /* ── ④ 数字列按**数值**（剩余课时）────────────────────────────────────── */
+  const REMAINING = [10, 2, 9].map((lessons) =>
+    student({ id: `r${String(lessons)}`, name: `剩 ${String(lessons)} 节`, enrollments: [enrollment(lessons)] }));
+  eq("剩余课时按**数值**排：2 → 9 → 10",
+    idsOf(sortStudents(REMAINING, { field: "remaining", direction: "asc" }, null)),
+    ["r2", "r9", "r10"]);
+  eq("（同一批数字按字符串比会得到 10 / 2 / 9 —— 两种顺序不同，所以这条真的在验数值）",
+    ["10", "2", "9"].slice().sort(),
+    ["10", "2", "9"]);
+  ok("这一列取的就是页面上那个数（`remainingTotal`，一处口径）",
+    remainingTotal(REMAINING[0]!.enrollments) === 10, String(remainingTotal(REMAINING[0]!.enrollments)));
+
+  /* ── ⑤ 日期按**时间**（不是按字符串）──────────────────────────────────── */
+  const DATES = ["2026-9-2", "2026-10-01", "2025-12-31"];
+  eq("日期按**时间**排：2025-12-31 → 2026-9-2 → 2026-10-01",
+    sortByValues(DATES, (raw) => timeValue(raw), "asc"),
+    ["2025-12-31", "2026-9-2", "2026-10-01"]);
+  eq("（同一批日期按字符串排会把 2026-10-01 排到 2026-9-2 前面 —— 两种顺序不同，所以这条真的在验时间）",
+    DATES.slice().sort(),
+    ["2025-12-31", "2026-10-01", "2026-9-2"]);
+
+  /* ── ⑥ 空值一律**最后**（升序、降序都在最后）──────────────────────────── */
+  const SOURCES = [
+    student({ id: "s1", name: "空来源", source: "" }),
+    student({ id: "s2", name: "抖音来源", source: "抖音" }),
+    student({ id: "s3", name: "地推来源", source: "地推" }),
+  ];
+  eq("升序：**没填来源的排在最后**（不是排在字母最前）",
+    idsOf(sortStudents(SOURCES, { field: "source", direction: "asc" }, null)),
+    ["s3", "s2", "s1"]);
+  eq("降序：没填来源的**仍然在最后**（空值不跟着翻方向）",
+    idsOf(sortStudents(SOURCES, { field: "source", direction: "desc" }, null)),
+    ["s2", "s3", "s1"]);
+  eq("（因此「降序＝升序倒过来」只在没有空值时才成立 —— 有空的那些永远在末尾）",
+    idsOf(sortStudents(SOURCES, { field: "source", direction: "asc" }, null)).slice().reverse(),
+    ["s1", "s2", "s3"]);
+  eq("显示成「—」的（一门都没报）也算空值：降序时仍在最后",
+    idsOf(sortStudents([
+      student({ id: "t1", subjects: [] }),
+      student({ id: "t2", subjects: ["初中数学"] }),
+    ], { field: "subjects", direction: "desc" }, SORT_CATALOG)),
+    ["t2", "t1"]);
+  eq("教材没填（空数组 → 显示串是「—」）同样算空值：降序时仍在最后",
+    idsOf(sortStudents([
+      student({ id: "u1", textbooks: [] }),
+      student({ id: "u2", textbooks: ["mod_a1"] }),
+    ], { field: "textbooks", direction: "desc" }, SORT_CATALOG)),
+    ["u2", "u1"]);
+
+  /* ── ⑦ 稳定：并列的保持**默认顺序**（tiebreak 是原来的下标）────────────── */
+  const TIES = [
+    student({ id: "k1", name: "甲", grade: "初二" }),
+    student({ id: "k2", name: "乙", grade: "初一" }),
+    student({ id: "k3", name: "丙", grade: "初二" }),
+  ];
+  eq("升序：同一个年级里 **甲 在 丙 前面**（＝保持默认顺序，不是按姓名重排）",
+    idsOf(sortStudents(TIES, { field: "grade", direction: "asc" }, null)),
+    ["k1", "k3", "k2"]);
+  eq("降序：那一档内部**仍然是 甲 在 丙 前面**（方向翻了，并列的相对顺序没翻）",
+    idsOf(sortStudents(TIES, { field: "grade", direction: "desc" }, null)),
+    ["k2", "k1", "k3"]);
+  eq("（按姓名的拼音排会是 丙 / 甲 / 乙 —— 与上面两处都不同，所以那两条真的在验「用原来的下标」）",
+    sortStudents(TIES, { field: "name", direction: "asc" }, null).map((item) => item.name),
+    ["丙", "甲", "乙"]);
+
+  /* ── ⑧ 升降对称（没有空值、没有并列时，降序恰好是升序的反序）──────────── */
+  eq("姓名升序",
+    sortStudents(NAMES, { field: "name", direction: "asc" }, null).map((item) => item.id),
+    ["n3", "n1", "n2", "n0"]);
+  eq("姓名降序 ＝ 升序**逐条相反**（反过来逐条比也对得上）",
+    sortStudents(NAMES, { field: "name", direction: "desc" }, null).map((item) => item.id),
+    sortStudents(NAMES, { field: "name", direction: "asc" }, null).map((item) => item.id).reverse());
+
+  /* ── ⑨ 三态循环：升序 → 降序 → **取消** ──────────────────────────────── */
+  eq("没排序时点一下 = **升序**",
+    nextStudentSort(null, "name"), { field: "name", direction: "asc" });
+  eq("同一列再点一下 = **降序**",
+    nextStudentSort({ field: "name", direction: "asc" }, "name"),
+    { field: "name", direction: "desc" });
+  eq("同一列**第三次点 = 取消**（回默认顺序）——没有这一档就再也回不到列表本来的顺序",
+    nextStudentSort({ field: "name", direction: "desc" }, "name"), null);
+  eq("换一列点时从**升序**重新开始（不是接着上一列的方向）",
+    nextStudentSort({ field: "name", direction: "desc" }, "grade"),
+    { field: "grade", direction: "asc" });
+  eq("取消之后**顺序与默认逐条相同**（不是「按名字又排了一遍」）",
+    idsOf(sortStudents(SOURCES, null, null)),
+    idsOf(SOURCES));
+  ok("取消时返回的是**另一份数组**（不是把同一个数组原样还回来 —— 免得调用方就地改到列表）",
+    sortStudents(SOURCES, null, null) !== SOURCES);
+
+  /* ── ⑩ 反向断言：排序**不改数据**（不满地排、不入参、对象逐字节不变）────── */
+  {
+    const before = JSON.stringify(NAMES);
+    const ascending = sortStudents(NAMES, { field: "name", direction: "asc" }, null);
+    const descending = sortStudents(NAMES, { field: "name", direction: "desc" }, null);
+    const cleared = sortStudents(NAMES, null, null);
+    eq("排来排去（升 → 降 → 取消）之后，学生对象**逐字节不变**", JSON.stringify(NAMES), before);
+    ok("而且元素还是**原来那些对象**（不是深拷贝出来的新对象）",
+      ascending.every((item) => NAMES.includes(item)) &&
+        descending.every((item) => NAMES.includes(item)) &&
+        cleared.every((item) => NAMES.includes(item)));
+    eq("`sortByValues` 也不就地改入参（`items.map(…)` 先造带下标的副本、排的是副本）",
+      (() => {
+        const input = [3, 1, 2];
+        sortByValues(input, (value) => numberValue(value), "desc");
+        return input;
+      })(),
+      [3, 1, 2]);
+    eq("排序不增不减：条数与排序前一致", [ascending.length, descending.length, cleared.length],
+      [NAMES.length, NAMES.length, NAMES.length]);
+  }
+
+  /* ── ⑪ 键的边界：空串 / 「—」/ NaN / 解析不出来的日期都算"没有值" ──────── */
+  eq("空串与全是空白的串都算**没有值**（不是「一个空字符串」排在字母最前）",
+    [textValue("").kind, textValue("   ").kind], ["empty", "empty"]);
+  eq("显示成「—」的算没有值（`displayValue`）", displayValue("—").kind, "empty");
+  eq("算不出来的数字（NaN / Infinity）算没有值 —— 不让它进比较函数（`a - b` 得到 NaN 会让顺序变成「看引擎实现」）",
+    [numberValue(Number.NaN).kind, numberValue(Number.POSITIVE_INFINITY).kind], ["empty", "empty"]);
+  eq("解析不出来的日期算没有值", timeValue("不是日期").kind, "empty");
+  {
+    const SAMPLES: SortValue[] = [
+      textValue("甲"), textValue(""), numberValue(-3.5), numberValue(0),
+      timeValue("2026-09-02"), timeValue(""),
+    ];
+    const problems: string[] = [];
+    for (const a of SAMPLES) {
+      for (const b of SAMPLES) {
+        const result = compareSortValues(a, b);
+        if (!Number.isFinite(result)) problems.push(`${a.kind}/${b.kind} 不是有限数`);
+        if (result !== -compareSortValues(b, a)) problems.push(`${a.kind}/${b.kind} 不对称`);
+      }
+    }
+    ok(`扫描真的跑过了（${String(SAMPLES.length)} 档 × 自己）`,
+      SAMPLES.length >= 6, String(SAMPLES.length));
+    eq("任何两档键都比得出一个**确定的数**（有限、且反对称）—— 不会返回 NaN",
+      problems, []);
+  }
+
+  /* ── ⑫ 多值列按**显示出来的那一串**比（复用既有显示口径，不在排序里另拼）── */
+  const TEXTBOOKS = [
+    student({ id: "b2", name: "id 在前", textbooks: ["mod_a1"] }),
+    student({ id: "b1", name: "显示串在前", textbooks: ["mod_z9"] }),
+  ];
+  eq("夹具的两种显示串（先确认这一点，否则下面那条分辨不出用的是 id 还是显示串）",
+    [textbookSummary(SORT_CATALOG, ["mod_a1"]), textbookSummary(SORT_CATALOG, ["mod_z9"])],
+    ["数学·一年级教材", "数学·九年级教材"]);
+  eq("教材按**显示出来的那一串**排（`textbookSummary`）：九(jiu) 在 一(yi) 前面",
+    idsOf(sortStudents(TEXTBOOKS, { field: "textbooks", direction: "asc" }, SORT_CATALOG)),
+    ["b1", "b2"]);
+  eq("（按模块 id 的字母序排会得到相反的顺序 —— 所以上面那条真的在验「复用显示口径」）",
+    idsOf(sortByValues(TEXTBOOKS, (item) => textValue(item.textbooks[0] ?? ""), "asc")),
+    ["b2", "b1"]);
+  eq("读不到课程类型时（那一列在页面上显示 `…`）**不猜顺序**：整列当作没有值 → 保持默认顺序",
+    idsOf(sortStudents(TEXTBOOKS, { field: "textbooks", direction: "asc" }, null)),
+    ["b2", "b1"]);
+  const SUBJECTS = [
+    student({ id: "c1", subjects: ["初中英语"] }),
+    student({ id: "c2", subjects: ["初中数学"] }),
+  ];
+  eq("报读科目按显示串（`subjectsSummary`）排：初中数学(shu) 在 初中英语(ying) 前面",
+    idsOf(sortStudents(SUBJECTS, { field: "subjects", direction: "asc" }, SORT_CATALOG)),
+    ["c2", "c1"]);
+  eq("那一串就是页面那一格显示的同一个函数（空列表给「—」，一字未改）",
+    [subjectsSummary(["初中数学", "初中物理"]), subjectsSummary([])],
+    ["初中数学、初中物理", "—"]);
+
+  /* ── ⑬ 页面源码：八个表头是按钮、操作列不是 ───────────────────────────── */
+  const studentsPageSortCode = stripSortComments(
+    readSortFile("app/admin/(dashboard)/students/page.tsx"));
+  const sortModuleCode = stripSortComments(readSortFile("lib/students/student-sort.ts"));
+
+  eq("八个字段列**每一列**都渲染了排序表头（顺序与列清单一致）",
+    STUDENT_SORT_COLUMNS.map((column) => column.field)
+      .filter((field) => studentsPageSortCode.includes(`<SortableTh field="${field}"`)),
+    STUDENT_SORT_COLUMNS.map((column) => column.field));
+  eq("排序表头一共只有八个（多一个就说明有列被渲染了两次）",
+    (studentsPageSortCode.match(/<SortableTh /g) ?? []).length,
+    STUDENT_SORT_COLUMNS.length);
+  eq("九列表头 = 八个排序按钮 + **一个普通 `<th>`**（也就是「只有操作列不排」）",
+    [
+      (studentsPageSortCode.match(/<SortableTh /g) ?? []).length,
+      (studentsPageSortCode.match(/<th className="px-4 py-2\.5 font-medium">/g) ?? []).length,
+    ],
+    [8, 1]);
+  ok("那一个不排的表头就是「操作」（它那两个按钮不是字段，不参与排序）",
+    /<th className="px-4 py-2\.5 font-medium">操作<\/th>/.test(studentsPageSortCode));
+  ok("表头文案取自纯模块（页面里没有自己抄一遍「姓名 / 年级 / …」的字面量）",
+    !studentsPageSortCode.includes(">姓名<") &&
+      studentsPageSortCode.includes("studentSortLabel(field)"));
+
+  /* ── ⑭ 页面源码：`aria-sort` 三态、当前列 ▲/▼、提示文案 ───────────────── */
+  eq("`aria-sort` 三态（纯函数层）：当前列 ascending / descending，**没排序的列不渲染这个属性**",
+    [
+      studentSortAriaValue(null, "name"),
+      studentSortAriaValue({ field: "name", direction: "asc" }, "name"),
+      studentSortAriaValue({ field: "name", direction: "desc" }, "name"),
+      studentSortAriaValue({ field: "name", direction: "asc" }, "grade"),
+    ],
+    [undefined, "ascending", "descending", undefined]);
+  ok("`aria-sort` 挂在 `<th>` 上、值从纯模块算（页面里没有 `\"ascending\"` 这种字面量 —— 三态只在模块里判一次）",
+    studentsPageSortCode.includes("aria-sort={studentSortAriaValue(sort, field)}") &&
+      !studentsPageSortCode.includes('"ascending"'));
+  eq("▲ / ▼ 只在**当前排序列**出现（其余列不显示箭头）",
+    [
+      studentSortIndicator({ field: "name", direction: "asc" }, "name"),
+      studentSortIndicator({ field: "name", direction: "desc" }, "name"),
+      studentSortIndicator({ field: "name", direction: "asc" }, "grade"),
+      studentSortIndicator(null, "name"),
+    ],
+    ["▲", "▼", "", ""]);
+  ok("表头那个箭头也从纯模块算（页面里没有为排序另写一套箭头判断）",
+    studentsPageSortCode.includes("studentSortIndicator(sort, field)"));
+  ok("有一句极短的**发现性提示**（「点表头可以排序」，并把「再点一次取消」说出来）",
+    studentsPageSortCode.includes("点表头可以排序") &&
+      studentsPageSortCode.includes("再点一次取消"));
+  ok("表头是**真按钮**（`<button type=\"button\">`）而不是挂在 `<th>` 上的 onClick —— 键盘能用",
+    /<th[\s\S]{0,120}?<button[\s\S]{0,120}?type="button"[\s\S]{0,200}?onClick=\{\(\) => onSort\(nextStudentSort\(sort, field\)\)\}/.test(
+      studentsPageSortCode));
+
+  /* ── ⑮ 页面源码：调的是那个纯模块，先筛后排，且不持久化 ───────────────── */
+  ok("页面的排序结果来自纯模块的 `sortStudents`（不是自己在 JSX 里排）",
+    studentsPageSortCode.includes("sortStudents(visible, sort, catalog)") &&
+      /from "@\/lib\/students\/student-sort"/.test(studentsPageSortCode));
+  ok("排的是**筛完之后那一批**（`visible`）：搜索框筛出来的结果不会被排序弄丢",
+    studentsPageSortCode.includes("sortStudents(visible,") &&
+      studentsPageSortCode.includes("students.filter(") &&
+      studentsPageSortCode.includes("setKeyword"));
+  ok("排序是**一次纯推导**（`useMemo` 里 `sortStudents(visible, sort, catalog)`，依赖就这三样）—— 它不改数据、也不写回服务层",
+    studentsPageSortCode.includes(
+      "const rows = useMemo(() => sortStudents(visible, sort, catalog), [visible, sort, catalog]);",
+    ));
+  ok("页面里**没有第二个比较器**：不建 `Intl.Collator`、不就地 sort 列表（`students.sort(` / `visible.sort(` 都不许有）",
+    !studentsPageSortCode.includes("Intl.Collator") &&
+      !/\b(students|visible|rows)\.sort\(/.test(studentsPageSortCode));
+  ok("初始状态是 `null`（＝没排序）：进页面看到的仍然是列表**本来的顺序**，与加这个功能之前逐条一致",
+    studentsPageSortCode.includes("useState<StudentSort>(null)"));
+  ok("**不持久化**：页面里没有把排序写进 localStorage / 会话里（排序是「看的方式」、不是数据，刷新回默认顺序）",
+    !studentsPageSortCode.includes("localStorage") &&
+      !studentsPageSortCode.includes("sessionStorage"));
+  ok("纯模块自己也不碰存储 / DOM / 网络（因此它能在 Node 里直接测，也写不出数据）",
+    !/localStorage|sessionStorage|window\.|document\.|fetch\(/.test(sortModuleCode));
+
+  /* ── ⑯ 全仓库只有一处建比较器（防止后来的人再写一套）──────────────────── */
+  {
+    const SCAN_ROOTS = ["app", "components", "lib"];
+    const collatorFiles = SCAN_ROOTS.flatMap((dir) => {
+      const dirUrl = new URL(`../${dir}/`, import.meta.url);
+      return (readdirSync(dirUrl, { recursive: true }) as string[])
+        .map((entry) => entry.replaceAll("\\", "/"))
+        .filter((entry) => /\.(ts|tsx)$/.test(entry) && !/(^|\/)(node_modules|\.next|out)\//.test(entry))
+        // 去注释再查（与本节其它判据同一条纪律：注释里那句"不许自己建比较器"不算代码）
+        .filter((entry) => stripSortComments(readFileSync(new URL(entry, dirUrl), "utf8")).includes("Intl.Collator"))
+        .map((entry) => `${dir}/${entry}`);
+    }).sort();
+    eq("全仓库只有纯模块那一处建比较器（`Intl.Collator`）—— 页面不许再起一套",
+      collatorFiles, ["lib/students/student-sort.ts"]);
+  }
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);

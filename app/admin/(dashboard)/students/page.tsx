@@ -13,11 +13,27 @@ import { StudentDetail } from "@/components/admin/StudentDetail";
 import { Button } from "@/components/ui/Button";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { api, type Catalog, type Lesson, type Student } from "@/lib/backend/api";
-import { remainingTotal } from "@/lib/backend/enrollment";
+// `subjectsSummary` 是报读科目的**唯一**显示口径（列表这一格与排序共用它）
+import { remainingTotal, subjectsSummary } from "@/lib/backend/enrollment";
 import { FOLLOWUP_RULES } from "@/lib/backend/followup";
 import { LoadFailure } from "@/components/admin/LoadFailure";
 // 教材的唯一显示口径（`学科·模块名`，v32）
 import { textbookSummary } from "@/lib/backend/textbooks";
+/*
+ * 学生列表的「按字段升降序排序」（v52）：比较规则**只有那一个纯模块里那一份实现**，
+ * 这一页只调用它 —— 页面里不写 `sort((a, b) => …)`、也不自己建 `Intl.Collator`
+ * （散在 JSX 里的排序规则没法靠人眼验：拼音序、`学生2` 在 `学生10` 前、空值恒在最后、
+ * 并列保持默认顺序，这几条"排对了"与"排错了"在屏幕上一模一样）。
+ */
+import {
+  nextStudentSort,
+  sortStudents,
+  studentSortAriaValue,
+  studentSortIndicator,
+  studentSortLabel,
+  type StudentSort,
+  type StudentSortField,
+} from "@/lib/students/student-sort";
 
 /**
  * **教材未填**的待补小标（v32）：虚线边框 + 灰底 + 更浅的字色。
@@ -72,6 +88,26 @@ export default function AdminStudentsPage() {
    */
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [keyword, setKeyword] = useState("");
+  /**
+   * 列表的排序（v52）：**当前这一屏的"看法"，不是数据**。
+   *
+   * ## 为什么不持久化（机构正在用这套系统，这一条是有意的）
+   *
+   * 排序**不进数据库、也不进 localStorage**：刷新、或者从别的页面回到学生列表，
+   * 顺序就回到**机构自己的登记顺序**（`students.list()` 给的那一份）。
+   * 理由与「暂未开放往后排」同一条：**看的方式**不该变成数据。
+   * 真存下来的话会出现三种说不清的场面 ——
+   *   ① 两个人看同一份名单、顺序不同，对不上话（"第三行那个学生"是谁说不准）；
+   *   ② 机构某次按"剩余课时"排了一下，之后**每次**打开列表最上面都是课时最少的几个人，
+   *      而"默认顺序"再也没有出现过；
+   *   ③ 排序（一个纯显示动作）会在导出 / 备份里留下一条谁也想不到的状态。
+   *
+   * 代价是"每次进来都要点一下"——接受：机构看的是"这一屏里谁课时最少"，
+   * 而不是"永远按那个顺序看名单"。
+   *
+   * `null` ＝ 没排序（＝默认顺序，与没有这个功能时**逐条一致**）。
+   */
+  const [sort, setSort] = useState<StudentSort>(null);
   const [loading, setLoading] = useState(true);
   /**
    * 读不出来时的原因（审计抓到的那条：这里原先没有 try/catch ——
@@ -179,6 +215,17 @@ export default function AdminStudentsPage() {
         .includes(text),
     );
   }, [keyword, students]);
+
+  /**
+   * 表里**真正渲染**的那一批（v52）：**先筛后排** —— 排序作用在当前筛出来的这一批上，
+   * 因此筛出来的结果一个都不会少、也不会多（排序不改条数，只改顺序）。
+   *
+   * 分开写 `visible`（筛选，给计数用）与 `rows`（渲染用）是刻意的：
+   * 上面那句「N / M 人」读的就是 `visible`，与排序无关 —— 它要是跟着排序重算，
+   * 以后很难看清"计数到底数的是筛完的还是排完的"。
+   * 排序**不改任何学生对象**（`sortStudents` 返回新数组、元素还是原来那些对象）。
+   */
+  const rows = useMemo(() => sortStudents(visible, sort, catalog), [visible, sort, catalog]);
 
   /** 每个学生排了几节课（用于列表里一眼看出有没有排课）。 */
   const lessonCountByStudent = useMemo(() => {
@@ -340,33 +387,49 @@ export default function AdminStudentsPage() {
         </div>
       </div>
 
+      {/*
+        排序的发现性提示（v52）：机构原话「在学生列表里每个字段都加一个可以按升降排序的
+        功能」—— 表头做成了按钮，但**按钮长得像一段文字**，不点一下看不出来。
+        因此这里用一句话把"能点"和"三态"都说出来，省得机构去猜（尤其"再点一次取消"这一档，
+        猜不到的话点完降序就只能刷新页面）。
+      */}
+      <p className="mt-4 text-xs text-ink-500">
+        点表头可以排序：升序 ▲ → 降序 ▼ → 再点一次取消（回到原来的顺序）。
+      </p>
+
       {/* 列表 */}
-      <div className="mt-4 overflow-x-auto rounded-lg border border-ink-200 bg-white">
+      <div className="mt-2 overflow-x-auto rounded-lg border border-ink-200 bg-white">
         {/*
           列宽：加「教材」（v32）与「来源」（v33）之后是**九列**。
           `min-w` 跟着从 720px 提到 880px —— 不提的话，窄屏上那九列会被浏览器挤到
           一格只放两三个字（姓名列折成两行、"初中数学、初中英语"每行一个科目），
           读起来比左右滚动难受得多。外面那层 `overflow-x-auto` 本来就在，
           因此宽屏不受影响、窄屏左右滚动。
+
+          表头（v52）：**八个字段列**各是一个可点的排序按钮（`SortableTh`），
+          最右边那列「操作」是编辑 / 删除两个按钮、**不是字段**，因此仍是普通 `<th>`：
+          "按操作排序"没有含义（点它排出来的是什么，谁也说不清）。
+          表头文案与排序键都取自 `lib/students/student-sort.ts` 的那一份列清单
+          （`studentSortLabel`），页面里不再抄一遍字段名。
         */}
         <table className="w-full min-w-[880px] border-collapse text-sm">
           <thead>
             <tr className="border-b border-ink-100 text-left text-xs text-ink-500">
-              <th className="px-4 py-2.5 font-medium">姓名</th>
-              <th className="px-4 py-2.5 font-medium">年级</th>
-              <th className="px-4 py-2.5 font-medium">报读科目</th>
+              <SortableTh field="name" sort={sort} onSort={setSort} />
+              <SortableTh field="grade" sort={sort} onSort={setSort} />
+              <SortableTh field="subjects" sort={sort} onSort={setSort} />
               {/* 现阶段使用的教材（v32）：多本时按 `学科·模块名` 列出来，没填挂待补灰标 */}
-              <th className="px-4 py-2.5 font-medium">教材</th>
+              <SortableTh field="textbooks" sort={sort} onSort={setSort} />
               {/* 来源（v33，**获客来源**）：没填挂待补灰标 */}
-              <th className="px-4 py-2.5 font-medium">来源</th>
-              <th className="px-4 py-2.5 font-medium">剩余课时</th>
-              <th className="px-4 py-2.5 font-medium">状态</th>
-              <th className="px-4 py-2.5 font-medium">家长</th>
+              <SortableTh field="source" sort={sort} onSort={setSort} />
+              <SortableTh field="remaining" sort={sort} onSort={setSort} />
+              <SortableTh field="status" sort={sort} onSort={setSort} />
+              <SortableTh field="guardian" sort={sort} onSort={setSort} />
               <th className="px-4 py-2.5 font-medium">操作</th>
             </tr>
           </thead>
           <tbody>
-            {visible.map((student) => (
+            {rows.map((student) => (
               <tr key={student.id} className="border-b border-ink-50 last:border-0">
                 <td className="px-4 py-2.5">
                   <button
@@ -382,7 +445,13 @@ export default function AdminStudentsPage() {
                 </td>
                 <td className="px-4 py-2.5 text-ink-700">{student.grade}</td>
                 <td className="px-4 py-2.5 text-ink-600">
-                  {student.subjects.join("、") || "—"}
+                  {/*
+                    报读科目：显示口径走 `subjectsSummary`（**唯一一处**，v52 提出来的）——
+                    这一格与"按这一列排序"用的是同一个函数，因此**排出来的顺序与看到的对得上**
+                    （两处各写一遍 `join("、") || "—"` 的话，哪天显示改成别的分隔符，
+                    排序还按老写法比，屏幕上完全看不出来）。
+                  */}
+                  {subjectsSummary(student.subjects)}
                 </td>
                 <td className="px-4 py-2.5">
                   {/*
@@ -529,6 +598,64 @@ export default function AdminStudentsPage() {
         />
       )}
     </>
+  );
+}
+
+/**
+ * 一个**可排序的表头**（v52，学生列表的字段列专用）。
+ *
+ * ## 为什么是"`<th>` 里放一个 `<button>`"
+ *
+ * 机构原话：「**在学生列表里每个字段都加一个可以按升降排序的功能**」。
+ * 做成**真按钮**而不是给 `<th>` 挂 `onClick`：键盘（Tab 聚焦 + Enter / 空格触发）、
+ * 屏幕阅读器（读成"按钮"而不是"一段文字"）都是白拿的 —— 挂 `onClick` 的 `<div>`/`<th>`
+ * 两条都没有，而机构里就有人只用键盘。
+ *
+ * ## 三样"看得见"的反馈（都是机构口径要求的那几条）
+ *
+ *   1. **当前列的箭头** ▲ / ▼：文案与方向都从纯模块拿（`studentSortIndicator`），
+ *      未排序列**不显示箭头**（免得每个表头都挂个记号，反而看不出当前排的是哪一列）；
+ *   2. **`aria-sort`**：挂在 `<th>` 上，当前列 `ascending` / `descending`，
+ *      **没排序的列不渲染这个属性**（`studentSortAriaValue` 返回 `undefined`）——
+ *      读屏软件据此说"这一列没排序"，而不是"这一列不支持排序"；
+ *   3. `title`：鼠标停在上面时把三态说一遍（"点一下升序、再点降序、第三次取消"）。
+ *
+ * 点下去只改**这一屏的排序状态**（`onSort` 给的是 `nextStudentSort` 的结果）——
+ * 不写数据库、不写 localStorage，因此点错了也没有后果，再点一次就回到默认顺序。
+ */
+function SortableTh({
+  field,
+  sort,
+  onSort,
+}: {
+  field: StudentSortField;
+  /** 当前的排序状态（`null` ＝ 没排序）。 */
+  sort: StudentSort;
+  /** 换一个排序状态（页面把它放进 state，见上面 `sort` 那一处注释）。 */
+  onSort: (next: StudentSort) => void;
+}) {
+  const indicator = studentSortIndicator(sort, field);
+  return (
+    <th scope="col" aria-sort={studentSortAriaValue(sort, field)} className="px-4 py-2.5 font-medium">
+      <button
+        type="button"
+        onClick={() => onSort(nextStudentSort(sort, field))}
+        title="点一下升序、再点降序、第三次取消"
+        /*
+         * 视觉上仍像一段表头文字（不能做成大按钮：九列各一个大按钮会把表头变成一排控件），
+         * 因此"能点"靠三样表达：hover 变深、聚焦时描一圈、与表头同一档字号。
+         */
+        className="inline-flex items-center gap-1 rounded-sm text-left transition-colors hover:text-ink-900 focus-visible:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-100"
+      >
+        {studentSortLabel(field)}
+        {/* 箭头只是"哪一列排着、朝哪个方向"的记号，方向本身已经由 `aria-sort` 说了 */}
+        {indicator !== "" && (
+          <span aria-hidden="true" className="text-brand-700">
+            {indicator}
+          </span>
+        )}
+      </button>
+    </th>
   );
 }
 

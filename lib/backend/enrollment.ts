@@ -25,6 +25,24 @@ export function remainingTotal(enrollments: Enrollment[]): number {
   return activeEnrollments(enrollments).reduce((sum, item) => sum + remainingOf(item), 0);
 }
 
+/**
+ * **报读科目的显示口径**（唯一一处）：`初中数学、初中物理`；一门都没报时给「—」。
+ *
+ * 为什么把这一句从页面里提出来（2026-09，给学生列表加排序那一次）：
+ * 学生列表要能**按这一列显示出来的那一串**排序（机构：「在学生列表里每个字段都加一个
+ * 可以按升降排序的功能」），而"排出来的顺序"必须与"屏幕上看到的顺序"对得上。
+ * 页面与排序模块各写一遍 `join("、") || "—"` 的话，哪天显示改成用「/」分隔、
+ * 排序却还按「、」比 —— 屏幕上完全看不出来。因此显示与排序**共用这一个函数**
+ * （与教材那一列走 `textbookSummary` 是同一个做法）。
+ *
+ * 空列表给「—」而不是空串是**原来的写法**（一字未改）：列表上一个空白单元格会被读成
+ * "这一页不显示科目"，而「—」读成"还没报课"。
+ */
+export function subjectsSummary(subjects: readonly string[]): string {
+  const text = subjects.join("、");
+  return text === "" ? "—" : text;
+}
+
 /** 按科目汇总剩余课时，例如 { 初中数学: 8, 初中物理: 3 }。 */
 /**
  * 一个学生的**课时余额**：合计 + 最少的那一门。
