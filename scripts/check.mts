@@ -9652,12 +9652,12 @@ console.log("\n=== 30. 课程类型：四张维度表（v23，v26 去掉「交�
    * 三本教材时改成**钉真实值**：这一条断言的题目就是"种子规模就是机构清单那一份"，
    * 而"多了几条 / 少了几条"恰恰是这一节最该守住的东西 —— 宽口子对"漏掉 20 条"一声不吭。
    * 数字要动只有一种情况：**种子真的变了**（机构加了学科 / 模块），
-   * 那时这里跟着改，而且改的人必须说得出为什么（E20 就是一次：100 → 103）。
+   * 那时这里跟着改，而且改的人必须说得出为什么（E20 与它的「续」各是一次：100 → 103 → 106）。
    */
   eq(`种子规模就是机构清单那一份（${catalogSummary(seedCatalog)}）`,
     [seedCatalog.stages.length, seedCatalog.subjects.length, seedCatalog.modules.length,
       seedCatalog.formats.length],
-    [5, 43, 103, 5]);
+    [5, 43, 106, 5]);
   const duplicatesOf = (ids: string[]): string[] => ids.filter((id, index) => ids.indexOf(id) !== index);
   eq("四张表的 id 都不重复",
     [duplicatesOf(seedCatalog.stages.map((item) => item.id)).length,
@@ -9689,28 +9689,40 @@ console.log("\n=== 30. 课程类型：四张维度表（v23，v26 去掉「交�
   eq("语文里「客观题」只有一行（初中与高中并到这一行上）",
     [chineseModules.filter((item) => item.name === "客观题").length, objective?.kind, stagesOf(objective?.stageIds ?? [])],
     [1, "能力点", ["初中", "高中"]]);
+  /*
+   * ⚠️ 判据是**按学段**筛，不是"这一科所有教材进度"：E20 续给语文的初中补了三本之后，
+   * 语文的教材进度一共 9 册（小学 6 + 初中 3）。这一条问的是"小学那一段是教材进度吗"，
+   * 因此必须带上学段 —— 不带的话，加初中那三本会让它变成假红（报的不是 bug，是判据写宽了）。
+   */
   eq("小学语文的模块是教材进度（一年级…六年级）",
-    chineseModules.filter((item) => item.kind === "教材进度").map((item) => item.name),
+    chineseModules
+      .filter((item) => item.kind === "教材进度" && item.stageIds.includes(catalogId("st", "小学")))
+      .map((item) => item.name),
     ["一年级", "二年级", "三年级", "四年级", "五年级", "六年级"]);
   ok("「听力」在两个学科里各有一条（模块不跨学科复用，这不算重名）",
     new Set(seedCatalog.modules.filter((item) => item.name === "听力").map((item) => item.subjectId)).size >= 2);
 
   /*
-   * ── ②.5 初中英语的「教材进度」（E20）─────────────────────────────────────
+   * ── ②.5 初中英语与初中语文的「教材进度」（E20 + E20 续）──────────────────
    *
-   * 机构原话：「**现阶段教材里面英语缺少了七年级教材、八年级教材、九年级教材**」。
-   * 缺口的形状很具体：初中数学 / 科学 / 社会都有那三本，**只有英语没有** ——
-   * 于是学生在「现阶段使用的教材」里选不到「英语·七年级教材」。
+   * 机构原话（**两次**，中间隔了一份清单）：
+   *   · 「**现阶段教材里面英语缺少了七年级教材、八年级教材、九年级教材**」；
+   *   · 他看到那份"哪些学科没有教材进度"的清单之后：「**语文也一起补上**」。
+   *
+   * 缺口的形状一模一样：初中数学 / 科学 / 社会都有那三本，**只有英语与语文没有** ——
+   * 于是学生在「现阶段使用的教材」里选不到「英语·七年级教材」「语文·七年级教材」。
    *
    * 这一组守四件事（下面 §51 再守"这一层模块 ↔ 学生教材候选"那后半程）：
-   *   ① 英语下面**同时**有那三本教材进度与原有的三个能力点（kind 各归各位）；
+   *   ① 这两科下面**同时**有那三本教材进度与原有的能力点（kind 各归各位，一个不少）；
    *   ② 数学 / 科学 / 社会那三本**没被动过**（也没被顺手加上能力点）；
-   *   ③ 别的学科一条没多、一条没少（全库 103 = 原 100 + 3）。
+   *   ③ 别的学科一条没多、一条没少（全库 **106** = 原 100 + 英语 3 + 语文 3）。
    *
-   * 判据写成"**英语这一行的完整形状**"，而不是"包含三本"：只判包含的话，
-   * "顺手把能力点也改成教材进度"这类改动照样全绿。
+   * 判据写成"**这一行的完整形状**"，而不是"包含三本"：只判包含的话，
+   * "顺手把能力点也改成教材进度"这类改动照样全绿；两科共用同一条判据函数，
+   * 免得出现"英语对了、语文漏了"（那正是这次两轮之间的真实形状）。
    */
   const junior = catalogId("st", "初中");
+  const primary = catalogId("st", "小学");
   /** 初中那三本教材的名字（种子里的 `GRADES_JUNIOR` 是私有的，自检里照抄一份写法）。 */
   const GRADES_JUNIOR_NAMES = ["七年级教材", "八年级教材", "九年级教材"];
   const modulesOf = (subject: string): CatalogModule[] =>
@@ -9718,25 +9730,53 @@ console.log("\n=== 30. 课程类型：四张维度表（v23，v26 去掉「交�
       .filter((item) => item.subjectId === catalogId("subj", subject))
       .sort((a, b) => a.order - b.order);
   const englishModules = modulesOf("英语");
+  const chineseRow = modulesOf("语文");
   eq("英语这一行的模块与 kind 逐条（教材进度在前、能力点按原样、等级断后）",
     englishModules.map((item) => `${item.name}/${item.kind}`),
     ["三年级/教材进度", "四年级/教材进度", "五年级/教材进度", "六年级/教材进度",
       "七年级教材/教材进度", "八年级教材/教材进度", "九年级教材/教材进度",
       "听力/能力点", "客观题/能力点", "作文/能力点", "CET-4/语言等级", "CET-6/语言等级"]);
-  eq("① 初中那三本挂的是「教材进度」且学段就是初中（与数学 / 科学 / 社会同一套写法）",
+  eq("语文这一行的模块与 kind 逐条（小学 6 册 + 初中 3 本在前、4 个能力点在最后）",
+    chineseRow.map((item) => `${item.name}/${item.kind}`),
+    ["一年级/教材进度", "二年级/教材进度", "三年级/教材进度", "四年级/教材进度",
+      "五年级/教材进度", "六年级/教材进度",
+      "七年级教材/教材进度", "八年级教材/教材进度", "九年级教材/教材进度",
+      "客观题/能力点", "阅读/能力点", "文言文/能力点", "作文/能力点"]);
+
+  /** 某一科里那三本初中教材的形状（两科**共用**一条判据）。 */
+  const juniorTextbookShape = (subject: string): unknown[][] =>
     GRADES_JUNIOR_NAMES.map((name) => {
-      const item = englishModules.find((candidate) => candidate.name === name);
+      const item = modulesOf(subject).find((candidate) => candidate.name === name);
       return [item?.kind, item?.stageIds, item?.id];
-    }),
-    GRADES_JUNIOR_NAMES.map((name) => ["教材进度", [junior], catalogId("mod", `英语·${name}`)]));
-  eq("① 原有的三个能力点一个没少（kind 仍是能力点、学段仍是初中 + 高中）",
-    ["听力", "客观题", "作文"].map((name) => {
-      const item = englishModules.find((candidate) => candidate.name === name);
+    });
+  const juniorTextbookExpected = (subject: string): unknown[][] =>
+    GRADES_JUNIOR_NAMES.map((name) => ["教材进度", [junior], catalogId("mod", `${subject}·${name}`)]);
+  eq("① 英语里那三本挂的是「教材进度」且学段就是初中",
+    juniorTextbookShape("英语"), juniorTextbookExpected("英语"));
+  eq("① 语文里那三本挂的是「教材进度」且学段就是初中（与数学 / 科学 / 社会同一套写法）",
+    juniorTextbookShape("语文"), juniorTextbookExpected("语文"));
+
+  /** 某些能力点的形状（kind + 学段）。 */
+  const abilityShape = (subject: string, names: readonly string[]): unknown[][] =>
+    names.map((name) => {
+      const item = modulesOf(subject).find((candidate) => candidate.name === name);
       return [item?.kind, stagesOf(item?.stageIds ?? [])];
-    }),
+    });
+  eq("① 英语原有的三个能力点一个没少（kind 仍是能力点、学段仍是初中 + 高中）",
+    abilityShape("英语", ["听力", "客观题", "作文"]),
     [["能力点", ["初中", "高中"]], ["能力点", ["初中", "高中"]], ["能力点", ["初中", "高中"]]]);
-  ok("① 英语里没有第二个叫「七年级教材」的模块（id 由「学科·模块名」派生，重了会撞 id）",
-    englishModules.filter((item) => item.name === "七年级教材").length === 1);
+  eq("① 语文原有的四个能力点一个没少（机构只要求加书，能力点一个字没让动）",
+    abilityShape("语文", ["客观题", "阅读", "文言文", "作文"]),
+    [["能力点", ["初中", "高中"]], ["能力点", ["初中", "高中"]],
+      ["能力点", ["初中", "高中"]], ["能力点", ["初中", "高中"]]]);
+  ok("① 英语 / 语文里都没有第二个叫「七年级教材」的模块（id 由「学科·模块名」派生，重了会撞 id）",
+    englishModules.filter((item) => item.name === "七年级教材").length === 1 &&
+    chineseRow.filter((item) => item.name === "七年级教材").length === 1);
+  eq("① 小学那 6 册没被动过（语文的教材进度里，小学那一段仍是那 6 册）",
+    chineseRow
+      .filter((item) => item.kind === "教材进度" && item.stageIds.includes(primary))
+      .map((item) => item.name),
+    ["一年级", "二年级", "三年级", "四年级", "五年级", "六年级"]);
   eq("② 数学 / 科学 / 社会那三本没被动过（还是那三本教材、且这三科里**没有**能力点）",
     ["数学", "科学", "社会"].map((subject) => {
       const mods = modulesOf(subject);
@@ -9750,28 +9790,46 @@ console.log("\n=== 30. 课程类型：四张维度表（v23，v26 去掉「交�
       ];
     }),
     [[true, false, 11], [true, false, 7], [true, false, 3]]);
-  eq("③ 英语 9 → 12 条、全库 100 → 103 条；**别的 42 个学科项目一条没多、一条没少**",
-    [englishModules.length, seedCatalog.modules.length,
-      seedCatalog.subjects.filter((item) => item.name !== "英语")
+  eq("③ 英语 12 条 / 语文 13 条 / 全库 100 → 106 条；**其它 41 个学科项目一条没多、一条没少**",
+    [englishModules.length, chineseRow.length, seedCatalog.modules.length,
+      seedCatalog.subjects.filter((item) => item.name !== "英语" && item.name !== "语文")
         .map((item) => `${item.name}:${String(seedCatalog.modules.filter((m) => m.subjectId === item.id).length)}`)
         .join(" ")],
-    [12, 103,
-      "外语等级考试:0 专业外语:0 不分班型项目:0 语文:10 数学:11 科学:7 小升初预习班:1 社会:3 " +
+    [12, 13, 106,
+      "外语等级考试:0 专业外语:0 不分班型项目:0 数学:11 科学:7 小升初预习班:1 社会:3 " +
       "初升高预习班:1 日语:8 俄语:7 德语:7 法语:7 西班牙语:7 政治:2 历史:2 地理:2 物理:2 化学:2 " +
       "生物:2 技术:2 雅思:0 托福:0 多邻国:0 剑桥英语证书:0 意大利语:4 阿拉伯语:4 商务英语:0 " +
       "体育英语:0 医学英语:0 3D建模与3D打印:0 成人英语口语:0 成人零基础外语:0 出国语言备考:0 " +
       "编程与信息素养:0 网课:0 网课+答疑:0 网课+一对一针对性答疑:0 小学托管:0 初中托管:0 " +
       "学期全日托管:0 假期全日托管:0"]);
-  eq("③ 三本新教材在**全库**里各自的学科数都 +1（七年级教材：数学 / 科学 / 社会 / 小升初预习班 → 再加英语）",
+  eq("③ 三本新教材在**全库**里各自的学科数都 +1（七年级教材：数学 / 科学 / 社会 / 小升初预习班 → 再加英语、语文）",
     GRADES_JUNIOR_NAMES.map((name) =>
       new Set(seedCatalog.modules.filter((item) => item.name === name)
         .map((item) => item.subjectId)).size),
-    [5, 4, 4]);
-  eq("③ 语文（机构**还没提**的同一处缺口）**刻意没动**：仍然只有能力点、没有初中教材进度",
-    [modulesOf("语文").filter((item) => item.kind === "教材进度").length,
-      modulesOf("语文").map((item) => item.name)],
-    [6, ["一年级", "二年级", "三年级", "四年级", "五年级", "六年级",
+    [6, 5, 5]);
+  eq("③ 语文（机构看过清单后要求补上的那一处）**已经补上**：教材进度 6 → 9 条、能力点仍是 4 条",
+    [chineseRow.filter((item) => item.kind === "教材进度").length,
+      chineseRow.filter((item) => item.kind === "能力点").length,
+      chineseRow.map((item) => item.name)],
+    [9, 4, ["一年级", "二年级", "三年级", "四年级", "五年级", "六年级",
+      "七年级教材", "八年级教材", "九年级教材",
       "客观题", "阅读", "文言文", "作文"]]);
+  /*
+   * **高中那一批：机构拍板「不需要分」**（2026-09）。
+   *
+   * 高中语文 / 高中英语只有能力点、没有必修 / 选修教材；日语 / 俄语 / 德语 / 法语 / 西班牙语
+   * （高中那一支）同样只有能力点。这**不是漏挂模块，而是机构的经营口径** ——
+   * 清查时把这份缺口清单拿给他看，他的回答是「**这些不需要分**」（高中按能力点与等级走，
+   * 不按教材分册）。
+   *
+   * 所以这一条从"当时刻意没动（等拍板）"改成了"**机构拍板了：不分**"：
+   * 期望值当然还是 0（口径没变），但**含义变了** —— 它现在拦的是"以后有人看见清单又顺手补上"。
+   * 将来机构改主意要按教材分，这条会红，正好提醒改这里与 E20 的记载。
+   */
+  eq("③ **高中那一批机构拍板「不需要分」**（因此语文 / 英语 / 日语 / 俄语 / 德语 / 法语 / 西班牙语在高中都没有教材进度：不是漏，是口径）",
+    ["语文", "英语", "日语", "俄语", "德语", "法语", "西班牙语"].map((subject) =>
+      modulesOf(subject).filter((item) => item.kind === "教材进度" && item.stageIds.includes(catalogId("st", "高中"))).length),
+    [0, 0, 0, 0, 0, 0, 0]);
 
   // ③ 分组是「学段内的桶」
   const stageIdOf = (name: string): string =>
@@ -14185,11 +14243,13 @@ console.log(
 }
 
 console.log(
-  "\n=== 51. 初中英语补上那三本教材（E20）—— 「课程类型那层模块」↔「学生教材候选」这条链路 ===",
+  "\n=== 51. 初中英语 / 初中语文补上那三本教材（E20 与「E20 续」）—— 「课程类型那层模块」↔「学生教材候选」这条链路 ===",
 );
 
 /*
- * 机构原话：「**现阶段教材里面英语缺少了七年级教材、八年级教材、九年级教材**」。
+ * 机构原话（两次，中间隔了一份清单）：
+ *   · 「**现阶段教材里面英语缺少了七年级教材、八年级教材、九年级教材**」；
+ *   · 他看到那份"哪些学科没有教材进度"的清单之后：「**语文也一起补上**」。
  *
  * ## 为什么单开一节，而不是全塞进 §30 或 §49
  *
@@ -14202,61 +14262,134 @@ console.log(
  * §30 里另有一组断言守种子的形状，两处**不重复**：那边比的是种子函数，
  * 这边比的是**系统正在服务的那个 catalog**（`api.catalog.list()`）与写入闸 / 导入那一列。
  *
- * ## 四件事
+ * ## 四件事（**两科跑同一套判据**，不是各写一遍）
  *
- *   ① 初中英语有那 3 个「教材进度」模块、**且原有的能力点一个没少**；
+ *   ① 英语 / 语文各有那 3 个「教材进度」模块、**且原有的能力点一个没少**；
  *   ② 数学 / 科学 / 社会那三本**没被动过**（这三科里也没有被顺手塞进能力点）；
  *   ③ 别的学科与模块**逐项未变**（对着种子逐字节比，不是只比条数）；
- *   ④ 这条链路真的通：`textbookLabel` 显示成 `英语·七年级教材`、`resolveTextbookRef` 认这个名字、
+ *   ④ 这条链路真的通：`textbookLabel` 显示成 `学科·七年级教材`、`resolveTextbookRef` 认这个名字、
  *      服务层收下这个 id、**学生真的存得进也读得回**、批量导入那一列也认；
  *      而且顺序是**教材进度在前**（"先看到书、再看到能力点"）。
+ *
+ * 判据写成"两科共用一张表 + 一个循环"是刻意的：这两轮之间真实出现过的形状正是
+ * "英语补好了、语文漏着"—— 各写一遍的代码看不出来，同一套判据跑两遍就看得出来了。
  */
 {
-  const englishMemory = createMemoryStore();
-  __useStoreForTesting(englishMemory);
+  const textbookMemory = createMemoryStore();
+  __useStoreForTesting(textbookMemory);
   await api.importDatabase(serializeDatabase(seedDb));
 
   /** 系统正在服务的这一份（新建的库按种子灌进去，与机构那份同一套口径）。 */
   const liveCatalog = await api.catalog.list();
-  const seatSubject = liveCatalog.subjects.find((item) => item.name === "英语");
-  ok("找得到「英语」这个学科（课程类型里英语只有一行，横跨四个学段）",
-    seatSubject !== undefined);
-  const subjectId = seatSubject?.id ?? "";
-  const GRADE7 = catalogId("mod", "英语·七年级教材");
-  const englishRow = liveCatalog.modules
-    .filter((item) => item.subjectId === subjectId)
-    .sort((a, b) => a.order - b.order);
   const stageNames = (ids: readonly string[]): string[] => stageNamesOf(liveCatalog, ids);
   const juniorStage = catalogId("st", "初中");
+  const rowOf = (subject: string) => {
+    const id = liveCatalog.subjects.find((item) => item.name === subject)?.id ?? "";
+    return {
+      id,
+      modules: liveCatalog.modules.filter((item) => item.subjectId === id).sort((a, b) => a.order - b.order),
+    };
+  };
 
-  /* ── ① 那三本 + 原有的能力点 ─────────────────────────────────────────── */
-  eq("① 英语下面有三本「教材进度」、学段是初中、id 就是「英语·模块名」派生的那一个",
-    ["七年级教材", "八年级教材", "九年级教材"].map((name) => {
-      const found = englishRow.find((item) => item.name === name);
-      return [found?.kind, stageNames(found?.stageIds ?? []), found?.id];
-    }),
-    [["教材进度", ["初中"], GRADE7],
-      ["教材进度", ["初中"], catalogId("mod", "英语·八年级教材")],
-      ["教材进度", ["初中"], catalogId("mod", "英语·九年级教材")]]);
-  eq("① 原有的三个能力点一个没少（kind 仍是能力点、学段仍是初中 + 高中）",
-    ["听力", "客观题", "作文"].map((name) => {
-      const found = englishRow.find((item) => item.name === name);
-      return [found?.kind, stageNames(found?.stageIds ?? [])];
-    }),
-    [["能力点", ["初中", "高中"]], ["能力点", ["初中", "高中"]], ["能力点", ["初中", "高中"]]]);
-  eq("① 顺序：教材进度在三本都排在能力点**前面**（「现阶段使用的教材」里先看到书）",
-    englishRow.filter((item) => item.kind === "教材进度").map((item) => item.name),
-    ["三年级", "四年级", "五年级", "六年级", "七年级教材", "八年级教材", "九年级教材"]);
-  eq("① 英语一行 12 条（原来 9 条 + 3 本），全库 103 条",
-    [englishRow.length, liveCatalog.modules.length], [12, 103]);
+  /**
+   * 这两轮补的两行。`primaryTextbooks` 是**原有**的教材进度（小学那一段），
+   * `abilities` 是原有能力点（必须一个不少），`total` 是这一行现在应有的模块条数。
+   */
+  const ROWS: Array<{ subject: string; primaryTextbooks: string[]; abilities: string[]; total: number }> = [
+    { subject: "英语", primaryTextbooks: ["三年级", "四年级", "五年级", "六年级"],
+      abilities: ["听力", "客观题", "作文"], total: 12 },
+    { subject: "语文", primaryTextbooks: ["一年级", "二年级", "三年级", "四年级", "五年级", "六年级"],
+      abilities: ["客观题", "阅读", "文言文", "作文"], total: 13 },
+  ];
+  const JUNIOR3 = ["七年级教材", "八年级教材", "九年级教材"];
+
+  /* ── ① / ④ 两科逐条：那一行的形状 + 学生教材候选那条链路 ─────────────── */
+  for (const spec of ROWS) {
+    const { id: subjectId, modules: row } = rowOf(spec.subject);
+    ok(`找得到「${spec.subject}」这个学科（课程类型里只有一行，学段挂在同一行上）`,
+      subjectId !== "" && liveCatalog.subjects.some((item) => item.id === subjectId));
+    const GRADE7 = catalogId("mod", `${spec.subject}·七年级教材`);
+
+    eq(`① ${spec.subject}：那三本挂的是「教材进度」、学段就是初中、id 是「${spec.subject}·模块名」派生的`,
+      JUNIOR3.map((name) => {
+        const found = row.find((item) => item.name === name);
+        return [found?.kind, stageNames(found?.stageIds ?? []), found?.id];
+      }),
+      JUNIOR3.map((name) => ["教材进度", ["初中"], catalogId("mod", `${spec.subject}·${name}`)]));
+    eq(`① ${spec.subject}原有的能力点一个没少（kind 仍是能力点、学段仍是初中 + 高中）`,
+      spec.abilities.map((name) => {
+        const found = row.find((item) => item.name === name);
+        return [found?.kind, stageNames(found?.stageIds ?? [])];
+      }),
+      spec.abilities.map(() => ["能力点", ["初中", "高中"]]));
+    eq(`① ${spec.subject}的顺序：教材进度（含原有小学那一段）都排在能力点**前面**`,
+      row.filter((item) => item.kind === "教材进度").map((item) => item.name),
+      [...spec.primaryTextbooks, ...JUNIOR3]);
+    ok(`① ${spec.subject}里没有第二个叫「七年级教材」的模块（id 由「学科·模块名」派生，重了会撞 id）`,
+      row.filter((item) => item.name === "七年级教材").length === 1);
+    eq(`① ${spec.subject}一行 ${String(spec.total)} 条（原有 ${String(spec.primaryTextbooks.length + spec.abilities.length)} 条 + 3 本新书）`,
+      row.length, spec.total);
+
+    /* ④ 候选 / 显示 / 解析 / 写入闸 —— 与 §49 的是同一套真口径 */
+    const options = row.map((item) => ({ value: item.id, label: textbookLabel(liveCatalog, item.id) }));
+    ok(`④ ${spec.subject}的候选里能查到「${spec.subject}·七年级教材」，值是模块 id（不是名字）`,
+      options.some((option) => option.label === `${spec.subject}·七年级教材` && option.value === GRADE7),
+      JSON.stringify(options.map((option) => option.label)));
+    eq(`④ \`textbookLabel\` 给的正是 \`学科·模块名\``,
+      textbookLabel(liveCatalog, GRADE7), `${spec.subject}·七年级教材`);
+    eq(`④ \`resolveTextbookRef\` 认「${spec.subject}·七年级教材」这个写法（批量导入那一列走它）`,
+      resolveTextbookRef(liveCatalog, `${spec.subject}·七年级教材`), { ok: true, id: GRADE7 });
+    eq(`④ \`resolveTextbookRef\` 也认 id 本身（导出里拿回来的就是它）`,
+      resolveTextbookRef(liveCatalog, GRADE7), { ok: true, id: GRADE7 });
+    eq(`④ 服务层写入闸收下这个 id（空数组＝通过）`,
+      textbookIssues(liveCatalog, [GRADE7]), []);
+
+    /* 真的建一个学生：新建 → 读回 → 显示 */
+    const student = await api.students.create({
+      name: `自检·${spec.subject}七年级教材`, grade: "初一", guardian: "", status: "在读", note: "",
+      textbooks: [GRADE7], profile: {}, enrollments: [],
+    });
+    eq(`④ 新建学生时勾这本教材**存得进去**（服务层收下模块 id）`, student.textbooks, [GRADE7]);
+    eq(`④ 读回来还是这个 id（不是名字、也没被丢掉）`,
+      (await api.students.get(student.id))?.textbooks, [GRADE7]);
+    eq(`④ 列表 / 详情上显示成 \`${spec.subject}·七年级教材\`（带学科，认得出是哪一科的书）`,
+      textbookSummary(liveCatalog, student.textbooks), `${spec.subject}·七年级教材`);
+
+    {
+      /*
+       * 反方向也要有判据：**课程类型里没有的模块照样被拒**。
+       * 否则"加了三本"这件事可以靠"把闸门放开"来蒙过 —— 那样任何字符串都存得进去。
+       */
+      let refused = "";
+      try {
+        await api.students.create({
+          name: `自检·不该建出来·${spec.subject}`, grade: "初一", guardian: "", status: "在读", note: "",
+          textbooks: [`mod_${spec.subject}·一十年级教材`], profile: {}, enrollments: [],
+        });
+      } catch (error) {
+        refused = error instanceof Error ? error.message : String(error);
+      }
+      ok(`④ ${spec.subject}：课程类型里没有的教材仍然被拒（不是把闸门放开了）`,
+        refused.includes("课程类型") && refused.includes(`mod_${spec.subject}·一十年级教材`), refused);
+    }
+
+    /* 批量导入那一列也认这本（机构最常做的事：导出来改完再导回去） */
+    const csv = [
+      "姓名,年级,教材",
+      `自检·${spec.subject}教材导入,初一,${spec.subject}·七年级教材`,
+    ].join("\n") + "\n";
+    const parsed = parseImport("students", csv, "csv", liveCatalog);
+    eq(`④ 批量导入的「教材」列写「${spec.subject}·七年级教材」能解析成模块 id`,
+      parsed.records.map((record) => record.textbooks), [[GRADE7]]);
+    eq(`④ 这一行没有报错（解析器不认为它有问题）`, parsed.problems, []);
+  }
 
   /* ── ② 数学 / 科学 / 社会那三本没被动过 ─────────────────────────────── */
   eq("② 数学 / 科学 / 社会里那三本仍然是「教材进度 + 初中」，而且这三科里**没有**能力点",
     ["数学", "科学", "社会"].map((subject) => {
-      const id = liveCatalog.subjects.find((item) => item.name === subject)?.id ?? "";
-      const mods = liveCatalog.modules.filter((item) => item.subjectId === id);
+      const mods = rowOf(subject).modules;
       return [
-        ["七年级教材", "八年级教材", "九年级教材"].every((name) => {
+        JUNIOR3.every((name) => {
           const found = mods.find((item) => item.name === name);
           return found?.kind === "教材进度" && stageNames(found.stageIds).join() === "初中"
             && found.stageIds.join() === juniorStage;
@@ -14270,85 +14403,30 @@ console.log(
   /*
    * 判据刻意是"逐字节相同"而不是"条数对得上"：条数相同的两种改法（换一个模块名、
    * 挪一个学段）在条数上完全看不出来，而那两件事都会让学生勾到一本不存在的教材。
+   * 这两轮各动了一行，因此这里把**两行都剥掉**再比 —— 剩下的（42 → 41 个学科项目、
+   * 学段、班型、seededAt）必须一个字节都没动。
    */
-  const stripEnglish = (catalog: typeof liveCatalog): string =>
-    JSON.stringify({
-      ...catalog,
-      modules: catalog.modules.filter((item) => item.subjectId !== subjectId),
-    });
-  eq("③ 除了英语这一行，学段 / 学科 / 别的全部模块 / 班型 / seededAt **逐字节相同**（对着种子比）",
-    stripEnglish(liveCatalog) === stripEnglish(catalogFromSeed(liveCatalog.seededAt)),
+  const touched = new Set([rowOf("英语").id, rowOf("语文").id]);
+  const stripTouched = (catalog: typeof liveCatalog): string =>
+    JSON.stringify({ ...catalog, modules: catalog.modules.filter((item) => !touched.has(item.subjectId)) });
+  eq("③ 除了英语 / 语文这两行，学段 / 学科 / 别的全部模块 / 班型 / seededAt **逐字节相同**（对着种子比）",
+    stripTouched(liveCatalog) === stripTouched(catalogFromSeed(liveCatalog.seededAt)),
     true);
-  eq("③ 英语 12 条之外，别的学科合计还是 91 条（100 − 9，一条没动）",
-    liveCatalog.modules.length - englishRow.length, 91);
+  eq("③ 英语 12 条 + 语文 13 条之外，别的学科合计还是 81 条（100 − 9 − 10，一条没动）",
+    liveCatalog.modules.length - rowOf("英语").modules.length - rowOf("语文").modules.length, 81);
+  eq("③ 全库 106 条内容模块（100 → 103 → 106，两轮各 +3）",
+    liveCatalog.modules.length, 106);
 
-  /* ── ④ 学生教材候选：这条链路真的通 ─────────────────────────────────── */
+  /* ── ④ 只写模块名仍然要带学科（加了语文没把重名判据弄坏）────────────── */
   /*
-   * 「学生教材候选」＝ `StudentForm.tsx` 那一份：全部模块、按学科分组、
-   * 显示名走 `textbookLabel`、值是模块 id。这里**照着同一套形状重建一遍**
-   * （自检里不 import 组件，但口径必须一致 —— 因此下面还钉了源码那一处）。
-   */
-  const englishOptions = liveCatalog.modules
-    .filter((item) => item.subjectId === subjectId)
-    .sort((a, b) => a.order - b.order)
-    .map((item) => ({ value: item.id, label: textbookLabel(liveCatalog, item.id) }));
-  ok("④ 候选里能查到「英语·七年级教材」，值是模块 id（不是名字）",
-    englishOptions.some((option) => option.label === "英语·七年级教材" && option.value === GRADE7),
-    JSON.stringify(englishOptions.map((option) => option.label)));
-  eq("④ `textbookLabel` 给的正是 `学科·模块名`（显示口径只有一处）",
-    textbookLabel(liveCatalog, GRADE7), "英语·七年级教材");
-  eq("④ `resolveTextbookRef` 认「英语·七年级教材」这个写法（批量导入那一列走它）",
-    resolveTextbookRef(liveCatalog, "英语·七年级教材"), { ok: true, id: GRADE7 });
-  eq("④ `resolveTextbookRef` 也认 id 本身（导出里拿回来的就是它）",
-    resolveTextbookRef(liveCatalog, GRADE7), { ok: true, id: GRADE7 });
-  eq("④ 服务层写入闸收下这个 id（空数组＝通过）",
-    textbookIssues(liveCatalog, [GRADE7]), []);
-  /*
-   * 「只写模块名」在这一本上仍然是**要带学科**的：`七年级教材` 在数学 / 科学 / 社会 /
-   * 小升初预习班下都有，加上英语就是 5 个 —— 这一条同时守住"加了英语没把重名判据弄坏"。
+   * `七年级教材` 现在在**六个**学科下都有（语文 / 数学 / 英语 / 科学 / 小升初预习班 / 社会）。
    */
   const bareResolution = resolveTextbookRef(liveCatalog, "七年级教材");
-  ok("④ 只写「七年级教材」仍然报「没说清是哪个学科」（现在有 5 个学科下都有，提示里带英语）",
+  ok("④ 只写「七年级教材」仍然报「没说清是哪个学科」（现在 6 个学科下都有，提示里带语文与英语）",
     bareResolution.ok === false && bareResolution.reason.includes("没说清是哪个学科") &&
+      bareResolution.reason.includes("语文·七年级教材") &&
       bareResolution.reason.includes("英语·七年级教材"),
     bareResolution.ok ? "竟然认了" : bareResolution.reason);
-
-  /* 真的建一个学生：新建 → 读回 → 显示 */
-  const grade7Student = await api.students.create({
-    name: "自检·英语七年级教材", grade: "初一", guardian: "", status: "在读", note: "",
-    textbooks: [GRADE7], profile: {}, enrollments: [],
-  });
-  eq("④ 新建学生时勾这本教材**存得进去**（服务层收下模块 id）", grade7Student.textbooks, [GRADE7]);
-  eq("④ 读回来还是这个 id（不是名字、也没被丢掉）",
-    (await api.students.get(grade7Student.id))?.textbooks, [GRADE7]);
-  eq("④ 列表 / 详情上显示成 `英语·七年级教材`（带学科，认得出是哪一科的书）",
-    textbookSummary(liveCatalog, grade7Student.textbooks), "英语·七年级教材");
-  {
-    /*
-     * 反方向也要有判据：**课程类型里没有的模块照样被拒**。
-     * 否则"加了三本"这件事可以靠"把闸门放开"来蒙过 —— 那样任何字符串都存得进去。
-     */
-    let refused = "";
-    try {
-      await api.students.create({
-        name: "自检·不该建出来·英语", grade: "初一", guardian: "", status: "在读", note: "",
-        textbooks: ["mod_英语·一十年级教材"], profile: {}, enrollments: [],
-      });
-    } catch (error) {
-      refused = error instanceof Error ? error.message : String(error);
-    }
-    ok("④ 课程类型里没有的教材仍然被拒（不是把闸门放开了）",
-      refused.includes("课程类型") && refused.includes("mod_英语·一十年级教材"), refused);
-  }
-  /* 批量导入那一列也认这本（机构最常做的事：导出来改完再导回去） */
-  const grade7Csv = [
-    "姓名,年级,教材",
-    "自检·英语教材导入,初一,英语·七年级教材",
-  ].join("\n") + "\n";
-  const parsedGrade7 = parseImport("students", grade7Csv, "csv", liveCatalog);
-  eq("④ 批量导入的「教材」列写「英语·七年级教材」能解析成模块 id",
-    parsedGrade7.records.map((record) => record.textbooks), [[GRADE7]]);
-  eq("④ 这一行没有报错（解析器不认为它有问题）", parsedGrade7.problems, []);
 
   /* 界面那一处：候选仍然是"课程类型那一层全部模块、按学科分组" */
   {
