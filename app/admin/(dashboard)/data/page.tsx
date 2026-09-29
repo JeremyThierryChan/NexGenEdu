@@ -38,6 +38,20 @@ import {
 import { formatDayLabel } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
 import { BACKUP_SLOTS, LOG_LIMIT } from "@/lib/backend/api";
+/*
+ * 「每天自动备份」（服务端机器上那份每天一份的备份文件）的显示口径与确认文案：
+ * 全部来自 `lib/backend/daily-backups.ts`（一处实现）—— 条数摘要、大小、时间、
+ * 以及确认框里那句"这份备份里有什么 / 库里现在有什么"的**对照**。
+ * 页面里不许自己拼这些字，否则改了那边忘了这边，确认框会少掉一半信息而没人发现。
+ */
+import {
+  backupBytesText,
+  backupCountsText,
+  dailyBackupCompareText,
+  dailyBackupTimeText,
+  type DailyBackupEntry,
+  type DailyBackupList,
+} from "@/lib/backend/daily-backups";
 // 教室名的唯一显示口径（「校区·教室名」，v31）
 import { classroomLabel } from "@/lib/backend/classrooms";
 
@@ -82,6 +96,8 @@ export default function AdminDataPage() {
   const [hasBackup, setHasBackup] = useState(false);
   /** 导入前备份的清单（最近的在最前）—— 让人看到"有几份、什么时候的"。 */
   const [backupList, setBackupList] = useState<Array<{ at: string; summary: string }>>([]);
+  /** 「每天自动备份」的清单（服务端机器上的备份文件；null = 还没读出来）。 */
+  const [dailyList, setDailyList] = useState<DailyBackupList | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -89,16 +105,29 @@ export default function AdminDataPage() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
-    const [db, logList, backupExists, slots] = await Promise.all([
+    const [db, logList, backupExists, slots, daily] = await Promise.all([
       api.exportDatabase(),
       api.logs.list(100),
       api.hasBackup(),
       // 备份清单只是为了显示"有几份"；读不到不影响这一页别的功能
       api.backupSlots().catch(() => []),
+      /*
+       * 「每天自动备份」的清单：读不到（例如后端没跑、或这一页在浏览器里独自打开）
+       * 不该让整页崩，因此回一份"读不出来"的空清单 —— 那一块会显示一句说明，
+       * 而不是把这一页和导出 / 导入一起搞坏。
+       */
+      api.dailyBackups.list().catch((cause: unknown) => ({
+        available: false,
+        reason: `读不出备份清单：${cause instanceof Error ? cause.message : String(cause)}`,
+        dir: "",
+        current: null,
+        files: [],
+      })),
     ]);
     setStats(databaseStats(db));
     setHasBackup(backupExists);
     setBackupList(slots);
+    setDailyList(daily);
     setLogs(logList);
   }, []);
 
@@ -245,6 +274,61 @@ export default function AdminDataPage() {
     await load();
   }
 
+  /**
+   * 用「每天自动备份」里的**某一份**把库换回去。
+   *
+   * ## 二次确认里必须同时出现"两份东西有什么"
+   *
+   * 这一条与整库导入那条路是同一条纪律（见上面 `importFile` 的注释）：恢复是
+   * **整库替换**，人点"确定"的时候必须知道自己在换掉什么。所以确认框里同时列出
+   * **这份备份里的条数**与**库里现在的条数**（`dailyBackupCompareText` 一处实现），
+   * 并说清"恢复前系统会先把现在这份另存"。
+   *
+   * ## 恢复完成之后必须告诉用户两件事
+   *
+   *   1. **现在用的是哪一天的数据**（否则他不知道回到了哪个时点）；
+   *   2. **他原来那一份叫什么名字**（否则"还能回去"这句话是空的）——
+   *      再加上清单里马上会多出那一行，两条线索对得上。
+   */
+  async function restoreDaily(entry: DailyBackupEntry) {
+    setError("");
+    setMessage("");
+    /*
+     * `window.confirm` 挡住的是**手滑**（真正的闸在服务端：`confirmed: true`，
+     * 以及"校验不过一个字都不写"）。这里把两份条数摊开，让人对着数字点。
+     */
+    if (
+      !window.confirm(
+        `用这份备份把整个库换回去？\n\n` +
+          dailyBackupCompareText(entry, dailyList?.current ?? null) +
+          `\n恢复前系统会先把「现在的库」另存一份备份（清单里会出现它，名字会在下面告诉你）。\n` +
+          `恢复的是**业务数据**（档案 / 报课 / 课时 / 收款 / 排课）；网站内容要另外发布。\n\n` +
+          `确认恢复这一份？`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    // 服务端要求显式确认：确认框点过了才传 true（见 lib/backend/daily-backups.ts 的说明）
+    const result = await api.dailyBackups.restore(entry.name, { confirmed: true });
+    setBusy(false);
+    if (!result.ok) {
+      setError(`恢复失败：${result.error}`);
+      await load();
+      return;
+    }
+    setMessage(
+      `${result.note}\n` +
+        `恢复前后：${backupCountsText(result.before)} → ${backupCountsText(result.after)}。\n` +
+        `另存的那一份是 ${result.preRestore}（本次是从 ${result.file} 恢复的）—— ` +
+        "它就在下面的清单里，点它的「恢复这一份」就能回到恢复前的状态。\n" +
+        "网站内容（课程正文 / 案例 / 报价文案）要发布的话仍走 `npm run site:export` → 提交推送；" +
+        "账号与口令不在备份里，不用重新配；另外，别人手上开着的后台页面看到的还是恢复前的数据，" +
+        "请让他们刷新页面（或重新登录）再看。",
+    );
+    await load();
+  }
+
 
   return (
     <>
@@ -283,7 +367,7 @@ export default function AdminDataPage() {
       <BulkImport onImported={() => void load()} />
 
       {message !== "" && (
-        <p className="mt-4 rounded-md border border-success-100 bg-success-50 px-3 py-2 text-sm text-success-600">
+        <p className="mt-4 whitespace-pre-line rounded-md border border-success-100 bg-success-50 px-3 py-2 text-sm text-success-600">
           {message}
         </p>
       )}
@@ -360,6 +444,9 @@ export default function AdminDataPage() {
         </p>
       </Panel>
 
+      {/* 每天自动备份：机构问「数据丢了怎么办」时，答案就在这一块 */}
+      <DailyBackupsPanel list={dailyList} busy={busy} onRestore={(entry) => void restoreDaily(entry)} />
+
       {/* 操作日志：谁在什么时候改了什么 */}
       <Panel
         className="mt-4"
@@ -408,6 +495,131 @@ export default function AdminDataPage() {
 
 function describeStats(stats: DatabaseStats): string {
   return `${stats.students} 名学生 / ${stats.lessons} 节排课 / ${stats.transactions} 笔课时流水`;
+}
+
+/**
+ * 「每天自动备份」——机构问"**数据丢了怎么办**"时，答案就在这一块。
+ *
+ * ## 为什么它必须是一个独立面板（而不是并进上面那个「导入」）
+ *
+ * 因为那是**另一套备份**：上面那一块是"导入前的滚动 5 份"（存在数据库里），
+ * 这一块是**服务端机器上每天一份的备份文件**（`server/backups/`，默认留 90 份）。
+ * 只有后者能回答机构真正会问的那句话：**"这周三的数据还在吗"** ——
+ * 之前它只能靠开发在命令行里手工复制文件（步骤写在给开发看的文档里），
+ * 所以"数据丢了怎么办"的答案是"找开发"，那不叫备份。
+ *
+ * ## 界面上必须同时说清的三件事
+ *
+ *   1. **清单**：每份的时间、大小、以及读得出的条数摘要；
+ *   2. **读不出来的那一份要标出来**（不是藏起来）：目录里躺着一份坏备份正是最该知道的事；
+ *   3. **恢复的是什么、不是什么**：恢复的是**业务数据**；`data/site/*.md` 与 `out/`
+ *      不在备份范围内（网站内容要发布仍走 `npm run site:export` + 提交推送）。
+ *      另外恢复**不动账号与口令** —— 恢复完还是用自己的账号登录。
+ */
+function DailyBackupsPanel({
+  list,
+  busy,
+  onRestore,
+}: {
+  list: DailyBackupList | null;
+  busy: boolean;
+  onRestore: (entry: DailyBackupEntry) => void;
+}) {
+  return (
+    <Panel
+      className="mt-4"
+      title="每天自动备份"
+      description="服务端每天自动备一份（保留 90 份）。数据丢了就在这里挑一份恢复回来 —— 恢复前系统会先把「现在的库」另存一份。"
+    >
+      <div className="px-4 py-4">
+        {list === null ? (
+          <p className="text-sm text-ink-400">加载中…</p>
+        ) : !list.available ? (
+          <p className="rounded-md bg-ink-50 px-3 py-2 text-xs leading-relaxed text-ink-600">
+            {list.reason}
+          </p>
+        ) : (
+          <>
+            <p className="mb-3 text-xs leading-relaxed text-ink-500">
+              备份目录：<code className="text-ink-700">{list.dir}</code>
+              {list.current === null ? "" : ` · 库里现在：${backupCountsText(list.current)}`}
+            </p>
+
+            {list.files.length === 0 ? (
+              <p className="text-sm text-ink-500">
+                这个目录里还没有备份。后端启动时会先把「今天那份」补上，之后每小时检查一次
+                （也可以在后端机器上跑 <code>npm run server:backup</code> 立刻备一份）。
+              </p>
+            ) : (
+              <div className="max-h-80 overflow-y-auto rounded-md border border-ink-200">
+                <table className="w-full min-w-[720px] text-left text-xs">
+                  <thead className="sticky top-0 bg-ink-50 text-ink-500">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">时间</th>
+                      <th className="px-3 py-2 font-medium">大小</th>
+                      <th className="px-3 py-2 font-medium">里面有多少数据</th>
+                      <th className="px-3 py-2 font-medium">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-ink-100">
+                    {list.files.map((entry) => (
+                      <tr key={entry.name}>
+                        <td className="whitespace-nowrap px-3 py-2 text-ink-800">
+                          {dailyBackupTimeText(entry.at)}
+                          <span className="mt-0.5 block text-[11px] text-ink-400">{entry.name}</span>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2 text-ink-600">
+                          {backupBytesText(entry.bytes)}
+                        </td>
+                        <td className="px-3 py-2 text-ink-700">
+                          {entry.counts === null ? (
+                            /*
+                             * 读不出的那一份**照样列出来**并说明原因：它在目录里确实占着一份，
+                             * 而当它不存在会让人以为"我的退路是连续 90 天"。
+                             */
+                            <span className="text-danger-600">
+                              读不出这一份的内容：{entry.problem}
+                            </span>
+                          ) : (
+                            backupCountsText(entry.counts)
+                          )}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            // 读不出内容的备份恢复不了（服务端也会拒），因此按钮直接禁用并说清原因
+                            disabled={busy || entry.counts === null}
+                            onClick={() => onRestore(entry)}
+                          >
+                            恢复这一份
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <p className="mt-3 text-xs leading-relaxed text-ink-500">
+              「恢复这一份」会把**整个库**换成那份备份里的数据：点下去会先让你看到
+              「这份备份里有什么 / 库里现在有什么」的条数对照，确认之后才替换。
+              <br />
+              恢复前系统会**自动把现在的库另存一份**（清单里马上会多出那一行，恢复完也会告诉你它的名字），
+              所以恢复错了还能再恢复回去。
+              <br />
+              恢复的是**业务数据**（学生 / 报课 / 课时 / 收款 / 排课 / 课堂记录）；
+              `data/site/*.md` 与 `out/` **不在备份范围内** —— 网站内容要发布仍走
+              <code className="mx-1">npm run site:export</code>再提交推送。
+              恢复**不动账号与口令**（`server/data/` 下的账号表与凭据文件不在备份里），
+              恢复完还是用你自己的账号登录。
+            </p>
+          </>
+        )}
+      </div>
+    </Panel>
+  );
 }
 
 function Stat({ label, value }: { label: string; value: number | undefined }) {

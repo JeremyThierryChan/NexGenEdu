@@ -47,6 +47,21 @@ import { FOLLOWUP_RULES } from "./followup";
 import { countLessons } from "./lesson-stats";
 import { decideCharge, isAbsent } from "./attendance";
 import { databaseStats, validateImportedDatabase, type ImportOutcome } from "./backup";
+/*
+ * 「每天自动备份」（服务端机器上的备份文件）的口径与类型：
+ * **这里只 import 类型与纯函数**，碰文件的那一半在 `server/daily-backup-files.mts`
+ * （理由见下面 `dailyBackupFiles` 那一段）。三套备份的区别见 `daily-backups.ts` 文件头。
+ */
+import {
+  backupCountsDeltaText,
+  dailyBackupTimeText,
+  type DailyBackupCounts,
+  type DailyBackupEntry,
+  type DailyBackupFileAccess,
+  type DailyBackupList,
+  type RestoreDailyBackupInput,
+  type RestoreDailyBackupResult,
+} from "./daily-backups";
 import { buildFollowUps, type FollowUpItem } from "./followup";
 import { searchAll } from "./search";
 import {
@@ -256,10 +271,45 @@ export type { WriteOptions } from "./concurrency";
  *   的单写者锁拒绝，不是这一层能解决的）。
  */
 
-const STORAGE_KEY = "nexgenedu.admin.db.v1";
+/**
+ * 整库快照在键值存储里的键。
+ *
+ * 浏览器里它就是 localStorage 的那个键，服务端就是 SQLite `kv` 表的那一行
+ * （`server/index.mts` 与 `server/daily-backup-files.mts` 都从**这里**取，不再各写一份字面量）：
+ * 备份文件里装的正是这一份快照，两边一旦取了不同的键，"恢复"就会读出空库。
+ */
+export const SNAPSHOT_KEY = "nexgenedu.admin.db.v1";
 
 /** 「导入前」的备份键：导入是唯一能一次性毁掉全部数据的操作，留一颗后悔药。 */
 const BACKUP_KEY = "nexgenedu.admin.db.backup.v1";
+
+/**
+ * 「每天自动备份」的**文件能力**（列文件 / 读一份备份 / 另存一份）。
+ *
+ * ## 为什么是"装进来"，而不是在这里直接读写文件
+ *
+ * `api.ts` 是**浏览器与 Node 共用**的一份实现（线上静态站那份后台也在加载它），
+ * 因此它不能 import `node:fs` 与 `better-sqlite3`。服务端启动时把这份能力装上
+ * （`server/index.mts` 调 `__useDailyBackupFiles()`，与 `__useStoreForTesting()` 同一个做法），
+ * 于是：
+ *   - **浏览器里**它是 `null` → `dailyBackups.list()` 回 `available: false` 并说明原因，
+ *     "在浏览器里点一下把服务端的库换掉"这件事**在结构上不可能发生**；
+ *   - 服务端上它是真实实现 → 界面上的清单与恢复走的就是 `server/backups/`。
+ *
+ * 口径与安全底线写在 `lib/backend/daily-backups.ts` 的文件头（那里是"一份备份长什么样、
+ * 什么叫读得出、确认框里要看到什么"），这里只负责编排：**校验 → 另存 → 替换 → 落盘 → 写日志**。
+ */
+let dailyBackupFiles: DailyBackupFileAccess | null = null;
+
+/** 装/卸这份能力（服务端启动时装上；自检与演练用它在临时目录上验）。 */
+export function __useDailyBackupFiles(next: DailyBackupFileAccess | null): void {
+  dailyBackupFiles = next;
+}
+
+/** 没装能力时的解释（浏览器 / 静态站那份后台会看到它）。 */
+const NO_DAILY_BACKUP_ACCESS =
+  "「每天自动备份」存在**服务端那台机器上**（server/backups/），浏览器里读不到也改不了。" +
+  "请在后端跑着的时候打开这一页（页面右上角会显示「已连接后端」）。";
 
 /**
  * 「导入前备份」改成**滚动保留最近几份**。
@@ -326,6 +376,84 @@ function writeBackupSlot(summary: string): string {
   return at;
 }
 
+/* ── 「每天自动备份」：清单与恢复 ────────────────────────────────────────────
+ *
+ * 口径、安全底线与"三套备份的区别"写在 `lib/backend/daily-backups.ts` 的文件头。
+ * 这里只有两个辅助函数与两个接口方法，做法上与整库导入那条路（`importDatabase`）**刻意一致**：
+ * 先看清有什么 → 校验 → 留一份后悔药 → 整体替换 → 写一条操作日志。
+ */
+
+/** 整库 → 清单里那几个条数（清单、确认框、操作日志共用同一份口径）。 */
+function snapshotCounts(db: Database): DailyBackupCounts {
+  return {
+    students: db.students.length,
+    teachers: db.teachers.length,
+    classrooms: db.classrooms.length,
+    courses: db.courses.length,
+    lessons: db.lessons.length,
+    lessonRecords: db.lessonRecords.length,
+    payments: db.payments.length,
+    transactions: db.transactions.length,
+  };
+}
+
+/**
+ * 一份备份里的快照文本 → "能不能用 + 条数是多少"。
+ *
+ * ## 为什么清单与恢复必须走**同一个**判据
+ *
+ * 清单靠它算摘要、恢复靠它决定收不收。如果两边各写一套，迟早出现这种最难解释的状态：
+ * 清单里那一行看着一切正常（有 12 名学生），点「恢复这一份」却被拒 —— 或者反过来，
+ * 清单标着"读不出"而恢复照样替换。所以：**判据只有这一处**，
+ * 清单里读不出摘要的原因，就是恢复时会给出的那条拒绝理由。
+ *
+ * 校验三道，缺一不可（顺序也是刻意的）：
+ *   1. 能解析成 JSON（文件没写坏）；
+ *   2. `validateImportedDatabase`：像不像本系统的库、**版本是不是比当前新**（比当前新就直接拒）；
+ *   3. `migrate`：能不能沿迁移链升到当前结构（老库能升，坏库升不动）。
+ */
+function readSnapshotDatabase(
+  text: string,
+):
+  | { ok: true; database: Database; counts: DailyBackupCounts; fromVersion: number }
+  | { ok: false; error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (cause) {
+    return {
+      ok: false,
+      error:
+        "这份备份里的内容不是合法 JSON" +
+        `（${cause instanceof Error ? cause.message : String(cause)}）—— 文件可能写坏了。`,
+    };
+  }
+
+  const validated = validateImportedDatabase(parsed);
+  if (!validated.ok) return { ok: false, error: validated.error };
+
+  // migrate() 是**原地修改**：先记下原始版本，否则"已升级"那句话永远不会出现（导入那边踩过一次）
+  const fromVersion = validated.database.version;
+  let migrated: Database | null;
+  try {
+    migrated = migrate(validated.database);
+  } catch (cause) {
+    return {
+      ok: false,
+      error: `这份备份的结构迁移不了（${cause instanceof Error ? cause.message : String(cause)}）。`,
+    };
+  }
+  if (migrated === null) {
+    return {
+      ok: false,
+      error:
+        `这份备份的版本是 v${fromVersion}，本版本（v${CURRENT_VERSION}）的迁移链升不了它，` +
+        "因此它不能用来恢复。",
+    };
+  }
+  return { ok: true, database: migrated, counts: snapshotCounts(migrated), fromVersion };
+}
+
 // 版本号与变更记录见 lib/backend/version.ts（seed 与迁移必须用同一个值）
 
 /**
@@ -358,7 +486,7 @@ function delay(): Promise<void> {
 function load(): Database {
   if (cache !== null) return cache;
 
-  const raw = store.read(STORAGE_KEY);
+  const raw = store.read(SNAPSHOT_KEY);
   if (raw !== null) {
     /*
      * ## 有内容却读不出来时，**绝不能覆盖**（审计抓到的一条"整库清零"路径）
@@ -1828,7 +1956,7 @@ function normalizeTeacherStrict(teacher: Teacher): Teacher {
 
 function persist(db: Database): void {
   db.updatedAt = nowIso();
-  store.write(STORAGE_KEY, JSON.stringify(db));
+  store.write(SNAPSHOT_KEY, JSON.stringify(db));
 }
 
 function clone<T>(value: T): T {
@@ -5442,6 +5570,167 @@ const localApi = {
     } catch {
       return { ok: false, error: "备份已损坏，无法恢复。" };
     }
+  },
+
+  /**
+   * 「每天自动备份」：清单与恢复。
+   *
+   * ⚠️ 这一组与上面那三个（`hasBackup` / `backupSlots` / `restoreBackup`）**不是一回事**：
+   * 上面那三个是**「导入前自动备份」**（存在数据库里的滚动 5 份），这里是服务端机器上
+   * `server/backups/` 里**每天一份的备份文件**（默认留 90 份）。两者的用途与恢复粒度都不同，
+   * 详情见 `lib/backend/daily-backups.ts` 的文件头那张表。
+   *
+   * 权限在 `lib/auth/roles.ts` 的 `GROUP_ACCESS.ops`（**只有技术管理员**）——
+   * 与 `importDatabase` / `restoreBackup` / `logs.clear` 同一档，都是"一次能毁掉整库"的动作。
+   * 这一组**不放宽**：恢复这件事没有任何理由让招生 / 财务 / 教师碰得到。
+   */
+  dailyBackups: {
+    /**
+     * 列出「每天自动备份」（最新的在前），每份带上**读得出的条数摘要**。
+     *
+     * 只读：它不生成、不删除、不改动任何一份备份。
+     *
+     * 读不出摘要的那一份**照样列出来**，并带上 `problem`（界面上标红、恢复按钮禁用）：
+     * "目录里躺着一份坏备份"正是机构最该知道的事 —— 悄悄隐藏它会让人以为
+     * "我有 90 天的退路"，而事实可能只有 3 天。
+     */
+    async list(): Promise<DailyBackupList> {
+      const access = dailyBackupFiles;
+      if (access === null) {
+        return { available: false, reason: NO_DAILY_BACKUP_ACCESS, dir: "", current: null, files: [] };
+      }
+      // 读 90 份备份要一点点时间，浏览器里 `delay()` 让加载态露出来（服务端上是空操作）
+      await delay();
+      const current = snapshotCounts(load());
+      const files: DailyBackupEntry[] = access.list().map((file) => {
+        try {
+          const read = access.readSnapshot(file.name);
+          const checked = readSnapshotDatabase(read.text);
+          return checked.ok
+            ? { ...file, counts: checked.counts, problem: "" }
+            : { ...file, counts: null, problem: checked.error };
+        } catch (cause) {
+          // 读不出来（空文件 / 不是 SQLite / 目录里那个文件不是本系统的快照）→ 记下原因，照常列出
+          return {
+            ...file,
+            counts: null,
+            problem: cause instanceof Error ? cause.message : String(cause),
+          };
+        }
+      });
+      return { available: true, reason: "", dir: access.dir(), current, files };
+    },
+
+    /**
+     * 用**其中一份**备份把整个库换回去（机构要的"数据丢了怎么办"）。
+     *
+     * ## 顺序是安全的全部（每一步的位置都不能挪）
+     *
+     *   1. **确认**：`input.confirmed !== true` → 直接拒绝（什么都不做）；
+     *   2. **读 + 校验**：文件在不在 / 读不读得出 / 是不是本项目的快照 / 版本是不是比当前新 /
+     *      能不能过迁移链 —— **任何一条不过就在这里返回**，
+     *      此时**一个字节都还没写**（连"另存一份"都还没做，所以坏备份不会在备份目录里留下垃圾）；
+     *   3. **另存当前库**（恢复前的后悔药）：只有校验全过了才做；
+     *   4. **替换 + 落盘**：`cache = migrated` + `persist()` —— 走的是既有的持久化路径
+     *      （写 kv 快照），**不是**在服务运行期间拿文件复制去换 `nexgenedu.db`（WAL 会弄坏它）；
+     *   5. **写操作日志**：谁、什么时候、从哪个文件、多少条 → 多少条、原来那份叫什么名字。
+     *
+     * ## 不碰登录凭据
+     *
+     * 恢复的是**业务数据**（kv 快照里那份）。`server/data/accounts.json` 与
+     * `server/data/admin-credential.json` 不在快照里、也不在这条路上的任何一步 ——
+     * 否则机构恢复完会发现自己被锁在门外（这个系统里"谁是谁、什么角色"是独立于业务数据的一份东西）。
+     */
+    async restore(
+      name: string,
+      input: RestoreDailyBackupInput,
+    ): Promise<RestoreDailyBackupResult> {
+      const access = dailyBackupFiles;
+      if (access === null) return { ok: false, error: NO_DAILY_BACKUP_ACCESS };
+      if (typeof name !== "string" || name.trim() === "") {
+        return { ok: false, error: "没说恢复哪一份（要传备份文件名）。" };
+      }
+      /*
+       * 第二道闸（第一道是界面上的确认框）：**程序也要显式说"我确认了"**。
+       * 少了它，一个把参数拼错的脚本会变成一次静默的整库替换 —— 而那正是一个
+       * "平时都对、出事那天才发现"的错误。
+       */
+      if (input === null || input === undefined || input.confirmed !== true) {
+        return {
+          ok: false,
+          error:
+            "恢复会**整库替换数据**，必须二次确认（`confirmed: true`）。" +
+            "界面上会先让你看清「这份备份里有什么、库里现在有什么」再点确认 —— " +
+            "这条闸防的是「某个脚本顺手调了一下」这种拼错参数的调用。",
+        };
+      }
+
+      // ① 读 + 校验（**这一步失败 = 零写入**）
+      let text: string;
+      let at: string;
+      try {
+        const read = access.readSnapshot(name);
+        text = read.text;
+        at = read.at;
+      } catch (cause) {
+        return {
+          ok: false,
+          error: `${cause instanceof Error ? cause.message : String(cause)} —— 本次**没有改动任何数据**。`,
+        };
+      }
+      const checked = readSnapshotDatabase(text);
+      if (!checked.ok) {
+        return {
+          ok: false,
+          error: `${checked.error} —— 本次**没有改动任何数据**（备份也一份没动）。`,
+        };
+      }
+
+      const before = snapshotCounts(load());
+      const restored = checked.database;
+      const after = snapshotCounts(restored);
+
+      // ② 先把"现在的库"另存一份（这一步之后才可能丢东西，因此后悔药必须在它前面）
+      let preRestore: string;
+      try {
+        preRestore = access.writeSnapshot(JSON.stringify(load()));
+      } catch (cause) {
+        return {
+          ok: false,
+          error:
+            `恢复前的另存失败了（${cause instanceof Error ? cause.message : String(cause)}），` +
+            "因此**这次恢复没有执行** —— 宁可恢复不了，也不能在没有退路的情况下替换整库。",
+        };
+      }
+
+      // ③ 替换 + 落盘（走既有的持久化路径）
+      cache = restored;
+      writeLog(cache, {
+        entity: "数据",
+        action: "恢复每日备份",
+        targetId: name,
+        summary:
+          `从每日备份恢复：${name}（${backupCountsDeltaText(before, after)}）；` +
+          `恢复前的库已另存为 ${preRestore}`,
+      });
+      persist(cache);
+
+      const upgraded =
+        checked.fromVersion === restored.version
+          ? ""
+          : `（顺手把结构从 v${checked.fromVersion} 升到了 v${restored.version}）`;
+      return {
+        ok: true,
+        file: name,
+        at,
+        preRestore,
+        before,
+        after,
+        note:
+          `现在用的是 **${dailyBackupTimeText(at)}** 那份备份的数据${upgraded}；` +
+          `你原来那份已经另存为 **${preRestore}**，要回去就再点它那一行的「恢复这一份」。`,
+      };
+    },
   },
 
   /** 设置操作人（登录后由后台外壳调用一次，用于操作日志）。 */

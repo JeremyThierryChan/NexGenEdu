@@ -209,10 +209,24 @@ export const API_CONTRACT: ContractGroup[] = [
       "与**批量导入**（`imports.apply` 从文件/文本；默认只新增，" +
       "冲突可逐条选择覆盖 / 跳过 / 保留两份）。" +
       "两者都要在动手前留备份（前者是结构校验 + 导入前备份 + 版本迁移三道保险）。" +
+      "**「每天自动备份」是第三套东西**（`dailyBackups.list` / `dailyBackups.restore`）：" +
+      "备份是服务端机器上的**文件**（`server/backups/`，默认留 90 份），" +
+      "恢复它会**整库替换数据** —— 服务端必须自己复核「文件在不在、读不读得出、" +
+      "是不是本项目的快照、版本是不是比当前新」，并且在替换**之前**先把当前库另存一份、" +
+      "把「从哪个文件恢复 / 多少条 → 多少条 / 另存成什么名字」写进操作日志。" +
+      "这一组只有技术管理员能调（见 lib/auth/roles.ts 的 GROUP_ACCESS.ops，**别放宽**）。" +
       "`logs` 存在库里、能被导入导出整体替换，因此还不是不可篡改的审计记录。",
     methods: [
       "exportDataset",
       "exportDatabase", "importDatabase", "imports.apply", "hasBackup", "backupSlots", "restoreBackup", "reset",
+      /*
+       * 每天自动备份：只读清单（含每份的条数摘要）+ 单点恢复。
+       *
+       * 只有这两个 —— 不做"删除某一份备份"（备份的删除只能走 `server/backup.mts` 的
+       * `pruneBackups`，判据只能是名字与份数；接口给一条"删这份"的路，就等于绕开了那条纪律），
+       * 也不做"立刻备一份"（那件事的入口是每天一次的调度与命令行，多一个入口就多一处口径）。
+       */
+      "dailyBackups.list", "dailyBackups.restore",
       /*
        * 两个"会话管道"方法：不做业务，只把"这次请求是谁、按谁的范围看"交给服务层。
        * 它们由**服务端**在每个请求开头按会话调用（见 server/index.mts 的 requireAuth），

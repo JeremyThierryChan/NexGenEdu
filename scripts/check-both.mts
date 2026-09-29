@@ -90,6 +90,14 @@ try {
         NEXT_PUBLIC_API_BASE: base,
         NEXGENEDU_ADMIN_USER: info.username,
         NEXGENEDU_ADMIN_PASSWORD: info.password,
+        /*
+         * §53（「每天自动备份」的清单与恢复）在 HTTP 模式下是**隔着 HTTP 调服务端**的：
+         * 它要造的夹具备份、以及恢复之后要数的"是不是多了一份"，都在**服务端的备份目录**里。
+         * 因此把服务端那个临时备份目录交给自检进程 —— 两端看同一个目录，谁都不碰
+         * `server/backups/`。自检自己还会再核一次那个目录**确实在系统临时目录下**，
+         * 不是就跳过全部写文件的断言（宁可少验，也不拿真实库做恢复试验）。
+         */
+        NEXGENEDU_BACKUP_DIR: info.backupDir,
       },
     });
     process.stdout.write(remoteRun.output);

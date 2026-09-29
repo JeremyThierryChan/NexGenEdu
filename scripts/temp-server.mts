@@ -135,6 +135,15 @@ export type StartServerOptions = {
   env?: Record<string, string>;
   /** 就绪前等多久（默认 30 秒）。 */
   timeoutMs?: number;
+  /**
+   * **备份目录**。给了就设 `NEXGENEDU_BACKUP_DIR`，于是这个临时服务写的每一份备份
+   * （迁移前快照、每天一份、界面恢复前的另存）都落在那个目录里，绝不去动 `server/backups/`。
+   *
+   * 为什么做成一个显式参数而不是"调用方自己在 env 里塞"：临时服务要写备份这件事是
+   * **一定会发生**的（起一个空库服务就要跑两条迁移），因此默认值必须是"能隔离"的那个，
+   * 而不是"忘了设就写进真实目录"。
+   */
+  backupDir?: string;
 };
 
 /**
@@ -168,6 +177,7 @@ export async function startServer(options: StartServerOptions): Promise<ServerHa
       PORT: String(port),
       NEXGENEDU_ADMIN_USER: credentials.username,
       NEXGENEDU_ADMIN_PASSWORD: credentials.password,
+      ...(options.backupDir === undefined ? {} : { NEXGENEDU_BACKUP_DIR: options.backupDir }),
       ...(options.env ?? {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -283,6 +293,15 @@ export async function withTempServer<T>(
     info: {
       port: number;
       dbPath: string;
+      /**
+       * **这次临时服务的备份目录**（一次性临时目录里的 `backups/`，跑完即删）。
+       *
+       * 交给 `body` 是因为「每天自动备份」那一块（清单 / 恢复）要**测试进程与服务端
+       * 看同一个目录**：服务端用它写"恢复前的另存"，测试进程要造一份夹具备份、
+       * 还要在恢复之后去数目录里是不是真的多了一份。把两端指向同一个临时目录，
+       * 才是"绝不碰 server/backups/"这句话的落地方式。
+       */
+      backupDir: string;
       username: string;
       password: string;
       /**
@@ -310,10 +329,21 @@ export async function withTempServer<T>(
    */
   const dir = mkdtempSync(path.join(tmpdir(), "nexgenedu-check-"));
   const dbPath = path.join(dir, `db-${port}.sqlite`);
+  /*
+   * 备份目录也放进同一个一次性临时目录。
+   *
+   * 原先不设它 → 临时服务的**迁移前快照**会写进真实的 `server/backups/`
+   * （每起一个临时服务就丢一个空库备份进去）。脏只是表面问题，真正的危险是
+   * 那些文件会满足「今天已经备份过」的判定，于是**真实库当天一份备份都没有** ——
+   * 假备份挤掉真备份，是备份机制最坏的一种失效方式。
+   * 现在从环境变量这一层就隔离开（`scripts/check-both.mts` 跑完还会再对一次目录，双保险）。
+   */
+  const backupDir = path.join(dir, "backups");
 
   const handle = await startServer({
     dbPath,
     port,
+    backupDir,
     /*
      * `NEXGENEDU_TEST_HOOKS=1`：打开"夹具收尾"入口（`/api/test-hooks/remove-fixture`）。
      *
@@ -327,6 +357,7 @@ export async function withTempServer<T>(
     return await body(handle.base, {
       port,
       dbPath,
+      backupDir,
       username: handle.credentials.username,
       password: handle.credentials.password,
       log: handle.log,

@@ -552,6 +552,21 @@ try {
       equal("招生老师不能改课程正文（课程页主干归技术）",
         await attempt(marketing.token, "site.saveContent"), 403);
       equal("教师不能导出整库", await attempt(teacher.token, "exportDatabase"), 403);
+      /*
+       * 「每天自动备份」的清单与恢复（界面「数据与备份」页那一块）：
+       * **只有技术管理员**。`dailyBackups.restore` 会整库替换数据，是这一组里破坏力最大的动作之一 ——
+       * 它必须和 `importDatabase` / `restoreBackup` 一样，靠**真实 HTTP 403** 证明挡住了别人，
+       * 而不是靠"角色表里写着"（那只是同一份数据的两处说法）。
+       */
+      equal("教师不能读每天自动备份的清单", await attempt(teacher.token, "dailyBackups.list"), 403);
+      equal("教师不能从每天自动备份恢复（整库替换）",
+        await attempt(teacher.token, "dailyBackups.restore"), 403);
+      equal("招生老师不能读每天自动备份的清单",
+        await attempt(marketing.token, "dailyBackups.list"), 403);
+      equal("财务不能从每天自动备份恢复",
+        await attempt(cashier.token, "dailyBackups.restore"), 403);
+      equal("技术管理员能读每天自动备份的清单",
+        await attempt(admin.token, "dailyBackups.list"), 200);
 
       // 财务管理员：钱与报课能用（机构确认①），运维仍然不行
       check("财务能报课（机构确认①：财务也要能报课）",

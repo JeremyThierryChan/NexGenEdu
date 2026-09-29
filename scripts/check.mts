@@ -72,7 +72,13 @@ import {
   getFeaturedContentFromTemplate,
 } from "@/lib/data/featured";
 import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
-import { __removeFixture, __useStoreForTesting, api } from "@/lib/backend/api";
+import {
+  __removeFixture,
+  __useDailyBackupFiles,
+  __useStoreForTesting,
+  api,
+  SNAPSHOT_KEY,
+} from "@/lib/backend/api";
 /*
  * 夹具里用到的**类型**也要显式 import。
  *
@@ -352,11 +358,41 @@ import {
   PRICING_SOURCE_ADMIN,
   PRICING_SOURCE_CONTENT,
 } from "@/lib/backend/pricing";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { holidaysDir, holidayYearFile, refreshHolidayYear } from "../server/holidays.mts";
+/*
+ * §53（「每天自动备份」的清单与恢复）要用的两样东西：
+ *   - `createNodeDailyBackupFiles`：**服务端那半边**的文件能力。自检直接用它造夹具备份、
+ *     再数目录里到底多了什么 —— 断言的是"真的碰到文件了"，不是"看起来调过了"；
+ *   - `listMigrations`：夹具备份里的 `schema_version` 取当前最新的一版
+ *     （与真实服务端 `currentVersion(db)` 同一个数；**不写死**，否则加一条迁移就过期）。
+ */
+import { createNodeDailyBackupFiles } from "../server/daily-backup-files.mts";
+import { listMigrations } from "../server/migrate.mts";
+/*
+ * 「每天自动备份」的显示口径（条数摘要 / 大小 / 时间 / 确认框里的条数对照）
+ * 也是**值**，而且只有一处实现（`lib/backend/daily-backups.ts`）：
+ * §53 直接对着它们断言，不在自检里再拼一遍 —— 拼一遍就是第二份实现。
+ */
+import {
+  backupBytesText,
+  backupCountsDeltaText,
+  backupCountsText,
+  dailyBackupCompareText,
+  dailyBackupTimeText,
+  type DailyBackupCounts,
+  type DailyBackupEntry,
+} from "@/lib/backend/daily-backups";
+/*
+ * 自检要造几种**坏备份**（不是 SQLite 的文件、有效 SQLite 但没有本项目的快照…），
+ * 因此这里直接用 better-sqlite3 —— 服务端模块用的就是它。
+ * 名字带 `Sqlite` 前缀是必须的：这一份自检里 `Database` 是**本项目的整库类型**（types.ts），
+ * 两者同名会让下面所有 `Database` 注解指向错的东西。
+ */
+import SqliteDatabase from "better-sqlite3";
 import { LEAVE_NOTICE_HOURS, decideCharge } from "@/lib/backend/attendance";
 import {
   CLASS_HOURS_PER_DAY,
@@ -15121,6 +15157,631 @@ console.log(
         studentsPageSortCode.includes('<SortableTh field="grade"'));
   }
 }
+
+console.log(
+  "\n=== 53. 「每天自动备份」的清单与恢复（机构：「先做 1：备份能在后台恢复」）===",
+);
+
+/*
+ * ## 机构原话
+ *
+ * > 「**先做 1：备份能在后台恢复**」
+ *
+ * 背景：那之前"数据丢了怎么办"的答案是"**找开发**" —— 恢复步骤写在给开发看的
+ * `docs/部署与发布.md` 里（停后端 → 挪走 `nexgenedu.db` 与 `-wal`/`-shm` → 复制一份改名 →
+ * 重起后端）。那是**开发的操作手册**，不是机构的能力：一个不懂终端的机构用户，
+ * 面对"数据丢了"这件事只能等人。
+ *
+ * ## 这一节守的东西（按功能的安全底线编号，与 `lib/backend/daily-backups.ts` 的文件头一致）
+ *
+ *   ① 清单只读、能读出摘要、**坏文件被标出**（不是悄悄隐藏）；
+ *   ② 恢复必须二次确认，未确认时**什么都不发生**；
+ *   ③ 恢复前**自动另存**当前库，且那一份能被再次恢复（"恢复错了还能回来"）；
+ *   ④ 恢复后库里就是备份那一刻的数据（**逐条比对**，不是"看起来像"）；
+ *   ⑤ 坏备份被拒且**零写入**（库与备份目录逐字节未变）；
+ *   ⑥ 恢复写一条操作日志（谁 / 什么时候 / 从哪个文件 / 多少条 → 多少条 / 另存成什么名字）；
+ *   ⑦ 权限：两个方法都只有技术管理员，**整组 ops 也不许放宽**；
+ *   ⑧ 恢复**不动** `accounts.json` / `admin-credential.json` / `data/site/*.md`（反向断言）；
+ *   ⑨ 版本不比当前新的判据在（拿一份"版本更高"的假快照验证被拒）；
+ *   ⑩ 界面与源码：那一页有清单与恢复按钮、确认框里有**两份条数**、恢复后的提示里有那两份名字。
+ *
+ * ## 为什么这一节只在**临时目录 + 临时库**上做
+ *
+ * 恢复是**整库替换**。在真实库上做一次"恢复试验"，最好的结果是什么都没变，
+ * 最坏的结果是机构的数据没了 —— 而这类事故的代价无法用"我试的时候是好的"来抵。
+ * 因此这一节：
+ *   - 备份目录一律用一次性临时目录（内存那一遍自建；HTTP 那一遍用 `check-both.mts`
+ *     交给临时服务端的那个临时目录）；
+ *   - **认不出是临时环境就不做任何会写文件的动作**，并大声说明（见下面 `skipReason` 的判据）。
+ *     宁可少验，也不拿一个来路不明的目录当试验场。
+ */
+
+/* ── 纯口径：与文件无关，两种后端都跑（⑩ 与 ⑦ 的判定部分）────────────────── */
+
+/*
+ * ⑦ 权限。判定完全交给 `lib/auth/roles.ts`（服务端闸门用的就是它），
+ * 这里只断言结果 —— 而且**同时**断言"没有为了让谁用得上而放宽整组 ops"：
+ * 那一组里还有 `importDatabase` / `restoreBackup` / `logs.clear`，
+ * 放宽一个分组等于把三个"一次毁掉整库"的动作一起交出去。
+ */
+eq("⑦ 两个方法都登记在「运维与审计」组里（groupOfMethod 认得出来，没落在没登记那一档）",
+  [groupOfMethod("dailyBackups.list"), groupOfMethod("dailyBackups.restore")], ["ops", "ops"]);
+eq("⑦ 只有技术管理员能调（与 importDatabase / restoreBackup / logs.clear 同一档）",
+  [allowedRolesForMethod("dailyBackups.list"), allowedRolesForMethod("dailyBackups.restore")],
+  [["技术管理员"], ["技术管理员"]]);
+ok("⑦ 财务 / 招生 / 教师一律调不了（界面上的按钮也藏得掉：canCallMethod 同源）",
+  (["财务管理员", "招生老师", "普通教师"] as const).every(
+    (role) =>
+      !canCallMethod([role], "dailyBackups.list") &&
+      !canCallMethod([role], "dailyBackups.restore"),
+  ));
+ok("⑦ 普通教师那一层也关门（`teacherScopeDenial` 给出拒绝理由，不是静默放行）",
+  ["dailyBackups.list", "dailyBackups.restore"].every(
+    (method) => teacherScopeDenial(method, ["普通教师"]) !== null,
+  ));
+ok("⑦ 反向断言：**整组 ops 仍然只有技术管理员**（没有为了让谁用得上而放宽那一组）",
+  API_CONTRACT.flatMap((group) => group.methods)
+    .filter((method) => groupOfMethod(method) === "ops")
+    .every((method) => {
+      const allowed = allowedRolesForMethod(method) ?? [];
+      return (
+        canAccess(["技术管理员"], allowed) &&
+        !canAccess(["财务管理员", "招生老师", "普通教师"], allowed)
+      );
+    }));
+
+/*
+ * ⑩ 确认框的文案：**两边的条数都要在**。
+ *
+ * 判据对着 `lib/backend/daily-backups.ts` 的纯函数（页面用的就是它），
+ * 因此"确认框里有两个条数"这件事不靠正则去猜页面里的字。
+ */
+const demoBackupCounts: DailyBackupCounts = {
+  students: 5, teachers: 2, classrooms: 2, courses: 18,
+  lessons: 20, lessonRecords: 4, payments: 12, transactions: 26,
+};
+const demoBackup: DailyBackupEntry = {
+  name: "nexgenedu-2020-03-04-09-05-06-007.db",
+  bytes: 1638,
+  at: new Date(2020, 2, 4, 9, 5, 6, 7).toISOString(),
+  counts: demoBackupCounts,
+  problem: "",
+};
+const demoCurrent: DailyBackupCounts = {
+  students: 12, teachers: 3, classrooms: 4, courses: 20,
+  lessons: 40, lessonRecords: 8, payments: 30, transactions: 52,
+};
+const compareText = dailyBackupCompareText(demoBackup, demoCurrent);
+ok("⑩ 确认框的文案里**同时**有「这份备份里」与「库里现在」（少一边就等于没确认）",
+  compareText.includes("这份备份（2020-03-04 09:05:06 的 nexgenedu-2020-03-04-09-05-06-007.db）里：") &&
+    compareText.includes("库里现在："));
+ok("⑩ 两边的条数都真的写进去了（学生 5 名 ↔ 学生 12 名，不是「有几条」这种含糊话）",
+  compareText.includes("学生 5 名") && compareText.includes("学生 12 名") &&
+    compareText.includes("收款 12 条") && compareText.includes("收款 30 条"));
+{
+  const brokenText = dailyBackupCompareText(
+    { ...demoBackup, counts: null, problem: "这份备份是空文件（0 字节）" }, demoCurrent);
+  ok("⑩ 读不出摘要的那一份**不装作看得到数字**：如实说读不出，并把原因带出来",
+    brokenText.includes("读不出摘要") &&
+      brokenText.includes("这份备份是空文件（0 字节）") &&
+      brokenText.includes("库里现在："));
+}
+eq("⑩ 时间按**本地时间**写成 `YYYY-MM-DD HH:mm:ss`（备份名字里的时间戳也是本地时间）",
+  dailyBackupTimeText(demoBackup.at), "2020-03-04 09:05:06");
+eq("⑩ 大小给人话（B / KB / MB）",
+  [backupBytesText(900), backupBytesText(1638), backupBytesText(3 * 1024 * 1024)],
+  ["900 B", "2 KB", "3.0 MB"]);
+eq("⑩ 清单里那一行的摘要写法（页面、确认框、清单三处都用同一句）",
+  backupCountsText(demoCurrent),
+  "学生 12 名、教师 3 位、教室 4 间、课程 20 门、课节 40 节、课堂记录 8 条、收款 30 条、课时流水 52 条");
+ok("⑩ 操作日志那句「多少条 → 多少条」里，变了的那一项写成箭头、没变的只写一个数",
+  backupCountsDeltaText(demoCurrent, demoBackupCounts).includes("学生 12→5") &&
+    backupCountsDeltaText(demoCurrent, demoCurrent).includes("学生 12") &&
+    !backupCountsDeltaText(demoCurrent, demoCurrent).includes("→"));
+
+{
+  /* ⑩ 界面源码（先去注释：注释里提到"恢复这一份"不算代码） */
+  const pageUrl = new URL("../app/admin/(dashboard)/data/page.tsx", import.meta.url);
+  /*
+   * 去注释：**只去掉"整行开始的块注释"** —— 不像别处那样用 `\/\*[\s\S]*?\*\/` 一把梭。
+   * 为什么：这个页面里有一句 JSX 文案写着 `data/site/*.md`，那个 `/*` 会开启一个"注释"，
+   * 把后面一大段真代码当成注释吃掉 —— 断言会**假红**（明明写了却查不到；这一版就是这么红的）。
+   * "整行以 `/*` 开头"这个判据对本用途足够：注释里提到「恢复这一份」不算代码，
+   * 而真代码里那个 `/*` 不会出现在行首。
+   */
+  const stripSourceComments = (source: string): string =>
+    source.replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, " ").replace(/^[ \t]*\/\/.*$/gm, "");
+  const pageCode = stripSourceComments(readFileSync(pageUrl, "utf8"));
+
+  ok("⑩ 那一页有「每天自动备份」这一块：标题 + 一行一份的清单（时间 / 大小 / 摘要）",
+    pageCode.includes('title="每天自动备份"') &&
+      pageCode.includes("list.files.map(") &&
+      pageCode.includes("dailyBackupTimeText(entry.at)") &&
+      pageCode.includes("backupBytesText(entry.bytes)") &&
+      pageCode.includes("backupCountsText(entry.counts)"));
+  ok("⑩ 每一行都有「恢复这一份」；读不出的那一份**按钮禁用并说明原因**（不是藏起来）",
+    pageCode.includes("恢复这一份") &&
+      pageCode.includes("disabled={busy || entry.counts === null}") &&
+      pageCode.includes("读不出这一份的内容"));
+  ok("⑩ 页面调的就是服务层那两个方法（清单 + 单点恢复）",
+    pageCode.includes("api.dailyBackups.list(") &&
+      pageCode.includes("api.dailyBackups.restore("));
+  ok("⑩ 确认框里的两份条数取自纯模块，而且**全页面只有这一处**拼它（页面不许自己拼一套）",
+    pageCode.includes("dailyBackupCompareText(entry,") &&
+      pageCode.includes("dailyList?.current") &&
+      (pageCode.match(/dailyBackupCompareText\(/g) ?? []).length === 1);
+  {
+    const fromHandler = pageCode.slice(pageCode.indexOf("async function restoreDaily("));
+    const nextHandler = fromHandler.indexOf("\n  async function ");
+    const handler = nextHandler === -1 ? fromHandler : fromHandler.slice(0, nextHandler);
+    ok("⑩ 恢复那一段：先 `window.confirm`（说清会先另存 + 恢复的是业务数据），确认之后才真的调接口",
+      handler.includes("window.confirm(") &&
+        handler.includes("恢复前系统会先把") &&
+        handler.includes("网站内容要另外发布") &&
+        handler.indexOf("window.confirm(") < handler.indexOf("api.dailyBackups.restore("));
+    ok("⑩ 确认之后才传 `confirmed: true`（服务端那道闸有输入，不是永远为假）",
+      handler.includes("api.dailyBackups.restore(entry.name, { confirmed: true })"));
+    ok("⑩ 恢复完的提示里**两份名字都在**：从哪一份恢复的 + 原来那份另存成了什么",
+      handler.includes("result.note") &&
+        handler.includes("result.file") &&
+        handler.includes("result.preRestore") &&
+        handler.includes("restoreDaily"));
+  }
+  ok("⑩ 界面上说清了「恢复的是业务数据、网站内容要另外发布」并给了指路（site:export）",
+    pageCode.includes("不在备份范围内") &&
+      pageCode.includes("site:export") &&
+      pageCode.includes("恢复这一份"));
+  ok("⑩ 界面上说清了「恢复不动账号与口令」（免得机构以为恢复完要重新配账号）",
+    pageCode.includes("不动账号与口令"));
+
+  /* ⑧ 的第二半：源码级反向断言 —— 恢复那条路上根本没有"凭据 / 网站内容"这些文件 */
+  const implSources: Array<[string, string]> = [
+    ["server/daily-backup-files.mts", readFileSync(new URL("../server/daily-backup-files.mts", import.meta.url), "utf8")],
+    [
+      "lib/backend/api.ts（dailyBackups 那一段）",
+      (() => {
+        const source = readFileSync(new URL("../lib/backend/api.ts", import.meta.url), "utf8");
+        const start = source.indexOf("dailyBackups: {");
+        const end = source.indexOf("/** 设置操作人（登录后由后台外壳调用一次，用于操作日志）。 */");
+        return start === -1 || end === -1 || end <= start ? "" : source.slice(start, end);
+      })(),
+    ],
+  ];
+  ok("⑧ 反向断言：扫描真的取到了源码（取不到就等于没查）",
+    implSources.every(([, code]) => code.length > 300),
+    implSources.map(([file, code]) => `${file}:${String(code.length)} 字`).join("、"));
+  eq("⑧ 反向断言：恢复那一段里**没有** accounts.json / admin-credential / data/site 这些字",
+    implSources
+      .filter(([, code]) =>
+        /accounts\.json|admin-credential|accounts\.mts|data\/site/.test(stripSourceComments(code)),
+      )
+      .map(([file]) => file),
+    []);
+}
+
+/* ── 文件那一半：只在**临时目录**上做 ───────────────────────────────────── */
+
+const dailyRemote = isRemoteMode();
+let dailyDir = "";
+let dailySkip = "";
+if (!dailyRemote) {
+  // 内存那一遍：自建一个一次性临时备份目录（跑完删掉）
+  dailyDir = mkdtempSync(join(tmpdir(), "nexgenedu-daily-check-"));
+} else {
+  /*
+   * HTTP 那一遍：备份目录**必须**是 `check-both.mts` 交给临时服务端的那个临时目录。
+   *
+   * 两道判据都不许省：①它得在系统临时目录下；②后端自报的库名不能是真实库
+   * （`nexgenedu.db`）。少一条，这一节就可能在**真实库**上做一次"恢复试验" ——
+   * 那正是这一节最不能发生的事。认不出就一行都不写，并大声说明。
+   */
+  const provided = process.env.NEXGENEDU_BACKUP_DIR ?? "";
+  let healthDb = "";
+  try {
+    const health = (await (await fetch(`${remoteBase()}/health`)).json()) as { db?: unknown };
+    healthDb = String(health.db ?? "");
+  } catch {
+    healthDb = "";
+  }
+  if (provided === "" || !provided.startsWith(tmpdir())) {
+    dailySkip =
+      `没拿到临时备份目录（NEXGENEDU_BACKUP_DIR=${provided === "" ? "（空）" : provided}）`;
+  } else if (healthDb === "" || healthDb === "nexgenedu.db") {
+    dailySkip = `后端报的库是 ${healthDb === "" ? "（读不出）" : healthDb}，像真实库`;
+  } else {
+    dailyDir = provided;
+  }
+}
+
+if (dailySkip !== "") {
+  console.log(
+    `  ⚠ 跳过全部会写文件的断言：${dailySkip}。\n` +
+      "     这一节**绝不**拿非临时目录 / 真实库做恢复试验（恢复 = 整库替换）。\n" +
+      "     要跑全套请用 `npm run check:both`（它会起临时服务并把临时备份目录交给两边）。",
+  );
+} else {
+  console.log(`      临时备份目录：${dailyDir}`);
+
+  const dailyFiles = createNodeDailyBackupFiles({
+    dir: dailyDir,
+    snapshotKey: SNAPSHOT_KEY,
+    // 夹具备份里的结构版本取**当前最新的一版迁移**（不写死数字，否则加一条迁移就过期）
+    schemaVersion: listMigrations().at(-1)?.version ?? 0,
+  });
+  // 内存那一遍：把这份能力装到 `api` 上（HTTP 那一遍由服务端自己装，调用走 HTTP）
+  if (!dailyRemote) __useDailyBackupFiles(dailyFiles);
+
+  /** 目录里所有文件的逐字节指纹（断言"零写入"靠它：一个字节变了就红）。 */
+  const dirFingerprint = (): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const name of readdirSync(dailyDir).sort()) {
+      // 二进制按 latin1 读进来只作"变了没有"的比对，不做文本解释
+      out[name] = readFileSync(join(dailyDir, name)).toString("latin1");
+    }
+    return out;
+  };
+  const dirText = (): string => JSON.stringify(dirFingerprint());
+
+  /** 手写一份夹具备份（名字由调用方给：断言要能指名道姓地对某一份说"恢复它"）。 */
+  const writeBackupFixture = (name: string, snapshotText: string): string => {
+    /*
+     * 目录可能还不存在：HTTP 那一遍用的是**临时服务端**的备份目录，它由服务端在第一次
+     * 写备份时创建（而临时服务的自动备份是关掉的）—— 因此测试进程必须自己把目录建出来，
+     * 否则 better-sqlite3 会报 "directory does not exist"（这一条就是这么红过一次的）。
+     */
+    mkdirSync(dailyDir, { recursive: true });
+    const file = join(dailyDir, name);
+    const raw = new SqliteDatabase(file);
+    try {
+      raw.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+      raw.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)").run(SNAPSHOT_KEY, snapshotText);
+    } finally {
+      raw.close();
+    }
+    return file;
+  };
+
+  /** 一份快照里的条数（自检自己数一遍：与清单里那几个数字对得上才算真读出来了）。 */
+  const countsOf = (snapshot: Database): DailyBackupCounts => ({
+    students: snapshot.students.length,
+    teachers: snapshot.teachers.length,
+    classrooms: snapshot.classrooms.length,
+    courses: snapshot.courses.length,
+    lessons: snapshot.lessons.length,
+    lessonRecords: snapshot.lessonRecords.length,
+    payments: snapshot.payments.length,
+    transactions: snapshot.transactions.length,
+  });
+
+  /**
+   * 逐表比对的指纹：**排除操作日志与 updatedAt**。
+   *
+   * 恢复本身会往恢复后的库里写一条日志（那是对的：那条日志是"这次恢复发生过"的痕迹），
+   * 而 `persist()` 会推进 `updatedAt`。除此之外**每一个字段都必须逐字节相同** ——
+   * 其余部分一旦不同，就说明"恢复"改动了它不该改的东西。
+   */
+  const withoutLogs = (snapshot: Database): string => {
+    const copy = JSON.parse(JSON.stringify(snapshot)) as Record<string, unknown>;
+    delete copy.logs;
+    delete copy.updatedAt;
+    return JSON.stringify(copy);
+  };
+
+  /** ⑧ 那几份"恢复绝不该碰"的文件（读一次指纹，最后再对一次）。 */
+  const untouchable = [
+    "server/data/accounts.json",
+    "server/data/admin-credential.json",
+    "data/site/content.md",
+    "data/site/pricing.md",
+  ];
+  const untouchableBefore = untouchable.map((file) => {
+    const path = new URL(`../${file}`, import.meta.url);
+    return existsSync(path) ? readFileSync(path, "utf8") : null;
+  });
+
+  const beforeRestores = JSON.parse(JSON.stringify(await api.exportDatabase())) as Database;
+  const goodName = "nexgenedu-2020-03-04-09-05-06-007.db";
+  const e2eName = "nexgenedu-2031-12-13-14-15-16-017.db";
+  const badNames = {
+    empty: "nexgenedu-2022-01-02-03-04-05-006.db",
+    text: "nexgenedu-2023-02-03-04-05-06-007.db",
+    plainSqlite: "nexgenedu-2024-03-04-05-06-07-008.db",
+    newerVersion: "nexgenedu-2025-04-05-06-07-08-009.db",
+    brokenJson: "nexgenedu-2026-05-06-07-08-09-010.db",
+  };
+  const beforeJson = JSON.stringify(beforeRestores);
+  writeBackupFixture(goodName, beforeJson);
+  mkdirSync(dailyDir, { recursive: true });
+  writeFileSync(join(dailyDir, badNames.empty), "");
+  writeFileSync(join(dailyDir, badNames.text), "这不是一个 SQLite 文件，只是一段文字。");
+  {
+    const raw = new SqliteDatabase(join(dailyDir, badNames.plainSqlite));
+    try {
+      raw.exec("CREATE TABLE IF NOT EXISTS someone_else (x TEXT)");
+    } finally {
+      raw.close();
+    }
+  }
+  writeBackupFixture(
+    badNames.newerVersion,
+    JSON.stringify({ ...(beforeRestores as unknown as Record<string, unknown>), version: CURRENT_VERSION + 1 }),
+  );
+  writeBackupFixture(badNames.brokenJson, "{ 这不是合法 JSON");
+
+  const dirAfterFixtures = dirText();
+  const dbBeforeList = JSON.stringify(await api.exportDatabase());
+
+  /*
+   * 顺手把这份能力**直接**用一次（不经 `api`）：读一份夹具备份，文本必须逐字节等于写进去的那一份。
+   * 这一条同时证明两件事：读的是**真文件**（不是某个缓存），以及 HTTP 那一遍
+   * 测试进程与服务端看的确实是**同一个目录**（否则后面的清单断言会全空）。
+   */
+  {
+    const read = dailyFiles.readSnapshot(goodName);
+    eq("① 备份文件里就是写进去的那份快照（逐字节，读的是真文件）", read.text, JSON.stringify(beforeRestores));
+  }
+
+  /* ── ① 清单：只读、读得出摘要、坏的那几份被标出 ───────────────────── */
+  const dailyList = await api.dailyBackups.list();
+  eq("① 清单读得出来（`available` 为真，目录就是服务端那一个）",
+    [dailyList.available, dailyList.dir], [true, dailyDir]);
+  const entryOf = (name: string): DailyBackupEntry | undefined =>
+    dailyList.files.find((item) => item.name === name);
+  eq("① 造的每一份都在清单里 —— **包括读不出的那几份**（坏掉的不许被藏起来）",
+    [goodName, ...Object.values(badNames)].filter((name) => entryOf(name) === undefined),
+    []);
+  {
+    const entry = entryOf(goodName);
+    const expected = countsOf(beforeRestores);
+    eq("① 读得出的那一份，摘要与快照里的条数逐项一致（学生 / 教师 / 教室 / 课程 / 课节 / 课堂记录 / 收款 / 课时流水）",
+      entry?.counts, expected);
+    eq("① 那一份没有问题标记（problem 为空串）", entry?.problem, "");
+    ok("① 大小也读出来了（清单上要能看出这一份多大）",
+      (entry?.bytes ?? 0) > 0 && entry?.bytes === readFileSync(join(dailyDir, goodName)).length);
+    ok("① 时间取自**文件名**（不是 mtime）：2020-03-04 09:05:06",
+      entry !== undefined && dailyBackupTimeText(entry.at) === "2020-03-04 09:05:06");
+  }
+  eq("① 读不出的那几份都被标出：`counts` 为 null 且 `problem` 是一句能看懂的原因",
+    Object.values(badNames).filter((name) => {
+      const entry = entryOf(name);
+      return entry === undefined || entry.counts !== null || entry.problem === "";
+    }),
+    []);
+  ok("① 空文件那一份，原因说的是「空文件」",
+    (entryOf(badNames.empty)?.problem ?? "").includes("空文件"));
+  ok("① 不是数据库的那一份，原因说的是「不是 SQLite 数据库」（而不是含混的「读不出」）",
+    (entryOf(badNames.text)?.problem ?? "").includes("不是 SQLite 数据库"));
+  ok("① 是数据库但没有本项目快照的那一份，原因说的是「没有本系统的数据快照」",
+    (entryOf(badNames.plainSqlite)?.problem ?? "").includes("没有本系统的数据快照"));
+  ok("① 内容不是合法 JSON 的那一份，原因说的是「不是合法 JSON」",
+    (entryOf(badNames.brokenJson)?.problem ?? "").includes("不是合法 JSON"));
+  ok(`① 版本比当前新的那一份（v${String(CURRENT_VERSION + 1)}），原因点名了版本 ` +
+      "（与 ⑨ 同一条判据：`validateImportedDatabase`）",
+    (entryOf(badNames.newerVersion)?.problem ?? "").includes(`v${String(CURRENT_VERSION + 1)}`) &&
+      (entryOf(badNames.newerVersion)?.problem ?? "").includes("更新"));
+  eq("① 清单按**时间倒序**（最新的在前）——否则「挑一份恢复」这件事没法用",
+    dailyList.files
+      .map((item) => new Date(item.at).getTime())
+      .every((time, index, all) => index === 0 || (all[index - 1] ?? 0) >= time),
+    true);
+  eq("① 清单里有「库里现在」的条数（确认框要拿它做对照，同一时刻取的）",
+    dailyList.current, countsOf(JSON.parse(dbBeforeList) as Database));
+  eq("① 只读：读一次清单之后，备份目录**逐字节未变**", dirText(), dirAfterFixtures);
+  eq("① 只读：读清单不改库（逐字节）", JSON.stringify(await api.exportDatabase()), dbBeforeList);
+
+  /* ── ② 二次确认：未确认时什么都不发生 ───────────────────────────────── */
+  {
+    const logsBefore = (await api.logs.list(500)).length;
+    const dbBeforeConfirm = JSON.stringify(await api.exportDatabase());
+    const withFalse = await api.dailyBackups.restore(goodName, { confirmed: false });
+    /*
+     * 连"忘了传确认"这条也要验：类型上第二个参数是必填，但 `/api/call` 的 args
+     * 是原样传进来的（TS 在运行时不作数），因此这里用一次强制转换模拟那种调用。
+     */
+    const forgot = await (
+      api.dailyBackups.restore as unknown as (
+        name: string,
+        input?: unknown,
+      ) => Promise<{ ok: boolean; error?: string }>
+    )(goodName);
+    eq("② 没确认时被拒（界面上的确认框是第一道闸，`confirmed: true` 是服务端那道）",
+      [withFalse.ok, forgot.ok], [false, false]);
+    ok("② 拒绝理由说得清「必须二次确认」",
+      withFalse.ok === false && withFalse.error.includes("二次确认"));
+    eq("② 未确认时**什么都不发生**：库逐字节未变",
+      JSON.stringify(await api.exportDatabase()), dbBeforeConfirm);
+    eq("② 未确认时备份目录也逐字节未变（连「先另存一份」都不做）", dirText(), dirAfterFixtures);
+    eq("② 未确认时不写操作日志", (await api.logs.list(500)).length, logsBefore);
+  }
+
+  /* ── ⑤ 坏备份被拒，且**零写入** ────────────────────────────────────── */
+  {
+    const rejects: Array<[string, string]> = [
+      ["⑤ 空文件", badNames.empty],
+      ["⑤ 不是 SQLite 的文本文件", badNames.text],
+      ["⑤ 有效 SQLite 但没有本项目的快照", badNames.plainSqlite],
+      ["⑤ 内容不是合法 JSON", badNames.brokenJson],
+      [`⑤ 版本比当前新（v${String(CURRENT_VERSION + 1)}）`, badNames.newerVersion],
+      ["⑤ 文件不存在（已被清理 / 被手工挪走）", "nexgenedu-2019-01-01-00-00-00-000.db"],
+      ["⑤ 名字不是备份文件名（迁移前快照不在这条路上）", "nexgenedu-migrate-2020-01-01-00-00-00-000.db"],
+      ["⑤ 名字里带路径（不许靠恢复去读服务端机器上别的文件）", "../../server/data/nexgenedu.db"],
+    ];
+    for (const [label, name] of rejects) {
+      const dbBefore = JSON.stringify(await api.exportDatabase());
+      const dirBefore = dirText();
+      const result = await api.dailyBackups.restore(name, { confirmed: true });
+      ok(`${label}：被拒（并且给出一句能看懂的理由）`,
+        result.ok === false && result.error.length > 10,
+        result.ok === true ? "竟然恢复了" : result.error);
+      eq(`${label}：被拒之后**库里逐字节未变**`, JSON.stringify(await api.exportDatabase()), dbBefore);
+      eq(`${label}：被拒之后**备份目录逐字节未变**（一个字节都不写）`, dirText(), dirBefore);
+      eq(`${label}：拒绝理由里写明了「没有改动任何数据」`,
+        result.ok === false && result.error.includes("没有改动任何数据"), true);
+    }
+    ok("⑨ 版本更高的那一份，拒绝理由点名了「比当前程序更新」",
+      (entryOf(badNames.newerVersion)?.problem ?? "").includes("比当前程序"));
+  }
+
+  /* ── ③④ 造一份备份 → 改坏当前数据 → 恢复 → 逐条比对回来 ───────────── */
+  const keeper = await api.students.create({
+    name: "自检·恢复前就有的学生",
+    grade: "初二",
+    guardian: "139-0000-0001",
+    status: "在读",
+    note: "§53 夹具",
+    profile: {},
+  });
+  const keeperSnapshot = JSON.parse(JSON.stringify(await api.exportDatabase())) as Database;
+  const keeperCounts = countsOf(keeperSnapshot);
+  writeBackupFixture(e2eName, JSON.stringify(keeperSnapshot));
+
+  const spoiledA = await api.students.create({
+    name: "自检·恢复后该消失的甲", grade: "初三", guardian: "139-0000-0002",
+    status: "在读", note: "§53 夹具", profile: {},
+  });
+  const spoiledB = await api.students.create({
+    name: "自检·恢复后该消失的乙", grade: "高一", guardian: "139-0000-0003",
+    status: "在读", note: "§53 夹具", profile: {},
+  });
+  await api.students.update(keeper.id, { name: "自检·名字被改坏了" });
+  const spoiledSnapshot = JSON.parse(JSON.stringify(await api.exportDatabase())) as Database;
+  const spoiledCounts = countsOf(spoiledSnapshot);
+  eq("③④ 前提：改坏这一步真的改了东西（条数 +2、keeper 的名字变了）——否则下面等于没验",
+    [
+      spoiledCounts.students - keeperCounts.students,
+      spoiledSnapshot.students.find((item) => item.id === keeper.id)?.name,
+    ],
+    [2, "自检·名字被改坏了"]);
+
+  const dirBeforeRestore = dirText();
+  const fileNamesBeforeRestore = Object.keys(dirFingerprint());
+  const restored = await api.dailyBackups.restore(e2eName, { confirmed: true });
+  ok("④ 恢复成功（返回 ok，不是靠猜）", restored.ok === true,
+    restored.ok === false ? restored.error : "");
+  if (restored.ok) {
+    const afterRestore = JSON.parse(JSON.stringify(await api.exportDatabase())) as Database;
+
+    ok("④ 提示里说了「现在用的是哪一天的数据」",
+      restored.note.includes(dailyBackupTimeText(restored.at)) &&
+        restored.note.includes("现在用的是"));
+    ok("③ 提示里说了「你原来那份另存成了什么名字」，以及怎么回去",
+      restored.note.includes(restored.preRestore) && restored.note.includes("恢复这一份"));
+
+    const newFiles = Object.keys(dirFingerprint()).filter((name) => !fileNamesBeforeRestore.includes(name));
+    eq("③ 恢复前**自动另存**了一份：目录里确实多了一个文件，而且就是返回的那个名字",
+      newFiles, [restored.preRestore]);
+    {
+      // 已有的那几份必须**逐字节**没被碰过：恢复只允许"新增一份"，不许改 / 删别人
+      const now = dirFingerprint();
+      const before = JSON.parse(dirBeforeRestore) as Record<string, string>;
+      eq("③ 恢复没有改动或删除任何已有的备份（已有的每一份逐字节相同）",
+        Object.keys(before).filter((name) => now[name] !== before[name]), []);
+    }
+    const relisted = await api.dailyBackups.list();
+    const preEntry = relisted.files.find((item) => item.name === restored.preRestore);
+    ok("③ 另存的那一份出现在清单里（用户能看见 Y 是什么、点它就能回去）",
+      preEntry !== undefined && preEntry.problem === "");
+    ok("③ 另存的那一份的内容 = **恢复前那一刻**的库（它不是空壳，也不是恢复后的样子）",
+      preEntry?.counts?.students === spoiledCounts.students &&
+        preEntry?.counts?.lessons === spoiledCounts.lessons);
+
+    eq("④ 恢复后的库与备份那一刻**逐表逐条**相同（只多了一条「这次恢复」的日志、updatedAt 变了）",
+      withoutLogs(afterRestore), withoutLogs(keeperSnapshot));
+    eq("④ 恢复后：学生列表**按 id 逐条**一致（顺序也一样）",
+      afterRestore.students.map((item) => item.id),
+      keeperSnapshot.students.map((item) => item.id));
+    eq("④ 恢复后：改坏时新建的两个学生不在了（按姓名逐条找，不是只比条数）",
+      afterRestore.students.filter((item) => item.name.startsWith("自检·恢复后该消失")).map((item) => item.name),
+      []);
+    eq("④ 恢复后：keeper 的姓名 / 年级 / 家长与备份那一刻**逐字相同**",
+      afterRestore.students
+        .filter((item) => item.id === keeper.id)
+        .map((item) => `${item.name}|${item.grade}|${item.guardian}`),
+      keeperSnapshot.students
+        .filter((item) => item.id === keeper.id)
+        .map((item) => `${item.name}|${item.grade}|${item.guardian}`));
+    eq("④ 恢复后：报课记录（课时账本的源头）逐条一致",
+      afterRestore.students.flatMap((item) => item.enrollments).map((item) => `${item.id}|${item.subject}|${item.totalLessons}|${item.usedLessons}|${item.paidAmount}`),
+      keeperSnapshot.students.flatMap((item) => item.enrollments).map((item) => `${item.id}|${item.subject}|${item.totalLessons}|${item.usedLessons}|${item.paidAmount}`));
+    eq("④ 恢复后：教师 / 教室 / 课程 / 课节 / 课堂记录 / 收款 / 课时流水逐表逐条一致",
+      [
+        afterRestore.teachers.map((item) => item.id).join(),
+        afterRestore.classrooms.map((item) => item.id).join(),
+        afterRestore.courses.map((item) => item.id).join(),
+        afterRestore.lessons.map((item) => item.id).join(),
+        afterRestore.lessonRecords.map((item) => item.id).join(),
+        afterRestore.payments.map((item) => item.id).join(),
+        afterRestore.transactions.map((item) => item.id).join(),
+      ],
+      [
+        keeperSnapshot.teachers.map((item) => item.id).join(),
+        keeperSnapshot.classrooms.map((item) => item.id).join(),
+        keeperSnapshot.courses.map((item) => item.id).join(),
+        keeperSnapshot.lessons.map((item) => item.id).join(),
+        keeperSnapshot.lessonRecords.map((item) => item.id).join(),
+        keeperSnapshot.payments.map((item) => item.id).join(),
+        keeperSnapshot.transactions.map((item) => item.id).join(),
+      ]);
+    eq("④ 恢复后的「库里现在」条数 = 备份那一刻的条数",
+      countsOf(afterRestore), keeperCounts);
+
+    /* ⑥ 操作日志：谁 / 什么时候 / 从哪个文件 / 多少条 → 多少条 / 另存成什么 */
+    const logs = await api.logs.list(50);
+    const record = logs.find((item) => item.action === "恢复每日备份");
+    ok("⑥ 恢复写了一条操作日志（action = 恢复每日备份）", record !== undefined);
+    eq("⑥ 日志指得出「从哪个文件恢复」", record?.targetId, e2eName);
+    ok("⑥ 日志里有「多少条 → 多少条」（学生 +2 → 恢复回去；不是只写一句「已恢复」）",
+      record?.summary.includes(e2eName) === true &&
+        record.summary.includes(`学生 ${String(spoiledCounts.students)}→${String(keeperCounts.students)}`),
+      `实际：${record?.summary ?? "（没有这条日志）"}`);
+    ok("⑥ 日志里有「另存的那一份叫什么名字」（事后回看能顺着它回去）",
+      record?.summary.includes(restored.preRestore) === true);
+    ok("⑥ 日志的操作人是**当前会话那个人**（不是「admin」写死、也不是前端传的）",
+      record?.operator === "admin", String(record?.operator));
+    ok("⑥ 日志的时间是有效的 ISO 时间戳", typeof record?.at === "string" && !Number.isNaN(Date.parse(record.at)));
+    eq("⑥ 恢复没有把日志弄丢：恢复后的日志 = 备份那一刻的日志 + 这次恢复那一条",
+      afterRestore.logs.length, keeperSnapshot.logs.length + 1);
+
+    /* ③ 另存的那一份**能再恢复一次**（"要回去可以再恢复 Y"不是空话） */
+    const again = await api.dailyBackups.restore(restored.preRestore, { confirmed: true });
+    ok("③ 另存的那一份可以再恢复一次（回到恢复前的状态）", again.ok === true,
+      again.ok === false ? again.error : "");
+    if (again.ok) {
+      const back = JSON.parse(JSON.stringify(await api.exportDatabase())) as Database;
+      eq("③ 再恢复之后：改坏时新建的两个学生又回来了（确实是「恢复前那一刻」）",
+        back.students.filter((item) => item.name.startsWith("自检·恢复后该消失")).map((item) => item.name),
+        [spoiledA.name, spoiledB.name]);
+      eq("③ 再恢复之后：keeper 的名字也是被改坏的那个",
+        back.students.find((item) => item.id === keeper.id)?.name, "自检·名字被改坏了");
+      eq("③ 再恢复之后条数 = 改坏那一刻的条数", countsOf(back), spoiledCounts);
+    }
+
+    /* ⑧ 恢复不动凭据、也不动网站内容（反向断言：逐字节比一次） */
+    eq("⑧ 恢复不动 accounts.json / admin-credential.json / data/site/*.md（逐字节比对）",
+      untouchable.map((file) => {
+        const path = new URL(`../${file}`, import.meta.url);
+        return existsSync(path) ? readFileSync(path, "utf8") : null;
+      }),
+      untouchableBefore);
+    ok("⑧ 恢复后的库里没有跑出任何「账号 / 凭据」数据（快照里根本没有这些东西）",
+      !JSON.stringify(await api.exportDatabase()).includes("passwordHash") &&
+        !JSON.stringify(await api.exportDatabase()).includes("admin-credential"));
+  }
+
+  /* 收尾：把这一节造的夹具清掉（自检的库不该留下"自检·"开头的东西） */
+  {
+    const cleanup = await api.exportDatabase();
+    const leftovers = cleanup.students.filter((item) => item.name.startsWith("自检·"));
+    for (const item of leftovers) await api.students.remove(item.id);
+    eq("收尾：这一节造的学生夹具已清掉（没有「有账删不掉」的意外）",
+      (await api.exportDatabase()).students.filter((item) => item.name.startsWith("自检·")).length, 0);
+  }
+
+  // 收尾：临时备份目录整个删掉（内存那一遍自建的那个；HTTP 那一遍由 check-both 的临时目录兜底）
+  if (!dailyRemote) rmSync(dailyDir, { recursive: true, force: true });
+  __useDailyBackupFiles(null);
+}
+
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
 process.exit(failures === 0 ? 0 : 1);

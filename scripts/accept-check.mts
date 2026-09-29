@@ -17,6 +17,14 @@ import { classroomLabel } from "../lib/backend/classrooms.ts";
 import { textbookSummary } from "../lib/backend/textbooks.ts";
 import { applyDecision, offerKey, offersByKey, resolveOffer } from "../lib/backend/offers.ts";
 import { isRemoteMode, remoteBase } from "../lib/backend/remote.ts";
+/*
+ * 「每天自动备份」那一块（「数据与备份」页）：它读写的是**服务端机器上的备份文件**，
+ * 因此验收要造一份夹具备份、再点"恢复"（见下面 10.5 那一节）。
+ * 夹具备份用服务端同一个模块写，参数与真实服务端一致（`SNAPSHOT_KEY` 与结构版本一处真源）。
+ */
+import { SNAPSHOT_KEY } from "../lib/backend/api.ts";
+import { createNodeDailyBackupFiles } from "../server/daily-backup-files.mts";
+import { listMigrations } from "../server/migrate.mts";
 
 /*
  * 闸：没指向服务端就直接退出。
@@ -1396,6 +1404,113 @@ await check("数据与备份", "批量导入：缺少必填列时拒绝且不写
   const outcome = await api.imports.apply({ entity: "classrooms", text: "房间名,容量\r\n漏了表头,6\r\n" });
   return { ok: outcome.ok, changed: (await api.classrooms.list()).length - before };
 }, (v: { ok: boolean; changed: number }) => v.ok === false && v.changed === 0);
+
+/* ── 10.5 每天自动备份：机构「先做 1：备份能在后台恢复」────────────────────────
+ *
+ * ## 为什么这件事必须在**真实后端**上验收
+ *
+ * 「清单」与「恢复」都要**读写服务端机器上的文件**（`server/backups/`），因此它们
+ * 在内存伪后端上根本跑不了（`available: false`）—— 那是这一页唯一"必须在后端上才成立"
+ * 的功能。断言的是端到端那一条链：
+ *
+ *   造一份备份 → 改坏当前数据 → 恢复 → **逐条比对回到备份那一刻** → 另存的那一份存在且能被再恢复
+ *
+ * ## 绝不碰 `server/backups/`
+ *
+ * 备份目录用**这次临时服务的一次性临时目录**（`accept-run.mts` 通过
+ * `NEXGENEDU_BACKUP_DIR` 同时交给服务端与本脚本）。真实的 `server/backups/` 里
+ * 每一份都是机构的退路，验收碰一下都不行 —— 这句纪律靠"指向同一个临时目录"落地，
+ * 而不是靠"记得别写"。
+ */
+const acceptBackupDir = process.env.NEXGENEDU_BACKUP_DIR ?? "";
+const acceptBackupFiles = createNodeDailyBackupFiles({
+  dir: acceptBackupDir,
+  snapshotKey: SNAPSHOT_KEY,
+  schemaVersion: listMigrations().at(-1)?.version ?? 0,
+});
+const acceptKeeperName = "验收·恢复前就有的学生";
+let acceptKeeperId = "";
+let acceptBackupName = "";
+let acceptSpoiledId = "";
+/** **备份那一刻**的学生姓名清单（恢复之后要逐条对回来的就是它）。 */
+let acceptNamesAtBackup = "";
+
+await check("数据与备份", "每天自动备份：清单读得出来，而且看的就是临时备份目录", async () => {
+  const list = await api.dailyBackups.list();
+  return { available: list.available, dir: list.dir, reason: list.reason };
+}, (v: { available: boolean; dir: string; reason: string }) =>
+  v.available === true && v.dir === acceptBackupDir);
+
+await check("数据与备份", "每天自动备份：造一份夹具备份（内容 = 现在这一刻的库）", async () => {
+  const keeper = await api.students.create({
+    name: acceptKeeperName, grade: "初二", guardian: "138-0000-9999",
+    status: "在读", note: "验收夹具（每天自动备份）", profile: {},
+  });
+  acceptKeeperId = keeper.id;
+  acceptNamesAtBackup = JSON.stringify((await api.students.list()).map((item) => item.name));
+  const snapshot = JSON.stringify(await api.exportDatabase());
+  acceptBackupName = acceptBackupFiles.writeSnapshot(snapshot);
+  const list = await api.dailyBackups.list();
+  const entry = list.files.find((item) => item.name === acceptBackupName);
+  return { name: acceptBackupName, problem: entry?.problem ?? "不在清单里", students: entry?.counts?.students ?? -1 };
+}, (v: { name: string; problem: string; students: number }) =>
+  v.problem === "" && v.students > 0);
+
+await check("数据与备份", "每天自动备份：未确认时恢复被拒，而且什么都不发生", async () => {
+  const before = (await api.students.list()).length;
+  const result = await api.dailyBackups.restore(acceptBackupName, { confirmed: false });
+  return { ok: result.ok, changed: (await api.students.list()).length - before, error: result.ok === false ? result.error : "" };
+}, (v: { ok: boolean; changed: number; error: string }) =>
+  v.ok === false && v.changed === 0 && v.error.includes("二次确认"));
+
+await check("数据与备份", "每天自动备份：改坏之后再恢复，库里逐条回到备份那一刻", async () => {
+  const spoiled = await api.students.create({
+    name: "验收·恢复后该消失的学生", grade: "高一", guardian: "138-0000-8888",
+    status: "在读", note: "验收夹具（每天自动备份）", profile: {},
+  });
+  acceptSpoiledId = spoiled.id;
+  const result = await api.dailyBackups.restore(acceptBackupName, { confirmed: true });
+  if (result.ok === false) return { error: result.error };
+  const names = JSON.stringify((await api.students.list()).map((item) => item.name));
+  const list = await api.dailyBackups.list();
+  return {
+    error: "",
+    // 逐条比对（不是"看起来像"）：姓名清单与备份那一刻**逐字相同**
+    names,
+    namesAtBackup: acceptNamesAtBackup,
+    preRestore: result.preRestore,
+    preRestoreInList: list.files.some((item) => item.name === result.preRestore && item.problem === ""),
+    note: result.note,
+    counts: JSON.stringify(result.after) === JSON.stringify(result.before) ? "竟然一样" : "变了（对的）",
+  };
+}, (v: { error: string; names: string; namesAtBackup: string; preRestoreInList: boolean; note: string; counts: string }) =>
+  v.error === "" &&
+  v.names === v.namesAtBackup &&
+  v.names.includes("验收·恢复前就有的学生") &&
+  v.names.includes("验收·恢复后该消失的学生") === false &&
+  v.preRestoreInList === true &&
+  v.counts === "变了（对的）" &&
+  v.note.includes("现在用的是"));
+
+await check("数据与备份", "每天自动备份：恢复写了操作日志（从哪个文件、多少条 → 多少条）", async () => {
+  const logs = await api.logs.list(50);
+  const record = logs.find((item) => item.action === "恢复每日备份");
+  return { found: record !== undefined, summary: record?.summary ?? "", target: record?.targetId ?? "" };
+}, (v: { found: boolean; summary: string; target: string }) =>
+  v.found === true && v.target === acceptBackupName && v.summary.includes("→") && v.summary.includes(acceptBackupName));
+
+await check("数据与备份", "收尾：删掉这一节的夹具学生", async () => {
+  for (const id of [acceptKeeperId, acceptSpoiledId]) {
+    if (id === "") continue;
+    // 恢复已经把"改坏"那个学生删掉了（它不在备份里），因此这里删不到是正常的
+    await api.students.remove(id).catch(() => false);
+  }
+  // 只数**这一节**那两个夹具（验收别处也造了「验收·」开头的记录，不能一起数）
+  return (await api.students.list()).filter(
+    (item) => item.name === acceptKeeperName || item.name === "验收·恢复后该消失的学生",
+  ).length;
+}, (v: number) => v === 0);
+
 /*
  * ── 节假日（后台「节假日」页）────────────────────────────────────────────────
  *

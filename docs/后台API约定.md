@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 109 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 111 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -42,7 +42,7 @@ lib/backend/api.ts        服务层实现（当前 109 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 109 个方法）
+## 二、接口分组（当前 111 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -818,7 +818,11 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 ### 7. 运维与审计
 
 `exportDataset`、`exportDatabase`、`importDatabase`、`imports.apply`、`hasBackup`、`backupSlots`、`restoreBackup`、
-`reset`、`setOperator`、`logs.list`、`logs.clear`。
+`dailyBackups.list`、`dailyBackups.restore`、`reset`、`setOperator`、`logs.list`、`logs.clear`。
+
+**权限**：整组**只有技术管理员**（`lib/auth/roles.ts` 的 `GROUP_ACCESS.ops`）。这一组里每一个动作都能
+一次改变全部数据，因此**不要为了"让谁也能用"而放宽整组** —— 要放宽就逐个方法写 `METHOD_ACCESS`，
+并且先把"它毁掉数据时的退路"说清楚。`scripts/check.mts` 第 8 组有一条断言钉着这件事（含反向断言）。
 
 **两种"导入"别混**：
 
@@ -866,18 +870,60 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 `reset` 的语义是**清空业务数据**（回到 `createEmptyDatabase()`：业务表全空 + 网站课程 + 报价配置），
 不是"回到示例数据"。
 
-⚠️ 别把两个"备份"搞混：`hasBackup`/`backupSlots`/`restoreBackup` 指的是**「导入前自动备份」**
-（存在同一个 KeyValueStore 里，键 `nexgenedu.admin.db.backup.v1` 存**最新那一份**、
-`nexgenedu.admin.db.backups.v1` 是清单 —— **滚动保留最近 5 份**，`backupSlots` 给界面看清单。
-早先只有一个键、每次导入覆盖，于是"选错文件 → 导入 → 恢复"只能走一次，再选错就回不去了）；
-**每天一份的备份文件**（`server/backups/`，保留 90 份）是另一套，由服务端的备份调度负责，
-接口里没有对应方法。
+⚠️ 别把**三套**"备份"搞混：
+
+| | 「导入前自动备份」 | 「每天自动备份」（`dailyBackups.*`） | 导出的 JSON |
+| --- | --- | --- | --- |
+| 存在哪 | 同一个 KeyValueStore 里，键 `nexgenedu.admin.db.backup.v1`（最新那份）+ `nexgenedu.admin.db.backups.v1`（清单） | 服务端机器上的**文件** `server/backups/nexgenedu-<时间戳>.db`，默认保留 **90 份** | 浏览器下载目录里的文件 |
+| 怎么产生 | 每次整库导入前自动写一份 | 服务端每天备一份（启动补当天 + 每小时检查），也可 `npm run server:backup` | 用户点「导出全部数据」 |
+| 恢复入口 | `restoreBackup`（滚动最近 **5** 份） | `dailyBackups.restore`（界面上一行一个「恢复这一份」） | `importDatabase` |
+| 回答的问题 | "上一次导入之前是什么样" | "**这周三的数据还在吗**" | "换机器 / 给别人一份" |
+
+`hasBackup` / `backupSlots` / `restoreBackup` 只管第一套（早先只有一个键、每次导入覆盖，
+于是"选错文件 → 导入 → 恢复"只能走一次，再选错就回不去了 —— 现在滚动 5 份）。
+第三套由 `importDatabase` 收。三者的用途不同，**不要合并成一个"恢复"按钮**。
 
 导入必须保持三道保险：**结构校验**（不合格直接拒收且不动现有数据）、
 **导入前自动备份**、**版本迁移**。`logs` 已经落在**服务端**（不在浏览器里），
 操作人来自会话、前端说了不算；但它还不是不可篡改的审计表 —— 接口里仍有
 `logs.clear`，只要登录就能清空，做到"防篡改"要等单账号之外有按人区分的权限，
 并且把清空这条收进运维通道（见技术架构第 10 节）。
+
+### 7.0 「每天自动备份」的两个方法（`dailyBackups.list` / `dailyBackups.restore`）
+
+> ⚠️ **`dailyBackups.restore` 会整库替换数据。** 它只给技术管理员，而且服务端自己做五件事，
+> 顺序不能改：**校验 → 先另存 → 再替换 → 落盘 → 写日志**。任何一步想省掉，
+> 都会重新打开"一次误点造成不可逆损失"这条口子。
+
+| 方法 | 入参 | 出参 | 语义 |
+| --- | --- | --- | --- |
+| `dailyBackups.list` | — | `{ available, reason, dir, current, files[] }` | **只读**：列出 `server/backups/` 里符合命名规则的每日备份（最新的在前）。每份带 `name` / `bytes` / `at`（从**文件名**解析，不是 mtime）与 `counts`（条数摘要：学生 / 教师 / 教室 / 课程 / 课节 / 课堂记录 / 收款 / 课时流水）；**读不出的那一份照样列出**，`counts` 为 `null` 并带 `problem`（界面标红、按钮禁用）。`current` 是**库里现在**的条数，供确认框做对照 |
+| `dailyBackups.restore` | `name`（备份文件名）、`input: { confirmed: boolean }` | `{ ok: true, file, at, preRestore, before, after, note }` 或 `{ ok: false, error }` | 用那一份把整库换回去 |
+
+`restore` 的四条硬性口径（`scripts/check.mts` 第 53 节逐条断言）：
+
+1. **`confirmed !== true` 直接拒绝**：这是服务端的第二道闸（界面上的确认框是第一道）。
+   它挡的是"某个脚本顺手调了一下"——一个把参数拼错的调用不能变成一次静默的整库替换；
+2. **坏备份一个字都不写**：文件不存在 / 读不出（不是 SQLite / 没有本项目的快照）/ 内容不是合法 JSON /
+   空文件 / **版本比当前程序新** / 名字不符合备份命名规则（含带路径的名字 —— 那条防的是
+   "靠恢复去读服务端机器上任意一个 SQLite 文件"）→ 一律在**动第一个字节之前**返回失败，
+   此时连"先另存一份"都还没做，因此备份目录也不会多出垃圾；
+3. **恢复前先另存当前库**（`preRestore` 就是新文件名），并把名字写进返回的 `note` 与操作日志。
+   那一份是**正常的备份**（同一个命名规则、同一份清单、能被同一套恢复再恢复回去）：
+   所以"恢复错了还能回来"不是一句安慰，而是一条可执行的路径；
+4. **走服务层落盘**（`cache = 迁移后的库` + `persist()`），**不是**在服务运行期间用文件复制去替换
+   `nexgenedu.db` —— 这个库开着 WAL，那样做会把它弄坏（手工换文件那套必须停机，见
+   [部署与发布.md 第 7 节](./部署与发布.md)）。
+
+**它不碰什么**（同样是断言钉着的反向口径）：`server/data/accounts.json`、`server/data/admin-credential.json`
+（账号与口令**不在备份里** —— 恢复它们会把机构锁在门外）、`data/site/*.md` 与 `out/`
+（网站内容文件与构建产物不在备份范围内，要发布仍走 `npm run site:export`）。
+
+**实现分两半**（`api.ts` 是浏览器与 Node 共用的一份实现，不能 import `node:fs`）：
+口径与类型在 `lib/backend/daily-backups.ts`（纯函数：条数摘要、大小、时间、确认框文案），
+碰文件的那一半在 `server/daily-backup-files.mts`（`server/index.mts` 启动时用
+`__useDailyBackupFiles()` 装上，与 `__useStoreForTesting()` 同一个做法）。
+浏览器里没装这份能力 → `list()` 回 `available: false` 并说明"这件事只有服务端能做"。
 
 ### 7.1 账号管理：四条**独立路由**（`/api/accounts`，不在 `/api/call` 里）
 
@@ -900,7 +946,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 2. 它会进入 `API_CONTRACT` —— 而自检要求"服务层每个方法都必须在契约里"，
    于是契约里出现一个"只有服务端才有意义"的方法，契约就不再是"页面对服务层的形状"了。
 
-**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 109 个方法，
+**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 111 个方法，
 这四条路由**刻意不登记**（它们不是服务层方法）；页面的客户端是 `lib/auth/accounts.ts`，
 与 `lib/auth/session.ts` 调 `/api/login`、`/api/session` 是同一个做法。
 自检里对它们的要求写在 `scripts/check-auth.mts` 的 [10] 节（真实 HTTP、真实写盘），

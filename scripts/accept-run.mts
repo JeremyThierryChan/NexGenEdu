@@ -62,6 +62,12 @@ try {
         // 第 6 步之后接口要登录：把本次测试账号交给验收脚本
         NEXGENEDU_ADMIN_USER: info.username,
         NEXGENEDU_ADMIN_PASSWORD: info.password,
+        /*
+         * 「每天自动备份」那一块（数据与备份页）：验收要造一份夹具备份、再点"恢复"。
+         * 备份目录一律用**这次临时服务的一次性临时目录** ——
+         * 验收绝不能碰 `server/backups/`（那里的每一份都是机构的真实退路）。
+         */
+        NEXGENEDU_BACKUP_DIR: info.backupDir,
       },
       stream: true,
       timeoutMs: CHILD_TIMEOUT_MS,

@@ -33,7 +33,9 @@ import {
   api,
   __appendSystemLog,
   __removeFixture,
+  __useDailyBackupFiles,
   __useStoreForTesting,
+  SNAPSHOT_KEY,
 } from "../lib/backend/api.ts";
 /*
  * 版本冲突的类型：接口层要靠**类型**把它翻成 409。
@@ -60,6 +62,8 @@ import {
   backupsDisabled,
   latestBackup,
 } from "./backup.mts";
+// 「每天自动备份」的文件能力（列备份 / 读一份 / 另存一份）：只有服务端能做，见 server/daily-backup-files.mts
+import { createNodeDailyBackupFiles } from "./daily-backup-files.mts";
 // 会话认证（第 6 步）：口令与令牌都在服务端，见 server/auth.mts
 import {
   activeSessionCount,
@@ -691,7 +695,6 @@ const migration = migrate(db);
  * 之后 `api` 上的方法全部可用，且**与浏览器里跑的是同一套逻辑**。（数量以 `contract.ts` 为准，
  * 不在这里写死 —— 写死的数字一定会过期。）
  */
-const SNAPSHOT_KEY = "nexgenedu.admin.db.v1";
 const serverStore = createSqliteStore(db);
 
 /*
@@ -723,6 +726,30 @@ if (serverStore.read(SNAPSHOT_KEY) === null) {
 }
 
 __useStoreForTesting(serverStore);
+
+/* ── 「每天自动备份」的清单与恢复（界面「数据与备份」页那一块）──────────────────────
+ *
+ * 那两件事要**读写服务端机器上的文件**（`server/backups/` 里列文件、打开某一份读快照、
+ * 把当前库另存一份），浏览器里那份 `api` 做不了。因此在这里把这份能力装上 ——
+ * 与 `__useStoreForTesting()` 是同一个做法：`api.ts` 只认接口，实现由运行环境给。
+ *
+ * 三个参数各自都有一处真源，不在这里写第二个字面量：
+ *   - `dir`：`backupDir()` —— 走 `NEXGENEDU_BACKUP_DIR`，因此临时服务 / 演练 / 验收
+ *     一改环境变量就整体隔离到临时目录，**绝不会去动真实的 server/backups/**；
+ *   - `snapshotKey`：`SNAPSHOT_KEY`（`lib/backend/api.ts`）—— 备份文件里装的正是这一份快照；
+ *   - `schemaVersion`：`currentVersion(db)` —— 另存的那份也写一个正确的结构版本。
+ *
+ * ⚠️ 权限不在这里判：`dailyBackups.*` 登记在契约的 `ops` 组，
+ * 判定由 `lib/auth/roles.ts` 的 `GROUP_ACCESS.ops` 给出（**只有技术管理员**），
+ * 与 `importDatabase` / `restoreBackup` / `logs.clear` 同一档 —— 这一组不放宽。
+ */
+__useDailyBackupFiles(
+  createNodeDailyBackupFiles({
+    dir: backupDir(),
+    snapshotKey: SNAPSHOT_KEY,
+    schemaVersion: currentVersion(db),
+  }),
+);
 
 /* ── 节假日表（`/api/holidays`：查看；`/api/holidays/refresh`：抓取并写入）────────── */
 
@@ -1585,7 +1612,7 @@ const server = createServer((request: IncomingMessage, response: ServerResponse)
         "POST /api/holidays/refresh",
       ],
       storage: "sqlite(kv)：与浏览器共用同一份 api.ts 实现",
-      snapshotBytes: snapshotSize(db, "nexgenedu.admin.db.v1"),
+      snapshotBytes: snapshotSize(db, SNAPSHOT_KEY),
       /*
        * 备份状态放进探活：备份是"出事那天才想起来检查"的东西，所以平时也要看得见。
        * 只报**最近一份**的时间与份数 —— 判断"备份是不是停了"只要这两样。
