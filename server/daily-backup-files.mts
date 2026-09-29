@@ -1,12 +1,26 @@
 /**
  * 「每天自动备份」的**文件能力**（只有服务端能做的事）。
  *
- * `lib/backend/daily-backups.ts` 里写清了这三套备份的区别与那五条安全底线；
- * 这一层只负责三件**碰文件**的事：
+ * `lib/backend/daily-backups.ts` 里写清了这两套备份的区别与那六条安全底线；
+ * 这一层只负责几件**碰文件**的事：
  *
- *   1. **列清单**：`server/backups/` 里符合命名规则的每日备份（最新的在前）；
+ *   1. **列清单**：`server/backups/` 里**两类**快照（每日备份 + 升级前快照，最新的在前），
+ *      每一份带上它是哪一类；
  *   2. **读一份备份里的整库快照**：以**只读**方式打开那个 SQLite 文件，取出 kv 表里那份快照文本；
- *   3. **把当前库另存一份**：恢复前的那颗后悔药。
+ *   3. **把当前库另存一份**：恢复前的那颗后悔药；
+ *   4. **立刻备份一份**（`takeNow`）：走**每日备份那一套现成的实现**（`server/backup.mts`
+ *      的 `takeBackup`：`VACUUM INTO` + 按保留份数清理），**不另写一份备份实现**。
+ *
+ * ## 两类快照在这里**只有一处判据**
+ *
+ * "这个文件名算不算一份备份、算哪一类"完全交给 `server/backup.mts` 的 `backupKindOfName()`
+ * （命名规则的唯一实现）。这一层不写第二条前缀判断 —— 分成两处之后，
+ * 迟早出现"清单里看得见它、恢复却说这不是备份"这种最难向机构解释的状态
+ * （他从界面上明明看到了那一份，点下去却说"这不是本系统的备份文件名"）。
+ *
+ * ⚠️ **升级前快照的版本比当前旧是正常的**：它就是在升级前留的，恢复它 = 退回升级前，
+ * 必须走迁移链升上来。因此这里的读快照只负责"读得出来"，版本判据在服务层
+ * （"比当前新"才拒绝）—— 在这一层加一句"版本必须等于当前"会把这条路整个堵死。
  *
  * ## 为什么读一份备份时**只读打开**
  *
@@ -31,7 +45,8 @@
  *
  * ## 命名：**只有一处实现**
  *
- * 文件名一律由 `server/db.mts` 的 `backupFileName()` 生成（本地时间、精确到毫秒）。
+ * 文件名一律由 `server/db.mts` 的 `backupFileName()` / `backupStamp()` 生成（本地时间、精确到毫秒）；
+ * 迁移前快照的名字由 `server/backup.mts` 的 `migrationBackupName()` 生成（同一个时间戳、多一个前缀）。
  * 另存的那一份**刻意与每日备份同名同形**：它是"另一份完整的备份"，不是一种新东西 ——
  * 于是它自动满足三件事：出现在同一份清单里（用户看得见"我原来那份"）、
  * 能被同一套恢复逻辑再恢复回来（`name` 的判据完全一样）、按同一条保留份数规则被清理。
@@ -42,7 +57,15 @@ import { existsSync, mkdirSync, mkdtempSync, statSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { backupFileName, backupTimeOfName } from "./db.mts";
-import { listBackups } from "./backup.mts";
+import {
+  backupsDisabled,
+  backupKeep,
+  backupKindOfName,
+  listBackupSnapshots,
+  migrationBackupKeep,
+  takeBackup,
+} from "./backup.mts";
+import type { BackupKind } from "../lib/backend/daily-backups.ts";
 import type {
   DailyBackupFile,
   DailyBackupFileAccess,
@@ -63,6 +86,18 @@ export type NodeDailyBackupFilesOptions = {
   snapshotKey: string;
   /** 当前数据库的结构版本（写进另存那份的 `schema_version`）。 */
   schemaVersion: number;
+  /**
+   * 当前数据库句柄 —— **只给 `takeNow()` 用**（"立刻备份一份"要走 `takeBackup(db)`）。
+   *
+   * 为什么是"给它一个句柄"而不是"给它一个回调"：`takeBackup` 是**备份生成的唯一实现**
+   * （`server/backup.mts`），把句柄交给这一层、由这一层调它，就没有任何余地
+   * 在别处再写一份"VACUUM INTO + 清理"。回调形式也可以，但那样"到底走的哪一份实现"
+   * 就取决于注入方 —— 而注入方一旦随手写个 `writeSnapshot`，就悄悄多出了第二套口径。
+   *
+   * `null`（默认）时 `takeNow()` **明确抛错**，不返回一个"看着成功"的假结果：
+   * 浏览器里、自检的内存那一遍都没有句柄，那种环境下"备一份"没有意义。
+   */
+  db?: Database.Database | null;
   /** 取当前时间（测试要可控）；默认 `new Date()`。 */
   now?: () => Date;
 };
@@ -73,33 +108,56 @@ export function createNodeDailyBackupFiles(
 ): DailyBackupFileAccess {
   const now = options.now ?? (() => new Date());
 
-  /** 把文件名解析成时间点（不符合命名规则 → 拒绝）。 */
-  const timeOf = (name: string): { at: Date; file: string } => {
-    const parsed = backupTimeOfName(name);
+  /**
+   * 把文件名解析成时间点与类别（**两类都认**）；不符合任何命名规则 → 拒绝。
+   *
+   * 判据只有一处（`backupKindOfName`）：今天多认的那一类是"升级前快照"
+   * （`nexgenedu-migrate-<时间戳>.db`），它此前是被这条判据**明确拒绝**的 ——
+   * 机构看完清单后当场点了"也纳入界面 + 加上限"，于是这条路开了
+   * （见 `lib/backend/daily-backups.ts` 的 `BackupKind`）。
+   */
+  const timeOf = (name: string): { at: Date; kind: BackupKind; file: string } => {
+    const parsed = backupKindOfName(name);
     if (parsed === null) {
       throw new BackupFileRefusal(
         `这不是本系统的备份文件名：${name}。` +
-          "备份的名字形如 nexgenedu-2026-02-01-08-00-00-000.db —— " +
-          "只有这种名字的文件才会出现在「每天自动备份」清单里（迁移前快照等其他文件不在此列）。",
+          "备份的名字只有两种：每日备份 nexgenedu-2026-02-01-08-00-00-000.db、" +
+          "升级前快照 nexgenedu-migrate-2026-02-01-08-00-00-000.db —— " +
+          "只有这两种名字的文件才会出现在这份清单里（导出的 JSON、手工改过名的文件都不在此列）。",
       );
     }
     /*
      * 路径安全：命名规则决定了 `name` 里**不可能**有 `/` 或 `..`（正则只认数字与连字符），
      * 因此这里 join 出来的路径一定落在备份目录里面。这一条不是"顺手加的防御"：
      * 恢复的入参来自 HTTP 请求，允许它带路径就等于允许它读服务端机器上任意一个 SQLite 文件。
+     * ⚠️ 加第二类名字时**这一条同样成立**（前缀是固定字符串 + 时间戳正则），
+     * 但将来若再认一种"前缀里能带任意字符"的名字，必须重新审这一句。
      */
-    return { at: new Date(parsed), file: path.join(options.dir, name) };
+    return { at: parsed.at, kind: parsed.kind, file: path.join(options.dir, name) };
   };
 
   return {
     dir: () => options.dir,
 
+    /*
+     * 两类各留几份：**判定只有一处**（`server/backup.mts` 的两个 `*Keep()` 读的是
+     * `NEXGENEDU_BACKUP_KEEP` / `NEXGENEDU_MIGRATE_SNAPSHOT_KEEP`）。
+     * 界面据此显示"保留 90 份 / 保留 10 份"—— 它不写死数字，否则人把上限调小之后
+     * 界面上那句"保留 10 份"会变成假话，而他正靠那句话判断"最早那份还能留多久"。
+     */
+    keep: () => ({ daily: backupKeep(), migrate: migrationBackupKeep() }),
+
     list(): DailyBackupFile[] {
-      // 只认符合命名规则的文件（目录里别人手动放的东西不参与排序与清理，见 server/backup.mts）
-      return listBackups(options.dir).map((item) => ({
+      /*
+       * 两类一起列（**最新的在前**），每一份带 `kind` —— 界面上靠它分栏标注。
+       * 只认符合命名规则的文件（目录里别人手动放的东西不参与排序与清理，
+       * 也不出现在清单里：见 server/backup.mts 的 `listBackupSnapshots`）。
+       */
+      return listBackupSnapshots(options.dir).map((item) => ({
         name: item.name,
         bytes: item.bytes,
         at: item.at.toISOString(),
+        kind: item.kind,
       }));
     },
 
@@ -202,6 +260,69 @@ export function createNodeDailyBackupFiles(
       throw new Error(
         `同一毫秒里已经有 1000 份备份了（${options.dir}）—— 先清理备份目录再恢复。`,
       );
+    },
+
+    /**
+     * **立刻备份一份每日备份**（界面上那颗按钮，机构原话：「**加"立刻备份一份"按钮**」）。
+     *
+     * ## 为什么它调的是 `takeBackup` 而不是 `writeSnapshot`
+     *
+     * 两者的区别不是风格，是"这一份算不算**每日备份**"：
+     *   - `writeSnapshot` 是恢复前那颗后悔药：它写一个**恰好能装下当前快照的新文件**，
+     *     名字看起来像每日备份（因此清单里看得见），但它**不参与保留份数清理**
+     *     —— 每恢复一次就多一份、永远不被清，那不是每日备份的语义；
+     *   - `takeBackup` 才是每日备份的**唯一实现**：`VACUUM INTO` 当前库（因此它是一份
+     *     **完整的数据库**，含规范化表）→ 按 `NEXGENEDU_BACKUP_KEEP` 清理旧份 →
+     *     返回新名字与被清掉的名单。
+     *
+     * 用后者意味着"立刻备份一份"与"服务端每天自动备一份"产出的东西**完全一样**
+     * （同一套命名、同一处生成、同一处清理）。另写一份"看起来差不多"的实现，
+     * 迟早出现"手动备的那份不被清理"或"手动备的那份不被清单认出来"这类静默分叉。
+     *
+     * ## 没有数据库句柄时**明确拒绝**
+     *
+     * 自检的内存那一遍、浏览器里都没有句柄。此时返回 { ok: false } 那种"看着像失败"没问题，
+     * 但这里选择**抛错**：调用方（服务层）会把它翻成一句人话，而"静默返回一个空文件名"
+     * 会被当成成功 —— 在备份这件事上，假的成功比明确的失败贵得多。
+     */
+    takeNow(): { file: string; at: string; bytes: number; removed: string[]; total: number } {
+      const db = options.db;
+      if (db === null || db === undefined) {
+        throw new BackupFileRefusal(
+          "这个环境里没有数据库句柄，因此「立刻备份一份」办不到" +
+            "（它要对着**当前的这个库**做一次 VACUUM INTO）。" +
+            "浏览器里读不到服务端的库，这件事只能在服务端上做。",
+        );
+      }
+      /*
+       * 备份被**整体关掉**（`NEXGENEDU_NO_BACKUP=1`）时也拒绝，理由不在这一层自己编、
+       * 而是复用 `backupsDisabled()`（唯一一份判定，见 server/backup.mts 的文件头）：
+       * 那个开关的语义就是"这台机器上不要生成备份文件"，而"人点了一下按钮"不是例外 ——
+       * 半开半关的开关最危险的地方在于**没人说得清它到底关没关**。
+       * 它的真实用途是"自检 / 验收起的临时服务不要往真实备份目录丢文件"，
+       * 因此才需要这里也认它（否则点一下按钮就绕过去了）。
+       */
+      if (backupsDisabled()) {
+        throw new BackupFileRefusal(
+          "这台机器上的备份被整体关掉了（NEXGENEDU_NO_BACKUP=1），因此不能立刻备份一份。" +
+            "备份恢复之后（去掉这个环境变量、重起后端）再点。",
+        );
+      }
+      // 目录用**这份能力自己的** dir（与 list / readSnapshot / writeSnapshot 同一个目录）
+      const outcome = takeBackup(db, now(), options.dir);
+      /*
+       * `at` 从**文件名**解析（不是 `now()`、也不是 mtime）：清单里显示的时间点同样是
+       * 从文件名来的，两处口径必须一致 —— 否则刚备完那一下的提示会说一个时间、
+       * 清单里那一行显示另一个时间，而人正靠对得上号来判断"是不是这一份"。
+       */
+      const parsed = backupTimeOfName(outcome.file);
+      return {
+        file: outcome.file,
+        at: new Date(parsed ?? now().getTime()).toISOString(),
+        bytes: outcome.bytes,
+        removed: outcome.removed,
+        total: outcome.total,
+      };
     },
   };
 }

@@ -73,6 +73,25 @@ function encodeArg(value: unknown): unknown {
  */
 let scriptToken: string | null = null;
 
+/**
+ * 忘掉脚本这一轮登录拿到的令牌（下一次调用会用环境变量里的账号口令**重新登录**）。
+ *
+ * ## 为什么需要它：会话会被**服务端主动作废**
+ *
+ * E22 续 起，`dailyBackups.restore` 换库成功之后会作废**全部**会话（机构原话：
+ * 「恢复后让所有人重新登录」）—— 于是**正在调用它的那个脚本自己也会掉线**：
+ * 手上那个令牌立刻失效，后面每一条断言都会变成 401。
+ *
+ * 浏览器里有登录界面（用户自己重新输口令），脚本没有 —— 它唯一的出路是用
+ * `NEXGENEDU_ADMIN_USER` / `NEXGENEDU_ADMIN_PASSWORD` 再登一次。调一次这个函数，
+ * 下一次调用就会重新登录。自检与验收在**每次恢复之后**显式调它（见 `scripts/check.mts`
+ * 与 `scripts/accept-check.mts`），这既修好了"脚本掉线"，也让"恢复之后要重新登录"
+ * 这件事在测试里被真的走了一遍 —— 而不是靠"把作废会话那条去掉"来让用例过。
+ */
+export function forgetScriptLogin(): void {
+  scriptToken = null;
+}
+
 async function resolveToken(base: string): Promise<string | null> {
   const direct = process.env.NEXGENEDU_API_TOKEN;
   if (typeof direct === "string" && direct !== "") return direct;
@@ -121,6 +140,16 @@ async function callRemote(base: string, method: string, args: unknown[]): Promis
      * "在后台某页报错却被踢到登录页、还不知道为什么"。
      */
     clearToken();
+    /*
+     * 脚本那句缓存下来的令牌也要丢掉 —— 与浏览器同一件事的两面。
+     *
+     * 会话除了"过期"，还可能被**服务端主动作废**：恢复整库就是这样
+     * （机构：「恢复后让所有人重新登录」）。浏览器里下一步是重新输口令；
+     * 脚本没有登录界面，丢了缓存之后下一次调用会用环境变量里的账号口令重新登录 ——
+     * 少了这一句，一次恢复会让整个脚本（自检 / 验收）从这里开始一路 401。
+     * 浏览器里 `scriptToken` 恒为 null，因此这一句对它没有任何影响。
+     */
+    scriptToken = null;
     throw new Error("登录已过期，请重新登录。");
   }
 

@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 111 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 112 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -42,7 +42,7 @@ lib/backend/api.ts        服务层实现（当前 111 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 111 个方法）
+## 二、接口分组（当前 112 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -818,7 +818,7 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 ### 7. 运维与审计
 
 `exportDataset`、`exportDatabase`、`importDatabase`、`imports.apply`、`hasBackup`、`backupSlots`、`restoreBackup`、
-`dailyBackups.list`、`dailyBackups.restore`、`reset`、`setOperator`、`logs.list`、`logs.clear`。
+`dailyBackups.list`、`dailyBackups.restore`、`dailyBackups.takeNow`、`reset`、`setOperator`、`logs.list`、`logs.clear`。
 
 **权限**：整组**只有技术管理员**（`lib/auth/roles.ts` 的 `GROUP_ACCESS.ops`）。这一组里每一个动作都能
 一次改变全部数据，因此**不要为了"让谁也能用"而放宽整组** —— 要放宽就逐个方法写 `METHOD_ACCESS`，
@@ -872,12 +872,12 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 
 ⚠️ 别把**三套**"备份"搞混：
 
-| | 「导入前自动备份」 | 「每天自动备份」（`dailyBackups.*`） | 导出的 JSON |
+| | 「导入前自动备份」 | 「每天自动备份」+「升级前快照」（`dailyBackups.*`） | 导出的 JSON |
 | --- | --- | --- | --- |
-| 存在哪 | 同一个 KeyValueStore 里，键 `nexgenedu.admin.db.backup.v1`（最新那份）+ `nexgenedu.admin.db.backups.v1`（清单） | 服务端机器上的**文件** `server/backups/nexgenedu-<时间戳>.db`，默认保留 **90 份** | 浏览器下载目录里的文件 |
-| 怎么产生 | 每次整库导入前自动写一份 | 服务端每天备一份（启动补当天 + 每小时检查），也可 `npm run server:backup` | 用户点「导出全部数据」 |
-| 恢复入口 | `restoreBackup`（滚动最近 **5** 份） | `dailyBackups.restore`（界面上一行一个「恢复这一份」） | `importDatabase` |
-| 回答的问题 | "上一次导入之前是什么样" | "**这周三的数据还在吗**" | "换机器 / 给别人一份" |
+| 存在哪 | 同一个 KeyValueStore 里，键 `nexgenedu.admin.db.backup.v1`（最新那份）+ `nexgenedu.admin.db.backups.v1`（清单） | 服务端机器上的**文件**：每日备份 `nexgenedu-<时间戳>.db`（默认 **90** 份）、升级前快照 `nexgenedu-migrate-<时间戳>.db`（默认 **10** 份） | 浏览器下载目录里的文件 |
+| 怎么产生 | 每次整库导入前自动写一份 | 每日备份：服务端每天备一份（启动补当天 + 每小时检查）、`npm run server:backup`、或界面上的 `dailyBackups.takeNow`（「立刻备份一份」）；升级前快照：**结构升级前**由迁移器自动留一份 | 用户点「导出全部数据」 |
+| 恢复入口 | `restoreBackup`（滚动最近 **5** 份） | `dailyBackups.restore`（界面上一行一个「恢复这一份」；**两类走同一套**） | `importDatabase` |
+| 回答的问题 | "上一次导入之前是什么样" | "**这周三的数据还在吗**" / "**我要退回升级前**" | "换机器 / 给别人一份" |
 
 `hasBackup` / `backupSlots` / `restoreBackup` 只管第一套（早先只有一个键、每次导入覆盖，
 于是"选错文件 → 导入 → 恢复"只能走一次，再选错就回不去了 —— 现在滚动 5 份）。
@@ -889,18 +889,24 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 `logs.clear`，只要登录就能清空，做到"防篡改"要等单账号之外有按人区分的权限，
 并且把清空这条收进运维通道（见技术架构第 10 节）。
 
-### 7.0 「每天自动备份」的两个方法（`dailyBackups.list` / `dailyBackups.restore`）
+### 7.0 「每天自动备份」的三个方法（`dailyBackups.list` / `.restore` / `.takeNow`）
 
-> ⚠️ **`dailyBackups.restore` 会整库替换数据。** 它只给技术管理员，而且服务端自己做五件事，
-> 顺序不能改：**校验 → 先另存 → 再替换 → 落盘 → 写日志**。任何一步想省掉，
+> ⚠️ **`dailyBackups.restore` 会整库替换数据**（并且换成功之后**作废所有人的会话**）。
+> 它只给技术管理员，而且服务端自己做六件事，顺序不能改：
+> **校验 → 先另存 → 再替换 → 落盘 → 写日志 → 作废全部会话**。任何一步想省掉，
 > 都会重新打开"一次误点造成不可逆损失"这条口子。
 
 | 方法 | 入参 | 出参 | 语义 |
 | --- | --- | --- | --- |
-| `dailyBackups.list` | — | `{ available, reason, dir, current, files[] }` | **只读**：列出 `server/backups/` 里符合命名规则的每日备份（最新的在前）。每份带 `name` / `bytes` / `at`（从**文件名**解析，不是 mtime）与 `counts`（条数摘要：学生 / 教师 / 教室 / 课程 / 课节 / 课堂记录 / 收款 / 课时流水）；**读不出的那一份照样列出**，`counts` 为 `null` 并带 `problem`（界面标红、按钮禁用）。`current` 是**库里现在**的条数，供确认框做对照 |
-| `dailyBackups.restore` | `name`（备份文件名）、`input: { confirmed: boolean }` | `{ ok: true, file, at, preRestore, before, after, note }` 或 `{ ok: false, error }` | 用那一份把整库换回去 |
+| `dailyBackups.list` | — | `{ available, reason, dir, current, files[], keep }` | **只读**：列出 `server/backups/` 里的**两类**快照（最新的在前）。每份带 `name` / `bytes` / `at`（从**文件名**解析，不是 mtime）/ **`kind`**（`"daily"` 每日备份 / `"migrate"` 升级前快照）与 `counts`（条数摘要：学生 / 教师 / 教室 / 课程 / 课节 / 课堂记录 / 收款 / 课时流水）；**读不出的那一份照样列出**，`counts` 为 `null` 并带 `problem`（界面标红、按钮禁用）。`current` 是**库里现在**的条数，供确认框做对照；`keep` 是两类各自保留几份（`{ daily, migrate }`，由服务端读环境变量给出 —— 界面不写死数字） |
+| `dailyBackups.restore` | `name`（备份文件名，**两类都收**）、`input: { confirmed: boolean }` | `{ ok: true, file, kind, at, preRestore, before, after, sessionsCleared, reloginRequired, note }` 或 `{ ok: false, error }` | 用那一份把整库换回去（**整库替换**） |
+| `dailyBackups.takeNow` | — | `{ ok: true, file, at, bytes, removed, total, note }` 或 `{ ok: false, error }` | 「**立刻备份一份**」：调 `server/backup.mts` 的 `takeBackup`（备份生成的**唯一实现**）生成一份**每日备份**，并按 `NEXGENEDU_BACKUP_KEEP` 清理旧份（`removed` 就是被清掉的那几份）。**不删除任何东西之外的副作用**：已有的备份一份都不动，升级前快照也不参与这条清理 |
 
-`restore` 的四条硬性口径（`scripts/check.mts` 第 53 节逐条断言）：
+**两类快照的差别**（`kind`）：`daily` 是"回到某一天"，`migrate` 是"退回升级前"。它们**走同一套**
+校验与恢复顺序；唯一要当心的是**版本方向** —— 升级前快照的版本通常比当前**旧**（它就是在升级前留的），
+那是**正常路径**（要沿迁移链升上来），而"版本比当前**新**"仍然一律拒绝。
+
+`restore` 的硬性口径（`scripts/check.mts` 第 53 节与第 54 节逐条断言）：
 
 1. **`confirmed !== true` 直接拒绝**：这是服务端的第二道闸（界面上的确认框是第一道）。
    它挡的是"某个脚本顺手调了一下"——一个把参数拼错的调用不能变成一次静默的整库替换；
@@ -913,17 +919,33 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
    所以"恢复错了还能回来"不是一句安慰，而是一条可执行的路径；
 4. **走服务层落盘**（`cache = 迁移后的库` + `persist()`），**不是**在服务运行期间用文件复制去替换
    `nexgenedu.db` —— 这个库开着 WAL，那样做会把它弄坏（手工换文件那套必须停机，见
-   [部署与发布.md 第 7 节](./部署与发布.md)）。
+   [部署与发布.md 第 7 节](./部署与发布.md)）；
+5. **换成功之后作废所有人的会话**（机构原话：「恢复后让所有人重新登录」）：
+   恢复是整库替换，别人手上的页面显示的还是旧数据，他提交时会被乐观锁拦住 —— 从他的角度
+   只是"点了没反应 / 说被人改过"，不可能猜到"整库刚被换过"。因此服务端清空会话表
+   （**包括执行恢复的那个人**），并在返回里带上 `reloginRequired: true` / `sessionsCleared` /
+   那句"所有人都需要重新登录（包括你自己）"。⚠️ **恢复失败时一个人都不踢**：
+   只有真的换成功了才作废会话；
+6. **两类快照同一套**：`name` 可以是每日备份，也可以是升级前快照（`nexgenedu-migrate-…db`）——
+   后者是"退回升级前"那条路（机构要的是"升级出问题我自己能退"）。校验、顺序、后悔药、
+   日志与作废会话一个字都不差；差别只在 `kind` 与那句人话。
 
 **它不碰什么**（同样是断言钉着的反向口径）：`server/data/accounts.json`、`server/data/admin-credential.json`
 （账号与口令**不在备份里** —— 恢复它们会把机构锁在门外）、`data/site/*.md` 与 `out/`
 （网站内容文件与构建产物不在备份范围内，要发布仍走 `npm run site:export`）。
 
 **实现分两半**（`api.ts` 是浏览器与 Node 共用的一份实现，不能 import `node:fs`）：
-口径与类型在 `lib/backend/daily-backups.ts`（纯函数：条数摘要、大小、时间、确认框文案），
-碰文件的那一半在 `server/daily-backup-files.mts`（`server/index.mts` 启动时用
-`__useDailyBackupFiles()` 装上，与 `__useStoreForTesting()` 同一个做法）。
+口径与类型在 `lib/backend/daily-backups.ts`（纯函数：**类型标识** `backupKindText`、条数摘要、大小、
+时间、确认框文案、两个上限的默认值与环境变量名），碰文件的那一半在 `server/daily-backup-files.mts`
+（`server/index.mts` 启动时用 `__useDailyBackupFiles()` 装上，与 `__useStoreForTesting()` 同一个做法；
+`takeNow` 用它装进来的数据库句柄调 `server/backup.mts` 的 `takeBackup`）。
 浏览器里没装这份能力 → `list()` 回 `available: false` 并说明"这件事只有服务端能做"。
+
+**保留份数各算各的**（这一条是"升级前快照纳入界面"那一版的要点）：
+每日备份 `NEXGENEDU_BACKUP_KEEP`（默认 90）、升级前快照 `NEXGENEDU_MIGRATE_SNAPSHOT_KEEP`（默认 10）；
+清理只有一处实现（`server/backup.mts` 的 `pruneBackups` / `pruneMigrationBackups`，
+判据只有"名字 + 类 + 份数"），升级前快照的清理**贴着生成那一处**（`server/migrate.mts`），
+只删最老的几份，且清掉谁要写进日志。
 
 ### 7.1 账号管理：四条**独立路由**（`/api/accounts`，不在 `/api/call` 里）
 
@@ -946,7 +968,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 2. 它会进入 `API_CONTRACT` —— 而自检要求"服务层每个方法都必须在契约里"，
    于是契约里出现一个"只有服务端才有意义"的方法，契约就不再是"页面对服务层的形状"了。
 
-**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 111 个方法，
+**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 112 个方法，
 这四条路由**刻意不登记**（它们不是服务层方法）；页面的客户端是 `lib/auth/accounts.ts`，
 与 `lib/auth/session.ts` 调 `/api/login`、`/api/session` 是同一个做法。
 自检里对它们的要求写在 `scripts/check-auth.mts` 的 [10] 节（真实 HTTP、真实写盘），

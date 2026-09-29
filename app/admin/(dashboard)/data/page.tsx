@@ -37,16 +37,18 @@ import {
 } from "@/lib/backend/backup";
 import { formatDayLabel } from "@/lib/backend/format";
 import { cn } from "@/lib/utils/cn";
+import { useRouter } from "next/navigation";
 import { BACKUP_SLOTS, LOG_LIMIT } from "@/lib/backend/api";
 /*
- * 「每天自动备份」（服务端机器上那份每天一份的备份文件）的显示口径与确认文案：
- * 全部来自 `lib/backend/daily-backups.ts`（一处实现）—— 条数摘要、大小、时间、
+ * 「每天自动备份」与「升级前快照」（服务端机器上那两类备份文件）的显示口径与确认文案：
+ * 全部来自 `lib/backend/daily-backups.ts`（一处实现）—— 类型标识、条数摘要、大小、时间、
  * 以及确认框里那句"这份备份里有什么 / 库里现在有什么"的**对照**。
  * 页面里不许自己拼这些字，否则改了那边忘了这边，确认框会少掉一半信息而没人发现。
  */
 import {
   backupBytesText,
   backupCountsText,
+  backupKindText,
   dailyBackupCompareText,
   dailyBackupTimeText,
   type DailyBackupEntry,
@@ -54,6 +56,12 @@ import {
 } from "@/lib/backend/daily-backups";
 // 教室名的唯一显示口径（「校区·教室名」，v31）
 import { classroomLabel } from "@/lib/backend/classrooms";
+/*
+ * 恢复之后要**重新登录**（服务端已经作废全部会话，包括你自己）：
+ * 用与顶栏「退出登录」同一个函数（清本地令牌 + 让服务端作废），再回登录页 ——
+ * 这一步不能省：那一页接下来的任何请求都会 401，人只会看到"点了没反应"。
+ */
+import { logout } from "@/lib/auth/session";
 
 /**
  * 数据与备份。
@@ -92,12 +100,28 @@ function describeImportText(text: string): string {
 }
 
 export default function AdminDataPage() {
+  const router = useRouter();
   const [stats, setStats] = useState<DatabaseStats | null>(null);
   const [hasBackup, setHasBackup] = useState(false);
   /** 导入前备份的清单（最近的在最前）—— 让人看到"有几份、什么时候的"。 */
   const [backupList, setBackupList] = useState<Array<{ at: string; summary: string }>>([]);
   /** 「每天自动备份」的清单（服务端机器上的备份文件；null = 还没读出来）。 */
   const [dailyList, setDailyList] = useState<DailyBackupList | null>(null);
+  /**
+   * **刚备的那一份**的文件名（「立刻备份一份」之后标出来）。
+   *
+   * 为什么要有这个高亮：点完按钮清单里会多一行，而"多了哪一行"在几十行里看不出来 ——
+   * 人点了一下按钮，最该得到的就是"系统做到了、就是这一份"。
+   */
+  const [justBackedUp, setJustBackedUp] = useState("");
+  /**
+   * 恢复成功之后的**重新登录提示**（空串 = 不需要）。
+   *
+   * 恢复会作废所有人的会话（包括你自己），因此这一页接下来的请求都会 401。
+   * 此时**不再刷新清单**（那一次一定失败，只会弹一句"登录已过期"，
+   * 把真正的原因盖掉），而是把这句话钉在页面顶部并给一个明确的下一步。
+   */
+  const [reloginNotice, setReloginNotice] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -122,6 +146,7 @@ export default function AdminDataPage() {
         dir: "",
         current: null,
         files: [],
+        keep: { daily: 0, migrate: 0 },
       })),
     ]);
     setStats(databaseStats(db));
@@ -275,7 +300,7 @@ export default function AdminDataPage() {
   }
 
   /**
-   * 用「每天自动备份」里的**某一份**把库换回去。
+   * 用「每天自动备份」或「升级前快照」里的**某一份**把库换回去。
    *
    * ## 二次确认里必须同时出现"两份东西有什么"
    *
@@ -284,25 +309,39 @@ export default function AdminDataPage() {
    * **这份备份里的条数**与**库里现在的条数**（`dailyBackupCompareText` 一处实现），
    * 并说清"恢复前系统会先把现在这份另存"。
    *
-   * ## 恢复完成之后必须告诉用户两件事
+   * ⚠️ **两类备份的确认框要说清自己在做哪件事**（第二句）：点每日备份是"恢复到那一天"，
+   * 点升级前快照是"**退回升级前**"—— 后者还会把数据升回当前结构。
+   * 两句话都由 `backupKindText(entry.kind)` 决定（类型标识只有一处实现）。
+   *
+   * ## 恢复完成之后必须告诉用户三件事
    *
    *   1. **现在用的是哪一天的数据**（否则他不知道回到了哪个时点）；
    *   2. **他原来那一份叫什么名字**（否则"还能回去"这句话是空的）——
-   *      再加上清单里马上会多出那一行，两条线索对得上。
+   *      再加上清单里马上会多出那一行，两条线索对得上；
+   *   3. **所有人都要重新登录（包括他自己）** —— 恢复会作废全部会话，
+   *      因此服务端在 `note` 里带了这一句，这一页据此**不再刷新清单**，
+   *      而是把提示钉在顶部并把人送去登录页（见下面 `reloginNotice` 那一段）。
    */
   async function restoreDaily(entry: DailyBackupEntry) {
     setError("");
     setMessage("");
+    const kindText = backupKindText(entry.kind);
     /*
      * `window.confirm` 挡住的是**手滑**（真正的闸在服务端：`confirmed: true`，
      * 以及"校验不过一个字都不写"）。这里把两份条数摊开，让人对着数字点。
      */
     if (
       !window.confirm(
-        `用这份备份把整个库换回去？\n\n` +
+        `用这份${kindText}把整个库换回去？\n\n` +
           dailyBackupCompareText(entry, dailyList?.current ?? null) +
+          (entry.kind === "migrate"
+            ? `\n这是**升级前快照**（结构升级之前自动留的那一份）：恢复它 = **退回升级前**\n` +
+              `那一版程序看到的数据库。它比当前版本旧是正常的，系统会沿迁移链把数据升回当前结构。\n`
+            : `\n这是**每日备份**：恢复它 = 把数据回到 ${dailyBackupTimeText(entry.at)} 那一刻。\n`) +
           `\n恢复前系统会先把「现在的库」另存一份备份（清单里会出现它，名字会在下面告诉你）。\n` +
-          `恢复的是**业务数据**（档案 / 报课 / 课时 / 收款 / 排课）；网站内容要另外发布。\n\n` +
+          `恢复的是**业务数据**（档案 / 报课 / 课时 / 收款 / 排课）；网站内容要另外发布。\n` +
+          `恢复成功后**所有人都需要重新登录**（包括你）：别人手上那个页面显示的还是旧数据，\n` +
+          `所以系统会把所有登录状态一起作废。\n\n` +
           `确认恢复这一份？`,
       )
     ) {
@@ -314,19 +353,64 @@ export default function AdminDataPage() {
     setBusy(false);
     if (!result.ok) {
       setError(`恢复失败：${result.error}`);
+      // 失败时**没有踢人**（服务端只在换成功之后作废会话），所以这一页照常刷新
       await load();
       return;
     }
-    setMessage(
+    const detail =
       `${result.note}\n` +
-        `恢复前后：${backupCountsText(result.before)} → ${backupCountsText(result.after)}。\n` +
-        `另存的那一份是 ${result.preRestore}（本次是从 ${result.file} 恢复的）—— ` +
-        "它就在下面的清单里，点它的「恢复这一份」就能回到恢复前的状态。\n" +
-        "网站内容（课程正文 / 案例 / 报价文案）要发布的话仍走 `npm run site:export` → 提交推送；" +
-        "账号与口令不在备份里，不用重新配；另外，别人手上开着的后台页面看到的还是恢复前的数据，" +
-        "请让他们刷新页面（或重新登录）再看。",
-    );
+      `恢复前后：${backupCountsText(result.before)} → ${backupCountsText(result.after)}。\n` +
+      `本次用的是${backupKindText(result.kind)}（${result.file}）；你原来那份已经另存为 ` +
+      `${result.preRestore} —— 它就在下面的清单里，点它的「恢复这一份」就能回到恢复前的状态。\n` +
+      "网站内容（课程正文 / 案例 / 报价文案）要发布的话仍走 `npm run site:export` → 提交推送；" +
+      "账号与口令不在备份里，不用重新配。";
+    if (result.reloginRequired) {
+      /*
+       * 会话已经在服务端被整体作废（`result.sessionsCleared` 个），**包括自己这一个**。
+       * 因此：①把本地令牌也清掉，不留"看着还登着"的假象；②**不刷新清单**
+       * （那一次一定 401，只会弹一句"登录已过期"，把真正的原因盖掉）；
+       * ③把话钉在页面顶部，并给一个明确的下一步（去登录）。
+       */
+      setReloginNotice(detail);
+      setMessage("");
+      return;
+    }
+    setMessage(detail);
     await load();
+  }
+
+  /**
+   * 「**立刻备份一份**」（机构原话：「加『立刻备份一份』按钮」）。
+   *
+   * 为什么要有它：每天自动备份有一个隐含前提 —— **出事之前的那一天刚好备过**。
+   * 而机构真正会做的是"我要在动数据之前先备一份"（导入名单、批量改报课、放假前调价）。
+   * 没有这个按钮，他要么等到明天，要么去后端机器上敲 `npm run server:backup` ——
+   * 后者等于把他按回"找数据开发"那条路上，而正是那条路让备份形同虚设。
+   *
+   * 服务端走的是**每日备份那一套现成的实现**（`takeBackup`），因此新那份与自动备的
+   * 一模一样（同一套命名 → 清单认得出它）；返回里也带上"顺手清了哪几份旧的"。
+   * 点完**刷新清单并把新那份标出来**（`justBackedUp`）。
+   */
+  async function takeBackupNow() {
+    setError("");
+    setMessage("");
+    setReloginNotice("");
+    setBusy(true);
+    const result = await api.dailyBackups.takeNow();
+    setBusy(false);
+    if (!result.ok) {
+      setError(`没能立刻备份一份：${result.error}`);
+      return;
+    }
+    setJustBackedUp(result.file);
+    setMessage(result.note);
+    await load();
+  }
+
+  /** 恢复之后的重新登录：与顶栏「退出登录」同一套（清本地令牌 + 回登录页）。 */
+  async function goToLogin() {
+    await logout();
+    router.replace("/admin/login");
   }
 
 
@@ -365,6 +449,29 @@ export default function AdminDataPage() {
 
       {/* 批量导入：把表格里的名单一次录进来（只新增，不覆盖） */}
       <BulkImport onImported={() => void load()} />
+
+      {/*
+        恢复成功之后的「所有人都要重新登录」提示。
+        它**排在最前面**、用 warn 色、并且带一个明确的下一步（去登录）——
+        因为此时这一页剩下的按钮全都调不动了（会话已经在服务端被作废）。
+        只写一句"恢复成功"就让人继续点点点，是最糟的那种界面。
+      */}
+      {reloginNotice !== "" && (
+        <div
+          role="alert"
+          className="mt-4 rounded-md border border-warning-100 bg-warning-50 px-3 py-3 text-sm text-warning-600"
+        >
+          <p className="whitespace-pre-line leading-relaxed">{reloginNotice}</p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button size="sm" disabled={busy} onClick={() => void goToLogin()}>
+              去登录（重新登录后这一页显示的就是恢复后的数据）
+            </Button>
+            <span className="text-xs text-warning-600">
+              这一页现在读不了了 —— 服务端已经把所有人的登录状态作废。
+            </span>
+          </div>
+        </div>
+      )}
 
       {message !== "" && (
         <p className="mt-4 whitespace-pre-line rounded-md border border-success-100 bg-success-50 px-3 py-2 text-sm text-success-600">
@@ -444,8 +551,19 @@ export default function AdminDataPage() {
         </p>
       </Panel>
 
-      {/* 每天自动备份：机构问「数据丢了怎么办」时，答案就在这一块 */}
-      <DailyBackupsPanel list={dailyList} busy={busy} onRestore={(entry) => void restoreDaily(entry)} />
+      {/*
+        每天自动备份 + 升级前快照：机构问「数据丢了怎么办」和「升级出问题我自己能不能退」时，
+        答案就在这一块。另外「立刻备份一份」那颗按钮也在这里（动数据之前先备一份）。
+        恢复成功之后这一块会被「所有人都要重新登录」的提示挡住 —— 见 `reloginNotice`。
+      */}
+      <DailyBackupsPanel
+        list={dailyList}
+        busy={busy}
+        locked={reloginNotice !== ""}
+        justBackedUp={justBackedUp}
+        onRestore={(entry) => void restoreDaily(entry)}
+        onTakeNow={() => void takeBackupNow()}
+      />
 
       {/* 操作日志：谁在什么时候改了什么 */}
       <Panel
@@ -498,38 +616,76 @@ function describeStats(stats: DatabaseStats): string {
 }
 
 /**
- * 「每天自动备份」——机构问"**数据丢了怎么办**"时，答案就在这一块。
+ * 「每天自动备份」+「升级前快照」——机构问"**数据丢了怎么办**"与"**升级出问题我自己能不能退**"时，
+ * 答案就在这一块。
  *
  * ## 为什么它必须是一个独立面板（而不是并进上面那个「导入」）
  *
  * 因为那是**另一套备份**：上面那一块是"导入前的滚动 5 份"（存在数据库里），
- * 这一块是**服务端机器上每天一份的备份文件**（`server/backups/`，默认留 90 份）。
- * 只有后者能回答机构真正会问的那句话：**"这周三的数据还在吗"** ——
- * 之前它只能靠开发在命令行里手工复制文件（步骤写在给开发看的文档里），
- * 所以"数据丢了怎么办"的答案是"找开发"，那不叫备份。
+ * 这一块是**服务端机器上的备份文件**（`server/backups/`：每日备份默认留 90 份 +
+ * 升级前快照默认留 10 份）。只有这一套能回答机构真正会问的那两句话：
+ * **"这周三的数据还在吗"** 与 **"升级出问题我能退回去吗"** ——
+ * 在那之前它们只能靠开发在命令行里手工复制文件（步骤写在给开发看的文档里），
+ * 所以答案是"找开发"，那不叫备份。
  *
- * ## 界面上必须同时说清的三件事
+ * ## 两类快照必须**分开显示**（机构原话：「也纳入界面 + 加上限」）
  *
- *   1. **清单**：每份的时间、大小、以及读得出的条数摘要；
+ * 机构看完清单后当场点的第一条就是"那 99 份升级前快照也要能在界面上看见并恢复"。
+ * 两类是**同一种文件**（都是一份完整快照），但在机构脑子里是**两个不同的念头**：
+ *
+ *   - 「每日备份」→ "**我要恢复成昨天**"（数据被误删 / 改错，回到某个时点）；
+ *   - 「升级前快照」→ "**我要退回升级前**"（升级完发现不对，退回上一版程序看到的数据）。
+ *
+ * 因此这里**分成两块**（各自一个小标题 + 一句"点它会怎样"），而不是一张大表里加一列 ——
+ * 在一张几十行的表里，人点按钮的那一刻正是最容易点错行的一刻；分开之后
+ * "我在退回到哪一刻"这件事在点之前就已经写在标题上了。
+ * 类型标识本身来自 `backupKindText(entry.kind)`（**一处实现**，服务端给的 `kind`）。
+ *
+ * ## 界面上必须同时说清的四件事
+ *
+ *   1. **清单**：每份的时间、大小、以及读得出的条数摘要（两类都给）；
  *   2. **读不出来的那一份要标出来**（不是藏起来）：目录里躺着一份坏备份正是最该知道的事；
  *   3. **恢复的是什么、不是什么**：恢复的是**业务数据**；`data/site/*.md` 与 `out/`
- *      不在备份范围内（网站内容要发布仍走 `npm run site:export` + 提交推送）。
- *      另外恢复**不动账号与口令** —— 恢复完还是用自己的账号登录。
+ *      不在备份范围内（网站内容要发布仍走 `npm run site:export` + 提交推送）；
+ *   4. **恢复之后所有人都要重新登录**（机构原话）—— 这一句同时出现在确认框、
+ *      服务端返回的提示与顶部那条醒目的提示里，三处都由 `reloginRequired` 那句话带来。
  */
 function DailyBackupsPanel({
   list,
   busy,
+  locked,
+  justBackedUp,
   onRestore,
+  onTakeNow,
 }: {
   list: DailyBackupList | null;
   busy: boolean;
+  /**
+   * 恢复成功之后这一页已经"登出"了（会话被服务端作废）。
+   *
+   * 此时把按钮全部禁用：它们每一个都会 401，而"点了没反应 / 报一句登录过期"
+   * 远不如"先登录再说"清楚。**不禁用整个面板**（清单还要看得见 ——
+   * 人刚恢复完，最想看的就是"现在这一份长什么样"）。
+   */
+  locked: boolean;
+  /** 刚「立刻备份一份」生成的那个文件名（在清单里标出来）。 */
+  justBackedUp: string;
   onRestore: (entry: DailyBackupEntry) => void;
+  onTakeNow: () => void;
 }) {
+  const daily = list === null ? [] : list.files.filter((entry) => entry.kind === "daily");
+  const migrate = list === null ? [] : list.files.filter((entry) => entry.kind === "migrate");
   return (
     <Panel
       className="mt-4"
       title="每天自动备份"
-      description="服务端每天自动备一份（保留 90 份）。数据丢了就在这里挑一份恢复回来 —— 恢复前系统会先把「现在的库」另存一份。"
+      description={
+        list === null || !list.available
+          ? "服务端自动备份的清单：每天一份（要回到某一天）与升级前快照（要退回升级前）。"
+          : `服务端每天自动备一份（保留 ${list.keep.daily} 份）；升级前自动留一份快照` +
+            `（保留 ${list.keep.migrate} 份）。数据丢了就在这里挑一份恢复回来 —— ` +
+            "恢复前系统会先把「现在的库」另存一份。"
+      }
     >
       <div className="px-4 py-4">
         {list === null ? (
@@ -545,80 +701,174 @@ function DailyBackupsPanel({
               {list.current === null ? "" : ` · 库里现在：${backupCountsText(list.current)}`}
             </p>
 
-            {list.files.length === 0 ? (
+            {/*
+              「立刻备份一份」：机构原话「加『立刻备份一份』按钮」。
+              它走服务端**同一处**备份实现（`takeBackup`），因此产出的东西与自动那份
+              完全一样（同一套命名 → 清单认得出它），点完刷新清单并把新那份标出来。
+            */}
+            <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-ink-200 bg-ink-50 px-3 py-3">
+              <Button size="sm" disabled={busy || locked} onClick={onTakeNow}>
+                立刻备份一份
+              </Button>
+              <span className="text-xs leading-relaxed text-ink-600">
+                要在动数据之前先留一手（导入名单 / 批量改报课 / 调价之前）就点它 ——
+                立刻生成一份**每日备份**（与自动备的那份一模一样），
+                不用等到明天、也不用去后端机器上敲命令。
+              </span>
+            </div>
+
+            {/* ── 每日备份：「我要恢复成昨天」──────────────────────────────── */}
+            <h3 className="mb-2 text-sm font-medium text-ink-800">
+              {backupKindText("daily")}
+              <span className="ml-2 text-xs font-normal text-ink-500">
+                每天自动备一份，保留 {list.keep.daily} 份（用 <code>NEXGENEDU_BACKUP_KEEP</code> 调）·
+                「恢复这一份」＝ 把数据回到那一天
+              </span>
+            </h3>
+            {daily.length === 0 ? (
               <p className="text-sm text-ink-500">
-                这个目录里还没有备份。后端启动时会先把「今天那份」补上，之后每小时检查一次
-                （也可以在后端机器上跑 <code>npm run server:backup</code> 立刻备一份）。
+                这个目录里还没有每日备份。后端启动时会先把「今天那份」补上，之后每小时检查一次
+                （也可以点上面那颗「立刻备份一份」，或在后端机器上跑{" "}
+                <code>npm run server:backup</code>）。
               </p>
             ) : (
-              <div className="max-h-80 overflow-y-auto rounded-md border border-ink-200">
-                <table className="w-full min-w-[720px] text-left text-xs">
-                  <thead className="sticky top-0 bg-ink-50 text-ink-500">
-                    <tr>
-                      <th className="px-3 py-2 font-medium">时间</th>
-                      <th className="px-3 py-2 font-medium">大小</th>
-                      <th className="px-3 py-2 font-medium">里面有多少数据</th>
-                      <th className="px-3 py-2 font-medium">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-ink-100">
-                    {list.files.map((entry) => (
-                      <tr key={entry.name}>
-                        <td className="whitespace-nowrap px-3 py-2 text-ink-800">
-                          {dailyBackupTimeText(entry.at)}
-                          <span className="mt-0.5 block text-[11px] text-ink-400">{entry.name}</span>
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-ink-600">
-                          {backupBytesText(entry.bytes)}
-                        </td>
-                        <td className="px-3 py-2 text-ink-700">
-                          {entry.counts === null ? (
-                            /*
-                             * 读不出的那一份**照样列出来**并说明原因：它在目录里确实占着一份，
-                             * 而当它不存在会让人以为"我的退路是连续 90 天"。
-                             */
-                            <span className="text-danger-600">
-                              读不出这一份的内容：{entry.problem}
-                            </span>
-                          ) : (
-                            backupCountsText(entry.counts)
-                          )}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            // 读不出内容的备份恢复不了（服务端也会拒），因此按钮直接禁用并说清原因
-                            disabled={busy || entry.counts === null}
-                            onClick={() => onRestore(entry)}
-                          >
-                            恢复这一份
-                          </Button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <BackupTable
+                entries={daily}
+                busy={busy}
+                locked={locked}
+                justBackedUp={justBackedUp}
+                onRestore={onRestore}
+              />
             )}
 
-            <p className="mt-3 text-xs leading-relaxed text-ink-500">
+            {/* ── 升级前快照：「我要退回升级前」────────────────────────────── */}
+            <h3 className="mt-5 mb-2 text-sm font-medium text-ink-800">
+              {backupKindText("migrate")}
+              <span className="ml-2 text-xs font-normal text-ink-500">
+                结构升级**之前**自动留的那一份，保留 {list.keep.migrate} 份（用{" "}
+                <code>NEXGENEDU_MIGRATE_SNAPSHOT_KEEP</code> 调）·「恢复这一份」＝ 退回升级前
+              </span>
+            </h3>
+            {migrate.length === 0 ? (
+              <p className="text-sm text-ink-500">
+                还没有升级前快照。它在**结构升级时**自动生成（升级前把当时的库整份留一份）——
+                平时一条都没有是正常的。
+              </p>
+            ) : (
+              <BackupTable
+                entries={migrate}
+                busy={busy}
+                locked={locked}
+                justBackedUp={justBackedUp}
+                onRestore={onRestore}
+              />
+            )}
+
+            <p className="mt-4 text-xs leading-relaxed text-ink-500">
               「恢复这一份」会把**整个库**换成那份备份里的数据：点下去会先让你看到
               「这份备份里有什么 / 库里现在有什么」的条数对照，确认之后才替换。
               <br />
               恢复前系统会**自动把现在的库另存一份**（清单里马上会多出那一行，恢复完也会告诉你它的名字），
               所以恢复错了还能再恢复回去。
               <br />
+              **升级前快照**点下去＝退回升级前那一版看到的数据：它的结构比当前**旧**是正常的，
+              系统会沿迁移链把数据升回当前结构（所以「版本旧」不是坏事，也不需要你做什么）。
+              <br />
               恢复的是**业务数据**（学生 / 报课 / 课时 / 收款 / 排课 / 课堂记录）；
               `data/site/*.md` 与 `out/` **不在备份范围内** —— 网站内容要发布仍走
               <code className="mx-1">npm run site:export</code>再提交推送。
-              恢复**不动账号与口令**（`server/data/` 下的账号表与凭据文件不在备份里），
-              恢复完还是用你自己的账号登录。
+              <br />
+              恢复**不动账号与口令**（`server/data/` 下的账号表与凭据文件一个字都不动），
+              但**恢复成功之后所有人都要重新登录**（包括你自己）：恢复是整库替换，
+              别人手上那个页面显示的还是恢复前的数据，提交时会被拦住 —— 所以服务端会把
+              所有登录状态一起作废。口令没变，重新登录一次即可。
             </p>
           </>
         )}
       </div>
     </Panel>
+  );
+}
+
+/**
+ * 一张快照清单（两类共用；标题与保留份数由上面那两块各自给）。
+ *
+ * 为什么抽出来：两块的列与按钮**必须逐字一样**（时间 / 大小 / 条数摘要 / 恢复按钮，
+ * 以及"读不出的那一份要标出来、按钮禁用"这条纪律）。写两遍的话，早晚出现
+ * "每日备份那半边标红了、升级前快照这半边却照样能点"这种最难解释的状态。
+ * 差别只由调用方给的 `entries`（已经按 `kind` 分过）体现。
+ */
+function BackupTable({
+  entries,
+  busy,
+  locked,
+  justBackedUp,
+  onRestore,
+}: {
+  entries: DailyBackupEntry[];
+  busy: boolean;
+  locked: boolean;
+  justBackedUp: string;
+  onRestore: (entry: DailyBackupEntry) => void;
+}) {
+  return (
+    <div className="max-h-80 overflow-y-auto rounded-md border border-ink-200">
+      <table className="w-full min-w-[720px] text-left text-xs">
+        <thead className="sticky top-0 bg-ink-50 text-ink-500">
+          <tr>
+            <th className="px-3 py-2 font-medium">时间</th>
+            <th className="px-3 py-2 font-medium">大小</th>
+            <th className="px-3 py-2 font-medium">里面有多少数据</th>
+            <th className="px-3 py-2 font-medium">操作</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-ink-100">
+          {entries.map((entry) => (
+            <tr
+              key={entry.name}
+              // 刚备的那一份整行淡黄标出来（"系统做到了、就是这一份"）
+              className={entry.name === justBackedUp ? "bg-warning-50" : undefined}
+            >
+              <td className="whitespace-nowrap px-3 py-2 text-ink-800">
+                {dailyBackupTimeText(entry.at)}
+                <span className="mt-0.5 block text-[11px] text-ink-400">{entry.name}</span>
+              </td>
+              <td className="whitespace-nowrap px-3 py-2 text-ink-600">
+                {backupBytesText(entry.bytes)}
+              </td>
+              <td className="px-3 py-2 text-ink-700">
+                {entry.counts === null ? (
+                  /*
+                   * 读不出的那一份**照样列出来**并说明原因：它在目录里确实占着一份，
+                   * 而当它不存在会让人以为"我的退路是连续 90 天"。
+                   */
+                  <span className="text-danger-600">
+                    读不出这一份的内容：{entry.problem}
+                  </span>
+                ) : (
+                  backupCountsText(entry.counts)
+                )}
+              </td>
+              <td className="whitespace-nowrap px-3 py-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  // 读不出内容的备份恢复不了（服务端也会拒），因此按钮直接禁用并说清原因；
+                  // 恢复成功之后这一页已经登出（locked），按钮也一并禁用（点了只会 401）
+                  disabled={busy || locked || entry.counts === null}
+                  onClick={() => onRestore(entry)}
+                >
+                  恢复这一份
+                </Button>
+                {entry.name === justBackedUp && (
+                  <span className="ml-2 text-[11px] text-warning-600">刚备的</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

@@ -83,7 +83,21 @@ try {
       printServerLogTail(info.log(), 15);
     }
     return result.code;
-  });
+  },
+  /*
+   * ── 这一轮的临时服务**把备份开着**（`NEXGENEDU_NO_BACKUP=0`）────────────────────
+   *
+   * `temp-server.mts` 给所有临时服务的默认值是 `NEXGENEDU_NO_BACKUP=1`（"自检/验收起的是临时库，
+   * 别往真实备份目录丢文件"）。而验收里有一条要验的正是**界面上的「立刻备份一份」按钮**
+   * （机构原话：「加『立刻备份一份』按钮」）：那一按就是"生成一份备份文件"，
+   * 备份被关掉时它会**明确拒绝**（这是对的行为），于是按钮永远验不到。
+   *
+   * 打开它安全吗？安全，而且只有这一处例外：这一轮的备份目录是 `withTempServer` 给的
+   * **一次性临时目录**（`NEXGENEDU_BACKUP_DIR` 同时交给服务端与验收脚本），
+   * 生成的文件随临时目录一起删掉 —— `server/backups/` 一个字节都不碰。
+   * `backupsDisabled()` 只认 `"1"`，因此 `"0"` 等于打开。
+   */
+  { env: { NEXGENEDU_NO_BACKUP: "0" } });
 } catch (cause) {
   console.error(`✗ 起临时服务端失败：${cause instanceof Error ? cause.message : String(cause)}`);
   process.exit(1);

@@ -16,7 +16,16 @@ import { classroomLabel } from "../lib/backend/classrooms.ts";
 // 教材的唯一显示口径（`学科·模块名`，v32）
 import { textbookSummary } from "../lib/backend/textbooks.ts";
 import { applyDecision, offerKey, offersByKey, resolveOffer } from "../lib/backend/offers.ts";
-import { isRemoteMode, remoteBase } from "../lib/backend/remote.ts";
+import {
+  /*
+   * ⚠️ E22 续 起：**恢复成功 = 所有人的会话被作废**（包括验收脚本自己那一个）。
+   * 因此每次恢复之后都要**重新登录一次**再继续比对 —— 这就是"更贴近真实使用"的那一步。
+   */
+  forgetScriptLogin,
+  isRemoteMode,
+  remoteBase,
+} from "../lib/backend/remote.ts";
+import SqliteDatabase from "better-sqlite3";
 /*
  * 「每天自动备份」那一块（「数据与备份」页）：它读写的是**服务端机器上的备份文件**，
  * 因此验收要造一份夹具备份、再点"恢复"（见下面 10.5 那一节）。
@@ -25,6 +34,8 @@ import { isRemoteMode, remoteBase } from "../lib/backend/remote.ts";
 import { SNAPSHOT_KEY } from "../lib/backend/api.ts";
 import { createNodeDailyBackupFiles } from "../server/daily-backup-files.mts";
 import { listMigrations } from "../server/migrate.mts";
+// 「升级前快照」的名字只有一处实现（`server/backup.mts`）：验收造夹具时也用它，不自己拼前缀
+import { migrationBackupName } from "../server/backup.mts";
 
 /*
  * 闸：没指向服务端就直接退出。
@@ -1470,6 +1481,15 @@ await check("数据与备份", "每天自动备份：改坏之后再恢复，库
   });
   acceptSpoiledId = spoiled.id;
   const result = await api.dailyBackups.restore(acceptBackupName, { confirmed: true });
+  /*
+   * ⚠️ **恢复成功 = 所有人的会话被作废**（E22 续，机构原话：「恢复后让所有人重新登录」）——
+   * 验收脚本手上那个令牌立刻失效。因此这里**重新登录一次**再往下比对：
+   * 少了这一步，下面每一条断言都会变成 401「登录已过期」，而那种红会让人以为是恢复坏了。
+   *
+   * 刻意**不**为了用例能过去掉"作废会话"（那等于把机构要的安全性质删掉），
+   * 也不改成"用另外的账号"糊过去 —— 重新登录才是真实使用里发生的那件事。
+   */
+  forgetScriptLogin();
   if (result.ok === false) return { error: result.error };
   const names = JSON.stringify((await api.students.list()).map((item) => item.name));
   const list = await api.dailyBackups.list();
@@ -1481,16 +1501,25 @@ await check("数据与备份", "每天自动备份：改坏之后再恢复，库
     preRestore: result.preRestore,
     preRestoreInList: list.files.some((item) => item.name === result.preRestore && item.problem === ""),
     note: result.note,
+    reloginRequired: result.reloginRequired,
+    sessionsCleared: result.sessionsCleared,
     counts: JSON.stringify(result.after) === JSON.stringify(result.before) ? "竟然一样" : "变了（对的）",
   };
-}, (v: { error: string; names: string; namesAtBackup: string; preRestoreInList: boolean; note: string; counts: string }) =>
+}, (v: { error: string; names: string; namesAtBackup: string; preRestoreInList: boolean; note: string; counts: string; reloginRequired: boolean; sessionsCleared: number }) =>
   v.error === "" &&
   v.names === v.namesAtBackup &&
   v.names.includes("验收·恢复前就有的学生") &&
   v.names.includes("验收·恢复后该消失的学生") === false &&
   v.preRestoreInList === true &&
   v.counts === "变了（对的）" &&
-  v.note.includes("现在用的是"));
+  v.note.includes("现在用的是") &&
+  /*
+   * ② 机构点的那一条：恢复成功之后**所有人都要重新登录**（包括点这一下的人），
+   * 而返回里必须带上这句话与作废的会话数 —— 界面据此给出明确提示、把人送去登录页。
+   */
+  v.reloginRequired === true &&
+  v.sessionsCleared >= 1 &&
+  v.note.includes("所有人都需要重新登录"));
 
 await check("数据与备份", "每天自动备份：恢复写了操作日志（从哪个文件、多少条 → 多少条）", async () => {
   const logs = await api.logs.list(50);
@@ -1510,6 +1539,131 @@ await check("数据与备份", "收尾：删掉这一节的夹具学生", async 
     (item) => item.name === acceptKeeperName || item.name === "验收·恢复后该消失的学生",
   ).length;
 }, (v: number) => v === 0);
+
+/* ── 10.6 「立刻备份一份」与「升级前快照」（机构当场点的另两条）──────────────────
+ *
+ * 机构原话：
+ *   > ① 「**也纳入界面 + 加上限（推荐）**」 —— 那 99 份「升级前快照」也要能在界面上
+ *   >    看见并恢复，并给它们一个保留份数上限；
+ *   > ③ 「**加『立刻备份一份』按钮**」。
+ *
+ * 为什么这两条也要在**真实后端**上验收：它们碰的都是**服务端机器上的文件**
+ * （生成一份新备份 / 读一份升级前快照并整库恢复），在内存伪后端上根本跑不了
+ * （`available: false`）。验收在这里验的是"用户点那两下真的会发生什么"：
+ * 目录里多/少一份、清单前后对照、以及**恢复之后所有人被踢下线**这一条副作用。
+ *
+ * ⚠️ 与 §10.5 同一条纪律：备份目录一律是**这次临时服务的一次性临时目录**
+ * （`accept-run.mts` 通过 `NEXGENEDU_BACKUP_DIR` 同时交给服务端与脚本），
+ * **绝不碰 `server/backups/`**。
+ */
+
+await check("数据与备份", "立刻备份一份：点完目录真的多一份，而且已有的备份一份没动", async () => {
+  const before = await api.dailyBackups.list();
+  const beforeNames = before.files.map((item) => item.name);
+  const result = await api.dailyBackups.takeNow();
+  if (result.ok === false) return { error: result.error };
+  const after = await api.dailyBackups.list();
+  const afterNames = after.files.map((item) => item.name);
+  return {
+    error: "",
+    file: result.file,
+    // 新那一份确实在清单里（命名规则认得出它）
+    inList: afterNames.includes(result.file),
+    // 清单里原来那些**一份都没少**（这一步只该"多一份"，不该删谁）
+    missing: beforeNames.filter((name) => !afterNames.includes(name)),
+    added: afterNames.filter((name) => !beforeNames.includes(name)),
+    // 新那一份是「每日备份」这一类（不是升级前快照）
+    kind: after.files.find((item) => item.name === result.file)?.kind ?? "不在清单里",
+    // 读得出摘要（用户点它就能恢复）
+    readable: after.files.find((item) => item.name === result.file)?.problem === "",
+    removed: result.removed,
+    note: result.note,
+  };
+}, (v: { error: string; file: string; inList: boolean; missing: string[]; added: string[]; kind: string; readable: boolean; removed: string[]; note: string }) =>
+  v.error === "" &&
+  v.file.startsWith("nexgenedu-") &&
+  v.inList === true &&
+  v.missing.length === 0 &&
+  v.added.length === 1 &&
+  v.added[0] === v.file &&
+  v.kind === "daily" &&
+  v.readable === true &&
+  v.removed.length === 0 &&
+  v.note.includes(v.file));
+
+await check("数据与备份", "立刻备份一份：写了操作日志（谁手动备了一份）", async () => {
+  const logs = await api.logs.list(20);
+  const record = logs.find((item) => item.action === "立刻备份");
+  return { found: record !== undefined, target: record?.targetId ?? "" };
+}, (v: { found: boolean; target: string }) => v.found === true && v.target.startsWith("nexgenedu-"));
+
+/*
+ * 「升级前快照」：机构要的"升级出问题我自己能退"。
+ *
+ * 夹具刻意用**当前库这一份**（名字换成 `nexgenedu-migrate-<时间戳>.db`）：
+ * 这样"恢复它"这一步在数据上是幂等的（内容与现在完全一样），验收不会因为
+ * 一次整库替换把后面几节依赖的数据弄乱；而"这一类文件能不能被清单认出来、
+ * 能不能恢复、恢复之后会不会踢人"这三件事全都验到了。
+ * （"版本比当前旧要沿迁移链升上来"那条正常路径由 `npm run check` 第 54 节正面覆盖 ——
+ * 那里用一份**真的 v1 老结构**快照，验收这边不必再造一份老库。）
+ */
+const acceptMigrateName = migrationBackupName(new Date(2022, 4, 5, 6, 7, 8, 9));
+if (acceptBackupDir !== "") {
+  // `acceptBackupDir` 为空说明这一轮没拿到临时备份目录（正常用 `npm run accept` 一定有）：
+  // 那时**不要**去建文件（会落到一个来路不明的路径上），让下面那几条断言如实报"不在清单里"。
+  const snapshot = JSON.stringify(await api.exportDatabase());
+  const raw = new SqliteDatabase(`${acceptBackupDir}/${acceptMigrateName}`);
+  try {
+    raw.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    raw.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)").run(SNAPSHOT_KEY, snapshot);
+  } finally {
+    raw.close();
+  }
+}
+
+await check("数据与备份", "升级前快照：也在清单里，类型标识是「升级前快照」，摘要读得出来", async () => {
+  const list = await api.dailyBackups.list();
+  const entry = list.files.find((item) => item.name === acceptMigrateName);
+  return {
+    found: entry !== undefined,
+    kind: entry?.kind ?? "没有这一项",
+    problem: entry?.problem ?? "没有这一项",
+    students: entry?.counts?.students ?? -1,
+    keepMigrate: list.keep.migrate,
+    keepDaily: list.keep.daily,
+  };
+}, (v: { found: boolean; kind: string; problem: string; students: number; keepMigrate: number; keepDaily: number }) =>
+  v.found === true && v.kind === "migrate" && v.problem === "" && v.students >= 0 &&
+  // 保留份数由服务端给（界面不写死）：升级前快照 10 份、每日备份 90 份
+  v.keepMigrate === 10 && v.keepDaily === 90);
+
+await check("数据与备份", "升级前快照：点「恢复这一份」真的能退回去，而且所有人都要重新登录", async () => {
+  const namesBefore = JSON.stringify((await api.students.list()).map((item) => item.id));
+  const result = await api.dailyBackups.restore(acceptMigrateName, { confirmed: true });
+  /*
+   * ⚠️ 恢复成功 = 会话被整体作废（包括验收自己）：先重新登录，再往下比对与收尾。
+   * 这一句与 §10.5 里那一句是同一件事的两处（很容易漏 —— 漏了后面全变 401）。
+   */
+  forgetScriptLogin();
+  if (result.ok === false) return { error: result.error };
+  const namesAfter = JSON.stringify((await api.students.list()).map((item) => item.id));
+  return {
+    error: "",
+    kind: result.kind,
+    // 恢复的是"当前库这一份"，因此数据逐条没变 —— 这正好证明恢复这条路走通了
+    unchanged: namesBefore === namesAfter,
+    reloginRequired: result.reloginRequired,
+    note: result.note,
+    preRestore: result.preRestore,
+  };
+}, (v: { error: string; kind: string; unchanged: boolean; reloginRequired: boolean; note: string; preRestore: string }) =>
+  v.error === "" &&
+  v.kind === "migrate" &&
+  v.unchanged === true &&
+  v.reloginRequired === true &&
+  v.note.includes("退回升级前") &&
+  v.note.includes("所有人都需要重新登录") &&
+  v.note.includes(v.preRestore));
 
 /*
  * ── 节假日（后台「节假日」页）────────────────────────────────────────────────

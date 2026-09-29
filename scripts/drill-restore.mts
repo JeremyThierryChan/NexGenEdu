@@ -214,7 +214,9 @@ try {
   console.log("[1/8] 起临时服务端");
   handle = await startServer({
     dbPath,
-    env: { NEXGENEDU_BACKUP_DIR: backupDirPath, NEXGENEDU_BACKUP_KEEP: "5" },
+    // 备份目录走必填参数（`server/data/drill-backups-<时间戳>`：与真实目录分开的一次性目录）
+    backupDir: backupDirPath,
+    env: { NEXGENEDU_BACKUP_KEEP: "5" },
   });
   console.log(`      ${handle.base}`);
 
@@ -369,7 +371,9 @@ try {
   console.log("\n[7/8] 重启服务并核对数据");
   handle = await startServer({
     dbPath,
-    env: { NEXGENEDU_BACKUP_DIR: backupDirPath, NEXGENEDU_BACKUP_KEEP: "5" },
+    // 备份目录走必填参数（`server/data/drill-backups-<时间戳>`：与真实目录分开的一次性目录）
+    backupDir: backupDirPath,
+    env: { NEXGENEDU_BACKUP_KEEP: "5" },
   });
   /*
    * 重启后旧令牌必然失效（会话在服务端内存里，见 server/auth.mts 的取舍说明）。

@@ -50,17 +50,22 @@ import { databaseStats, validateImportedDatabase, type ImportOutcome } from "./b
 /*
  * 「每天自动备份」（服务端机器上的备份文件）的口径与类型：
  * **这里只 import 类型与纯函数**，碰文件的那一半在 `server/daily-backup-files.mts`
- * （理由见下面 `dailyBackupFiles` 那一段）。三套备份的区别见 `daily-backups.ts` 文件头。
+ * （理由见下面 `dailyBackupFiles` 那一段）。两套备份的区别见 `daily-backups.ts` 文件头。
  */
 import {
   backupCountsDeltaText,
+  backupKindText,
   dailyBackupTimeText,
+  DAILY_BACKUP_KEEP_DEFAULT,
+  MIGRATE_SNAPSHOT_KEEP_DEFAULT,
+  type BackupKind,
   type DailyBackupCounts,
   type DailyBackupEntry,
   type DailyBackupFileAccess,
   type DailyBackupList,
   type RestoreDailyBackupInput,
   type RestoreDailyBackupResult,
+  type TakeDailyBackupResult,
 } from "./daily-backups";
 import { buildFollowUps, type FollowUpItem } from "./followup";
 import { searchAll } from "./search";
@@ -310,6 +315,40 @@ export function __useDailyBackupFiles(next: DailyBackupFileAccess | null): void 
 const NO_DAILY_BACKUP_ACCESS =
   "「每天自动备份」存在**服务端那台机器上**（server/backups/），浏览器里读不到也改不了。" +
   "请在后端跑着的时候打开这一页（页面右上角会显示「已连接后端」）。";
+
+/**
+ * 「**恢复之后让所有人重新登录**」的能力（机构原话）。
+ *
+ * ## 为什么又是一个"装进来"的钩子
+ *
+ * 会话表在**服务端进程**里（`server/auth.mts` 的 `sessions`），而 `api.ts` 是
+ * 浏览器与 Node **共用**的一份实现 —— 它 import 不了那个模块（浏览器里没有会话表，
+ * 也不该有）。所以与 `__useDailyBackupFiles()` 同一个做法：运行环境把能力装上。
+ *
+ * ## 为什么恢复之后非要踢人（而不是"让他们刷新一下"）
+ *
+ * 恢复是**整库替换**。别人手上那个页面显示的还是恢复前的数据，他提交时会被乐观锁拦住 ——
+ * 从他的角度看只是"点了没反应 / 说被人改过"，不可能猜到"整库刚被换过"；
+ * 而他手上的数字、课时、钱都已经不是库里那份了。会话里还带着**角色**（登录那一刻定下的），
+ * 因此"谁能做什么"也一并过期。让所有人重新登录，是把"你手上这一页和库里那份是同一份吗"
+ * 这个问题一次性消掉 —— 代价只是每人重输一次口令。
+ *
+ * **包括执行恢复的那个人**（他自己那一页同样过期了）；**失败时一个人都不踢**。
+ *
+ * 没装（浏览器里那份实现、或自检的内存那一遍）时 `sessionsCleared` 回 0、
+ * `reloginRequired` 为 false —— 如实回答"这个环境里没有会话可作废"，而不是骗一句"已作废"。
+ */
+let sessionInvalidator: (() => number) | null = null;
+
+/**
+ * 装/卸"作废全部会话"的能力（服务端启动时装上 `clearSessions`；自检用它在内存那一遍验顺序）。
+ *
+ * 返回值是**作废了几个会话**，恢复的结果里要如实带上这个数：
+ * "所有人都要重新登录"这句话如果没有数字撑着，人不会知道到底影不影响别人。
+ */
+export function __useSessionInvalidator(next: (() => number) | null): void {
+  sessionInvalidator = next;
+}
 
 /**
  * 「导入前备份」改成**滚动保留最近几份**。
@@ -5597,9 +5636,16 @@ const localApi = {
     async list(): Promise<DailyBackupList> {
       const access = dailyBackupFiles;
       if (access === null) {
-        return { available: false, reason: NO_DAILY_BACKUP_ACCESS, dir: "", current: null, files: [] };
+        return {
+          available: false,
+          reason: NO_DAILY_BACKUP_ACCESS,
+          dir: "",
+          current: null,
+          files: [],
+          keep: { daily: DAILY_BACKUP_KEEP_DEFAULT, migrate: MIGRATE_SNAPSHOT_KEEP_DEFAULT },
+        };
       }
-      // 读 90 份备份要一点点时间，浏览器里 `delay()` 让加载态露出来（服务端上是空操作）
+      // 读 100 多份备份要一点点时间，浏览器里 `delay()` 让加载态露出来（服务端上是空操作）
       await delay();
       const current = snapshotCounts(load());
       const files: DailyBackupEntry[] = access.list().map((file) => {
@@ -5618,11 +5664,33 @@ const localApi = {
           };
         }
       });
-      return { available: true, reason: "", dir: access.dir(), current, files };
+      /*
+       * 两类混在一起按时间排（最新的在前），每一份自带 `kind` —— 界面靠它分栏。
+       * 两类各留几份由服务端给（它才是读环境变量的那一侧）：界面**不写死数字**，
+       * 否则人把上限调成 3 之后，界面上还写着"保留 10 份"。
+       */
+      return {
+        available: true,
+        reason: "",
+        dir: access.dir(),
+        current,
+        files,
+        keep: access.keep(),
+      };
     },
 
     /**
      * 用**其中一份**备份把整个库换回去（机构要的"数据丢了怎么办"）。
+     *
+     * ## 两类快照走的是**同一套**代码（"恢复成昨天"与"退回升级前"的差别只在起点）
+     *
+     * `name` 可以是每日备份（`kind: "daily"`），也可以是**升级前快照**
+     * （`kind: "migrate"`，`nexgenedu-migrate-<时间戳>.db`）—— 后者是 E22 续 里机构
+     * 当场点的「也纳入界面 + 加上限」：升级出问题时要能自己退回去。
+     * 两条路的校验、顺序、后悔药、日志**一个字都不差**；唯一要当心的是**版本方向**：
+     * 升级前快照的版本通常比当前**旧**（它就是在升级前留的），那是**正常路径** ——
+     * 它要沿迁移链升上来。因此"版本比当前新就拒绝"那条判据**原样不动**，
+     * 而"比当前旧"从来不是拒绝理由（`readSnapshotDatabase` 里的 `migrate` 那一关才是）。
      *
      * ## 顺序是安全的全部（每一步的位置都不能挪）
      *
@@ -5633,13 +5701,16 @@ const localApi = {
      *   3. **另存当前库**（恢复前的后悔药）：只有校验全过了才做；
      *   4. **替换 + 落盘**：`cache = migrated` + `persist()` —— 走的是既有的持久化路径
      *      （写 kv 快照），**不是**在服务运行期间拿文件复制去换 `nexgenedu.db`（WAL 会弄坏它）；
-     *   5. **写操作日志**：谁、什么时候、从哪个文件、多少条 → 多少条、原来那份叫什么名字。
+     *   5. **写操作日志**：谁、什么时候、从哪个文件（哪一类）、多少条 → 多少条、原来那份叫什么名字；
+     *   6. **作废所有人的会话**（机构：「恢复后让所有人重新登录」）：换成功之后才做，
+     *      失败一个都不踢 —— 见下面那一段。
      *
-     * ## 不碰登录凭据
+     * ## 不碰登录凭据（但作废会话 —— 这两件事不矛盾）
      *
      * 恢复的是**业务数据**（kv 快照里那份）。`server/data/accounts.json` 与
      * `server/data/admin-credential.json` 不在快照里、也不在这条路上的任何一步 ——
      * 否则机构恢复完会发现自己被锁在门外（这个系统里"谁是谁、什么角色"是独立于业务数据的一份东西）。
+     * 但"已经登录"这件事必须过期：会话里带着角色、而所有人手上的页面都显示着恢复前的数据。
      */
     async restore(
       name: string,
@@ -5665,7 +5736,16 @@ const localApi = {
         };
       }
 
-      // ① 读 + 校验（**这一步失败 = 零写入**）
+      /*
+       * ① 读 + 校验（**这一步失败 = 零写入**）。
+       *
+       * `kind` 从清单那一份里取（`access.list()`），**不在这里按文件名前缀自己判**：
+       * "这个名字算哪一类"只有一处实现（`server/backup.mts` 的 `backupKindOfName`），
+       * 在这里再判一遍就会出现"清单说它是升级前快照、恢复说它是每日备份"这种话术分叉。
+       * 文件不在清单里（已被清理 / 被手工挪走）→ 回落到 `readSnapshot` 抛出的那句人话。
+       */
+      const listed = access.list().find((item) => item.name === name);
+      const kind: BackupKind = listed?.kind ?? "daily";
       let text: string;
       let at: string;
       try {
@@ -5710,25 +5790,130 @@ const localApi = {
         action: "恢复每日备份",
         targetId: name,
         summary:
-          `从每日备份恢复：${name}（${backupCountsDeltaText(before, after)}）；` +
-          `恢复前的库已另存为 ${preRestore}`,
+          `从${backupKindText(kind)}恢复：${name}（${backupCountsDeltaText(before, after)}）；` +
+          `恢复前的库已另存为 ${preRestore}` +
+          (kind === "migrate" ? "；这一份是**升级前快照**，恢复它＝退回升级前那一版看到的数据" : ""),
       });
       persist(cache);
+
+      /*
+       * ④ **作废所有人的会话**（机构：「恢复后让所有人重新登录」）。
+       *
+       * 位置在这里，不是"顺手提前到替换之前"：只有库真的换成功、且落盘成功了，
+       * 才轮到踢人。上面任何一条 return（未确认 / 读不出 / 校验不过 / 另存失败）
+       * 都在这一步之前返回 —— **失败时一个人都不踢**（一次误点不该把人赶出系统）。
+       *
+       * `sessionInvalidator` 没装时（浏览器里那份实现、自检的内存那一遍）
+       * 如实回 0 个、`reloginRequired: false`：那种环境里没有"服务端会话"这回事，
+       * 骗一句"已作废 3 个会话"比不说更糟。
+       */
+      const sessionsCleared = sessionInvalidator === null ? 0 : sessionInvalidator();
+      const reloginRequired = sessionInvalidator !== null;
 
       const upgraded =
         checked.fromVersion === restored.version
           ? ""
           : `（顺手把结构从 v${checked.fromVersion} 升到了 v${restored.version}）`;
+      const kindNote =
+        kind === "migrate"
+          ? "**退回升级前**" +
+            (checked.fromVersion === CURRENT_VERSION
+              ? "（这一份的结构版本与当前相同，因此没有走迁移链）"
+              : `（它比当前旧：v${checked.fromVersion}，已经沿迁移链升到 v${restored.version}）`) +
+            "；"
+          : "";
       return {
         ok: true,
         file: name,
+        kind,
         at,
         preRestore,
         before,
         after,
+        sessionsCleared,
+        reloginRequired,
         note:
-          `现在用的是 **${dailyBackupTimeText(at)}** 那份备份的数据${upgraded}；` +
-          `你原来那份已经另存为 **${preRestore}**，要回去就再点它那一行的「恢复这一份」。`,
+          `${kindNote}现在用的是 **${dailyBackupTimeText(at)}** 那份${backupKindText(kind)}的数据${upgraded}；` +
+          `你原来那份已经另存为 **${preRestore}**，要回去就再点它那一行的「恢复这一份」。` +
+          (reloginRequired
+            ? `\n**所有人都需要重新登录（包括你自己）**：恢复是整库替换，` +
+              `别人手上那个页面显示的还是恢复前的数据，提交时会被拦住（"说被人改过"），` +
+              `因此服务端已经作废**全部 ${sessionsCleared} 个会话** —— ` +
+              `账号与口令没变，重新登录一次即可；这一页也要重新登录才能继续用。`
+            : ""),
+      };
+    },
+
+    /**
+     * **立刻备份一份**（机构原话：「**加『立刻备份一份』按钮**」）。
+     *
+     * ## 为什么这个按钮值得存在
+     *
+     * "每天自动备份"有一个隐含前提：**出事之前的那一天刚好备过**。而机构真正会做的事是
+     * "我要在动数据之前先备一份"（导入名单、批量改报课、放假前调价…）。
+     * 没有这个按钮，他要么等到明天，要么去后端机器上敲 `npm run server:backup` ——
+     * 后者等于把他按回到"找开发"那条路上（而正是这条路让备份形同虚设）。
+     *
+     * ## 它用的是**同一处**备份实现
+     *
+     * 碰文件的那一半调 `server/backup.mts` 的 `takeBackup()`：`VACUUM INTO` 当前库
+     * （完整的数据库文件）+ 按 `NEXGENEDU_BACKUP_KEEP` 清理旧份。因此它产出的东西
+     * 与"服务端每天自动备一份"**完全一样**：同一套命名规则（因此清单认得出它）、
+     * 同一处生成、同一处清理。**绝不另写一份"看起来差不多"的实现** ——
+     * 那迟早分叉成"手动备的那份不被清理"或"清单里看不见它"。
+     *
+     * ## 为什么把"另存的那一份"与它分得这么清
+     *
+     * `writeSnapshot`（恢复前的后悔药）与它是两件事：前者**不参与保留份数清理**
+     * （每恢复一次就多一份，永远留着 —— 那是"后悔药"的语义），后者就是一份普通每日备份
+     * （过了保留窗口会被清掉）。把两者混起来，就会出现"我以为手动备的那份会一直留着"。
+     */
+    async takeNow(): Promise<TakeDailyBackupResult> {
+      const access = dailyBackupFiles;
+      if (access === null) return { ok: false, error: NO_DAILY_BACKUP_ACCESS };
+      await delay();
+      let taken: { file: string; at: string; bytes: number; removed: string[]; total: number };
+      try {
+        taken = access.takeNow();
+      } catch (cause) {
+        return {
+          ok: false,
+          error:
+            `没能立刻备份一份：${cause instanceof Error ? cause.message : String(cause)}` +
+            "（**没有生成任何文件**，现有备份一份都没动。）",
+        };
+      }
+      /*
+       * 写一条操作日志：谁在什么时候手动备了一份、备之前有没有顺手清掉旧份。
+       * 这一条比自动备份更需要日志 —— 自动那份有"每天一份"的规律可循，
+       * 而人手动点的那一下是**只有当时那个人知道**的动作。
+       */
+      const list = load();
+      writeLog(list, {
+        entity: "数据",
+        action: "立刻备份",
+        targetId: taken.file,
+        summary:
+          `手动备份一份：${taken.file}（${taken.bytes} 字节；现有每日备份 ${taken.total} 份）` +
+          (taken.removed.length === 0
+            ? "；没有清理任何旧份"
+            : `；顺手清理了超过保留份数的最老 ${taken.removed.length} 份：${taken.removed.join("、")}`),
+      });
+      persist(list);
+      return {
+        ok: true,
+        file: taken.file,
+        at: taken.at,
+        bytes: taken.bytes,
+        removed: taken.removed,
+        total: taken.total,
+        note:
+          `已经立刻备份一份：**${taken.file}**（${taken.bytes} 字节，现有每日备份 ${taken.total} 份）。` +
+          (taken.removed.length === 0
+            ? ""
+            : `为守住保留份数，顺手清掉了最老的 ${taken.removed.length} 份：${taken.removed.join("、")}。` +
+              "（**只删每日备份里最老的**，升级前快照与它各算各的。）") +
+          "它就在下面的清单里（标着「刚备的」），要回去点它那一行的「恢复这一份」。",
       };
     },
   },

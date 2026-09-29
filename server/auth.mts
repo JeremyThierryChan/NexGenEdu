@@ -365,6 +365,38 @@ export function logout(token: string | null): void {
   if (token !== null) sessions.delete(token);
 }
 
+/**
+ * **作废所有人的会话**，返回作废了几个 —— 恢复整库之后调用（机构原话：「恢复后让所有人重新登录」）。
+ *
+ * ## 为什么恢复之后必须踢人（而不是"让他们刷新一下"）
+ *
+ * 恢复是**整库替换**：换完之后，别人手上开着的页面显示的还是恢复前的数据。
+ * 他在那上面提交，服务端会用乐观锁把他拦住（这是现有行为，也是对的）——
+ * 但从他的角度看是"点了没反应 / 说被人改过"，**不可能猜到"整库刚被换过"**；
+ * 更糟的是他看到的数字、课时、钱都已经不是库里那份了，而他还在据此跟家长对账。
+ *
+ * 会话里带着**角色**（登录那一刻定下的），因此"谁是谁、能做什么"也一并过期；
+ * 整库换了之后让所有人重新登录，是把"你手上的页面和库里那份是同一份吗"这个问题
+ * 一次性消掉 —— 代价只是每个人重新输一次口令。
+ *
+ * ## 为什么**包括**执行恢复的那个人
+ *
+ * 他自己那一页显示的数据同样已经过期（提示里也写了"你原来那份另存成了什么"，
+ * 那是恢复**前**的事）。给他留一个例外，就得解释"为什么这个人的页面可以不用刷"，
+ * 而那条规则没有任何业务含义 —— 不如一致：**恢复成功 = 所有人重新登录**。
+ *
+ * ⚠️ 只该在**恢复真的成功之后**调用（见 `lib/backend/api.ts` 的 `dailyBackups.restore`：
+ * 校验失败 / 另存失败时一律**不踢人** —— 一次误点不该把人赶出系统）。
+ *
+ * ⚠️ 它**不动账号表**：`server/data/accounts.json` 与 `admin-credential.json`
+ * 一个字都不碰（恢复的是业务数据）。被作废的只是"已经登录"这件事，口令还是原来那个。
+ */
+export function clearSessions(): number {
+  const count = sessions.size;
+  sessions.clear();
+  return count;
+}
+
 /** 从 `Authorization: Bearer <token>` 头里取令牌。 */
 export function tokenFromHeader(header: string | undefined): string | null {
   if (typeof header !== "string") return null;

@@ -136,14 +136,25 @@ export type StartServerOptions = {
   /** 就绪前等多久（默认 30 秒）。 */
   timeoutMs?: number;
   /**
-   * **备份目录**。给了就设 `NEXGENEDU_BACKUP_DIR`，于是这个临时服务写的每一份备份
+   * **备份目录**（**必填**）。设成 `NEXGENEDU_BACKUP_DIR`，于是这个临时服务写的每一份备份
    * （迁移前快照、每天一份、界面恢复前的另存）都落在那个目录里，绝不去动 `server/backups/`。
    *
-   * 为什么做成一个显式参数而不是"调用方自己在 env 里塞"：临时服务要写备份这件事是
-   * **一定会发生**的（起一个空库服务就要跑两条迁移），因此默认值必须是"能隔离"的那个，
-   * 而不是"忘了设就写进真实目录"。
+   * ## 为什么它是必填、而且还要在运行时再挡一道
+   *
+   * 临时服务要写备份这件事是**一定会发生**的（起一个空库服务就要跑一遍迁移 → 一份迁移前快照），
+   * 因此默认值必须是"能隔离"的那个 —— 早先它是 `backupDir?: string`（可省），
+   * 于是 `scripts/check-auth.mts` 里那两处 `startServer({ dbPath })` **真的**把迁移前快照
+   * 写进了真实的 `server/backups/`：机器上那 99 份 `nexgenedu-migrate-*.db` 里的一大批
+   * 就是这么来的（每次跑一遍权限自检丢一份空快照进去）。
+   *
+   * 那时它只是"脏"（旧代码从不删迁移前快照）。而 E22 续 给迁移前快照加了**保留份数上限**
+   * 之后，同一个路径就变成了**会删东西的**：一次 `npm run check:auth` 就能把真实备份目录里
+   * 超出 10 份的迁移前快照全清掉（2026-09-29 真发生过：89 份空快照被清，
+   * 详见 PROJECT.md 的「E22 续」）。因此这一版把它改成**必填**（编译期就报错），
+   * 并在下面**再挡一道运行时的门**（`backupDir` 不许是真实的 `server/backups`）——
+   * "忘了隔离"的失败方向必须是**起不来**，而不是"悄悄动了机构的东西"。
    */
-  backupDir?: string;
+  backupDir: string;
 };
 
 /**
@@ -169,6 +180,28 @@ export async function startServer(options: StartServerOptions): Promise<ServerHa
     password: `test-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`,
   };
 
+  /*
+   * 运行时那道门：临时服务的备份目录**绝不许**是真实的 `server/backups/`。
+   *
+   * 判据是"路径相等"（规范化之后），不是"以 tmpdir 开头"：`scripts/drill-restore.mts`
+   * 用的是 `server/data/drill-backups-<时间戳>`（同样是与真实目录分开的一次性目录），
+   * 那种用法是正确的，不该被拦。要拦的只有**真实的那个目录**。
+   *
+   * 为什么宁可在这里让整个脚本起不来：写错一个参数就动到机构的退路，代价无法接受；
+   * 而"起不来"会立刻被人看见并修好。
+   */
+  const resolvedBackup = path.resolve(options.backupDir);
+  const realBackup = path.resolve(repoRoot, "server/backups");
+  if (resolvedBackup === realBackup) {
+    throw new Error(
+      "临时服务端的备份目录不能是真实的 server/backups/ —— " +
+        "临时服务要跑迁移，于是会往那个目录里写一份迁移前快照，并按 E22 续 的保留上限" +
+        "**删掉超出份数的最老几份**（2026-09-29 就是这么清掉 89 份的）。" +
+        "请传一个一次性目录（`mkdtempSync(join(tmpdir(), " +
+        '"nexgenedu-…-"));`），见 scripts/temp-server.mts 的 withTempServer。',
+    );
+  }
+
   const server = spawn(process.execPath, SERVER_ARGS, {
     cwd: repoRoot,
     env: {
@@ -177,7 +210,7 @@ export async function startServer(options: StartServerOptions): Promise<ServerHa
       PORT: String(port),
       NEXGENEDU_ADMIN_USER: credentials.username,
       NEXGENEDU_ADMIN_PASSWORD: credentials.password,
-      ...(options.backupDir === undefined ? {} : { NEXGENEDU_BACKUP_DIR: options.backupDir }),
+      NEXGENEDU_BACKUP_DIR: options.backupDir,
       ...(options.env ?? {}),
     },
     stdio: ["ignore", "pipe", "pipe"],

@@ -34,6 +34,7 @@ import {
   __appendSystemLog,
   __removeFixture,
   __useDailyBackupFiles,
+  __useSessionInvalidator,
   __useStoreForTesting,
   SNAPSHOT_KEY,
 } from "../lib/backend/api.ts";
@@ -61,12 +62,14 @@ import {
   backupIfNotToday,
   backupsDisabled,
   latestBackup,
+  migrationBackupKeep,
 } from "./backup.mts";
 // 「每天自动备份」的文件能力（列备份 / 读一份 / 另存一份）：只有服务端能做，见 server/daily-backup-files.mts
 import { createNodeDailyBackupFiles } from "./daily-backup-files.mts";
 // 会话认证（第 6 步）：口令与令牌都在服务端，见 server/auth.mts
 import {
   activeSessionCount,
+  clearSessions,
   credentialFile,
   login,
   logout,
@@ -691,6 +694,21 @@ async function handleAccountsRoute(
 const db = openDatabase();
 const migration = migrate(db);
 /*
+ * 迁移结果要**看得见**（尤其是"顺手清理了几份升级前快照"）。
+ *
+ * E22 续 起，生成一份新的迁移前快照之后会按保留上限清掉最老的几份 —— 那是机构要的行为
+ * （"给它们一个保留份数上限"），但它**删的是文件**，因此绝不允许静默：
+ * 服务端启动日志里逐条写明清了谁，谁在事后翻日志都能回答"我那几份快照去哪了"。
+ * （`npm run server:migrate` 那条命令行入口也打印同样的内容。）
+ */
+if (migration.snapshotRemoved.length > 0) {
+  console.log(
+    `[备份] 升级前快照超过保留份数（${migrationBackupKeep()} 份，NEXGENEDU_MIGRATE_SNAPSHOT_KEEP 可调），` +
+      `已清理最老的 ${migration.snapshotRemoved.length} 份：`,
+  );
+  for (const name of migration.snapshotRemoved) console.log(`  - ${name}`);
+}
+/*
  * 路线 B 的核心一步：把 api.ts 的存储换成 SQLite 支持的实现。
  * 之后 `api` 上的方法全部可用，且**与浏览器里跑的是同一套逻辑**。（数量以 `contract.ts` 为准，
  * 不在这里写死 —— 写死的数字一定会过期。）
@@ -737,7 +755,9 @@ __useStoreForTesting(serverStore);
  *   - `dir`：`backupDir()` —— 走 `NEXGENEDU_BACKUP_DIR`，因此临时服务 / 演练 / 验收
  *     一改环境变量就整体隔离到临时目录，**绝不会去动真实的 server/backups/**；
  *   - `snapshotKey`：`SNAPSHOT_KEY`（`lib/backend/api.ts`）—— 备份文件里装的正是这一份快照；
- *   - `schemaVersion`：`currentVersion(db)` —— 另存的那份也写一个正确的结构版本。
+ *   - `schemaVersion`：`currentVersion(db)` —— 另存的那份也写一个正确的结构版本；
+ *   - `db`：**只给「立刻备份一份」用**（机构：「加『立刻备份一份』按钮」）。那件事必须走
+ *     `server/backup.mts` 的 `takeBackup`（备份生成的唯一实现），而它要一个数据库句柄。
  *
  * ⚠️ 权限不在这里判：`dailyBackups.*` 登记在契约的 `ops` 组，
  * 判定由 `lib/auth/roles.ts` 的 `GROUP_ACCESS.ops` 给出（**只有技术管理员**），
@@ -748,8 +768,24 @@ __useDailyBackupFiles(
     dir: backupDir(),
     snapshotKey: SNAPSHOT_KEY,
     schemaVersion: currentVersion(db),
+    db,
   }),
 );
+
+/* ── 「恢复之后所有人重新登录」（机构：「恢复后让所有人重新登录」）────────────────────
+ *
+ * 恢复是**整库替换**，而"谁是谁、什么角色"记在服务端的**会话表**里（登录那一刻定下）。
+ * 恢复成功之后别人手上那个页面显示的还是恢复前的数据，他提交时会被乐观锁拦住 ——
+ * 从他的角度是"点了没反应"，不可能猜到"整库刚被换过"。
+ *
+ * 因此把**作废会话**这件事装进服务层（与 `__useDailyBackupFiles()` 同一个做法）：
+ * `lib/backend/api.ts` 的 `dailyBackups.restore` 在**真的换成功之后**调它，
+ * 把执行恢复的人也算在内。`api.ts` 是浏览器与 Node 共用的，它 import 不了这个模块
+ * （会话表在服务端进程里），所以判定留在服务层、能力由运行环境装上。
+ *
+ * ⚠️ 只在**成功**那条路径上调（失败时一个人都不踢）：一次误点不该把人赶出系统。
+ */
+__useSessionInvalidator(() => clearSessions());
 
 /* ── 节假日表（`/api/holidays`：查看；`/api/holidays/refresh`：抓取并写入）────────── */
 

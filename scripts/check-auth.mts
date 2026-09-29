@@ -23,12 +23,20 @@
  */
 
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { run, startServer, withTempServer } from "./temp-server.mts";
 import { login, prepareCredential } from "../server/auth.mts";
 import { createMemoryStore } from "../lib/backend/storage.ts";
+/*
+ * 这一节要自己造一份"装着当前库"的**升级前快照**（那种文件只有服务端会生成，
+ * 而它是机构机器上真实存在的东西）。名字用 `server/backup.mts` 那一处实现，
+ * kv 键用 `SNAPSHOT_KEY`（服务端与备用文件能力取的是同一个字面量）。
+ */
+import SqliteDatabase from "better-sqlite3";
+import { SNAPSHOT_KEY } from "../lib/backend/api.ts";
+import { migrationBackupName } from "../server/backup.mts";
 import {
   __useConnectionStoreForTesting,
   backendBase,
@@ -567,6 +575,14 @@ try {
         await attempt(cashier.token, "dailyBackups.restore"), 403);
       equal("技术管理员能读每天自动备份的清单",
         await attempt(admin.token, "dailyBackups.list"), 200);
+      /*
+       * 「立刻备份一份」（E22 续，机构：「加『立刻备份一份』按钮」）：它**生成**一份新备份，
+       * 与"改数据"同级（写的是服务端机器上的文件），因此与上面两个方法同一档 ——
+       * 只有技术管理员。这里同样要 403，而不是"角色表里写着"。
+       */
+      equal("教师不能「立刻备份一份」", await attempt(teacher.token, "dailyBackups.takeNow"), 403);
+      equal("招生老师不能「立刻备份一份」", await attempt(marketing.token, "dailyBackups.takeNow"), 403);
+      equal("财务不能「立刻备份一份」", await attempt(cashier.token, "dailyBackups.takeNow"), 403);
 
       // 财务管理员：钱与报课能用（机构确认①），运维仍然不行
       check("财务能报课（机构确认①：财务也要能报课）",
@@ -637,6 +653,17 @@ console.log("\n[9] 行级范围：普通教师只看自己的课与自己学生�
 try {
   const scopeDir = mkdtempSync(path.join(tmpdir(), "nexgenedu-scope-"));
   const scopeDbPath = path.join(scopeDir, "db-scope.sqlite");
+  /*
+   * ⚠️ **备份目录必须显式给**（这一段就是 2026-09-29 那次事故的现场）。
+   *
+   * 这两处 `startServer` 原先写的是 `startServer({ dbPath: scopeDbPath })` —— 没给备份目录，
+   * 于是 `NEXGENEDU_BACKUP_DIR` 没设，服务端跑迁移时把"迁移前快照"写进了**真实的**
+   * `server/backups/`（每跑一遍权限自检丢一份空的 8KB 快照进去：机器上那 99 份
+   * `nexgenedu-migrate-*.db` 一多半就是这么来的）。那时它只是脏；E22 续 给迁移前快照
+   * 加了保留上限之后，同一条路开始**删东西**：一次 check:auth 就把超出 10 份的那些清掉了。
+   * 现在 `startServer` 的 `backupDir` 是**必填**（编译期就报错），并在运行时拦住"真实目录"。
+   */
+  const scopeBackupDir = path.join(scopeDir, "backups");
 
   /** 播种：失败就抛 —— 空库上跑后面那些断言会"全绿"，那是假证据。 */
   const seed = async (
@@ -698,7 +725,7 @@ try {
   let cancelledLessonId = "";
 
   /* ① 第一个进程：建数据（用它自己的默认账号＝技术管理员） */
-  const first = await startServer({ dbPath: scopeDbPath });
+  const first = await startServer({ dbPath: scopeDbPath, backupDir: scopeBackupDir });
   try {
     const admin = await loginAs(first.base, first.credentials.username, first.credentials.password);
     const teacherA = (await seed(first.base, admin.token, "teachers.create", [teacherBody("范围甲老师", 1)])) as { id: string };
@@ -776,6 +803,8 @@ try {
 
   const second = await startServer({
     dbPath: scopeDbPath,
+    // 同上：临时服务的备份目录必须显式隔离，不给就等于写进机构的 server/backups/
+    backupDir: scopeBackupDir,
     env: { NEXGENEDU_ACCOUNTS_JSON: JSON.stringify(scopeAccounts) },
   });
   try {
@@ -1830,6 +1859,233 @@ try {
 } catch (cause) {
   failures += 1;
   console.error(`\n✗ 错误口径那一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
+}
+
+/*
+ * ── [12] 每天自动备份：真的按一下、真的退回到升级前、真的把所有人踢下线 ──────────
+ *
+ * （编号接在 [11] 节假日表之后 —— 上面那个 [11] 是 "节假日表：登录即可看…"，
+ * 一节一个编号，不给两件事用同一个号。）
+ *
+ * ## 为什么这一节必须单独起一个临时服务（且**不关掉备份**）
+ *
+ * 上面两个临时服务都带着 `NEXGENEDU_NO_BACKUP=1`（那是自检不让临时服务往真实备份目录
+ * 丢文件的隔离手段）。而这一节要验的正是"**按钮真的生成一份备份**"，
+ * 关掉备份就把它验成了一句空话。因此这里显式把那个开关设成 `"0"`（`backupsDisabled()`
+ * 只认 `"1"`），代价是必须更小心：备份目录是**临时目录**（`withTempServer` 给的），
+ * 因此生成的文件落在临时目录里，跑完随临时目录一起删 —— `server/backups/` 一个字都不碰
+ * （这一点由 `check-both.mts` 那三条护栏兜底，也与本节无关地一直在跑）。
+ *
+ * ## 这一节钉住的三件事（E22 续，机构当场点的三条）
+ *
+ *   ① 「**也纳入界面 + 加上限**」：真实的**迁移前快照**（服务启动跑迁移时自动生成的那一份）
+ *      出现在清单里、类型标识是「升级前快照」、而且**能用来恢复**；
+ *   ② 「**恢复后让所有人重新登录**」：恢复成功 → **所有**令牌立刻 401（含第二个会话），
+ *      重新登录又能用（账号与口令一个字没变）；恢复**失败** → 一个都不踢；
+ *   ③ 「**加『立刻备份一份』按钮**」：真的多一份、名字符合既有命名规则（清单认得出）、
+ *      已有的备份一份没被改动或删除、非技术管理员 403。
+ */
+
+try {
+  await withTempServer(
+    async (base, info) => {
+      console.log(`\n[12] 每天自动备份（E22 续）：临时服务 ${base}（备份目录 ${info.backupDir}，**备份开着**）`);
+
+      /** 登录一次（失败直接抛错：这一节里"应该能登录"的必须真能登）。 */
+      const loginAs11 = async (username: string, password: string): Promise<string> => {
+        const response = await raw(base, "/api/login", {
+          method: "POST",
+          body: { username, password },
+        });
+        if (response.status !== 200) {
+          throw new Error(`登录 ${username} 失败：HTTP ${String(response.status)}`);
+        }
+        return String(response.body.token ?? "");
+      };
+      /** 列目录（含大小：断言"已有的备份没被改动"要逐份比字节数）。 */
+      const listing11 = (): Record<string, number> =>
+        Object.fromEntries(
+          readdirSync(info.backupDir).sort().map((name) => [
+            name,
+            statSync(path.join(info.backupDir, name)).size,
+          ]),
+        );
+      const readBackup11 = (name: string): string =>
+        readFileSync(path.join(info.backupDir, name), "utf8");
+
+      const adminToken11 = await loginAs11(info.username, info.password);
+      /* 第二个会话：用来证明"作废的是**所有**会话"，而不是"只踢调用者那一个"。 */
+      const secondToken = await loginAs11(info.username, info.password);
+
+      /*
+       * ① 真实的迁移前快照：临时库是新库，服务启动时会跑一遍迁移，
+       * 而这一节的临时服务**没有关掉备份** → 迁移前那一份快照真的被生成了。
+       * 这就是"升级前快照"在真实路径上的样子（不是自检手写的夹具）。
+       */
+      const list11 = await call(base, adminToken11, "dailyBackups.list");
+      check("技术管理员能读清单（200）", list11.status === 200, JSON.stringify(list11.body).slice(0, 200));
+      const files11 = (list11.body.result as { files?: Array<Record<string, unknown>> } | undefined)?.files ?? [];
+      const migrateEntries = files11.filter((item) => item.kind === "migrate");
+      const migrateName = String(migrateEntries[0]?.name ?? "");
+      check("服务启动跑迁移时**真的**留了一份「升级前快照」，而且它就在清单里（类型标识是 migrate）",
+        migrateName.startsWith("nexgenedu-migrate-") &&
+          migrateEntries.length >= 1 &&
+          migrateEntries[0]?.kind === "migrate",
+        JSON.stringify(files11.map((item) => `${String(item.kind)}:${String(item.name)}`)));
+      /*
+       * ⚠️ 新库那第一份迁移快照**读不出摘要**，而且这是**正常**的：迁移跑在写入空快照之前，
+       * 于是那一刻的库里根本没有 kv 快照。清单把"读不出"如实标出来（原因写明白），
+       * 而不是把它藏起来 —— 那正是 §53 那条纪律（"读不出的那一份不许藏"）。
+       * 一份**有数据**的升级前快照能不能读、能不能恢复，用下面自己造的那一份来验。
+       */
+      check("新库那一份读不出时，清单给的原因点明了是「没有本系统的数据快照」（不是含混的一句读不出）",
+        String(migrateEntries[0]?.problem ?? "") === "" ||
+          String(migrateEntries[0]?.problem).includes("没有本系统的数据快照"),
+        String(migrateEntries[0]?.problem ?? ""));
+      /*
+       * 自己造一份**装着当前这一刻的库**的升级前快照（名字用 `server/backup.mts` 那一处实现，
+       * 不在这里拼前缀）：它才是机构机器上那种"升级前快照"的样子 —— 有数据、能读、能恢复。
+       */
+      const dataMigrateName = migrationBackupName(new Date(2022, 4, 5, 6, 7, 8, 9));
+      const exported11 = (await call(base, adminToken11, "exportDatabase")).body.result;
+      const expectedStudents11 = ((exported11 as { students?: unknown[] } | undefined)?.students ?? []).length;
+      {
+        const raw11 = new SqliteDatabase(path.join(info.backupDir, dataMigrateName));
+        try {
+          raw11.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+          raw11
+            .prepare("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)")
+            .run(SNAPSHOT_KEY, JSON.stringify(exported11));
+        } finally {
+          raw11.close();
+        }
+      }
+      const listData11 = await call(base, adminToken11, "dailyBackups.list");
+      const dataEntry11 = ((listData11.body.result as { files?: Array<Record<string, unknown>> } | undefined)?.files ?? [])
+        .find((item) => item.name === dataMigrateName);
+      check("一份**有数据**的升级前快照：在清单里、类型是 migrate、读得出摘要且条数与库里一致",
+        dataEntry11 !== undefined &&
+          dataEntry11.kind === "migrate" &&
+          dataEntry11.problem === "" &&
+          (dataEntry11.counts as { students?: unknown } | undefined)?.students === expectedStudents11,
+        JSON.stringify(dataEntry11 ?? null).slice(0, 240));
+
+      /*
+       * ② 「立刻备份一份」：基准 = 现在目录里有什么（迁移快照 + 可能已有的每日备份）。
+       */
+      const before11 = listing11();
+      const taken11 = await call(base, adminToken11, "dailyBackups.takeNow");
+      check("技术管理员「立刻备份一份」成功（200，返回 ok:true）",
+        taken11.status === 200 && (taken11.body.result as { ok?: unknown } | undefined)?.ok === true,
+        JSON.stringify(taken11.body).slice(0, 240));
+      const takenResult = taken11.body.result as {
+        file?: string; bytes?: number; removed?: string[]; total?: number; note?: string;
+      } | undefined;
+      const takenName = String(takenResult?.file ?? "");
+      check("返回了新那份的文件名，而且**符合既有命名规则**（形如 nexgenedu-<时间戳>.db）",
+        /^nexgenedu-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d{3}\.db$/.test(takenName), takenName);
+      const after11 = listing11();
+      check("调用之后目录里**真的多了一份**，就是返回的那个名字",
+        Object.keys(after11).filter((name) => !(name in before11)).join("|") === takenName,
+        JSON.stringify({ before: Object.keys(before11), after: Object.keys(after11) }));
+      check("已有的备份**一份没被改动或删除**（名字与大小逐份相同）",
+        Object.keys(before11).every((name) => after11[name] === before11[name]),
+        JSON.stringify({ before: before11, after: after11 }));
+      check("没有顺手清掉任何旧份（份数还少，removed 为空）",
+        Array.isArray(takenResult?.removed) && takenResult.removed.length === 0,
+        JSON.stringify(takenResult?.removed ?? null));
+      const listAfter11 = await call(base, adminToken11, "dailyBackups.list");
+      const listedNew11 = ((listAfter11.body.result as { files?: Array<Record<string, unknown>> } | undefined)?.files ?? [])
+        .find((item) => item.name === takenName);
+      check("刚备的那一份**就在清单里**，类型是 daily、读得出条数摘要（用户能看见它、能点它恢复）",
+        listedNew11 !== undefined && listedNew11.kind === "daily" && listedNew11.problem === "" &&
+          (listedNew11.counts as { students?: unknown } | undefined)?.students !== undefined,
+        JSON.stringify(listedNew11 ?? null).slice(0, 240));
+
+      /*
+       * ③ 恢复**失败**时一个都不踢：这一条与"成功要踢人"同等重要 ——
+       * 一次误点（选了一份已被清理掉的文件）不该把人赶出系统。
+       */
+      const failed11 = await call(base, adminToken11, "dailyBackups.restore", [
+        "nexgenedu-1990-01-01-00-00-00-000.db", { confirmed: true },
+      ]);
+      check("恢复一份不存在的备份：被拒（ok:false，不是 500）",
+        failed11.status === 200 && (failed11.body.result as { ok?: unknown } | undefined)?.ok === false,
+        JSON.stringify(failed11.body).slice(0, 240));
+      equal("恢复**失败**之后，手上的令牌还能用（没被踢下线）",
+        (await call(base, adminToken11, "students.list")).status, 200);
+      equal("恢复**失败**之后，另一个会话也还能用（一个都没踢）",
+        (await call(base, secondToken, "students.list")).status, 200);
+
+      /*
+       * ④ 恢复**成功**：用刚备的那一份把库换回去（内容与现在一致，因此数据不会变，
+       * 变的正是"所有人的会话"这件事）。
+       */
+      const statusBefore11 = await raw(base, "/api/status", { token: adminToken11 });
+      const activeBefore = Number(
+        (statusBefore11.body.auth as { activeSessions?: unknown } | undefined)?.activeSessions ?? -1,
+      );
+      check("（前置）此刻至少有两个活跃会话（下面才验得了「所有会话」）", activeBefore >= 2, String(activeBefore));
+      const restored11 = await call(base, adminToken11, "dailyBackups.restore", [
+        takenName, { confirmed: true },
+      ]);
+      const restoredResult = restored11.body.result as {
+        ok?: boolean; kind?: string; reloginRequired?: boolean; sessionsCleared?: number; note?: string;
+      } | undefined;
+      check("恢复成功（ok:true）", restored11.status === 200 && restoredResult?.ok === true,
+        JSON.stringify(restored11.body).slice(0, 300));
+      check("返回里说明恢复的是「每日备份」这一类（kind = daily）",
+        restoredResult?.kind === "daily", String(restoredResult?.kind));
+      check("返回里带上了「所有人都需要重新登录（包括你）」这句话",
+        restoredResult?.reloginRequired === true &&
+          String(restoredResult?.note ?? "").includes("所有人都需要重新登录"),
+        String(restoredResult?.note ?? "").slice(0, 200));
+      check("作废的会话数**多于一个**（不是只踢调用者自己那一个）",
+        Number(restoredResult?.sessionsCleared ?? 0) >= 2, String(restoredResult?.sessionsCleared));
+      equal("恢复成功之后：**执行恢复那个人**的令牌被拒（401）—— 他自己也要重新登录",
+        (await call(base, adminToken11, "students.list")).status, 401);
+      equal("恢复成功之后：**另一个会话**也被拒（401）—— 不是只踢一个人",
+        (await call(base, secondToken, "students.list")).status, 401);
+      equal("恢复成功之后：清单接口也读不了了（这一页会把人送回登录页）",
+        (await call(base, adminToken11, "dailyBackups.list")).status, 401);
+
+      /*
+       * ⑤ 重新登录就能继续（**账号与口令一个字没变**）：恢复不懂"谁是谁"这一摊子，
+       * 它只让"已经登录"这件事过期。这一条是"机构恢复完不会把自己锁在门外"的证据。
+       */
+      const relogin11 = await raw(base, "/api/login", {
+        method: "POST",
+        body: { username: info.username, password: info.password },
+      });
+      check("恢复之后用**原来那个账号口令**重新登录：成功（口令没被恢复影响）",
+        relogin11.status === 200 && typeof relogin11.body.token === "string",
+        JSON.stringify(relogin11.body).slice(0, 200));
+      const freshToken11 = String(relogin11.body.token ?? "");
+      equal("重新登录之后一切照常（清单读得到）",
+        (await call(base, freshToken11, "dailyBackups.list")).status, 200);
+      const statusAfter11 = await raw(base, "/api/status", { token: freshToken11 });
+      const activeAfter = Number(
+        (statusAfter11.body.auth as { activeSessions?: unknown } | undefined)?.activeSessions ?? -1,
+      );
+      check("此刻的活跃会话数 = 1（两个旧会话真的没了，只剩刚登的这一个）",
+        activeAfter === 1, `之前 ${String(activeBefore)} → 现在 ${String(activeAfter)}`);
+
+      /* 收尾：备份目录里那一份也要能读回来（顺带证明文件是真文件，不是缓存） */
+      check("新备的那一份在磁盘上真的存在，而且不是空文件",
+        readBackup11(takenName).length > 0 && (takenResult?.bytes ?? 0) > 0,
+        `${takenName} ${String(after11[takenName] ?? 0)} 字节`);
+    },
+    /*
+     * `NEXGENEDU_NO_BACKUP: "0"` —— **本节的要害**：上面两个临时服务都把它设成 1
+     * （"自检别往真实备份目录丢文件"），而这一节要验的正是"按钮真的生成一份备份"。
+     * 备份目录仍是临时目录（`withTempServer` 给的一次性目录），因此打开它不会碰到
+     * `server/backups/`。`backupsDisabled()` 只认 `"1"`，因此 `"0"` 等于打开。
+     */
+    { env: { NEXGENEDU_NO_BACKUP: "0" } },
+  );
+} catch (cause) {
+  failures += 1;
+  console.error(`\n✗ 每天自动备份那一节中断：${cause instanceof Error ? cause.message : String(cause)}`);
 }
 
 console.log(

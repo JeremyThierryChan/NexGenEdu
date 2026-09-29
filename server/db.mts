@@ -80,6 +80,16 @@ export function backupTo(db: Database.Database, file?: string): string {
  */
 const BACKUP_NAME_PATTERN = /^nexgenedu-(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})(?:-(\d{3}))?\.db$/;
 
+/**
+ * 备份文件名里**时间戳那一段**的形状（`2026-02-01-08-00-05-123`，毫秒可省）。
+ *
+ * 为什么不只在整名正则里做：目录里有**两类**备份文件（每日备份 / 迁移前快照），
+ * 它们的区别只在前缀，时间戳部分必须是**同一种**写法。把"时间戳"单独拆出来，
+ * 迁移快照就能复用同一段解析（`server/backup.mts` 的 `migrationBackupTimeOfName`），
+ * 而不是在那边再写一条正则 —— 两条正则早晚会有一条漏掉"毫秒可省"这类历史兼容。
+ */
+const BACKUP_STAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})(?:-(\d{3}))?$/;
+
 function pad2(value: number): string {
   return String(value).padStart(2, "0");
 }
@@ -111,9 +121,28 @@ export function backupFileName(at: Date): string {
 export function backupTimeOfName(name: string): number | null {
   const matched = BACKUP_NAME_PATTERN.exec(name);
   if (matched === null) return null;
-  const [, year, month, day, hour, minute, second, milli] = matched;
+  const [, ...parts] = matched;
+  return stampTime(parts);
+}
+
+/**
+ * 从**单纯的时间戳**解析时间点（不含前缀与 `.db`）；不符合形状返回 null。
+ *
+ * 给迁移前快照用（`nexgenedu-migrate-<时间戳>.db`）：它的名字只比每日备份多一个前缀，
+ * 时间戳部分的写法必须与每日备份**完全一致**，因此这一段只解析，不再复制一条正则。
+ */
+export function backupTimeOfStamp(stamp: string): number | null {
+  const matched = BACKUP_STAMP_PATTERN.exec(stamp);
+  if (matched === null) return null;
+  const [, ...parts] = matched;
+  return stampTime(parts);
+}
+
+function stampTime(parts: string[]): number {
+  const [year, month, day, hour, minute, second, milli] = parts;
   return new Date(
     Number(year), Number(month) - 1, Number(day),
     Number(hour), Number(minute), Number(second), Number(milli ?? 0),
   ).getTime();
 }
+

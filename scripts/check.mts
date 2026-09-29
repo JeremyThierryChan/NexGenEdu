@@ -75,6 +75,12 @@ import { calculateQuote, isTrialFree, trialFeeFor } from "@/lib/pricing/quote";
 import {
   __removeFixture,
   __useDailyBackupFiles,
+  /*
+   * §54：恢复成功之后**作废所有人的会话**（机构：「恢复后让所有人重新登录」）。
+   * 会话表在服务端进程里，因此这里装一个计数器当"作废"这个动作 —— 验的是**顺序**
+   * （成功才调、失败一次都不调），真会话被踢的结果由 HTTP 那一遍验（旧令牌 401）。
+   */
+  __useSessionInvalidator,
   __useStoreForTesting,
   api,
   SNAPSHOT_KEY,
@@ -161,7 +167,13 @@ import {
   timeValue,
   type SortValue,
 } from "@/lib/students/student-sort";
-import { isRemoteMode, remoteBase } from "@/lib/backend/remote";
+import {
+  // §54：恢复会作废会话（包括自检自己那个令牌），之后要重新登录一次才能继续 ——
+  // 这正是"更贴近真实使用"的那一步（浏览器里是人重新输口令）
+  forgetScriptLogin,
+  isRemoteMode,
+  remoteBase,
+} from "@/lib/backend/remote";
 import { createMemoryStore } from "@/lib/backend/storage";
 import {
   __useConnectionStoreForTesting,
@@ -373,6 +385,30 @@ import { holidaysDir, holidayYearFile, refreshHolidayYear } from "../server/holi
 import { createNodeDailyBackupFiles } from "../server/daily-backup-files.mts";
 import { listMigrations } from "../server/migrate.mts";
 /*
+ * §54 要用的**备份能力本体**（两类快照的命名、类型判定、保留份数与清理）。
+ *
+ * 刻意 import 真实现而不是在自检里重写一遍：
+ *   - `migrationBackupName` / `migrationBackupTimeOfName` / `backupKindOfName`：
+ *     "这个名字算不算一份备份、算哪一类"必须只有一处实现 —— 自检再写一条前缀判断，
+ *     就是在给自己造一条"清单认得、恢复不认"的路；
+ *   - `migrationBackupKeep` / `pruneMigrationBackups`：上限的默认值与清理的实现
+ *     （**删文件这件事只允许出现在 `server/backup.mts`**，下面有一条源码级断言钉着）；
+ *   - `backupKeep`：每日备份那一条上限（用来断言"两类各算各的，清理迁移快照不碰每日备份"）。
+ */
+import {
+  // 回归护栏用：真的拿"真实备份目录"去起一次临时服务，必须**起不来**（见 §54 那一条）
+  startServer,
+} from "./temp-server.mts";
+import {
+  backupKeep,
+  backupKindOfName,
+  listBackupSnapshots,
+  migrationBackupKeep,
+  migrationBackupName,
+  migrationBackupTimeOfName,
+  pruneMigrationBackups,
+} from "../server/backup.mts";
+/*
  * 「每天自动备份」的显示口径（条数摘要 / 大小 / 时间 / 确认框里的条数对照）
  * 也是**值**，而且只有一处实现（`lib/backend/daily-backups.ts`）：
  * §53 直接对着它们断言，不在自检里再拼一遍 —— 拼一遍就是第二份实现。
@@ -381,8 +417,13 @@ import {
   backupBytesText,
   backupCountsDeltaText,
   backupCountsText,
+  backupKindText,
+  DAILY_BACKUP_KEEP_DEFAULT,
+  DAILY_BACKUP_KEEP_ENV,
   dailyBackupCompareText,
   dailyBackupTimeText,
+  MIGRATE_SNAPSHOT_KEEP_DEFAULT,
+  MIGRATE_SNAPSHOT_KEEP_ENV,
   type DailyBackupCounts,
   type DailyBackupEntry,
 } from "@/lib/backend/daily-backups";
@@ -1568,10 +1609,18 @@ __useStoreForTesting(memory);
  * 只在一个后端上收得掉，另一个后端就会从这里开始一路红到底（`check:both` 抓过这一次）。
  */
 let fixtureToken: string | null = null;
+/**
+ * 摘掉一条夹具（走测试后端的专用入口）。
+ *
+ * ⚠️ **401 要重新登录再试一次**（E22 续 加的）：恢复整库会作废**所有人**的会话
+ * （机构：「恢复后让所有人重新登录」），而这里缓存的令牌可能正是恢复**之前**拿的。
+ * 少了这一段，表现是"恢复那一节之后的收尾全部失败"，而失败原因（401）跟收尾本身毫无关系 ——
+ * 那种红最难查。重新登录是脚本的等价动作（浏览器里是人重新输口令）。
+ */
 async function dropFixture(entity: string, id: string): Promise<boolean> {
   if (!isRemoteMode()) return __removeFixture(entity, id);
-  if (fixtureToken === null) {
-    const login = await fetch(`${remoteBase()}/api/login`, {
+  const login = async (): Promise<string> => {
+    const response = await fetch(`${remoteBase()}/api/login`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -1579,16 +1628,26 @@ async function dropFixture(entity: string, id: string): Promise<boolean> {
         password: process.env.NEXGENEDU_ADMIN_PASSWORD ?? "",
       }),
     });
-    const body = (await login.json().catch(() => ({}))) as { token?: unknown };
-    fixtureToken = typeof body.token === "string" ? body.token : "";
-  }
-  const response = await fetch(`${remoteBase()}/api/test-hooks/remove-fixture`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${fixtureToken}` },
-    body: JSON.stringify({ entity, id }),
-  });
-  const body = (await response.json().catch(() => ({}))) as { removed?: unknown };
-  return body.removed === true;
+    const body = (await response.json().catch(() => ({}))) as { token?: unknown };
+    return typeof body.token === "string" ? body.token : "";
+  };
+  if (fixtureToken === null) fixtureToken = await login();
+
+  const post = async (token: string): Promise<{ status: number; removed: unknown }> => {
+    const response = await fetch(`${remoteBase()}/api/test-hooks/remove-fixture`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ entity, id }),
+    });
+    const body = (await response.json().catch(() => ({}))) as { removed?: unknown };
+    return { status: response.status, removed: body.removed };
+  };
+  const first = await post(fixtureToken);
+  if (first.status !== 401) return first.removed === true;
+  // 令牌被作废了（多半是刚才恢复过整库）：重新登录一次再来
+  forgetScriptLogin();
+  fixtureToken = await login();
+  return (await post(fixtureToken)).removed === true;
 }
 
 const emptyAtStart = await api.students.list();
@@ -15246,6 +15305,8 @@ const demoBackup: DailyBackupEntry = {
   at: new Date(2020, 2, 4, 9, 5, 6, 7).toISOString(),
   counts: demoBackupCounts,
   problem: "",
+  // 类型标识（每日备份 / 升级前快照）是 E22 续 加的：清单里每一份都必须带
+  kind: "daily",
 };
 const demoCurrent: DailyBackupCounts = {
   students: 12, teachers: 3, classrooms: 4, courses: 20,
@@ -15293,15 +15354,23 @@ ok("⑩ 操作日志那句「多少条 → 多少条」里，变了的那一项�
     source.replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, " ").replace(/^[ \t]*\/\/.*$/gm, "");
   const pageCode = stripSourceComments(readFileSync(pageUrl, "utf8"));
 
+  /*
+   * ⚠️ 这两条在 E22 续 里跟着界面改过（界面上现在**两张表**：每日备份 / 升级前快照，
+   * 由 `BackupTable` 渲染）—— 但要求一个字没变：标题在、一行一份的清单在、
+   * 时间 / 大小 / 摘要都在、每行都有「恢复这一份」、读不出的那一份禁用并说明原因。
+   * 变的是"清单从哪个变量来"（`elist.files.map` → `entries.map`），不只是换了写法：
+   * 那是"两类分开显示"这条要求的直接结果。
+   */
   ok("⑩ 那一页有「每天自动备份」这一块：标题 + 一行一份的清单（时间 / 大小 / 摘要）",
     pageCode.includes('title="每天自动备份"') &&
-      pageCode.includes("list.files.map(") &&
+      pageCode.includes("entries.map(") &&
       pageCode.includes("dailyBackupTimeText(entry.at)") &&
       pageCode.includes("backupBytesText(entry.bytes)") &&
       pageCode.includes("backupCountsText(entry.counts)"));
   ok("⑩ 每一行都有「恢复这一份」；读不出的那一份**按钮禁用并说明原因**（不是藏起来）",
     pageCode.includes("恢复这一份") &&
-      pageCode.includes("disabled={busy || entry.counts === null}") &&
+      // 「locked」是 E22 续 加的第三个禁用理由：恢复成功之后这一页已经登出，点了只会 401
+      pageCode.includes("disabled={busy || locked || entry.counts === null}") &&
       pageCode.includes("读不出这一份的内容"));
   ok("⑩ 页面调的就是服务层那两个方法（清单 + 单点恢复）",
     pageCode.includes("api.dailyBackups.list(") &&
@@ -15603,7 +15672,15 @@ if (dailySkip !== "") {
       ["⑤ 内容不是合法 JSON", badNames.brokenJson],
       [`⑤ 版本比当前新（v${String(CURRENT_VERSION + 1)}）`, badNames.newerVersion],
       ["⑤ 文件不存在（已被清理 / 被手工挪走）", "nexgenedu-2019-01-01-00-00-00-000.db"],
-      ["⑤ 名字不是备份文件名（迁移前快照不在这条路上）", "nexgenedu-migrate-2020-01-01-00-00-00-000.db"],
+      /*
+       * ⚠️ 这一条**在 E22 续 里改过**：迁移前快照（`nexgenedu-migrate-…db`）原先在这里，
+       * 因为那时它不在界面这条路上。机构看完清单后当场点了「也纳入界面 + 加上限」——
+       * 现在它**能**恢复，因此它必须从这个"坏输入"清单里挪走（留着就是一条假红），
+       * 它的**正常路径**由 §54 正面断言（含"版本比当前旧"那条）。
+       * 换成两个**真正**不该被认的名字：机构自己导出的 JSON、以及一个普通文件名。
+       */
+      ["⑤ 名字不是备份文件名（机构自己导出的 JSON 不在这条路上）", "nexgenedu-备份-2026-09-19.json"],
+      ["⑤ 名字只是一个普通文件（既不是每日备份、也不是升级前快照）", "some-other-file.db"],
       ["⑤ 名字里带路径（不许靠恢复去读服务端机器上别的文件）", "../../server/data/nexgenedu.db"],
     ];
     for (const [label, name] of rejects) {
@@ -15656,6 +15733,20 @@ if (dailySkip !== "") {
   const dirBeforeRestore = dirText();
   const fileNamesBeforeRestore = Object.keys(dirFingerprint());
   const restored = await api.dailyBackups.restore(e2eName, { confirmed: true });
+  /*
+   * ⚠️ **恢复成功 = 所有人的会话被作废，包括自检自己这一个**（E22 续 起的行为；
+   * 机构原话：「恢复后让所有人重新登录」）。因此这里必须**重新登录一次**再往下跑：
+   * 不修的话，下面每一条断言都会变成 401「登录已过期」，而那种红会让人以为是"恢复坏了"。
+   *
+   * 三个"不要"写在这里，免得后人顺手改坏：
+   *   ① **不要**为了用例能过而去掉"作废会话"（那等于把机构要的安全性质删掉）；
+   *   ② **不要**在代理层做成静默重试（那是隐藏掉"你被踢了"这件事，不是重新登录）；
+   *   ③ **不要**只在内存那一遍跳过 —— HTTP 那一遍才是真会话，也正是它必须走这一步。
+   * 于是做法就是"在恢复之后重新登录"：脚本没有登录界面，`forgetScriptLogin()` 之后
+   * 下一次调用会用环境变量里的账号口令（`NEXGENEDU_ADMIN_USER/PASSWORD`）再登一次 ——
+   * 这正是浏览器里人重新输口令那一步的等价物。
+   */
+  forgetScriptLogin();
   ok("④ 恢复成功（返回 ok，不是靠猜）", restored.ok === true,
     restored.ok === false ? restored.error : "");
   if (restored.ok) {
@@ -15744,6 +15835,8 @@ if (dailySkip !== "") {
 
     /* ③ 另存的那一份**能再恢复一次**（"要回去可以再恢复 Y"不是空话） */
     const again = await api.dailyBackups.restore(restored.preRestore, { confirmed: true });
+    // 同上：这一次恢复也把所有人的会话作废了（包括自检自己），因此再重新登录一次
+    forgetScriptLogin();
     ok("③ 另存的那一份可以再恢复一次（回到恢复前的状态）", again.ok === true,
       again.ok === false ? again.error : "");
     if (again.ok) {
@@ -15782,6 +15875,651 @@ if (dailySkip !== "") {
   __useDailyBackupFiles(null);
 }
 
+
+console.log(
+  "\n=== 54. 「升级前快照」纳入界面 + 保留上限 / 「立刻备份一份」 / 恢复后作废会话（机构点的那三条）===",
+);
+
+/*
+ * ## 机构原话（他看完 E22 那份清单后当场点的三条）
+ *
+ * > ① 「**也纳入界面 + 加上限（推荐）**」 —— 那 99 份「升级前快照」也要能在界面上看见并恢复，
+ * >    并给它们一个保留份数上限；
+ * > ② 「**恢复后让所有人重新登录**」；
+ * > ③ 「**加『立刻备份一份』按钮**」。
+ *
+ * （他**没有**选"给恢复前另存的那份加标识"那一项，因此这里也不做 —— 另存的那一份
+ * 刻意与每日备份同名同形，理由见 `lib/backend/daily-backups.ts` 的文件头。）
+ *
+ * ## 这一节守的东西（按三件事编号，与 `PROJECT.md` 的「E22 续」那一节一致）
+ *
+ *   ① **两类快照都在清单里，而且分得清**：每份带 `kind`（`daily` / `migrate`），
+ *      界面上分开显示、保留份数各说各的（90 / 10，数字由服务端给、页面不写死）；
+ *   ② **迁移快照能恢复，而且"版本比当前旧"是正常路径**：拿一份真的 v1 老结构快照
+ *      走一遍（校验 → 另存 → 替换 → 落盘 → 日志），断言迁移链真的跑了（课时被折算、
+ *      教室被补字段、版本升到当前），以及**同一套**校验对坏快照照样拒、且零写入；
+ *   ③ **保留上限**：默认 10 份、`NEXGENEDU_MIGRATE_SNAPSHOT_KEEP` 可调、
+ *      超出时清掉**最老的**那几份、**每日备份一份没动**、认不出的文件也不动；
+ *      而且"删文件"这件事只有一处实现（源码级断言）。
+ *   ④ **立刻备份一份**：目录真的多一份、名字符合既有命名规则（因此清单认得出它）、
+ *      `readSnapshot` 读得出内容、**已有的备份一份没被改动或删除**、
+ *      没有数据库句柄 / 备份被整体关掉时**明确拒绝**（不生成文件）；
+ *   ⑤ **恢复成功后所有人的会话被作废**（含执行者），**恢复失败时一个人都不踢**。
+ *
+ * ## 为什么另起 §54 而不并进 §53（理由是"两件事的编号口径不同"）
+ *
+ * §53 守的是 E22 那一件事（"备份能在后台恢复"）的**七条安全底线**，编号 ①–⑩，
+ * 每一节都对着 `PROJECT.md` 里 E22 那张表。这一节的四件事是**同一件事的续**（E22 续），
+ * 而机构点的三条里有一条（作废会话）**改变了 §53 已确立的行为**：恢复不再只是换库，
+ * 还是一次"所有人下线"。并进 §53 会让那一节的 ①–⑩ 与"新加的三条"混在一张表里，
+ * 更麻烦的是"恢复成功=踢人"这条**同时影响 §53 的用例**（它自己就会掉线，见 §53 里的
+ * `forgetScriptLogin()`）—— 那属于"这一版新引入的连带影响"，自成一节更好读。
+ *
+ * ## 只在**临时目录 + 临时库**上做（与 §53 同一条纪律）
+ *
+ * 这一节同样会造备份文件、会整库恢复。因此它复用 §53 那两道判据（临时目录 + 后端自报的
+ * 库名不是真实库），认不出是临时环境就**一行都不写**：宁可少验，也不拿机构的
+ * `server/backups/` 做试验场。
+ */
+
+/* ── ①② 纯口径：类型标识、两类名字、上限、权限、界面（两种后端都跑）────────── */
+
+eq("① 两类快照的人话名字只有一处实现（每日备份 / 升级前快照）",
+  [backupKindText("daily"), backupKindText("migrate")], ["每日备份", "升级前快照"]);
+{
+  const at = new Date(2026, 0, 2, 3, 4, 5, 6);
+  const name = migrationBackupName(at);
+  eq("① 升级前快照的名字 = 固定前缀 + **与每日备份同一个**时间戳写法（命名只有一处实现）",
+    name, "nexgenedu-migrate-2026-01-02-03-04-05-006.db");
+  eq("① 那个名字解析回来的时间点与写进去的**逐毫秒相同**",
+    migrationBackupTimeOfName(name), at.getTime());
+  eq("① 类型判定只有一处：两种名字各归各类，别的一律认不出（含「少一位数字」这种脏名字）",
+    [
+      backupKindOfName("nexgenedu-2026-01-02-03-04-05-006.db")?.kind ?? "认不出",
+      backupKindOfName(name)?.kind ?? "认不出",
+      backupKindOfName("nexgenedu-备份-2026-09-19.json")?.kind ?? "认不出",
+      backupKindOfName("nexgenedu-migrate-2026-1-2-3-4-5-006.db")?.kind ?? "认不出",
+    ],
+    ["daily", "migrate", "认不出", "认不出"]);
+}
+{
+  /*
+   * 保留份数：默认值与环境变量名都从**口径那一层**取（页面显示的也是它们）。
+   * 这里临时改环境变量验"真的能调"—— 改完**必须还原**：它是模块级的环境，
+   * 漏还原会让后面所有断言都跑在"上限 3 份"的世界里（那种红极难定位）。
+   */
+  const savedMigrateKeep = process.env[MIGRATE_SNAPSHOT_KEEP_ENV];
+  const savedDailyKeep = process.env[DAILY_BACKUP_KEEP_ENV];
+  delete process.env[MIGRATE_SNAPSHOT_KEEP_ENV];
+  delete process.env[DAILY_BACKUP_KEEP_ENV];
+  eq("③ 升级前快照的保留上限默认 10 份（机构要的「加上限」）",
+    [MIGRATE_SNAPSHOT_KEEP_DEFAULT, migrationBackupKeep()], [10, 10]);
+  process.env[MIGRATE_SNAPSHOT_KEEP_ENV] = "3";
+  eq("③ 上限可以用环境变量调（NEXGENEDU_MIGRATE_SNAPSHOT_KEEP=3 → 3 份）",
+    migrationBackupKeep(), 3);
+  eq("③ 两类各有一个环境变量、各算各的（每日备份仍是 90 份那一个）",
+    [DAILY_BACKUP_KEEP_DEFAULT, DAILY_BACKUP_KEEP_ENV, MIGRATE_SNAPSHOT_KEEP_ENV],
+    [90, "NEXGENEDU_BACKUP_KEEP", "NEXGENEDU_MIGRATE_SNAPSHOT_KEEP"]);
+  eq("③ 每日备份的上限不受迁移快照那个变量影响", backupKeep(), 90);
+  if (savedMigrateKeep === undefined) delete process.env[MIGRATE_SNAPSHOT_KEEP_ENV];
+  else process.env[MIGRATE_SNAPSHOT_KEEP_ENV] = savedMigrateKeep;
+  if (savedDailyKeep === undefined) delete process.env[DAILY_BACKUP_KEEP_ENV];
+  else process.env[DAILY_BACKUP_KEEP_ENV] = savedDailyKeep;
+}
+eq("④ 「立刻备份一份」登记在「运维与审计」组、只有技术管理员",
+  [groupOfMethod("dailyBackups.takeNow"), allowedRolesForMethod("dailyBackups.takeNow")],
+  ["ops", ["技术管理员"]]);
+ok("④ 财务 / 招生 / 教师一律调不了「立刻备份一份」（界面上的按钮也藏得掉：canCallMethod 同源）",
+  (["财务管理员", "招生老师", "普通教师"] as const).every(
+    (role) => !canCallMethod([role], "dailyBackups.takeNow")));
+ok("④ 普通教师那一层也关门（`teacherScopeDenial` 给出拒绝理由，不是静默放行）",
+  teacherScopeDenial("dailyBackups.takeNow", ["普通教师"]) !== null);
+ok("④ 反向断言：**整组 ops 仍然只有技术管理员**（新增方法没有顺手放宽那一组）",
+  API_CONTRACT.flatMap((group) => group.methods)
+    .filter((method) => groupOfMethod(method) === "ops")
+    .every((method) => {
+      const allowed = allowedRolesForMethod(method) ?? [];
+      return (
+        canAccess(["技术管理员"], allowed) &&
+        !canAccess(["财务管理员", "招生老师", "普通教师"], allowed)
+      );
+    }));
+
+{
+  /*
+   * ③ **回归护栏：临时服务端的备份目录不许是真实的 `server/backups/`**。
+   *
+   * 这一条是**一次真事故**换来的（2026-09-29，见 PROJECT.md 的「E22 续」）：
+   * `scripts/check-auth.mts` 里有两处 `startServer({ dbPath })` 没给备份目录，
+   * 于是服务端跑迁移时把"迁移前快照"写进了**真实的** `server/backups/` ——
+   * 旧代码只写不删，那批空快照就一直在那里攒（99 份）；而 E22 续 给迁移前快照加了
+   * 保留上限之后，同一条路开始**删东西**：一次 `npm run check:auth` 就把超出 10 份的
+   * 89 份清掉了。
+   *
+   * 因此这里钉两件事：①参数是**必填**（编译期就挡住"忘了给"）；②真的传一次真实目录
+   * 必须**起不来**（运行时那道门真的在，而不是只在注释里写着）。
+   * 判据是"起不来"而不是"写别处"：失败方向必须是看得见的那种。
+   */
+  const tempServerSource = readFileSync(new URL("./temp-server.mts", import.meta.url), "utf8")
+    // 去注释：说明里就写着「早先它是 `backupDir?: string`（可省）」，
+    // 不剥掉注释的话，那条反向断言会被自己的一句注释判成红（与 §53 同一个坑）
+    .replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, " ")
+    .replace(/^[ \t]*\/\/.*$/gm, "");
+  ok("③ 回归护栏：临时服务的 `backupDir` 是**必填**参数（`backupDir: string;`，编译期挡住「忘了给」）",
+    /backupDir: string;/.test(tempServerSource) && !/backupDir\?: string/.test(tempServerSource));
+  let guardError = "";
+  try {
+    await startServer({
+      dbPath: join(tmpdir(), "nexgenedu-should-not-start.sqlite"),
+      backupDir: new URL("../server/backups", import.meta.url).pathname,
+    });
+  } catch (cause) {
+    guardError = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("③ 回归护栏：拿真实的 `server/backups` 起临时服务**真的起不来**，并说清为什么",
+    guardError.includes("server/backups"), guardError === "" ? "竟然没报错" : guardError);
+}
+
+{
+  /* ⑤ 界面源码（先去注释：注释里提到"立刻备份一份"不算代码） */
+  const stripSource54 = (source: string): string =>
+    source.replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, " ").replace(/^[ \t]*\/\/.*$/gm, "");
+  const pageCode54 = stripSource54(
+    readFileSync(new URL("../app/admin/(dashboard)/data/page.tsx", import.meta.url), "utf8"),
+  );
+  ok("① 页面上两类**分开显示**（各一个小标题 + 各自的「点它会怎样」，靠服务端给的 kind 分）",
+    pageCode54.includes('backupKindText("daily")') &&
+      pageCode54.includes('backupKindText("migrate")') &&
+      pageCode54.includes('entry.kind === "daily"') &&
+      pageCode54.includes('entry.kind === "migrate"'));
+  ok("③ 页面上的保留份数**不是写死的**：两类的上限都由服务端给（`list.keep`），并把环境变量名写出来",
+    pageCode54.includes("list.keep.daily") &&
+      pageCode54.includes("list.keep.migrate") &&
+      pageCode54.includes("NEXGENEDU_BACKUP_KEEP") &&
+      pageCode54.includes("NEXGENEDU_MIGRATE_SNAPSHOT_KEEP"));
+  ok("④ 那一块有「立刻备份一份」按钮，调的是服务层新方法，点完刷新清单",
+    pageCode54.includes("立刻备份一份") &&
+      pageCode54.includes("api.dailyBackups.takeNow(") &&
+      pageCode54.includes("onTakeNow"));
+  ok("④ 刚备的那一份在清单里被标出来（「系统做到了、就是这一份」）",
+    pageCode54.includes("justBackedUp") && pageCode54.includes("刚备的"));
+  ok("② 点「恢复这一份」时的确认框**说清自己在做哪件事**（回到某一天 / 退回升级前）",
+    pageCode54.includes("backupKindText(entry.kind)") && pageCode54.includes("退回升级前"));
+  {
+    const fromHandler54 = pageCode54.slice(pageCode54.indexOf("async function restoreDaily("));
+    const nextHandler54 = fromHandler54.indexOf("\n  async function ");
+    const handler54 = nextHandler54 === -1 ? fromHandler54 : fromHandler54.slice(0, nextHandler54);
+    ok("⑤ 恢复成功后按 `reloginRequired` 给出「所有人都要重新登录（包括你）」的提示",
+      handler54.includes("result.reloginRequired") &&
+        handler54.includes("setReloginNotice(") &&
+        handler54.includes("所有人都需要重新登录"));
+    /*
+     * 那一条提示不能是"说一句就走"：会话已经在服务端作废，这一页**再刷新清单一定会 401**，
+     * 而那句 401 会把真正的原因（"所有人都要重新登录"）盖成一句"登录已过期"。
+     * 因此那一条分支里**不许**出现 `await load()` —— 只许给出下一步（去登录页）。
+     * 判据取的是"那一条 `if` 到它自己的 `return;`"这一段，不是整个处理函数
+     * （函数末尾那次 `await load()` 是**没作废会话**时该走的正常路径）。
+     */
+    const reloginBranch = (() => {
+      const from = handler54.indexOf("if (result.reloginRequired)");
+      if (from === -1) return "";
+      const to = handler54.indexOf("return;", from);
+      return to === -1 ? handler54.slice(from) : handler54.slice(from, to);
+    })();
+    ok("⑤ 那一条分支里**不再刷新清单**（那一次一定 401，只会把真正的原因盖掉）",
+      reloginBranch.includes("setReloginNotice(") && !reloginBranch.includes("await load()"));
+    ok("⑤ 界面上给了明确的下一步：清掉本地令牌并回登录页（与顶栏「退出登录」同一套）",
+      pageCode54.includes("async function goToLogin(") &&
+        pageCode54.includes("await logout()") &&
+        pageCode54.includes('router.replace("/admin/login")'));
+  }
+}
+
+/* ── ②③④⑤ 文件那一半：只在**临时目录 + 临时库**上做 ────────────────────── */
+
+if (dailySkip !== "") {
+  console.log(
+    `  ⚠ §54 里会写文件的断言一并跳过（原因同上：${dailySkip}）。\n` +
+      "     清理迁移快照 / 立刻备份一份 / 用升级前快照恢复，都会真的落文件 —— " +
+      "认不出是临时环境就一行都不写。",
+  );
+} else {
+  /*
+   * 目录：内存那一遍自建一个一次性目录（跑完删掉）；HTTP 那一遍**复用 §53 那个**
+   * 临时目录 —— 理由与 §53 完全一样：临时服务端的备份目录就是它，
+   * 而"服务端的清单认不认自检造的那一份"正是这一节要验的东西
+   * （命名规则只有一处实现，两边必须对得上）。
+   */
+  const snapDir = dailyRemote ? dailyDir : mkdtempSync(join(tmpdir(), "nexgenedu-snap-check-"));
+  console.log(`      临时备份目录（§54）：${snapDir}`);
+
+  /** 目录里所有文件的逐字节指纹（断言"没被改动"靠它）。 */
+  const snapFiles = (): Record<string, string> =>
+    Object.fromEntries(
+      readdirSync(snapDir).sort().map((name) => [name, readFileSync(join(snapDir, name)).toString("latin1")]),
+    );
+  const migrateNames = (): string[] =>
+    listBackupSnapshots(snapDir).filter((item) => item.kind === "migrate").map((item) => item.name);
+  const dailyNames54 = (): string[] =>
+    listBackupSnapshots(snapDir).filter((item) => item.kind === "daily").map((item) => item.name);
+
+  /** 手写一份夹具备份（名字由调用方给：两类名字都要能造）。 */
+  const writeSnapshotFixture54 = (name: string, snapshotText: string): string => {
+    mkdirSync(snapDir, { recursive: true });
+    const file = join(snapDir, name);
+    const raw = new SqliteDatabase(file);
+    try {
+      raw.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+      raw.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)").run(SNAPSHOT_KEY, snapshotText);
+    } finally {
+      raw.close();
+    }
+    return file;
+  };
+  const countsOf54 = (snapshot: Database): DailyBackupCounts => ({
+    students: snapshot.students.length,
+    teachers: snapshot.teachers.length,
+    classrooms: snapshot.classrooms.length,
+    courses: snapshot.courses.length,
+    lessons: snapshot.lessons.length,
+    lessonRecords: snapshot.lessonRecords.length,
+    payments: snapshot.payments.length,
+    transactions: snapshot.transactions.length,
+  });
+
+  /*
+   * 一份**真的老结构**快照（v1）：它正是"升级前快照"该有的样子 ——
+   * 学生身上是 `remainingLessons`（不是报课记录）、教室没有 `kind` / `availability`。
+   * 用它恢复必须走完整的迁移链（v1 → v33）：课时被折算成一条报课记录、
+   * 教室被补上用途，因此断言"迁移链真的跑了"是能落地的
+   * （而不是"版本号变成了 33"这种看不出所以然的东西）。
+   */
+  const legacySnapshot = JSON.stringify({
+    version: 1,
+    students: [{
+      id: "s_old54", name: "自检·退回升级前的学生", grade: "初二", guardian: "",
+      subjects: ["初中数学"], remainingLessons: 5, status: "在读", note: "",
+      createdAt: new Date().toISOString(),
+    }],
+    teachers: [],
+    classrooms: [{ id: "c_old54", name: "旧结构教室", capacity: 6, note: "" }],
+    lessons: [],
+    updatedAt: new Date().toISOString(),
+  });
+  const oldSnapshotName = migrationBackupName(new Date(2019, 0, 1, 0, 0, 0, 0));
+  const brokenSnapshotName = migrationBackupName(new Date(2020, 0, 1, 0, 0, 0, 0));
+  writeSnapshotFixture54(oldSnapshotName, legacySnapshot);
+  writeFileSync(join(snapDir, brokenSnapshotName), "");
+  /*
+   * 再放一份**每日备份**夹具：这样清单里两类同时在（内存那一遍的目录是这一节自建的，
+   * 里面本来一份每日备份都没有，而下面几条断言要的就是"两类混在一份清单里、各归各类"）。
+   * 它同时是后面"清理迁移快照**不碰**每日备份"那条断言的比较对象。
+   */
+  const dailyFixtureName = "nexgenedu-2021-06-07-08-09-10-011.db";
+  writeSnapshotFixture54(dailyFixtureName, legacySnapshot);
+
+  /*
+   * 内存那一遍要把这份能力装上（HTTP 那一遍由服务端自己装它自己的那一份）。
+   * ⚠️ 它带一个**临时 SQLite 句柄**：这一节要验「立刻备份一份」真的能生成文件，
+   * 而那件事必须走 `takeBackup(db)`（备份生成的唯一实现）—— 没有句柄就办不到。
+   */
+  const takeDbPath = join(tmpdir(), `nexgenedu-snap-take-${String(process.pid)}.db`);
+  rmSync(takeDbPath, { force: true });
+  const takeDb = new SqliteDatabase(takeDbPath);
+  const snapshotFiles = createNodeDailyBackupFiles({
+    dir: snapDir,
+    snapshotKey: SNAPSHOT_KEY,
+    schemaVersion: CURRENT_VERSION,
+    db: takeDb,
+  });
+  if (!dailyRemote) __useDailyBackupFiles(snapshotFiles);
+
+  /* ── ① 两类都在清单里、都带类型标识、都能读出摘要 ─────────────────────── */
+  const list54 = await api.dailyBackups.list();
+  eq("① 清单读得出来（`available` 为真，目录就是那个临时目录）",
+    [list54.available, list54.dir], [true, snapDir]);
+  const entry54 = (name: string): DailyBackupEntry | undefined =>
+    list54.files.find((item) => item.name === name);
+  ok("① 造的两份升级前快照**都**在清单里（不再是「被命名规则排除」的那一类）",
+    entry54(oldSnapshotName) !== undefined && entry54(brokenSnapshotName) !== undefined);
+  eq("① 那两份的**类型标识**是「升级前快照」（清单里必须带，界面靠它分栏）",
+    [
+      entry54(oldSnapshotName)?.kind === undefined ? "没带" : backupKindText(entry54(oldSnapshotName)!.kind),
+      entry54(brokenSnapshotName)?.kind === undefined ? "没带" : backupKindText(entry54(brokenSnapshotName)!.kind),
+    ],
+    ["升级前快照", "升级前快照"]);
+  ok("① 升级前快照与每日备份一样给出**日期 / 大小 / 条数摘要**（它们就是同一种快照文件）",
+    (entry54(oldSnapshotName)?.bytes ?? 0) > 0 &&
+      entry54(oldSnapshotName)?.counts?.students === 1 &&
+      entry54(oldSnapshotName)?.problem === "" &&
+      dailyBackupTimeText(entry54(oldSnapshotName)?.at ?? "") === "2019-01-01 00:00:00");
+  ok("①② 读不出的那几份判据**两类共用**（空文件的升级前快照被标出，不是悄悄放过去）",
+    entry54(brokenSnapshotName)?.counts === null &&
+      (entry54(brokenSnapshotName)?.problem ?? "").includes("空文件"));
+  ok("① 两类**同时在**清单里，而且类型标识与名字逐一对得上（加了第二类，没把第一类弄混）",
+    list54.files.some((item) => item.kind === "daily") &&
+      list54.files.some((item) => item.kind === "migrate") &&
+      list54.files.every((item) =>
+        item.kind === "migrate"
+          ? item.name.startsWith("nexgenedu-migrate-")
+          : /^nexgenedu-\d{4}-/.test(item.name)));
+  eq("③ 清单把两类的**保留份数**一起给出来（界面不写死数字）",
+    [list54.keep.daily, list54.keep.migrate],
+    [DAILY_BACKUP_KEEP_DEFAULT, MIGRATE_SNAPSHOT_KEEP_DEFAULT]);
+  ok("① 清单整体仍按时间倒序（两类混在一起排序，「哪份最新」只有一个答案）",
+    list54.files.map((item) => new Date(item.at).getTime())
+      .every((time, index, all) => index === 0 || (all[index - 1] ?? 0) >= time));
+
+  /* ── ⑤ 作废会话：两种后端上各用能拿到的证据（下面两个 helper）──────────── */
+  let invalidateCalls = 0;
+  if (!dailyRemote) __useSessionInvalidator(() => { invalidateCalls += 1; return 1; });
+  /** 真登一次拿令牌（只 HTTP 那一遍用得上：内存那一遍没有"会话"这回事）。 */
+  const loginRaw54 = async (): Promise<string> => {
+    const response = await fetch(`${remoteBase()}/api/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        username: process.env.NEXGENEDU_ADMIN_USER ?? "",
+        password: process.env.NEXGENEDU_ADMIN_PASSWORD ?? "",
+      }),
+    });
+    const body = (await response.json().catch(() => ({}))) as { token?: unknown };
+    return typeof body.token === "string" ? body.token : "";
+  };
+  /** 拿一个令牌裸调一次 `/api/call`，返回 HTTP 状态码（401 = 这个会话已经作废）。 */
+  const rawCallStatus54 = async (token: string): Promise<number> => {
+    const response = await fetch(`${remoteBase()}/api/call`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ method: "students.list", args: [] }),
+    });
+    return response.status;
+  };
+
+  /* ── ②④ 用**升级前快照**恢复（含「版本比当前旧」这条正常路径）────────────── */
+  const oldToken54 = dailyRemote ? await loginRaw54() : "";
+  const dirBeforeOldRestore = snapFiles();
+  const fileNamesBeforeOldRestore = Object.keys(dirBeforeOldRestore);
+  const restoredOld = await api.dailyBackups.restore(oldSnapshotName, { confirmed: true });
+  /*
+   * ⚠️ 恢复成功 = 所有人的会话被作废（**包括自检自己这一个**）：HTTP 那一遍里
+   * 手上那个令牌立刻失效，后面每一条断言都会 401。因此这里必须**重新登录一次**
+   * （内存那一遍是空操作：那里没有会话）。这正是机构要的 ② 那一条在本测试里的样子 ——
+   * 而不是"为了让用例过把作废会话去掉"。
+   */
+  forgetScriptLogin();
+  ok("② 升级前快照**能用来恢复**（机构要的「升级出问题我自己能退」）",
+    restoredOld.ok === true, restoredOld.ok === false ? restoredOld.error : "");
+  if (restoredOld.ok) {
+    eq("② 返回里说明了恢复的是**哪一类**（界面据此说「退回升级前」）",
+      backupKindText(restoredOld.kind), "升级前快照");
+    ok("② 提示里说清了这是「退回升级前」",
+      restoredOld.note.includes("退回升级前"));
+    ok(`② **版本比当前旧是正常路径**：提示里写了从 v1 沿迁移链升到 v${String(CURRENT_VERSION)}`,
+      restoredOld.note.includes("v1") && restoredOld.note.includes(`v${String(CURRENT_VERSION)}`));
+    {
+      const dbNow54 = JSON.parse(JSON.stringify(await api.exportDatabase())) as Database;
+      eq("② 恢复之后库里就是那份升级前快照的数据（学生 1 名）", restoredOld.after.students, 1);
+      eq("② 迁移链**真的跑了**：v1 的「剩余课时」被折算成一条报课记录（5 节）",
+        remainingTotal(dbNow54.students[0]?.enrollments ?? []), 5);
+      eq("② 迁移链**真的跑了**：v1 的教室补上了用途与空时段",
+        [dbNow54.classrooms[0]?.kind, dbNow54.classrooms[0]?.availability],
+        ["上课用教室", []]);
+      eq("② 恢复后的结构版本 = 当前版本（不是把旧结构原样塞进来）",
+        dbNow54.version, CURRENT_VERSION);
+    }
+    eq("④ 恢复成功 → **所有人都要重新登录**（返回里带了这句话与作废的会话数）",
+      [restoredOld.reloginRequired, restoredOld.sessionsCleared >= 1],
+      [true, true]);
+    ok("④ 返回的提示里写着「所有人都需要重新登录（包括你自己）」",
+      restoredOld.note.includes("所有人都需要重新登录") && restoredOld.note.includes("包括"));
+    if (!dailyRemote) {
+      ok("④ 内存那一遍：作废会话这个动作在**换库成功之后**被调了一次",
+        invalidateCalls === 1, `实际调了 ${String(invalidateCalls)} 次`);
+    } else {
+      eq("④ HTTP 那一遍：恢复**前**拿到的那个令牌，恢复之后被拒（401）—— 那个会话真的作废了",
+        await rawCallStatus54(oldToken54), 401);
+    }
+    const newFiles54 = Object.keys(snapFiles()).filter((name) => !fileNamesBeforeOldRestore.includes(name));
+    eq("② 恢复前**自动另存**了一份（临时目录里确实多了一个文件，且就是返回的那个名字）",
+      newFiles54, [restoredOld.preRestore]);
+    eq("② 恢复没有改动或删除任何已有的备份（已有的每一份逐字节相同）",
+      Object.keys(dirBeforeOldRestore).filter((name) => snapFiles()[name] !== dirBeforeOldRestore[name]),
+      []);
+    {
+      const logs54 = await api.logs.list(50);
+      const record54 = logs54.find((item) => item.targetId === oldSnapshotName);
+      ok("② 操作日志写明了「从升级前快照恢复」（不是只写「恢复了某个文件」）",
+        record54 !== undefined && record54.summary.includes("升级前快照"),
+        record54?.summary ?? "（没有这条日志）");
+    }
+  }
+
+  /* ── ⑤ 恢复**失败**时一个人都不踢（这一条与上面同等重要）────────────────── */
+  {
+    const dirBeforeFail = snapFiles();
+    const dbBeforeFail = JSON.stringify(await api.exportDatabase());
+    // HTTP 那一遍：恢复失败之后，一个**刚登的**令牌必须还能用（没被踢下线）
+    const failToken54 = dailyRemote ? await loginRaw54() : "";
+    const refusedEmpty = await api.dailyBackups.restore(brokenSnapshotName, { confirmed: true });
+    const refusedMissing = await api.dailyBackups.restore(
+      migrationBackupName(new Date(1990, 0, 1, 0, 0, 0, 0)), { confirmed: true });
+    ok("② 空文件的 / 不存在的升级前快照都被拒（**同一套**判据，不是另一条路）",
+      refusedEmpty.ok === false && refusedMissing.ok === false);
+    ok("② 两条拒绝理由都写明「没有改动任何数据」",
+      refusedEmpty.ok === false && refusedEmpty.error.includes("没有改动任何数据") &&
+        refusedMissing.ok === false && refusedMissing.error.includes("没有改动任何数据"));
+    eq("② 被拒之后备份目录逐字节未变（一个字节都不写）", snapFiles(), dirBeforeFail);
+    eq("② 被拒之后库逐字节未变", JSON.stringify(await api.exportDatabase()), dbBeforeFail);
+    if (!dailyRemote) {
+      ok("⑤ 内存那一遍：恢复**失败**时一次都没踢人（作废会话的调用次数仍是 1）",
+        invalidateCalls === 1, `实际调了 ${String(invalidateCalls)} 次`);
+    } else {
+      eq("⑤ HTTP 那一遍：恢复**失败**后，刚登的那个令牌还能用（没被踢下线）",
+        await rawCallStatus54(failToken54), 200);
+    }
+  }
+
+  /* ── ③ 保留上限：造 12 份 → 只剩 10 份，而且每日备份一份没动 ─────────── */
+  {
+    const makeName = (day: number): string => migrationBackupName(new Date(2018, 0, day, 8, 0, 0, 0));
+    const madeNames: string[] = [];
+    for (let day = 1; day <= 12; day += 1) {
+      const name = makeName(day);
+      writeSnapshotFixture54(name, legacySnapshot);
+      madeNames.push(name);
+    }
+    /*
+     * 顺手放一个**绝不该被碰**的文件：机构自己导出的 JSON 就躺在同一个目录里
+     * （真实 `server/backups/` 里现在就有 3 份）。清理只认两类备份的名字，别的原样留着 ——
+     * 这条断言就是"清理不会顺手清掉机构自己放的东西"。
+     */
+    const jsonFixture54 = "nexgenedu-自检-不该被清理.json";
+    const jsonText54 = '{"note":"§54 夹具：不是备份文件，清理绝不该碰它"}';
+    writeFileSync(join(snapDir, jsonFixture54), jsonText54);
+
+    const keep54 = MIGRATE_SNAPSHOT_KEEP_DEFAULT;
+    const migrateBefore = migrateNames();
+    const dailyBefore = dailyNames54();
+    const keptBytesBefore = Object.fromEntries(
+      migrateBefore.slice(0, keep54).map((name) => [name, readFileSync(join(snapDir, name)).toString("latin1")]),
+    );
+    ok("③ 12 份夹具都真的造出来了（都在清理前的清单里）",
+      madeNames.every((name) => migrateBefore.includes(name)),
+      `清理前共 ${String(migrateBefore.length)} 份迁移快照`);
+    const pruned54 = pruneMigrationBackups(keep54, snapDir);
+    const migrateAfter = migrateNames();
+    eq(`③ 按上限 ${String(keep54)} 份清理之后**只剩 ${String(keep54)} 份**`, migrateAfter.length, keep54);
+    eq("③ 清掉的**正是最老的那几份**（按名字里的时间算，不是 mtime）",
+      pruned54.removed, migrateBefore.slice(keep54));
+    eq("③ 清掉的那几份（2018-01-04 → 01-01，最老的 4 份）确实不在目录里了",
+      pruned54.removed.filter((name) => existsSync(join(snapDir, name))), []);
+    eq("③ 留下的每一份逐字节没变（清理只删、绝不改内容）",
+      Object.keys(keptBytesBefore).filter((name) => readFileSync(join(snapDir, name)).toString("latin1") !== keptBytesBefore[name]),
+      []);
+    eq("③ **每日备份一份没动**（逐字节；两类各算各的，清理迁移快照不碰每日备份）",
+      Object.fromEntries(dailyNames54().map((name) => [name, readFileSync(join(snapDir, name)).toString("latin1")])),
+      Object.fromEntries(dailyBefore.map((name) => [name, readFileSync(join(snapDir, name)).toString("latin1")])));
+    eq("③ 每日备份的**份数**也没变", dailyNames54().length, dailyBefore.length);
+    eq("③ 认不出的文件（机构自己导出的 JSON）原样留着", readFileSync(join(snapDir, jsonFixture54), "utf8"), jsonText54);
+    ok("③ 上限内的那 10 份**一份都没少**（不是「一次全清」）",
+      migrateAfter.every((name) => existsSync(join(snapDir, name))) && pruned54.removed.length === 4);
+    eq("③ 清过之后清单里的升级前快照 = 磁盘上的那 10 份",
+      listBackupSnapshots(snapDir).filter((item) => item.kind === "migrate").length, keep54);
+  }
+
+  /* ── ④ 「立刻备份一份」：真的多一份、清单认得出、别人一份没动 ───────────── */
+  {
+    /*
+     * ⚠️ 两种后端上**执行者**不同（如实说明，而不是造一个两边都不像的断言）：
+     *   - 内存那一遍：自检装的那份能力（临时目录 + 临时 SQLite 句柄），直接调服务层的
+     *     `api.dailyBackups.takeNow()`；
+     *   - HTTP 那一遍：临时服务端的备份被**整体关掉**了（`NEXGENEDU_NO_BACKUP=1`，
+     *     那是它隔离真实备份目录的手段），所以**不能**指望服务端那颗按钮真的生成一份。
+     *     这一遍用**同一份文件能力**直接生成，再去问**服务端**的清单认不认它 ——
+     *     「清单认得出这个名字」正是要点（命名规则只有一处实现，两边必须对得上）。
+     *     真服务端上「按钮真的多一份 + 非技术管理员 403」由 `scripts/check-auth.mts` 验
+     *     （那里起的是一个**没有关掉备份**的临时服务）。
+     */
+    const dirBeforeTake = snapFiles();
+    const currentSnapshot54 = JSON.stringify(await api.exportDatabase());
+    const currentCounts54 = countsOf54(JSON.parse(currentSnapshot54) as Database);
+    // 让那份临时库"装着当前这一刻的库"：这样新备的那一份读出来的条数能对上号
+    takeDb.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    takeDb.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)").run(SNAPSHOT_KEY, currentSnapshot54);
+
+    const taken54 = snapshotFiles.takeNow();
+    eq("④ 「立刻备份一份」之后目录里真的多了一份，且返回的名字就是它",
+      Object.keys(snapFiles()).filter((name) => !(name in dirBeforeTake)), [taken54.file]);
+    ok("④ 文件名符合**既有**命名规则（因此清单才认得出它 —— 它不是另一种命名的备份）",
+      backupKindOfName(taken54.file)?.kind === "daily");
+    eq("④ 已有的备份**一份没被改动或删除**（逐字节比对整个目录，只多那一个新文件）",
+      Object.keys(dirBeforeTake).filter((name) => snapFiles()[name] !== dirBeforeTake[name]),
+      []);
+    eq("④ 新那一份里装的**就是当前这一刻的库**（读得出来，条数与库里一致）",
+      (() => {
+        const read = snapshotFiles.readSnapshot(taken54.file);
+        return countsOf54(JSON.parse(read.text) as Database);
+      })(),
+      currentCounts54);
+    /*
+     * 清单那一侧：内存那一遍看的是自检装的那份能力、HTTP 那一遍看的是**服务端**的清单。
+     * 两边都要能看见刚备的那一份 —— 这条断言是「命名与清单口径只有一处」的直接证据。
+     */
+    const relisted54 = await api.dailyBackups.list();
+    const takenEntry = relisted54.files.find((item) => item.name === taken54.file);
+    ok("④ 刚备的那一份**就在清单里**，而且读得出摘要（用户能看见它、能点它恢复）",
+      takenEntry !== undefined && takenEntry.kind === "daily" && takenEntry.problem === "" &&
+        takenEntry.counts?.students === currentCounts54.students);
+    ok("④ 「立刻备份一份」**不会清掉迁移快照**（它按每日备份的份数清理，两类各算各的）",
+      migrateNames().every((name) => existsSync(join(snapDir, name))));
+    if (!dailyRemote) {
+      const viaApi = await api.dailyBackups.takeNow();
+      ok("④ 内存那一遍：走 `api` 那一层也能立刻备份（返回新文件名 + 摘要 + 现有份数）",
+        viaApi.ok === true && viaApi.file.startsWith("nexgenedu-") && viaApi.bytes > 0 && viaApi.total >= 2,
+        viaApi.ok === false ? viaApi.error : "");
+    } else {
+      const viaApi = await api.dailyBackups.takeNow();
+      ok("④ HTTP 那一遍：备份被整体关掉时，`api` 那一层的「立刻备份一份」**明确拒绝**（不生成文件）",
+        viaApi.ok === false && viaApi.error.includes("NEXGENEDU_NO_BACKUP"),
+        viaApi.ok === true ? `竟然生成了 ${viaApi.file}` : viaApi.error);
+    }
+    {
+      /*
+       * 没有数据库句柄时也**明确拒绝**（不静默生成一份空备份）：自检的内存那一遍、
+       * 浏览器里都是这种情况。假的成功在备份这件事上最贵。
+       */
+      const noDb = createNodeDailyBackupFiles({
+        dir: snapDir, snapshotKey: SNAPSHOT_KEY, schemaVersion: CURRENT_VERSION,
+      });
+      let noDbError = "";
+      try {
+        noDb.takeNow();
+      } catch (cause) {
+        noDbError = cause instanceof Error ? cause.message : String(cause);
+      }
+      ok("④ 没有数据库句柄时明确拒绝（并说清这件事只能在服务端做）",
+        noDbError.includes("没有数据库句柄"));
+    }
+    {
+      /*
+       * 备份被**整体关掉**（`NEXGENEDU_NO_BACKUP=1`）时也拒绝，而且**一个文件都不生成**。
+       * 这一条在进程内验（同一个开关只有一份判定）—— 临时服务端上一次没生成，
+       * 也只是因为它的环境里带着这个变量。
+       */
+      const savedNoBackup = process.env.NEXGENEDU_NO_BACKUP;
+      process.env.NEXGENEDU_NO_BACKUP = "1";
+      const before51 = snapFiles();
+      let disabledError = "";
+      try {
+        snapshotFiles.takeNow();
+      } catch (cause) {
+        disabledError = cause instanceof Error ? cause.message : String(cause);
+      }
+      if (savedNoBackup === undefined) delete process.env.NEXGENEDU_NO_BACKUP;
+      else process.env.NEXGENEDU_NO_BACKUP = savedNoBackup;
+      ok("④ 备份被整体关掉时也拒绝（同一个开关、同一份判定，不半开半关）",
+        disabledError.includes("NEXGENEDU_NO_BACKUP"));
+      eq("④ 拒绝时一个文件都没生成", snapFiles(), before51);
+    }
+  }
+
+  /* ── ② 源码级纪律：清理与生成各自只有一处实现 ─────────────────────────── */
+  {
+    const strip54 = (source: string): string =>
+      source.replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, " ").replace(/^[ \t]*\/\/.*$/gm, "");
+    const backupSource54 = readFileSync(new URL("../server/backup.mts", import.meta.url), "utf8");
+    const migrateSource54 = strip54(readFileSync(new URL("../server/migrate.mts", import.meta.url), "utf8"));
+    const filesSource54 = strip54(readFileSync(new URL("../server/daily-backup-files.mts", import.meta.url), "utf8"));
+    const apiSection54 = (() => {
+      const source = readFileSync(new URL("../lib/backend/api.ts", import.meta.url), "utf8");
+      const start = source.indexOf("dailyBackups: {");
+      const end = source.indexOf("/** 设置操作人（登录后由后台外壳调用一次，用于操作日志）。 */");
+      return start === -1 || end === -1 || end <= start ? "" : strip54(source.slice(start, end));
+    })();
+    ok("② 源码级反向断言：`unlinkSync`（删备份文件）只出现在 `server/backup.mts` 里",
+      /unlinkSync/.test(backupSource54) &&
+        !/unlinkSync/.test(migrateSource54) &&
+        !/unlinkSync/.test(filesSource54) &&
+        !/unlinkSync/.test(apiSection54));
+    ok("② 迁移快照的清理**贴着生成那一处**（`server/migrate.mts` 里只被调用一次）",
+      (migrateSource54.match(/pruneMigrationBackups\(/g) ?? []).length === 1);
+    ok("③ 清理的候选只从 `kind === migrate` 里取（每日备份永不被它删到）",
+      backupSource54.includes('filter((item) => item.kind === "migrate")'));
+    ok("④ 「立刻备份一份」走的是**同一处**生成（文件能力调 `takeBackup`，自己不做 VACUUM INTO）",
+      filesSource54.includes("takeBackup(db, now(), options.dir)") &&
+        !/\.prepare\("VACUUM INTO/.test(filesSource54) &&
+        // 那条 SQL 只允许出现在 server/db.mts 的 backupTo（在线备份的唯一实现）
+        /\.prepare\("VACUUM INTO/.test(
+          readFileSync(new URL("../server/db.mts", import.meta.url), "utf8")));
+  }
+
+  /* 收尾：把这一节的夹具清掉（自检的库不该留下"自检·"开头的东西） */
+  {
+    const cleanup54 = await api.exportDatabase();
+    const leftovers54 = cleanup54.students.filter((entry) => entry.name.startsWith("自检·"));
+    /*
+     * 用"摘掉夹具"那个测试入口（`__removeFixture` / `/api/test-hooks/remove-fixture`），
+     * **不是** `students.remove`：这一节那个学生是**迁移链造出来的** —— 它名下有一条
+     * 报课记录与课时流水，按产品规矩（"有账就不许删"）本来就删不掉。
+     * 那条护栏是对的（对机构而言），因此这里绕的是测试那一道门，而不是放宽产品规矩。
+     */
+    for (const item of leftovers54) {
+      ok(`收尾：摘掉夹具学生「${item.name}」`, await dropFixture("students", item.id));
+    }
+    eq("收尾：这一节造的学生夹具已清掉",
+      (await api.exportDatabase()).students.filter((entry) => entry.name.startsWith("自检·")).length, 0);
+  }
+
+  // 收尾：临时 SQLite 句柄、内存那一遍装上的能力、内存那一遍自建的临时目录
+  takeDb.close();
+  rmSync(takeDbPath, { force: true });
+  __useSessionInvalidator(null);
+  if (!dailyRemote) {
+    __useDailyBackupFiles(null);
+    rmSync(snapDir, { recursive: true, force: true });
+  }
+}
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
 process.exit(failures === 0 ? 0 : 1);
