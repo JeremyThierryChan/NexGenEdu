@@ -53,3 +53,4 @@ server/backups/
 
 # 机构自己的思维导图（用户的文件，不提交；早先一次 git add -A 误入库）
 *.xmind
+image.png
