@@ -36,7 +36,7 @@ export function Logo({ brand, tone = "dark", className }: LogoProps) {
       alt=""
       width={512}
       height={386}
-      className="h-11 w-auto"
+      className="h-10 w-auto"
       // 图不大且是页头第一屏元素，优先加载（避免"先说文字、再冒出 logo"的跳动）
       fetchPriority="high"
     />
@@ -45,7 +45,7 @@ export function Logo({ brand, tone = "dark", className }: LogoProps) {
   return (
     <Link
       href="/"
-      className={cn("inline-flex shrink-0 items-center", className)}
+      className={cn("inline-flex shrink-0 items-center gap-2.5", className)}
       aria-label={`${brand.brandNameZh} 首页`}
     >
       {tone === "light" ? (
@@ -53,6 +53,30 @@ export function Logo({ brand, tone = "dark", className }: LogoProps) {
       ) : (
         mark
       )}
+      {/*
+       * **文字标识照原样保留**（机构 2026-10：「原来的左上角的 NexGenEdu新锐教培 也别删」）：
+       * 图形与文字并排 —— 图形负责"一眼认得出"，文字负责"念得出来、搜得到"。
+       * 这两行是原来那一版的一字不改（`items-baseline gap-2`、`text-lg font-bold`、
+       * `text-sm font-medium` 与两个颜色都保持原样），只是在它左边多了一张图。
+       */}
+      <span className="inline-flex items-baseline gap-2">
+        <span
+          className={cn(
+            "text-lg font-bold tracking-tight",
+            tone === "dark" ? "text-brand-800" : "text-white",
+          )}
+        >
+          {brand.brandName}
+        </span>
+        <span
+          className={cn(
+            "text-sm font-medium",
+            tone === "dark" ? "text-ink-500" : "text-ink-300",
+          )}
+        >
+          {brand.brandNameZh}
+        </span>
+      </span>
     </Link>
   );
 }
