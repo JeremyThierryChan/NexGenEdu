@@ -127,6 +127,17 @@ export const API_CONTRACT: ContractGroup[] = [
       "students.updateEnrollment", "students.renewEnrollment", "students.refundEnrollment",
       "students.adjustEnrollmentLessons", "students.saveProfile",
       "lessons.markCompleted", "lessons.createMakeup", "lessons.suggestMoves",
+      /*
+       * **串操作**（v34，机构原话「相当于就是 Apple 日历功能的全部复刻」）：
+       * `seriesPreview`（只读预演）/ `updateSeries` / `cancelSeries`。
+       *
+       * 归在「业务动作」而不是「看板」或「通用 CRUD」，理由是**服务端必须一次做完**：
+       * 一次串操作会改好几节课，而且**要么全部成功、要么整体不落盘**
+       * （冲突默认整体拒绝；前端不能拆成"逐节调用 update"—— 那正是"改了一半"的来源）。
+       * `seriesPreview` 是只读的（与 `suggestMoves` 同类），但它必须与写入
+       * **共用同一处判定**，因此刻意放在同一组、同一处实现旁边。
+       */
+      "lessons.seriesPreview", "lessons.updateSeries", "lessons.cancelSeries",
       "lessonRecords.save",
       "assessments.add",
       "payments.record",

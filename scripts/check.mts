@@ -84,6 +84,8 @@ import {
   __useStoreForTesting,
   api,
   SNAPSHOT_KEY,
+  // §56：按周批量排课的入参（自检夹具要按它拼一份"串"）
+  type SeriesInput,
 } from "@/lib/backend/api";
 /*
  * 夹具里用到的**类型**也要显式 import。
@@ -2726,7 +2728,7 @@ const gapLesson = (
   status: Lesson["status"] = "已排",
 ): Lesson => ({
   id, version: 1, subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1", studentIds: [],
-  startsAt: new Date(startsAt).toISOString(), durationMinutes, status, note: "", makeupForLessonId: "",
+  startsAt: new Date(startsAt).toISOString(), durationMinutes, status, note: "", makeupForLessonId: "", seriesId: "",
 });
 
 // 用户给的例子：17:30–18:30、19:00–20:30 两节课之间空 30 分钟
@@ -3481,7 +3483,7 @@ const scheduledLessons = (studentId: string): Lesson[] => [
     id: `fl_${studentId}`, version: 1, subject: "初中数学", form: "", teacherId: "", classroomId: "",
     studentIds: [studentId],
     startsAt: new Date(followNow.getTime() + 2 * 86_400_000).toISOString(),
-    durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
+    durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "", seriesId: "",
   },
 ];
 
@@ -3592,7 +3594,7 @@ const lr = (daysAgo: number, attendance: LessonRecord["attendance"]): { record: 
     id: `fl${daysAgo}`, version: 1, subject: "初中数学", form: "", teacherId: "", classroomId: "",
     studentIds: ["fs1"],
     startsAt: new Date(followNow.getTime() - daysAgo * 86_400_000).toISOString(),
-    durationMinutes: 60, status: "已上", note: "", makeupForLessonId: "",
+    durationMinutes: 60, status: "已上", note: "", makeupForLessonId: "", seriesId: "",
   },
 });
 const attendanceCase = [lr(1, "请假"), lr(2, "请假"), lr(3, "到课")];
@@ -3627,7 +3629,7 @@ const futureLesson: Lesson = {
   id: "fl_future", version: 1, subject: "初中数学", form: "", teacherId: "", classroomId: "",
   studentIds: ["fs1"],
   startsAt: new Date(followNow.getTime() + 2 * 86_400_000).toISOString(),
-  durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "",
+  durationMinutes: 60, status: "已排", note: "", makeupForLessonId: "", seriesId: "",
 };
 eq("已排课则不报久未排课",
   build({ students: [staleStudent], lessons: [futureLesson] }).some((item) => item.kind === "久未排课"), false);
@@ -3668,7 +3670,7 @@ const leaveLessonStart = new Date("2026-09-20T17:00:00");
 const leaveLesson: Lesson = {
   id: "lv1", version: 1, subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1",
   studentIds: ["s1"], startsAt: leaveLessonStart.toISOString(), durationMinutes: 60,
-  status: "已排", note: "", makeupForLessonId: "",
+  status: "已排", note: "", makeupForLessonId: "", seriesId: "",
 };
 const makeRecord = (
   attendance: LessonRecord["attendance"],
@@ -3822,7 +3824,7 @@ const statLesson = (
   return {
     id, version: 1, subject: "初中数学", form: "", teacherId: "t1", classroomId: "c1",
     studentIds: ["s1"], startsAt: day.toISOString(), durationMinutes: duration,
-    status: "已排", note: "", makeupForLessonId: "", ...over,
+    status: "已排", note: "", makeupForLessonId: "", ...over, seriesId: "",
   };
 };
 
@@ -3984,7 +3986,7 @@ const searchInput = {
     {
       id: "l1", version: 1, subject: "初中数学", form: "一对一", teacherId: "t1", classroomId: "c1",
       studentIds: ["s1"], startsAt: new Date("2026-09-18T17:30:00").toISOString(),
-      durationMinutes: 60, status: "已排" as const, note: "", makeupForLessonId: "",
+      durationMinutes: 60, status: "已排" as const, note: "", makeupForLessonId: "", seriesId: "",
     },
   ],
   courses: [{ title: "初中数学", href: "/courses/junior-math" }],
@@ -4610,7 +4612,7 @@ const iqRooms: Classroom[] = [
 const iqLessons: Lesson[] = [
   { id: "il1", version: 1, subject: "初中数学", form: "", teacherId: "it1", classroomId: "ic2",
     studentIds: ["s1"], startsAt: "2026-09-19T10:00:00", durationMinutes: 60,
-    status: "已排", note: "", makeupForLessonId: "" },
+    status: "已排", note: "", makeupForLessonId: "", seriesId: "" },
 ];
 
 /** 用一组固定数据评估一条咨询。 */
@@ -4641,7 +4643,7 @@ ok("阻塞里带上受影响的已有学生（界面要先显示再决定动不�
 const laterClash: Lesson[] = [
   { id: "il2", version: 1, subject: "初中数学", form: "", teacherId: "it1", classroomId: "ic1",
     studentIds: ["s2"], startsAt: "2026-10-03T10:00:00", durationMinutes: 60,
-    status: "已排", note: "", makeupForLessonId: "" },
+    status: "已排", note: "", makeupForLessonId: "", seriesId: "" },
 ];
 eq("系列中途撞课也要判定为不可行（不是只看第一次）",
   evalIq(mkInquiry({ preferredTeacherId: "it1" }), laterClash)[0]?.ok, false);
@@ -13956,8 +13958,8 @@ console.log(
   eq("迁移**没有**推学生的 version（乐观锁不被一次数据升级搅动）",
     migratedSourceStudents.map((student) => student.version),
     legacyVersions);
-  eq("迁移后版本就是当前版本（33）", (await api.exportDatabase()).version, 33);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 33);
+  eq("迁移后版本就是当前版本（34）", (await api.exportDatabase()).version, 34);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 34);
   ok("版本记录里写着这一步（`VERSION_NOTES[33]`，后来的人不用翻提交历史）",
     (VERSION_NOTES[33] ?? "").includes("来源"));
   ok("而且说明了它与 `Teacher.source` 不是一回事（免得后来的人把两件事混成一件）",
@@ -16598,6 +16600,641 @@ console.log(
     readText("scripts/check-links.mjs").includes('.split("?")'),
   );
 }
+
+console.log(
+  "\n=== 56. 排课串：仅此一次 / 此后所有（机构：「相当于就是 Apple 日历功能的全部复刻」）===",
+);
+
+/*
+ * 机构原话：
+ *
+ * > 「**再添加一个可以取消/修改单次排课和取消/修改该学生后续所有排课，
+ * > 相当于就是 Apple 日历功能的全部复刻**」
+ *
+ * 也就是点一节课时问的**那两个选项**。这一节守九件事，缺一条这个功能就会以某种方式
+ * 悄悄做错（而且大多是"错在别人身上"的那种错）：
+ *
+ *   ① **迁移**（v33 → v34）：老课的 `seriesId` 补空串、**别的字段一个没动**、
+ *      `version` **不推**（乐观锁不该被一次数据升级搅动，与 v30 / v33 同一条纪律）；
+ *      **绝不猜串** —— 用"科目+老师+教室+学生+每周同一天"反推一串，猜错一次就会把
+ *      **不相关的课当成一串一起改掉**，这是这一版最危险的一种猜；
+ *   ② **串身份写在哪**：`createSeries` 与咨询「采用」两处显式写、一批共用一个；
+ *      单节排课 / 补课是空串（**不是**"顺手挂进某一串"）；
+ *   ③ **`scope: "single"` 只动一节**（其余逐字节不变）；
+ *   ④ **`scope: "following"` 只动"这一节及其之后、还没上的"**：
+ *      **过去的课（已上）逐字节未变**，而且**明确报出来**（不是悄悄跳过）；
+ *   ⑤ **小组课**：取消一位学生只把 TA 移出名单；去掉最后一个学生才整节取消；
+ *   ⑥ **冲突**：默认**整体拒绝且零写入**（逐字节比对）；`onConflict: "skip"`
+ *      只跳过撞车的那几节 —— 而且"跳过"必须是人**显式**选的；
+ *   ⑦ **取消不占课时、不动账本**（反向断言：流水 / 报课 / 收款逐字节不变）；
+ *   ⑧ **权限**：与既有 `lessons.*` 的写动作同一档（普通教师不行，且在范围层是 hidden）；
+ *   ⑨ **界面源码级断言**：选择器、确认框（列出将影响的课）、学生入口、
+ *      以及"老数据不给「此后所有」并说明原因"。
+ *
+ * 这一节刻意**不重写一遍圈范围或冲突判定**：要比的是"接口里真正在跑的那一份"
+ * （`seriesScopeFor` / `conflictsFor` / `countLessons`），自检里再写一份等于口径有了
+ * 第二处实现 —— 而这一版最怕的正是"预览说 5 节、真做时只动 3 节"。
+ */
+{
+  const seriesRoot = new URL("../", import.meta.url);
+  const readSeriesFile = (file: string) => readFileSync(new URL(file, seriesRoot), "utf8");
+  /** 去掉注释再查源码（与 §22 / §44 / §49 / §50 / §55 同一个坑：注释里的词不算代码）。 */
+  const stripSeriesComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  /*
+   * 这一节从头到尾只碰**自己的**一份内存库（与 §49 / §50 同一做法）：
+   * 先灌入示例数据，再在自己造的夹具上验。HTTP 那一遍数据在服务端进程里，
+   * 但同一段代码照样跑（`importDatabase` 换的是服务端的库）—— 这正是 check:both 的意义。
+   */
+  __useStoreForTesting(createMemoryStore());
+  await api.importDatabase(serializeDatabase(seedDb));
+
+  const allLessons = async (): Promise<Lesson[]> =>
+    ((await api.exportDatabase()) as Database).lessons;
+  /** 除开这几节之外，库里的课逐字节不变（用来证"只动了该动的"）。 */
+  const othersBytes = (list: Lesson[], ids: string[]): string[] =>
+    list.filter((lesson) => !ids.includes(lesson.id)).map((lesson) => JSON.stringify(lesson));
+  const byId = (list: Lesson[], id: string): Lesson | undefined =>
+    list.find((lesson) => lesson.id === id);
+  const isoAt = (text: string): string => new Date(text).toISOString();
+
+  /* ── ① 迁移：v33 的老课补空串、不猜串、不推 version ─────────────────────── */
+  const legacySeriesDb = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+    lessons: Array<Record<string, unknown>>;
+    version: number;
+  };
+  legacySeriesDb.version = 33;
+  legacySeriesDb.lessons = legacySeriesDb.lessons.map((lesson) => {
+    const copy = { ...lesson };
+    delete copy.seriesId;
+    return copy;
+  });
+  /** 去掉 `seriesId` 之后的形状（用来比"别的字段一个字没动"）。 */
+  const withoutSeriesId = (lesson: Record<string, unknown>): string => {
+    const copy = { ...lesson };
+    delete copy.seriesId;
+    return JSON.stringify(copy);
+  };
+  const legacyLessonShapes = legacySeriesDb.lessons.map(withoutSeriesId);
+  const legacyLessonVersions = legacySeriesDb.lessons.map((lesson) => lesson.version);
+  eq(
+    "夹具确实是「没有 seriesId 这个字段的 v33 课」",
+    [legacySeriesDb.version, legacySeriesDb.lessons.every((lesson) => !("seriesId" in lesson))],
+    [33, true],
+  );
+
+  const upgradedSeries = await api.importDatabase(JSON.stringify(legacySeriesDb));
+  eq("v33 的老库能升级导入", upgradedSeries.ok, true);
+  const migratedLessons = await allLessons();
+  eq("v33 → v34 给每节老课补上空串（一条不落）", migratedLessons.map((l) => l.seriesId), migratedLessons.map(() => ""));
+  eq(
+    "课的其它字段逐字节没动（迁移不是「顺手改排课」）",
+    migratedLessons.map((lesson) => withoutSeriesId(lesson as unknown as Record<string, unknown>)),
+    legacyLessonShapes,
+  );
+  /*
+   * ⚠️ **不推 `version`**（与 v30 给教室 / 教师补字段、v33 给学生补「来源」同一条纪律）：
+   * `version` 是乐观锁（"我读到的是第几版"），它该只被**人改这节课**这件事推进。
+   * 一次数据升级顺手 +1，会让所有打开着的排课表单在下一次提交时报一次
+   * 「刚被别人改过，请刷新」—— 而其实谁都没改。
+   */
+  eq("迁移**没有**推课节的 version（乐观锁不被一次数据升级搅动）", migratedLessons.map((l) => l.version), legacyLessonVersions);
+  eq("迁移后版本就是当前版本（34）", (await api.exportDatabase()).version, 34);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 34);
+  ok("版本记录里写着这一步（`VERSION_NOTES[34]`，后来的人不用翻提交历史）", (VERSION_NOTES[34] ?? "").includes("串身份"));
+  ok("而且写明了「老课不猜串」这条口径", (VERSION_NOTES[34] ?? "").includes("不猜"));
+  ok("而且写明了「过去的课是账」这条边界", (VERSION_NOTES[34] ?? "").includes("已排（还没上）"));
+  ok("而且点名了三个新方法（服务端照契约实现时找得到入口）",
+    ["lessons.seriesPreview", "lessons.updateSeries", "lessons.cancelSeries"].every((name) =>
+      (VERSION_NOTES[34] ?? "").includes(name)));
+
+  /*
+   * 收尾归一也要兜一次（"自称 v34 却缺字段"的文件照样会出现：手改过的导出、
+   * 只恢复了一半、以及导入的旧表）。缺字段时界面读 `lesson.seriesId !== ""` 为真
+   * → **一节老课会被当成串里的课**，于是多问一句"此后所有"，而它背后没有串 ——
+   * 那正是这一版要避免的猜。归成空串是保守的那一侧。
+   */
+  {
+    const pretended = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+      lessons: Array<Record<string, unknown>>;
+    };
+    pretended.lessons = pretended.lessons.map((lesson) => {
+      const copy = { ...lesson };
+      delete copy.seriesId;
+      return copy;
+    });
+    await api.importDatabase(JSON.stringify(pretended));
+    eq("一份「自称 v34 却缺 seriesId」的文件也被收尾归一兜住（不是只靠迁移那一步）",
+      (await allLessons()).every((lesson) => lesson.seriesId === ""), true);
+  }
+
+  /* ── 夹具：三位学生 + 两位老师 + 两间教室（都用自检前缀，收尾全部摘掉）───── */
+  const seriesStudents: Student[] = [];
+  for (const name of ["甲", "乙", "丙", "丁"]) {
+    seriesStudents.push(
+      await api.students.create({
+        name: `自检·串学生${name}`,
+        grade: "初二",
+        guardian: "",
+        status: "在读",
+        note: "",
+        profile: {},
+        enrollments: [{ subject: "自检串课", lessons: 20 }],
+      }),
+    );
+  }
+  const [stuA, stuB, stuC, stuD] = seriesStudents as [Student, Student, Student, Student];
+  const seriesTeacher = async (name: string): Promise<Teacher> =>
+    api.teachers.create({
+      name,
+      subjects: [],
+      role: "",
+      phone: "",
+      active: true,
+      years: "",
+      summary: "",
+      bio: "",
+      recommendation: "",
+      order: 999,
+      siteVisible: false,
+      origin: "后台",
+      kind: "教师",
+      employment: "",
+      source: "",
+    });
+  const teacherA = await seriesTeacher("自检·串老师甲");
+  const teacherB = await seriesTeacher("自检·串老师乙");
+  const seriesRoom = async (name: string, capacity: number): Promise<Classroom> =>
+    api.classrooms.create({
+      name,
+      kind: "上课用教室",
+      campus: "自检",
+      capacity,
+      // 空数组＝不限时段：夹具不该被"教室该时段不开放"这条挡住
+      availability: [],
+      note: "",
+    });
+  const room = await seriesRoom("自检·串教室一", 20);
+  const room2 = await seriesRoom("自检·串教室二", 20);
+
+  /* ── ② 串身份写在哪：批量一处一个、单节是空串 ─────────────────────────── */
+  const singleLesson = await api.lessons.create({
+    subject: "自检串课",
+    form: "一对一",
+    teacherId: teacherA.id,
+    classroomId: room.id,
+    studentIds: [stuA.id],
+    startsAt: isoAt("2027-03-01T09:00:00"),
+    durationMinutes: 60,
+    status: "已排",
+    note: "自检单节",
+    makeupForLessonId: "",
+  });
+  eq("单节排课的串身份是空串（＝不属于任何串）", singleLesson.seriesId, "");
+
+  const seriesInput = (over: Partial<SeriesInput> = {}): SeriesInput => ({
+    subject: "自检串课",
+    form: "一对一",
+    teacherId: teacherA.id,
+    classroomId: room.id,
+    studentIds: [stuA.id],
+    durationMinutes: 60,
+    status: "已排" as const,
+    note: "串夹具",
+    startDate: "2027-04-05",
+    weekdays: [1],
+    time: "17:00",
+    count: 4,
+    ...over,
+  });
+  const madeA = await api.lessons.createSeries(seriesInput());
+  eq("按周批量排课真的建出来了", madeA.created, 4);
+  ok("这一批课共用一个非空串身份（服务端生成，与别的实体同一套 id）",
+    madeA.seriesId.startsWith("s_") && madeA.seriesId.length > 3);
+  const seriesOne = (await allLessons())
+    .filter((lesson) => lesson.seriesId === madeA.seriesId)
+    .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+  eq("同一串里的课数就是建出来的数", seriesOne.length, madeA.created);
+  ok("每一节都写着同一个串身份（不是只给第一节写）",
+    seriesOne.every((lesson) => lesson.seriesId === madeA.seriesId));
+
+  const madeB = await api.lessons.createSeries(seriesInput({ studentIds: [stuB.id], time: "19:00" }));
+  ok("另排一批拿到的是**另一个**串身份（不会把两批混成一串）",
+    madeB.seriesId !== "" && madeB.seriesId !== madeA.seriesId);
+
+  const makeupLesson = await api.lessons.createMakeup({
+    originalLessonId: singleLesson.id,
+    startsAt: isoAt("2027-03-08T09:00:00"),
+    durationMinutes: 60,
+    teacherId: teacherA.id,
+    classroomId: room.id,
+    studentIds: [stuA.id],
+    note: "自检补课",
+  });
+  eq("补课是单独一节、不属于任何串（补课常常挪到别的时间，挂进原课的串会让串操作顺手改掉它）",
+    makeupLesson?.seriesId, "");
+
+  /*
+   * 咨询「采用」那条路同样写串身份。它要走完"建线索 → 评估 → 采用"三步，
+   * 为此在这里跑一遍代价太大，而这条路上真正要守的是"**一处不落**"——
+   * 因此用**源码级断言**钉住那两处：批量排课与咨询采用各自显式写 seriesId。
+   */
+  {
+    const apiSource = stripSeriesComments(readFileSync(new URL("lib/backend/api.ts", seriesRoot), "utf8"));
+    ok("服务层里批量排课那一批共用一个串身份（循环外生成一次）",
+      apiSource.includes("const seriesId = nextId(\"s\")") && apiSource.includes("seriesId,"));
+    ok("咨询「采用」那条路也写串身份（一处不落）",
+      apiSource.includes("inquirySeriesId") && apiSource.includes("seriesId: inquirySeriesId"));
+    eq("冲突判定仍然只有一处实现（`overlaps` 在整份服务层里只出现一次）",
+      (apiSource.match(/const overlaps =/g) ?? []).length, 1);
+    ok("串操作的冲突预演走的是同一个 `conflictsFor`（不许另写一套）",
+      apiSource.includes("seriesTrialConflicts") && apiSource.includes("const report = conflictsFor(db, {"));
+  }
+
+  /* ── ③④ 仅此一次 / 此后所有：过去（已上）的课逐字节未变 ──────────────── */
+  const anchor = seriesOne[0]!;
+  const past = seriesOne[1]!;
+  await api.lessons.markCompleted(past.id);
+
+  const beforeScope = await allLessons();
+  const previewFollowing = await api.lessons.seriesPreview({
+    lessonId: anchor.id,
+    scope: "following",
+    action: "cancel",
+  });
+  eq("预览：此后所有会动到的是「这一节 + 之后还没上的」",
+    previewFollowing.affected.map((item) => item.id),
+    [seriesOne[0]!.id, seriesOne[2]!.id, seriesOne[3]!.id]);
+  eq("预览：中间那节「已上」被排除，并且**报出来**（不是悄悄跳过）",
+    previewFollowing.completed.map((item) => item.id), [past.id]);
+  ok("预览：属于串的课给得出「此后所有」", previewFollowing.followingAvailable === true);
+  eq("预览：涉及的学生就是名单里那几位", previewFollowing.studentIds, [stuA.id]);
+
+  const updatedFollowing = await api.lessons.updateSeries({
+    lessonId: anchor.id,
+    scope: "following",
+    patch: { teacherId: teacherB.id },
+  });
+  eq("此后所有：真正动到的与预览说的**一模一样**",
+    updatedFollowing.changed.map((item) => item.id),
+    previewFollowing.affected.map((item) => item.id));
+  const afterFollowing = await allLessons();
+  eq("改完之后，这三节都换了老师", updatedFollowing.changed.map((item) => byId(afterFollowing, item.id)?.teacherId), [teacherB.id, teacherB.id, teacherB.id]);
+  eq("**已上那一节逐字节未变**（过去的课是账）",
+    JSON.stringify(byId(afterFollowing, past.id)), JSON.stringify(byId(beforeScope, past.id)));
+  eq("其余课一节没动（逐字节）",
+    othersBytes(afterFollowing, updatedFollowing.changed.map((item) => item.id)),
+    othersBytes(beforeScope, updatedFollowing.changed.map((item) => item.id)));
+  eq("「已上」在结果里也照实报出来", updatedFollowing.completed.map((item) => item.id), [past.id]);
+
+  /*
+   * **整体平移**（`patch.startsAt`）单独验一遍，而且**逐条比对每一节的差量**。
+   *
+   * 这里真的出过一个 bug：平移的差量是"这一节的新时间 − **锚点原时间**"，
+   * 而锚点自己也在这一批里 —— 写完第一节之后锚点的时间就变了，再拿它去算后面几节的差量
+   * 会得到 0（后面几节原地不动），返回里却还说"改了 3 节"。
+   * 自检当时只改教师（不碰时间）因此没抓到，是**逐页验收**比对每一节的时间差抓到的
+   * （`npm run accept` 的「排课串」那一节）。这条断言就是那次事故的回归护栏。
+   */
+  const beforeShift = await allLessons();
+  const shiftedTo = new Date(
+    new Date(byId(beforeShift, anchor.id)!.startsAt).getTime() + 3 * 86_400_000,
+  ).toISOString();
+  const shiftedOutcome = await api.lessons.updateSeries({
+    lessonId: anchor.id,
+    scope: "following",
+    patch: { startsAt: shiftedTo },
+  });
+  const afterShift = await allLessons();
+  eq("整体平移：每一节都**正好**平移同样的差量（不是后面几节原地不动、也不是都设成同一时刻）",
+    shiftedOutcome.changed.map((item) =>
+      Math.round(
+        (new Date(byId(afterShift, item.id)!.startsAt).getTime() -
+          new Date(byId(beforeShift, item.id)!.startsAt).getTime()) / 86_400_000,
+      ),
+    ),
+    [3, 3, 3]);
+  eq("平移之后锚点自己就落在填的那个时间上",
+    byId(afterShift, anchor.id)?.startsAt, shiftedTo);
+  eq("平移时「已上」那一节仍然逐字节未变",
+    JSON.stringify(byId(afterShift, past.id)), JSON.stringify(byId(beforeShift, past.id)));
+
+  const beforeSingle = await allLessons();
+  const updatedSingle = await api.lessons.updateSeries({
+    lessonId: seriesOne[3]!.id,
+    scope: "single",
+    patch: { note: "只改这一节" },
+  });
+  eq("仅此一次：只动一节", updatedSingle.changed.map((item) => item.id), [seriesOne[3]!.id]);
+  const afterSingle = await allLessons();
+  eq("仅此一次：其余每一节逐字节不变", othersBytes(afterSingle, [seriesOne[3]!.id]), othersBytes(beforeSingle, [seriesOne[3]!.id]));
+  eq("改的那一节确实变了", byId(afterSingle, seriesOne[3]!.id)?.note, "只改这一节");
+
+  let pastAnchorError = "";
+  try {
+    await api.lessons.cancelSeries({ lessonId: past.id, scope: "single" });
+  } catch (cause) {
+    pastAnchorError = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("从一节「已上」的课发起串操作 → **明确报错**（已上的课不许被改写）",
+    pastAnchorError.includes("已上") && pastAnchorError.includes("账"));
+
+  /* ── ⑤ 小组课：只移出那一位学生；去掉最后一个才整节取消 ───────────────── */
+  const groupMade = await api.lessons.createSeries(
+    seriesInput({
+      form: "一对三",
+      studentIds: [stuA.id, stuB.id, stuC.id],
+      time: "10:00",
+      startDate: "2027-05-03",
+      count: 3,
+      note: "小组夹具",
+    }),
+  );
+  eq("小组课建出 3 节", groupMade.created, 3);
+  const groupOne = (await allLessons())
+    .filter((lesson) => lesson.seriesId === groupMade.seriesId)
+    .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+  const groupAnchor = groupOne[0]!;
+
+  const removed = await api.lessons.cancelSeries({
+    lessonId: groupAnchor.id,
+    scope: "following",
+    studentId: stuA.id,
+    reason: "转学",
+  });
+  eq("取消一位学生：三节都只是**移出名单**（不是整节取消）",
+    [removed.removedFrom, removed.cancelled], [3, 0]);
+  const afterGroupRemove = (await allLessons()).filter((lesson) => lesson.seriesId === groupMade.seriesId);
+  eq("这位学生从每一节里都去掉了，其余学生一个不少",
+    afterGroupRemove.map((lesson) => lesson.studentIds),
+    [[stuB.id, stuC.id], [stuB.id, stuC.id], [stuB.id, stuC.id]]);
+  eq("课还是「已排」（一节课不会因为少了一个学生就消失）",
+    afterGroupRemove.map((lesson) => lesson.status), ["已排", "已排", "已排"]);
+  ok("取消原因写进了备注（机构要能查到为什么取消）",
+    afterGroupRemove.every((lesson) => lesson.note.includes("转学")));
+
+  await api.lessons.cancelSeries({ lessonId: groupAnchor.id, scope: "single", studentId: stuB.id });
+  const lastOne = await api.lessons.cancelSeries({ lessonId: groupAnchor.id, scope: "single", studentId: stuC.id });
+  eq("去掉最后一个学生 → 这一节才整节取消", [lastOne.cancelled, lastOne.removedFrom], [1, 0]);
+  const afterGroupEmpty = (await allLessons()).filter((lesson) => lesson.seriesId === groupMade.seriesId);
+  eq("那一节名单空了、状态是「已取消」，另外两节仍带着原来的两位学生",
+    [
+      afterGroupEmpty[0] ? [afterGroupEmpty[0].studentIds, afterGroupEmpty[0].status] : null,
+      afterGroupEmpty[1]?.status,
+      afterGroupEmpty[2]?.status,
+    ],
+    [[[], "已取消"], "已排", "已排"]);
+
+  /* ── ⑥ 冲突：默认整体拒绝、零写入；skip 只跳过撞车的那几节 ───────────── */
+  const clashMade = await api.lessons.createSeries(
+    seriesInput({
+      teacherId: teacherB.id,
+      studentIds: [stuD.id],
+      time: "09:00",
+      startDate: "2027-06-07",
+      count: 3,
+      note: "冲突夹具",
+    }),
+  );
+  eq("冲突夹具：3 节", clashMade.created, 3);
+  const clashOne = (await allLessons())
+    .filter((lesson) => lesson.seriesId === clashMade.seriesId)
+    .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+  const clashAnchor = clashOne[0]!;
+  const middle = clashOne[1]!;
+  // 挡路课：只在**中间那一节**的时段占住 teacherA（教室用另一间，避免把教室也算进去）
+  await api.lessons.create({
+    subject: "自检挡路课",
+    form: "",
+    teacherId: teacherA.id,
+    classroomId: room2.id,
+    studentIds: [],
+    startsAt: middle.startsAt,
+    durationMinutes: 60,
+    status: "已排",
+    note: "挡路夹具",
+    makeupForLessonId: "",
+  });
+
+  const previewClash = await api.lessons.seriesPreview({
+    lessonId: clashAnchor.id,
+    scope: "following",
+    action: "update",
+    patch: { teacherId: teacherA.id },
+  });
+  eq("预览就能提前看见「哪一节会撞车」（不是点完才知道）",
+    previewClash.conflicts.map((item) => item.id), [middle.id]);
+
+  const beforeReject = await allLessons();
+  const logsBeforeReject = (await api.logs.list(500)).length;
+  let rejectError = "";
+  try {
+    await api.lessons.updateSeries({
+      lessonId: clashAnchor.id,
+      scope: "following",
+      patch: { teacherId: teacherA.id },
+    });
+  } catch (cause) {
+    rejectError = cause instanceof Error ? cause.message : String(cause);
+  }
+  ok("冲突时默认**整体拒绝**，并说清是哪一节、撞了谁",
+    rejectError.includes("整体没有改动") && rejectError.includes("跳过冲突的那几节"));
+  eq("拒绝之后**零写入**：库里每一节课逐字节不变",
+    JSON.stringify(await allLessons()), JSON.stringify(beforeReject));
+  eq("而且没有留下一条操作日志（拒绝不是「改了一下」）",
+    (await api.logs.list(500)).length, logsBeforeReject);
+
+  const logsBeforeSkip = (await api.logs.list(200)).length;
+  const skippedOutcome = await api.lessons.updateSeries({
+    lessonId: clashAnchor.id,
+    scope: "following",
+    patch: { teacherId: teacherA.id },
+    onConflict: "skip",
+  });
+  eq("显式 skip：只跳过撞车的那一节，其余照做",
+    [skippedOutcome.changed.map((item) => item.id), skippedOutcome.skipped.map((item) => item.id)],
+    [[clashOne[0]!.id, clashOne[2]!.id], [middle.id]]);
+  const afterSkip = await allLessons();
+  eq("被跳过的那一节逐字节未变", JSON.stringify(byId(afterSkip, middle.id)), JSON.stringify(byId(beforeReject, middle.id)));
+  eq("没撞车的两节确实改成了新老师",
+    [byId(afterSkip, clashOne[0]!.id)?.teacherId, byId(afterSkip, clashOne[2]!.id)?.teacherId],
+    [teacherA.id, teacherA.id]);
+  eq("批量只写**一条**日志（逐节写会把日志冲掉）",
+    (await api.logs.list(200)).length - logsBeforeSkip, 1);
+
+  /* ── ⑦ 取消不占课时、不动账本（反向断言）──────────────────────────────── */
+  {
+    const beforeCancel = JSON.parse(JSON.stringify(await api.exportDatabase())) as Database;
+    const activeBefore = countLessons(beforeCancel.lessons).active;
+    const cancelledBefore = countLessons(beforeCancel.lessons).cancelled;
+    const target = clashOne[2]!;
+    const cancelOutcome = await api.lessons.cancelSeries({
+      lessonId: target.id,
+      scope: "single",
+      reason: "自检账本探针",
+    });
+    eq("取消一节：结果是「整节取消」", [cancelOutcome.cancelled, cancelOutcome.removedFrom], [1, 0]);
+    const afterCancel = (await api.exportDatabase()) as Database;
+    eq("课时流水逐字节不变（取消不动账本）",
+      JSON.stringify(afterCancel.transactions), JSON.stringify(beforeCancel.transactions));
+    eq("报课记录（剩余课时）逐字节不变",
+      JSON.stringify(afterCancel.students.map((student) => student.enrollments)),
+      JSON.stringify(beforeCancel.students.map((student) => student.enrollments)));
+    eq("收款流水逐字节不变", JSON.stringify(afterCancel.payments), JSON.stringify(beforeCancel.payments));
+    const counts = countLessons(afterCancel.lessons);
+    eq("课次口径：有效的少一节、已取消的多一节（取消的课不占课时）",
+      [counts.active, counts.cancelled], [activeBefore - 1, cancelledBefore + 1]);
+    eq("那一节确实是「已取消」",
+      byId(afterCancel.lessons, target.id)?.status, "已取消");
+  }
+
+  /* ── ⑧ 老数据（seriesId === ""）：不给「此后所有」，但学生入口仍能处理 ──── */
+  {
+    /*
+     * 把刚建的一串"还原成老数据"来验：导出整库 → 把这些课的 seriesId 清空 → 导回。
+     * 这是**唯一**能造出"结构上是 v34、却属于老课"的夹具的办法（迁移那条路只能造
+     * 整库都老的那种）。目的有两个：
+     *   1. `seriesPreview` 必须给 `followingAvailable: false` 与一句原因
+     *      （界面据此只给「仅此一次」）；
+     *   2. 但**学生入口那条路仍然能用**：机构最常用的场景（学生不来了）在老课上
+     *      也得做得了 —— 它是按业务口径圈的（同一学生 + 同一科目 + 同一班型），
+     *      不依赖串身份。这两条一起才说得通"老课不猜串，但老课仍能被整串处理"。
+     */
+    const snapshot = JSON.parse(serializeDatabase(await api.exportDatabase())) as Database;
+    snapshot.lessons = snapshot.lessons.map((lesson) =>
+      lesson.seriesId === madeB.seriesId || lesson.seriesId === madeA.seriesId
+        ? { ...lesson, seriesId: "" }
+        : lesson,
+    );
+    await api.importDatabase(JSON.stringify(snapshot));
+    const oldLessons = (await allLessons())
+      .filter((lesson) => lesson.seriesId === "" && lesson.subject === "自检串课" && lesson.studentIds.includes(stuA.id))
+      .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+    ok("夹具：已经造出「不属于任何串」的老课", oldLessons.length >= 2);
+
+    const oldPreview = await api.lessons.seriesPreview({
+      lessonId: oldLessons[0]!.id,
+      scope: "following",
+      action: "cancel",
+    });
+    eq("老课（不属于循环串）**不给「此后所有」**", oldPreview.followingAvailable, false);
+    ok("而且说明了原因（界面上就显示这句话）",
+      oldPreview.followingUnavailableReason.includes("不属于循环串"));
+    ok("原因里还指了另一条路（去学生详情页的「这个学生此后的课」）",
+      oldPreview.followingUnavailableReason.includes("这个学生此后的课"));
+
+    const oldCancel = await api.lessons.cancelSeries({
+      lessonId: oldLessons[0]!.id,
+      scope: "following",
+    });
+    ok("但**学生入口那条路**在老课上照样能用（此后所有仍会圈到多节）",
+      oldCancel.changed.length >= 2, `实际 ${String(oldCancel.changed.length)} 节`);
+  }
+
+  /* ── ⑨ 权限：与既有 `lessons.*` 的写动作同一档 ─────────────────────────── */
+  {
+    const seriesMethods = ["lessons.seriesPreview", "lessons.updateSeries", "lessons.cancelSeries"];
+    eq("三个串方法都进了契约（服务端照这份清单实现）",
+      seriesMethods.filter((name) => groupOfMethod(name) === null), []);
+    /*
+     * 归属刻意与**既有的批量排课 / 冲突检查**那一组对齐（`lessons.createSeries` /
+     * `planSeries` / `findConflicts` / `suggestMoves`）：它们在角色层都允许普通教师，
+     * 到**行级范围**层才以 `hidden` 关掉 —— 因为串操作的预览会点名**别的教师与别的学生**
+     * （"和 X 老师的那节课撞了"），那正是行级范围要挡住的东西。
+     * 所以"教师能不能用"的正确判据要看**两层合起来**，不是只看角色层。
+     */
+    const sameRoles = (name: string, reference: string) =>
+      canAccess(["普通教师"], allowedRolesForMethod(name) ?? []) ===
+        canAccess(["普通教师"], allowedRolesForMethod(reference) ?? []) &&
+      JSON.stringify([...(allowedRolesForMethod(name) ?? [])].sort()) ===
+        JSON.stringify([...(allowedRolesForMethod(reference) ?? [])].sort());
+    ok("三个方法在角色层的归属与既有的批量排课 / 冲突检查**逐项一致**（没有顺手放宽或收紧）",
+      seriesMethods.every((name) =>
+        ["lessons.createSeries", "lessons.planSeries", "lessons.findConflicts", "lessons.suggestMoves"].every(
+          (reference) => sameRoles(name, reference))));
+    ok("技术管理员 / 招生老师 / 财务管理员都调得动（排课的写动作归他们）",
+      seriesMethods.every((name) =>
+        canAccess(["技术管理员", "招生老师", "财务管理员"], allowedRolesForMethod(name) ?? [])));
+    eq("对普通教师在**行级范围**表里是 hidden（与 findConflicts / createSeries 同一条）",
+      seriesMethods.map((name) => teacherScopeRule(name)), ["hidden", "hidden", "hidden"]);
+    ok("普通教师**实际不可用**：范围层给出拒绝理由（不是静默放行）",
+      seriesMethods.every((name) => (teacherScopeDenial(name, ["普通教师"]) ?? "").includes("不归普通教师")));
+    ok("界面判定与服务端同源（`canCallMethod` 问的是同一张表）",
+      seriesMethods.every((name) => canCallMethod(["招生老师"], name) === true) &&
+        canCallMethod(["技术管理员"], "lessons.updateSeries") === true);
+  }
+
+  /* ── ⑩ 界面源码级断言（选择器 / 确认框 / 学生入口 / 老数据不给）──────────── */
+  {
+    const dialogCode = stripSeriesComments(readSeriesFile("components/admin/LessonSeriesScopeDialog.tsx"));
+    const formCode = stripSeriesComments(readSeriesFile("components/admin/LessonForm.tsx"));
+    const listCode = stripSeriesComments(readSeriesFile("app/admin/(dashboard)/lessons/page.tsx"));
+    const detailCode = stripSeriesComments(readSeriesFile("components/admin/StudentDetail.tsx"));
+    const studentCode = stripSeriesComments(readSeriesFile("components/admin/StudentFutureLessons.tsx"));
+
+    ok("确认框里两个选项都在（「仅此一次」/「此后所有」）",
+      dialogCode.includes("仅此一次") && dialogCode.includes("此后所有"));
+    ok("「此后所有」只在**属于串**的课旁边出现（老数据那一支不渲染它）",
+      /seriesAvailable\s*\?\s*\([\s\S]{0,320}?此后所有/.test(dialogCode));
+    ok("老数据上写明原因（「这节课不属于循环串」）",
+      dialogCode.includes("不属于循环串"));
+    ok("界面自己不算影响范围与冲突，一律问服务层（口径只有一处）",
+      dialogCode.includes("api.lessons.seriesPreview") &&
+        dialogCode.includes("api.lessons.updateSeries") &&
+        dialogCode.includes("api.lessons.cancelSeries"));
+    ok("确认框里**列出将影响的课**（日期 + 学生数）",
+      dialogCode.includes("将影响") && dialogCode.includes("item.dayLabel") && dialogCode.includes("位学生"));
+    ok("「已上」的课在确认框里被明确报出来（过去的课是账）",
+      dialogCode.includes("completed") && dialogCode.includes("已经上过"));
+    ok("冲突有显式选项，且默认是「整体不动」",
+      dialogCode.includes('useState<SeriesConflictMode>("reject")') &&
+        dialogCode.includes('setOnConflict("skip")'));
+
+    ok("排课页的「取消」接到了选择器上（不是直接改状态）",
+      listCode.includes("LessonSeriesScopeDialog") && listCode.includes("setCancelTarget(lesson)"));
+    ok("排课表单也接了（改期 / 换老师 / 换教室时会问）",
+      formCode.includes("LessonSeriesScopeDialog") && formCode.includes("setSeriesPatch(next)"));
+    ok("排课表单对老数据说明原因", formCode.includes("不属于循环串"));
+
+    ok("学生详情页挂了「这个学生此后的课」入口",
+      detailCode.includes("StudentFutureLessons") && studentCode.includes("这个学生此后的课"));
+    ok("学生入口按「科目 + 班型」分组（与服务层圈范围的口径一致）",
+      studentCode.includes("lesson.subject") && studentCode.includes("lesson.form"));
+    ok("学生入口也走服务层那套方法（没有自己写一套批量改）",
+      studentCode.includes("api.lessons.listByStudent") &&
+        studentCode.includes("LessonSeriesScopeDialog"));
+    ok("学生入口说明了小组课的两条口径（只移出 TA / 改的是整节）",
+      studentCode.includes("只有这个学生") && studentCode.includes("整节"));
+  }
+
+  /* 收尾：把这一节造的东西全部摘掉（自检的库不该留下"自检·"开头的记录）。 */
+  {
+    const leftovers = await api.exportDatabase();
+    for (const lesson of leftovers.lessons.filter((item) => item.note.startsWith("自检") || item.note.startsWith("串夹具") || item.note.startsWith("小组夹具") || item.note.startsWith("冲突夹具") || item.note.startsWith("挡路夹具") || item.subject === "自检串课" || item.subject === "自检挡路课")) {
+      ok(`收尾：摘掉夹具课「${lesson.subject}」`, await dropFixture("lessons", lesson.id));
+    }
+    for (const student of leftovers.students.filter((item) => item.name.startsWith("自检·"))) {
+      ok(`收尾：摘掉夹具学生「${student.name}」`, await dropFixture("students", student.id));
+    }
+    for (const teacher of leftovers.teachers.filter((item) => item.name.startsWith("自检·"))) {
+      ok(`收尾：摘掉夹具教师「${teacher.name}」`, await dropFixture("teachers", teacher.id));
+    }
+    for (const classroom of leftovers.classrooms.filter((item) => item.name.startsWith("自检·"))) {
+      ok(`收尾：摘掉夹具教室「${classroom.name}」`, await dropFixture("classrooms", classroom.id));
+    }
+    const finalDb = await api.exportDatabase();
+    eq("收尾：这一节造的夹具已清掉（课 / 学生 / 教师 / 教室都不剩「自检·」）",
+      [
+        finalDb.lessons.filter((item) => item.subject.startsWith("自检")).length,
+        finalDb.students.filter((item) => item.name.startsWith("自检·")).length,
+        finalDb.teachers.filter((item) => item.name.startsWith("自检·")).length,
+        finalDb.classrooms.filter((item) => item.name.startsWith("自检·")).length,
+      ],
+      [0, 0, 0, 0]);
+  }
+}
+
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
 process.exit(failures === 0 ? 0 : 1);

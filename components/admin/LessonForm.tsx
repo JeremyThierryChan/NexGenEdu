@@ -10,6 +10,7 @@ import {
   type ConflictReport,
   type Lesson,
   type LessonInput,
+  type SeriesPatch,
   type Student,
   type Teacher,
 } from "@/lib/backend/api";
@@ -19,6 +20,8 @@ import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
 // 教室名的唯一显示口径（「校区·教室名」，v31）
 import { classroomLabel } from "@/lib/backend/classrooms";
 import { useSubjectOptions } from "@/components/admin/useSubjectOptions";
+// 改排课时的「仅此一次 / 此后所有」（v34）与它的确认框
+import { LessonSeriesScopeDialog } from "@/components/admin/LessonSeriesScopeDialog";
 
 /**
  * 排课表单：新建与编辑共用，带**冲突检测**。
@@ -79,6 +82,11 @@ export function LessonForm({
   const [scheduled, setScheduled] = useState<Lesson[]>([]);
   const [status, setStatus] = useState<Lesson["status"]>(lesson?.status ?? "已排");
   const [note, setNote] = useState(lesson?.note ?? "");
+  /**
+   * 要改成的样子（时间 / 教师 / 教室 / 时长 / 备注）—— 非空表示正等着人选
+   * **「仅此一次」还是「此后所有」**（v34）。见下面的 `onSubmit`。
+   */
+  const [seriesPatch, setSeriesPatch] = useState<SeriesPatch | null>(null);
 
   // 科目候选来自课程库（网站课程 + 机构自己加的课），见 useSubjectOptions
   const { names: subjectOptions } = useSubjectOptions();
@@ -221,6 +229,39 @@ export function LessonForm({
     setPending(true);
     setError("");
 
+    /*
+     * **改这一节，还是改这一串？**（v34，Apple 日历那两个选项）
+     *
+     * 只有"编辑一节**属于循环串**的课、而且改动碰到了时间/教师/教室/时长"时才多问一句
+     * —— 这类改动正是会牵连后面每一节的那种（改期、换老师）。只改备注、只改学生名单
+     * 不在这儿问：前者两边一样，后者压根不支持整串改（串范围就是按学生圈的）。
+     *
+     * 老数据（`seriesId === ""`）**不问**，只在表单里说明"这节课不属于循环串（老数据）"，
+     * 仍然走原来那条单节路径（不猜串：见 `lib/backend/version.ts` 的 v34 那条）。
+     * 状态变化（例如表单里把「已排」改成「已取消」）也不在这儿问 ——
+     * 那是单节语义，取消整串走排课页的「取消」按钮那条专门的路。
+     */
+    if (editing && lesson !== undefined) {
+      const next: SeriesPatch = {};
+      if (input.startsAt !== lesson.startsAt) next.startsAt = input.startsAt;
+      if (input.teacherId !== lesson.teacherId) next.teacherId = input.teacherId;
+      if (input.classroomId !== lesson.classroomId) next.classroomId = input.classroomId;
+      if (input.durationMinutes !== lesson.durationMinutes) {
+        next.durationMinutes = input.durationMinutes;
+      }
+      if (input.note !== lesson.note) next.note = input.note;
+      const touchesSchedule =
+        next.startsAt !== undefined ||
+        next.teacherId !== undefined ||
+        next.classroomId !== undefined ||
+        next.durationMinutes !== undefined;
+      if (touchesSchedule && (lesson.seriesId ?? "") !== "" && input.status === lesson.status) {
+        setSeriesPatch(next);
+        setPending(false);
+        return;
+      }
+    }
+
     try {
       if (editing) {
         // 编辑：id 不进 patch（服务端以路径参数为准）
@@ -250,7 +291,22 @@ export function LessonForm({
   }
 
   return (
+    <>
     <form onSubmit={onSubmit} className="px-4 py-4">
+      {/*
+        老数据（不属于循环串）：**说明原因**，而不是干脆不显示 ——
+        机构看到"别的地方有『此后所有』、这里没有"时，必须能一眼知道为什么。
+      */}
+      {editing && (lesson?.seriesId ?? "") === "" && (
+        <p className="mb-3 rounded-md border border-dashed border-ink-200 bg-ink-50 px-3 py-2 text-xs text-ink-500">
+          这节课不属于循环串（老数据）—— 保存只会改/取消<strong className="font-medium">这一节</strong>。
+          要让某个学生此后的课一起改，去学生详情页的
+          <a href="/admin/students" className="mx-1 underline">
+            这个学生此后的课
+          </a>
+          那条入口。
+        </p>
+      )}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <TextField
           label="日期"
@@ -477,6 +533,38 @@ export function LessonForm({
         ))}
       </datalist>
     </form>
+
+    {/*
+      第 2 步：**仅此一次 / 此后所有** + 确认框（v34）。
+      刻意渲染在 `<form>` **外面**：框里的按钮不该触发这个表单的提交。
+      「仅此一次」回落到本表单原来那条路（`api.lessons.update` + 乐观锁），
+      因此选"仅此一次"的行为与这一版之前**一个字都不差**。
+    */}
+    {seriesPatch !== null && lesson !== undefined && (
+      <LessonSeriesScopeDialog
+        lesson={lesson}
+        mode="lesson"
+        action="update"
+        patch={seriesPatch}
+        students={students}
+        teachers={teachers}
+        classrooms={classrooms}
+        onClose={() => setSeriesPatch(null)}
+        onSingle={async () => {
+          const input = buildInput();
+          if (input === null) return;
+          const patch: Partial<LessonInput> = { ...input };
+          delete patch.id;
+          const saved = await api.lessons.update(lesson.id, patch, { expectedVersion: version });
+          if (saved !== null) setVersion(saved.version);
+        }}
+        onDone={async () => {
+          setSeriesPatch(null);
+          await onSaved();
+        }}
+      />
+    )}
+    </>
   );
 }
 

@@ -7,6 +7,7 @@ import { DataNotice } from "@/components/admin/DataNotice";
 import { Panel } from "@/components/admin/AdminFields";
 import { LessonForm } from "@/components/admin/LessonForm";
 import { LessonSeriesForm } from "@/components/admin/LessonSeriesForm";
+import { LessonSeriesScopeDialog } from "@/components/admin/LessonSeriesScopeDialog";
 import { LessonRecordPanel } from "@/components/admin/LessonRecordPanel";
 import { PendingMakeups } from "@/components/admin/PendingMakeups";
 import { Button } from "@/components/ui/Button";
@@ -52,6 +53,12 @@ export default function AdminLessonsPage() {
   const [series, setSeries] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [recordId, setRecordId] = useState<string | null>(null);
+  /**
+   * 正在"取消"的那节课（v34）：先问「**仅此一次 / 此后所有**」，再弹确认框把
+   * "会影响哪几节"列出来 —— Apple 日历那两个选项的第二步。
+   * 取消一节课看起来是小事，"取消一串"却会动掉后面十几节，因此必须**先看得见**再确认。
+   */
+  const [cancelTarget, setCancelTarget] = useState<Lesson | null>(null);
   /**
    * 一次写操作的结果。
    *
@@ -400,7 +407,10 @@ export default function AdminLessonsPage() {
                     {canWriteLesson && lesson.status === "已排" && (
                       <button
                         type="button"
-                        onClick={() => void setStatus(lesson, "已取消")}
+                        onClick={() => {
+                          setEditingId(null);
+                          setCancelTarget(lesson);
+                        }}
                         className="text-xs text-ink-500 transition-colors hover:text-warning-600"
                       >
                         取消
@@ -475,6 +485,33 @@ export default function AdminLessonsPage() {
             onCancel={() => setEditingId(null)}
             onSaved={async () => {
               setEditingId(null);
+              await load({ quiet: true });
+            }}
+          />
+        </Panel>
+      )}
+
+      {/*
+        「仅此一次 / 此后所有」+ 确认框（v34）。
+        「仅此一次」仍然走原来那条单节路径（`api.lessons.update`）——
+        界面上多出来的那一步只影响"此后所有"。
+      */}
+      {cancelTarget !== null && (
+        <Panel className="mt-4" title="取消排课">
+          <LessonSeriesScopeDialog
+            lesson={cancelTarget}
+            mode="lesson"
+            action="cancel"
+            students={students}
+            teachers={teachers}
+            classrooms={classrooms}
+            onClose={() => setCancelTarget(null)}
+            onSingle={async () => {
+              await api.lessons.update(cancelTarget.id, { status: "已取消" });
+              setNotice({ tone: "ok", text: "已取消这一节课（只动了这一节）。" });
+            }}
+            onDone={async () => {
+              setCancelTarget(null);
               await load({ quiet: true });
             }}
           />

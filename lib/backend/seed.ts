@@ -511,5 +511,10 @@ function lesson(
     subject, form, teacherId, classroomId, studentIds, startsAt, durationMinutes, status,
     note: "",
     makeupForLessonId: "",
+    /*
+     * 示例数据里的课**不属于任何串**（v34）：它们是手写的夹具、不是"按周排出来的一串"。
+     * 与迁移对老课的口径一致 —— **不猜串**（猜错的后果是把不相关的课一起改掉）。
+     */
+    seriesId: "",
   };
 }

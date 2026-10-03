@@ -540,6 +540,20 @@ export const TEACHER_SCOPE_RULES: Record<string, TeacherScopeRule> = {
   "lessons.createSeries": "hidden",
   "lessons.suggestMoves": "hidden",
   /*
+   * **串操作**（v34，`lessons.seriesPreview` / `updateSeries` / `cancelSeries`）同样 `hidden`。
+   *
+   * 三条理由，与上面那几条同源：
+   *   1. 它们**改的是排课**（page 上"课程安排"那几行的写动作归招生与技术）；
+   *   2. `seriesPreview` 返回的冲突结论里会点名**别的教师与别的学生**
+   *      （"和 X 老师的那节课撞了"）—— 正是行级范围要挡住的东西（与 `findConflicts` 同一条）；
+   *   3. 批量动作的后果比单节大得多（一次改/取消一串），对普通教师关门的收益也更大。
+   * 这三条在角色层（`GROUP_ACCESS.actions`）是允许普通教师的，因此这里**不是死配置** ——
+   * 教师调用会走到这一层并被 403 挡住，文案由 `teacherScopeDenial` 统一给。
+   */
+  "lessons.seriesPreview": "hidden",
+  "lessons.updateSeries": "hidden",
+  "lessons.cancelSeries": "hidden",
+  /*
    * 课程分区的四个写方法与 `courses.setPartition` **刻意不在这里登记**：
    * 它们在角色层（`GROUP_ACCESS.crud`）就不给普通教师，登记成 `hidden` 是一条没人维护的
    * 假配置 —— 自检有一条断言专门盯着这种"压根轮不到这一层的条目"。

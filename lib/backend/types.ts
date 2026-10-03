@@ -1127,6 +1127,37 @@ export type Lesson = {
   note: string;
   /** 补课：指向被补的那节课；空串表示这是一节普通课。 */
   makeupForLessonId: string;
+  /**
+   * **串身份**（v34 起）：这节课属于哪一串"按周批量排出来的课"。
+   *
+   * ## 它解决什么
+   *
+   * 机构把排课工具比作 Apple 日历：「**再添加一个可以取消/修改单次排课和取消/修改该学生
+   * 后续所有排课**」—— 也就是点一节课时问「仅此一次 / 此后所有」。
+   * 要问出这句话，系统得先知道"这节课是不是某一串里的"。
+   *
+   * `seriesId` 就是那个标识：**同一批生成出来的课共用一个**（`lessons.createSeries`、
+   * 咨询「采用」那条路），由服务端用与其它实体同一套 id 生成器（`nextId`）生成。
+   * **空串表示不属于任何串** —— 一次性排课、单节补课（`lessons.createMakeup`）、
+   * 以及**所有 v33 及以前的老课**（迁移不猜串，理由见 `VERSION_NOTES[34]`）。
+   *
+   * ## ⚠️ 它不是"此后所有"的判据（这一条最容易想反）
+   *
+   * 「此后所有」处理哪些课由**业务口径**定（同一学生 + 同一科目 + 同一班型、从这一节起、
+   * 且只处理「已排（还没上）」的），**不是**按 `seriesId` 筛 —— 见
+   * `lib/backend/api.ts` 的 `seriesScopeFor`。两者对**新排的串**给出的集合是一致的
+   * （一串本来就是一回事：同科目、同班型、同一批学生）；区别在**老课**：
+   * 老课没有串身份，但机构最常用的那个场景（"这个学生不来了，此后的课都取消掉"）
+   * 恰恰要在老课上能做，因此它走学生详情页那条入口。
+   *
+   * `seriesId` 在这套逻辑里负责的是**界面那一步**：**属于串的课**才在单节课上多问
+   * 「仅此一次 / 此后所有」；老课（空串）只给「仅此一次」并说明原因。
+   *
+   * ## 边界
+   *
+   * 不参与报价、不参与课时账本、不参与冲突判定 —— 它只回答"这几节课当初是不是一起排的"。
+   */
+  seriesId: string;
 };
 
 /** 课堂记录：一节课的每个学生一条（由上课老师在课后填写）。 */
@@ -1420,7 +1451,15 @@ export type NewStudent = Omit<
 };
 export type NewTeacher = Omit<Teacher, "id" | "version">;
 export type NewClassroom = Omit<Classroom, "id" | "version">;
-export type NewLesson = Omit<Lesson, "id" | "version">;
+/**
+ * 排课入参：`id` / `version` 由服务生成。
+ *
+ * `seriesId` **可选**（与 `NewStudent.source` 同一条取舍）：单节排课、一次性补课、
+ * 脚本与自检夹具都不该被迫写一个"我不属于任何串"的空串 —— 服务层缺省补 `""`。
+ * 真正的串由 `lessons.createSeries` 与咨询「采用」两处**显式**写（见 `Lesson.seriesId`），
+ * 因此"串身份"仍然只有那两个来源，不会因为类型放宽而多出一堆各写各的。
+ */
+export type NewLesson = Omit<Lesson, "id" | "version" | "seriesId"> & { seriesId?: string };
 
 import type { StudentProfile } from "./student-profile";
 

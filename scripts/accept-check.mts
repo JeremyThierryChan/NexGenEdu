@@ -1778,6 +1778,177 @@ await check("寒暑假", "保存写了操作日志", async () => {
 });
 await check("寒暑假", "收尾：回到验收前的状态", async () => api.vacations.save(vacationsBefore), (rows: unknown[]) => rows.length === vacationsBefore.length);
 
+/* ── 11.5 排课串：「仅此一次 / 此后所有」（v34）── */
+/*
+ * 机构原话：「**再添加一个可以取消/修改单次排课和取消/修改该学生后续所有排课，
+ * 相当于就是 Apple 日历功能的全部复刻**」。
+ *
+ * 这一节是**真实后端上的完整读写一遍**（逐页验收的意义就在这里）：
+ *   建一串 → 「此后所有」整体平移时间 → **逐条读回比对** → 标一节「已上」再改一遍
+ *   （已上必须逐字节不动）→ 取消其中一节 → 再读回 → 冲突时**整体拒绝且零写入**。
+ * 数据用**这一节自己造的**学生 / 老师 / 一串课（科目「验收串课」是新的，
+ * 因此"同一学生 + 同一科目 + 同一班型"圈出来的只有这一串，断言不受别处的夹具干扰）。
+ *
+ * 收尾走测试后端的夹具通道（`/api/test-hooks/remove-fixture`）：这一串里有一节
+ * 已经「已上」、扣过课时，按产品规矩（"有账就不许删"）本来就删不掉 ——
+ * 那条护栏是对的，因此这里绕的是测试那一道门，而不是放宽产品规矩。
+ */
+const seriesRunToken = await (async (): Promise<string> => {
+  const response = await fetch(`${remoteBase()}/api/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      username: process.env.NEXGENEDU_ADMIN_USER ?? "",
+      password: process.env.NEXGENEDU_ADMIN_PASSWORD ?? "",
+    }),
+  });
+  const body = (await response.json().catch(() => ({}))) as { token?: unknown };
+  return typeof body.token === "string" ? body.token : "";
+})();
+const removeFixture = async (entity: string, id: string): Promise<boolean> => {
+  const response = await fetch(`${remoteBase()}/api/test-hooks/remove-fixture`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${seriesRunToken}` },
+    body: JSON.stringify({ entity, id }),
+  });
+  const body = (await response.json().catch(() => ({}))) as { removed?: unknown };
+  return response.ok && body.removed === true;
+};
+
+const seriesStudent = await api.students.create({
+  name: "验收排课串学生", grade: "初二", guardian: "", status: "在读", note: "", profile: {},
+  /*
+   * 科目用**既有的「围棋」**：验收那位老师登记的可带科目就是「围棋 / 初中数学」
+   * （科目对不上时每一节都会被判「教师未登记这门科目」而跳过 —— 第一版就踩了这个）。
+   * 学生是**新造的**，因此"同一学生 + 同一科目 + 同一班型"圈出来的只有这一串，
+   * 与 4.5 / 5 那几节围棋课（别的学生）不会互相干扰。
+   */
+  enrollments: [{ subject: "围棋", lessons: 12 }],
+});
+const seriesFixtureLessonIds: string[] = [];
+const seriesTeacher = await api.teachers.create({
+  name: "验收串老师", subjects: [], role: "", phone: "", active: true, years: "",
+  summary: "", bio: "", recommendation: "", order: 999, siteVisible: false,
+  origin: "后台", kind: "教师", employment: "", source: "",
+});
+const seriesInput = {
+  subject: "围棋", form: "一对一", teacherId, classroomId,
+  studentIds: [seriesStudent.id], durationMinutes: 60, status: "已排" as const,
+  note: "验收排课串", startDate: "2027-09-06", weekdays: [1], time: "14:00", count: 4,
+};
+const loadSeries = async () =>
+  (await api.lessons.listByStudent(seriesStudent.id))
+    .filter((lesson) => lesson.seriesId !== "")
+    .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+
+await check("排课串", "建一串：四节课带同一个串身份（真实 HTTP 写入）", async () => {
+  const outcome = await api.lessons.createSeries(seriesInput);
+  const rows = await loadSeries();
+  for (const lesson of rows) seriesFixtureLessonIds.push(lesson.id);
+  return { created: outcome.created, seriesId: outcome.seriesId, rows: rows.length, ids: [...new Set(rows.map((l) => l.seriesId))] };
+}, (v: { created: number; seriesId: string; rows: number; ids: string[] }) =>
+  v.created === 4 && v.rows === 4 && v.ids.length === 1 && v.ids[0] === v.seriesId && v.seriesId.startsWith("s_"));
+
+await check("排课串", "此后所有：整体平移时间 → 逐条读回比对", async () => {
+  const before = await loadSeries();
+  const anchor = before[0]!;
+  const shifted = new Date(new Date(anchor.startsAt).getTime() + 2 * 86_400_000).toISOString();
+  const outcome = await api.lessons.updateSeries({
+    lessonId: anchor.id,
+    scope: "following",
+    patch: { startsAt: shifted },
+  });
+  const after = await loadSeries();
+  return {
+    changed: outcome.changed.length,
+    // 逐条比对：每一节的新时间都必须**正好**是原来的 +2 天（整体平移，不是都设成同一时刻）
+    deltas: before.map((lesson, index) =>
+      Math.round((new Date(after[index]!.startsAt).getTime() - new Date(lesson.startsAt).getTime()) / 86_400_000),
+    ),
+    versions: after.map((lesson) => lesson.version),
+  };
+}, (v: { changed: number; deltas: number[]; versions: number[] }) =>
+  v.changed === 4 && v.deltas.join(",") === "2,2,2,2" && v.versions.every((n) => n >= 2));
+
+await check("排课串", "「已上」的课是账：改「此后所有」时逐字节不动，而且报出来", async () => {
+  const rows = await loadSeries();
+  const past = rows[1]!;
+  await api.lessons.markCompleted(past.id);
+  const beforePast = JSON.stringify((await api.lessons.get(past.id))!);
+  const anchor = rows[0]!;
+  const preview = await api.lessons.seriesPreview({ lessonId: anchor.id, scope: "following", action: "cancel" });
+  const outcome = await api.lessons.updateSeries({
+    lessonId: anchor.id,
+    scope: "following",
+    patch: { note: "验收·此后所有" },
+  });
+  return {
+    affected: preview.affected.length,
+    completed: preview.completed.length,
+    changed: outcome.changed.length,
+    reported: outcome.completed.length,
+    pastUnchanged: JSON.stringify((await api.lessons.get(past.id))!) === beforePast,
+  };
+}, (v: { affected: number; completed: number; changed: number; reported: number; pastUnchanged: boolean }) =>
+  v.affected === 3 && v.completed === 1 && v.changed === 3 && v.reported === 1 && v.pastUnchanged);
+
+await check("排课串", "取消其中一节 → 再读回（只动这一节）", async () => {
+  const rows = await loadSeries();
+  const target = rows[3]!;
+  await api.lessons.cancelSeries({ lessonId: target.id, scope: "single", reason: "验收取消" });
+  const after = await loadSeries();
+  return {
+    status: after.find((lesson) => lesson.id === target.id)?.status,
+    others: after.filter((lesson) => lesson.id !== target.id).map((lesson) => lesson.status),
+    note: after.find((lesson) => lesson.id === target.id)?.note,
+    ledger: (await api.transactions.listByEnrollment(seriesStudent.enrollments[0]!.id)).length,
+  };
+}, (v: { status: string; others: string[]; note: string; ledger: number }) =>
+  v.status === "已取消" && v.others.join(",") === "已排,已上,已排" && v.note.includes("验收取消"));
+
+await check("排课串", "冲突时**整体拒绝且零写入**，显式 skip 才只跳过节", async () => {
+  const rows = await loadSeries();
+  const first = rows.find((lesson) => lesson.status === "已排")!;
+  // 在**这一节**的时段放一节挡路课（同一位新老师 + 同一间教室）
+  const blocker = await api.lessons.create({
+    subject: "验收挡路课", form: "", teacherId: seriesTeacher.id, classroomId,
+    studentIds: [], startsAt: first.startsAt, durationMinutes: 60, status: "已排",
+    note: "验收挡路", makeupForLessonId: "",
+  });
+  seriesFixtureLessonIds.push(blocker.id);
+  const beforeBytes = JSON.stringify(await api.lessons.list());
+  let rejected = "";
+  try {
+    await api.lessons.updateSeries({ lessonId: first.id, scope: "single", patch: { teacherId: seriesTeacher.id } });
+  } catch (cause) {
+    rejected = cause instanceof Error ? cause.message : String(cause);
+  }
+  const zeroWrite = JSON.stringify(await api.lessons.list()) === beforeBytes;
+  const skipped = await api.lessons.updateSeries({
+    lessonId: first.id, scope: "following", patch: { teacherId: seriesTeacher.id }, onConflict: "skip",
+  });
+  return {
+    rejected: rejected.includes("整体没有改动"),
+    zeroWrite,
+    changed: skipped.changed.length,
+    skipped: skipped.skipped.length,
+  };
+}, (v: { rejected: boolean; zeroWrite: boolean; changed: number; skipped: number }) =>
+  v.rejected && v.zeroWrite && v.changed === 1 && v.skipped === 1);
+
+await check("排课串", "收尾：摘掉这一节造的夹具（学生 / 老师 / 课）", async () => {
+  const removed: boolean[] = [];
+  for (const id of seriesFixtureLessonIds) removed.push(await removeFixture("lessons", id));
+  removed.push(await removeFixture("students", seriesStudent.id));
+  removed.push(await removeFixture("teachers", seriesTeacher.id));
+  const left = (await api.lessons.list()).filter((lesson) =>
+    seriesFixtureLessonIds.includes(lesson.id),
+  );
+  const studentLeft = (await api.students.list()).some((item) => item.id === seriesStudent.id);
+  return { removed: removed.every(Boolean), left: left.length, studentLeft };
+}, (v: { removed: boolean; left: number; studentLeft: boolean }) =>
+  v.removed && v.left === 0 && v.studentLeft === false);
+
 /* ── 输出 ── */
 const byPage = new Map<string, Result[]>();
 for (const r of results) {

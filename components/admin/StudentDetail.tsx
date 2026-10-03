@@ -7,6 +7,8 @@ import { EnrollmentPanel } from "@/components/admin/EnrollmentPanel";
 import { HomeworkPanel } from "@/components/admin/HomeworkPanel";
 import { StudentProfileForm } from "@/components/admin/StudentProfileForm";
 import { StudentProfileView } from "@/components/admin/StudentProfileView";
+// 「这个学生此后的课」入口（v34）：一次取消/改掉 TA 后续所有课
+import { StudentFutureLessons } from "@/components/admin/StudentFutureLessons";
 import { api, type Catalog, type Classroom, type Lesson, type Student, type Teacher } from "@/lib/backend/api";
 import { remainingTotal } from "@/lib/backend/enrollment";
 import { formatDayLabel, formatTimeRange } from "@/lib/backend/format";
@@ -229,6 +231,16 @@ export function StudentDetail({
         ))}
 
       {tab === "lessons" && <StudentLessons studentId={student.id} />}
+      {/*
+        「这个学生此后的课」（v34）：机构最常用的场景 —— 学生不来了，
+        TA 此后的课一次取消/改掉。挂在「排课记录」页签下面，因为人是在那一屏里
+        看到"这个学生还有哪些课"的（`StudentFutureLessons` 自己按科目+班型分组）。
+      */}
+      {tab === "lessons" && (
+        <div className="px-4 pb-4">
+          <StudentFutureLessons student={student} onChanged={refresh} />
+        </div>
+      )}
       {tab === "homework" && <HomeworkPanel studentId={student.id} />}
       {tab === "assessments" && <AssessmentPanel studentId={student.id} />}
     </section>

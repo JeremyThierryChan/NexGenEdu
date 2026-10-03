@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 112 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 115 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -42,7 +42,7 @@ lib/backend/api.ts        服务层实现（当前 112 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 112 个方法）
+## 二、接口分组（当前 115 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -141,7 +141,9 @@ v39/v40 又把真源反成"课程库 → 内容文件"，因此"网站来的"不
 
 `students.enroll`、`students.updateEnrollment`、`students.renewEnrollment`、`students.refundEnrollment`、
 `students.adjustEnrollmentLessons`、`students.saveProfile`、`lessons.markCompleted`、
-`lessons.createMakeup`、`lessonRecords.save`、`assessments.add`、`payments.record`。
+`lessons.createMakeup`、`lessonRecords.save`、`assessments.add`、`payments.record`，
+以及**排课串**那三个（v34）：`lessons.seriesPreview`、`lessons.updateSeries`、`lessons.cancelSeries`
+（「仅此一次 / 此后所有」，见 §6.10）。
 
 这些动作「改一个数字会影响好几张表」，**不能由前端拆成多步调用**：
 
@@ -149,6 +151,7 @@ v39/v40 又把真源反成"课程库 → 内容文件"，因此"网站来的"不
 | --- | --- |
 | 建档 + 报课 | 学生档案 + N 条报课记录 + 课时流水（见 §6.3） |
 | 改报课 | 报课记录（班型 / 指定教师 / 单价 / 约定应缴 / 备注）+ **按范围**顺带更新的后续课节（见 §6.5） |
+| 改 / 取消一串排课 | 一次改（或取消）**好几节课**：要么全部成功、要么**整体不落盘**（见 §6.10） |
 | 报课 / 续费 | 报课记录 + 收款记录 + 实收累计 + 课时流水 |
 | 标记已上 | 课节状态 + 课时流水（按出勤决定扣不扣）+ 学生课时余额 |
 | 退课 / 退款 | 报课状态 + 退款记录 + 实收累计 + 历史留痕 + 课时流水（0 节，只留痕） |
@@ -815,6 +818,75 @@ api.students.saveProfile(studentId, profile, { expectedVersion: 3 })
 里面根本没有学生这一项），这个字段同样不会出门 ——「这个孩子是朋友介绍来的」是机构内部的经营信息。
 **边界**：不参与报价、不参与排课冲突判定、不参与课时账本（自检第 50 节有反向断言，与教材同一套做法）。
 
+### 6.10 排课串：仅此一次 / 此后所有（v34，机构：「相当于就是 Apple 日历功能的全部复刻」）
+
+机构原话：
+
+> 「**再添加一个可以取消/修改单次排课和取消/修改该学生后续所有排课，相当于就是 Apple 日历功能的全部复刻**」
+
+也就是点一节课时问的**那两个选项**。三个方法（都在「业务动作」组，服务端必须**一次做完**）：
+
+| 方法 | 干什么 |
+| --- | --- |
+| `lessons.seriesPreview({ lessonId, scope, action, patch?, studentId? })` | **只读**：这一下会影响什么 —— 会动到哪几节（日期 + 学生数 + 涉及的学生/教师/教室）、哪几节「已上」被排除、哪几节会撞车。界面的二次确认框显示的就是它 |
+| `lessons.updateSeries({ lessonId, scope, patch, onConflict? })` | 批量修改：`patch` 支持 `startsAt`（**整体平移**：按"这一节的新时间 − 原时间"的差量加到每一节上）/ `teacherId` / `classroomId` / `durationMinutes` / `note` |
+| `lessons.cancelSeries({ lessonId, scope, studentId?, reason? })` | 批量取消：整节取消；给了 `studentId` 则按"小组课"那条口径只把 TA 移出名单 |
+
+#### `scope` 的语义（两个选项）
+
+| `scope` | 范围 |
+| --- | --- |
+| `"single"` | **只动这一节**（与既有 `lessons.update` 的行为一致） |
+| `"following"` | 从这一节起、**同一学生 + 同一科目 + 同一班型**的课；只处理「**已排（还没上）**」的 |
+
+**⚠️ `following` 不按 `seriesId` 筛**（这一条最容易想反）。`Lesson.seriesId`（v34）是**串身份**
+（同一批按周排出来的课共用一个，`createSeries` 与咨询「采用」两处显式写；空串＝不属于任何串），
+它负责的是**界面那一步**：属于串的课才在单节课上多问「仅此一次 / 此后所有」。
+而"此后所有"真正圈哪些课由**业务口径**定 —— 因此**老课（`seriesId === ""`）也能被整串处理**：
+走学生详情页的「这个学生此后的课」那条入口（机构最常用的场景：学生不来了），
+它是机构指着某个学生说的，意图明确、不需要反推一串。
+
+#### 三条硬约束
+
+1. **过去的课一律不动**：范围内「已上」的课**报出来、一节不改**（口径：过去的课是账，
+   与「账本只追加」同一条纪律）。锚点本身就是「已上」时**直接报错**；
+2. **要么全部成功、要么整体不落盘**：
+   - 先圈范围、算好每一节的"改完之后"，再用**同一处冲突判定**（`conflictsFor`，也就是
+     `lessons.findConflicts` 的实现）逐节问一遍 —— 问的时候所有课都是改完之后的样子，
+     因此"两节都换到同一位老师"这种只在批量里才出现的撞车也算得出来；
+   - `onConflict: "reject"`（**默认**）只要有一节撞车就**整体拒绝且零写入**（逐字节）；
+   - `onConflict: "skip"` 是**显式选择**：只跳过撞车的那几节，并迭代到稳定
+     （"跳过一节"可能让另一节不再撞车）。前端**不能**把一次整串操作拆成"逐节调用 `update`"——
+     那正是"改了一半"的来源；
+   - 写入前留一份快照，任何一节写失败就**整体回滚**（不落盘）；
+3. **每一节都走既有的单条写入路径**（`writeLessonPatch`：乐观锁 + 课时复核 + 版本推进），
+   不是绕过服务层直接改字段；但批量只**一次落盘、一条日志**（逐节 `persist` 会把日志冲掉，
+   也做不到"整体不落盘"）。
+
+#### 取消的两条口径（小组课）
+
+- **不给 `studentId`**：整节取消（状态改「已取消」，`reason` 追加进备注）；
+- **给了 `studentId`**：**只把 TA 从 `studentIds` 里移出**；若去掉之后一个人都不剩，
+  才把这**整节**标成「已取消」。修改一节小组课的时间是共享的，因此改整节 ——
+  但"某一个学生不来"只影响 TA 自己。
+
+取消**不占课时、不动账本**（既有口径；`countLessons` 把已取消的排除在外），也不查冲突
+（取消只会让占用变少，不可能造出新冲突；否则一间"该时段不开放"的教室会把一次取消也拦下来）。
+
+#### 迁移（v33 → v34）
+
+老课**一律补 `seriesId: ""`，绝不猜串** —— 用"科目+老师+教室+学生+每周同一天"反推一串，
+猜错一次的后果是把**不相关的课当成一串一起改掉或取消掉**。老课因此在界面上**只能选「仅此一次」**
+并写明"这节课不属于循环串（老数据）"。⚠️ 这一步**不推课节的 `version`**（与 v30 / v33 同一条纪律）。
+
+#### 权限
+
+三个方法归「业务动作」组，与既有的批量排课 / 冲突检查**逐项一致**：角色层允许普通教师，
+但**行级范围**层是 `hidden`（`TEACHER_SCOPE_RULES`）—— `seriesPreview` 的冲突结论里会点名
+别的教师与别的学生，那正是行级范围要挡住的东西（与 `lessons.findConflicts` 同一条）。
+界面上的「取消 / 编辑」入口本身挂在 `lessons.update`（普通教师拿不到），因此教师那一侧
+连这个对话框都不会出现。
+
 ### 7. 运维与审计
 
 `exportDataset`、`exportDatabase`、`importDatabase`、`imports.apply`、`hasBackup`、`backupSlots`、`restoreBackup`、
@@ -968,7 +1040,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 2. 它会进入 `API_CONTRACT` —— 而自检要求"服务层每个方法都必须在契约里"，
    于是契约里出现一个"只有服务端才有意义"的方法，契约就不再是"页面对服务层的形状"了。
 
-**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 112 个方法，
+**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 115 个方法，
 这四条路由**刻意不登记**（它们不是服务层方法）；页面的客户端是 `lib/auth/accounts.ts`，
 与 `lib/auth/session.ts` 调 `/api/login`、`/api/session` 是同一个做法。
 自检里对它们的要求写在 `scripts/check-auth.mts` 的 [10] 节（真实 HTTP、真实写盘），

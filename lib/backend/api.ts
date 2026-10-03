@@ -1459,6 +1459,40 @@ function migrate(db: Database): Database | null {
     db.version = 33;
   }
 
+  if (db.version === 33) {
+    /*
+     * v33 → v34：课节增加「**串身份**」（`Lesson.seriesId`）。
+     *
+     * 机构原话：「**再添加一个可以取消/修改单次排课和取消/修改该学生后续所有排课，
+     * 相当于就是 Apple 日历功能的全部复刻**」—— 也就是点一节课时问
+     * 「仅此一次 / 此后所有」。要问出这句话，系统得先知道"这节课是不是某一串里的"。
+     *
+     * 这一版给课节加一个 `seriesId`：**同一批按周排出来的课共用一个**
+     * （`lessons.createSeries` 与咨询「采用」那条路显式写；空串＝不属于任何串）。
+     *
+     * ## 老课**一律补空串、绝不猜串**（这一版最重要的一个决定）
+     *
+     * "猜"在这里的诱惑极大，因为库里那些老课看起来很像一串：同一个学生、同一科目、
+     * 每周二 17:00，一连十二节。但**反推串**（科目 + 老师 + 教室 + 学生 + 每周同一天）
+     * 只要有一步对不上（中间换过老师、某节挪过时间、一次补课、两个班撞在同一个时段），
+     * 就会把**不相关的课当成一串** —— 而串操作是"此后的课一起改掉/取消掉"，
+     * 猜错的后果不是一个字段错了，是**一整批课被改走**，且机构往往当场看不出来。
+     *
+     * 因此老课**只能选「仅此一次」**，界面上明确写着"这节课不属于循环串（老数据）"。
+     * 想整串处理老课的，走**学生详情页的「这个学生此后的课」**——
+     * 那条路是机构自己指着某个学生说"TA 此后的课都取消"，意图明确、不需要猜。
+     * （口径：`seriesId` 不是「此后所有」的判据，只是**界面那一步**该不该问；
+     * 见 `types.ts` 的 `Lesson.seriesId`。）
+     *
+     * ⚠️ **这一步不推课节的 `version`**（与 v30 给教室 / 教师补字段、v33 给学生补「来源」
+     * 同一条纪律）：`version` 是**乐观锁**，它该只被**人改这节课**这件事推进。
+     * 一次数据升级顺手 +1，会让所有打开着的排课表单在下一次提交时报一次
+     * 「刚被别人改过，请刷新」—— 而其实谁都没改。
+     */
+    db.lessons = db.lessons.map((lesson) => ({ ...lesson, seriesId: "" }));
+    db.version = 34;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1632,6 +1666,25 @@ function migrate(db: Database): Database | null {
      * （见 `studentSourceIssues`）：那里是"人刚填的表单 / 脚本刚发的一次调用"，可以当场顶回去。
      */
     source: trimText(student.source),
+  }));
+
+  /*
+   * 收尾归一：课节的**串身份必须是一个字符串**（v34，与上面那几条同一条纪律：
+   * **声称的版本号不是证据**）。
+   *
+   * 一份"自称 v34"却缺 `seriesId` 的文件照样会出现 —— 手改过的导出、只跑了一半的恢复、
+   * 以及**导入**都长这样。缺了它的后果是**看得见的坏**：排课页那个「仅此一次 / 此后所有」
+   * 的判断读 `lesson.seriesId !== ""`，`undefined !== ""` 为真 → 一节**老课会被当成串里的课**，
+   * 于是界面上多问一句"此后所有"—— 而它背后没有串，这一步正是 v34 最想避免的猜。
+   * 归成空串（＝不属于任何串）是**保守**的那一侧：老课只给「仅此一次」。
+   *
+   * 这里**不做严格校验**（手改文件里写着 `seriesId: 123` 也在这一层 trim 成字符串）：
+   * 抛错会让整库读不出来（比"当成老课"坏得多）。真正的串身份由**服务端**生成，
+   * 只有 `createSeries` / 咨询「采用」两处会写（见 `Lesson.seriesId`）。
+   */
+  db.lessons = db.lessons.map((lesson) => ({
+    ...lesson,
+    seriesId: trimText(lesson.seriesId),
   }));
 
   return db.version === CURRENT_VERSION ? db : null;
@@ -2761,6 +2814,140 @@ export type SeriesOutcome = {
   first: string;
   last: string;
   plan: SeriesPlan;
+  /**
+   * 这一批课的**串身份**（v34）；一节都没建出来时是空串。
+   * 界面上"排完之后可以整串改/取消"就是靠它 —— 见 `Lesson.seriesId`。
+   */
+  seriesId: string;
+};
+
+/* ── 串操作：「仅此一次 / 此后所有」（v34，Apple 日历那两个选项）────────────────
+ *
+ * ## 口径（机构原话：「相当于就是 Apple 日历功能的全部复刻」）
+ *
+ *   - **single**：只动这一节；
+ *   - **following**：从这一节起、**同一学生 + 同一科目 + 同一班型**的课；
+ *     只处理「已排（还没上）」的，**「已上」的一律排除并报出来** ——
+ *     过去的课是账，不许被串操作改写（与"账本只追加"同一条纪律）。
+ *
+ * ⚠️ `following` 刻意**不按 `seriesId` 筛**（虽然 `seriesId` 就是为这件事加的）：
+ * 库里那些老课没有串身份，而机构最常用的场景（"这个学生不来了，此后的课都取消"）
+ * 恰恰要在老课上做。`seriesId` 负责的是**界面那一步**该不该问；
+ * 详见 `types.ts` 的 `Lesson.seriesId`。
+ */
+
+/** 串操作的适用范围：Apple 日历那两个选项。 */
+export type SeriesScope = "single" | "following";
+
+/**
+ * 批量碰到冲突时怎么办。
+ *   - `reject`（默认）：**整体拒绝、零写入** —— 先把冲突列出来让人决定；
+ *   - `skip`：跳过有冲突的那几节，其余的照做（**显式选择**，不是默认）。
+ */
+export type SeriesConflictMode = "reject" | "skip";
+
+/**
+ * `lessons.updateSeries` 的补丁：**只允许这几项**。
+ *
+ * 科目 / 学生 / 状态**刻意不在内**：它们决定课时账（谁上、上几节），
+ * 而串操作是按"同一学生 + 同一科目"圈范围的 —— 一边挪范围一边改范围会自相矛盾。
+ * 要改科目/学生就一节节改（那本来就是"换一门课"，不是"串的事"）。
+ */
+export type SeriesPatch = {
+  /** **这一节**的新开始时间（ISO）：整串按"与原时间的差量"整体平移。 */
+  startsAt?: string;
+  teacherId?: string;
+  classroomId?: string;
+  durationMinutes?: number;
+  note?: string;
+};
+
+/** 串操作预览的入参。 */
+export type SeriesPreviewInput = {
+  lessonId: string;
+  scope: SeriesScope;
+  action: "update" | "cancel";
+  /**
+   * 仅 `action: "update"` 用得上：拿这份补丁**预演**改完之后会不会撞课
+   * （不传＝按现状看这几节课之间/与别人有没有冲突）。
+   * 界面在"选完范围、还没确认"那一步要把冲突摊出来，因此它必须能预演。
+   */
+  patch?: SeriesPatch;
+  /** 仅 `action: "cancel"` 且"只取消某位学生"时用得上。 */
+  studentId?: string;
+};
+
+/** 预览/结果里的一节课（给人看的：日期 + 人数 + 谁上）。 */
+export type SeriesLessonBrief = {
+  id: string;
+  startsAt: string;
+  /** 「9月23日 周二 17:00」这样的人话。 */
+  dayLabel: string;
+  status: Lesson["status"];
+  studentIds: string[];
+  teacherId: string;
+  classroomId: string;
+};
+
+/** `lessons.updateSeries` / `lessons.cancelSeries` 的入参。 */
+export type SeriesWriteInput = {
+  lessonId: string;
+  scope: SeriesScope;
+  /** 只 `action: "cancel"`：给了就"只把这位学生移出名单"（小组课口径）。 */
+  studentId?: string;
+  /** 只 `action: "cancel"`：取消原因，追加到备注里（可空）。 */
+  reason?: string;
+};
+
+export type SeriesUpdateInput = SeriesWriteInput & {
+  patch: SeriesPatch;
+  onConflict?: SeriesConflictMode;
+};
+
+/** 串操作预览：**只读**，回答"这一下会影响什么"。 */
+export type SeriesPreview = {
+  scope: SeriesScope;
+  action: "update" | "cancel";
+  lessonId: string;
+  /** 这一节的串身份（空串＝老数据 / 一次性排课）。 */
+  seriesId: string;
+  /** 同一串一共有几节（含已上 / 已取消）。 */
+  seriesSize: number;
+  /**
+   * **这一节课上该不该弹出「仅此一次 / 此后所有」**：属于串才弹。
+   * 老数据（`seriesId === ""`）为 false，界面据此只给「仅此一次」并说明原因。
+   */
+  followingAvailable: boolean;
+  /** 不能选「此后所有」的原因（能选时为空串）—— 界面直接显示这句话。 */
+  followingUnavailableReason: string;
+  /** 会动到的课（已排、还没上、在范围内）。 */
+  affected: SeriesLessonBrief[];
+  /** 会撞车的课（`action: "update"` 才有；取消不可能造出新冲突）。 */
+  conflicts: Array<{ id: string; dayLabel: string; reason: string }>;
+  /** 范围内被排除的「已上」课（**明确报出来**，不是悄悄跳过）。 */
+  completed: SeriesLessonBrief[];
+  /** 范围内被排除的其它课（已取消等）及原因。 */
+  excluded: Array<{ id: string; dayLabel: string; reason: string }>;
+  /** 涉及到的实体（去重，给确认框写"牵动谁"）。 */
+  studentIds: string[];
+  teacherIds: string[];
+  classroomIds: string[];
+};
+
+/** 串操作的结果。 */
+export type SeriesWriteOutcome = {
+  seriesId: string;
+  scope: SeriesScope;
+  /** 真正写进去的课（写入后的样子）。 */
+  changed: SeriesLessonBrief[];
+  /** `onConflict: "skip"` 时被跳过的课（带原因）。 */
+  skipped: Array<{ id: string; dayLabel: string; reason: string }>;
+  /** 范围内被排除的「已上」课。 */
+  completed: Array<{ id: string; dayLabel: string }>;
+  /** 取消时：**整节取消**了几节。 */
+  cancelled: number;
+  /** 取消时：只是把某位学生**移出名单**了几节。 */
+  removedFrom: number;
 };
 
 /**
@@ -2931,6 +3118,365 @@ function describeConflicts(db: Database, report: ConflictReport): string {
   }
   if (report.teacherSubjectMismatch) parts.push("教师未登记这门科目");
   return parts.join("；");
+}
+
+/**
+ * **一节课的写入核心**（同步、就地改 `db`）：乐观锁 → 课时复核 → 覆盖字段 →
+ * 推进版本 → 「已上」被撤销时按流水退课时。
+ *
+ * ## 为什么单独抽出来（而不是让串操作自己写一遍）
+ *
+ * 串操作（`lessons.updateSeries` / `lessons.cancelSeries`）要**逐节走同一条写入路径**：
+ * 同一处乐观锁、同一处课时复核、同一处版本推进 —— 各写一遍的话，
+ * "批量改的课不推进版本"这类偏差只会在以后某次并发里暴露，而且很难查。
+ *
+ * 但批量又必须**一次落盘、一条日志**（逐节 `persist` 会把日志冲掉，也做不到
+ * "整体不落盘"）。因此把"改一节"这件事抽成这个函数：**它只改内存，不落盘、不写日志** ——
+ * 落盘与记日志留给调用方（单节那条路改一节写一条，批量那条路改完只写一条）。
+ *
+ * `lessons.update` 的行为一个字没变：它仍然是自己 load → 调这里 → 自己写日志 → persist。
+ */
+function writeLessonPatch(
+  db: Database,
+  lesson: Lesson,
+  patch: Partial<Omit<Lesson, "id" | "version">>,
+  options: WriteOptions = {},
+  internals: {
+    /**
+     * 跳过「课时不足」那道闸。**只有"把学生移出名单"这一种取消用它** ——
+     * 那道闸是给"把课排上去"用的，而移出学生只会让占用变少。
+     * 其余一切（乐观锁、字段覆盖、版本推进、撤销已上退课时）照走。
+     */
+    skipCreditCheck?: boolean;
+  } = {},
+): Lesson {
+  assertVersion(lesson, options.expectedVersion, `排课「${lesson.subject}」`);
+
+  const wasCompleted = lesson.status === "已上";
+  const becomesNotCompleted = patch.status !== undefined && patch.status !== "已上";
+
+  /*
+   * **改课也要过课时这一关**（不只是新建）。
+   *
+   * 不然「课时不足就不排课」有个现成的后门：新建被拦，就把旧课改成想排的
+   * 科目/学生/状态 —— 一样是排了一节课，一样是欠账。这里按**改完之后的样子**
+   * 复核（`{ ...lesson, ...patch }`），并把自己排除（见 `excludeLessonId`）。
+   *
+   * 只在改动**碰到课时三要素**（科目 / 学生 / 状态）时才查：纯粹改备注或改时间
+   * 不该被拒 —— 否则历史遗留的欠账课连备注都改不了，那是拿规则为难人。
+   */
+  const touchesCredits =
+    patch.subject !== undefined || patch.studentIds !== undefined || patch.status !== undefined;
+  if (touchesCredits && internals.skipCreditCheck !== true) {
+    const after = { ...lesson, ...patch };
+    if (after.status === "已排") {
+      const shortage = insufficientLessons(db, {
+        subject: after.subject,
+        studentIds: after.studentIds,
+        count: 1,
+        excludeLessonId: lesson.id,
+      });
+      if (shortage !== null) throw new Error(shortage.message);
+    }
+  }
+
+  /*
+   * `{ version: currentVersion }`：patch 里若夹带了 version（运行时不看类型）就用记录
+   * 自己的值盖回去 —— 否则"客户端可以自己定版本号"，乐观锁就成了摆设。
+   */
+  const currentVersion = lesson.version;
+  Object.assign(lesson, patch, { version: currentVersion });
+  // 改课就是一次写入：推进这条课节的版本（别人手上那份排课表单要过期）
+  bumpVersion(lesson);
+
+  if (wasCompleted && becomesNotCompleted) {
+    /*
+     * 撤销「已上」会把课时退回去 —— 这一步改的是**学生**那条记录的课时账，
+     * 因此顺手把那些学生的版本也推进一格（与 markCompleted 同一个道理）。
+     */
+    const refunded = new Set<string>();
+    for (const transaction of db.transactions) {
+      if (
+        transaction.lessonId !== lesson.id ||
+        transaction.kind !== "上课" ||
+        transaction.reversedAt !== ""
+      ) {
+        continue;
+      }
+      transaction.reversedAt = nowIso();
+      const enrollment = db.students
+        .flatMap((student) => student.enrollments)
+        .find((item) => item.id === transaction.enrollmentId);
+      if (enrollment !== undefined) {
+        enrollment.usedLessons = Math.max(0, enrollment.usedLessons - 1);
+        refunded.add(transaction.studentId);
+      }
+    }
+    for (const studentId of refunded) touchStudent(db, studentId);
+  }
+
+  return lesson;
+}
+
+/* ── 串操作（v34）：范围、预演、整体落盘 ─────────────────────────────────────
+ *
+ * 三块：
+ *   ① `seriesScopeFor`  —— 按口径圈出"这一下会动到哪些课"（只圈，不改）；
+ *   ② `seriesNextFor`   —— 算出每一节"改完之后"是什么样（时间整体平移）；
+ *   ③ `seriesTrialConflicts` —— 把②**暂时**写进内存，逐节问 `conflictsFor`
+ *      （＝`lessons.findConflicts` 的同一处实现），问完立刻恢复。
+ *
+ * ③ 那一步刻意"先写再问再恢复"而不是另写一套重叠判定：`conflictsFor` 的判据
+ * （相邻不算冲突、已取消不占时间、编辑自己不算冲突、教室可用时段、容量、科目）
+ * **一条都不许在这里有第二份实现**。批量里"别的课也在动"这件事也正好因此被算对：
+ * 问的时候看到的是所有课改完之后的样子。
+ */
+
+/** 预览/结果里给界面看的一节。 */
+function lessonBrief(lesson: Lesson): SeriesLessonBrief {
+  return {
+    id: lesson.id,
+    startsAt: lesson.startsAt,
+    dayLabel: describeSeriesDate(lesson.startsAt),
+    status: lesson.status,
+    studentIds: [...lesson.studentIds],
+    teacherId: lesson.teacherId,
+    classroomId: lesson.classroomId,
+  };
+}
+
+/**
+ * 取消原因写进备注（追加，不覆盖原有备注）。
+ *
+ * 为什么追加而不是替换：备注栏里往往有"本次讲二次函数"这类有用信息，
+ * 取消原因换掉它等于删了一条记录 —— 而"为什么取消"是要能查的。
+ */
+function appendCancelReason(note: string, reason: string): string {
+  const text = reason.trim();
+  if (text === "") return note;
+  const head = note.trim() === "" ? "" : `${note.trim()}；`;
+  return `${head}取消原因：${text}`;
+}
+
+/** 串范围的圈选结果。 */
+type SeriesSelection = {
+  anchor: Lesson;
+  /** 会动到的课：已排、还没上。 */
+  affected: Lesson[];
+  /** 范围内「已上」的课：**报出来但不动**（过去的课是账）。 */
+  completed: Lesson[];
+  /** 范围内被排除的其它课（已取消…）与原因。 */
+  excluded: Array<{ lesson: Lesson; reason: string }>;
+};
+
+/**
+ * 按口径圈出串操作的范围。
+ *
+ * `scope: "single"` → 只有这一节；`scope: "following"` → **同一学生 + 同一科目 +
+ * 同一班型**、从这一节起（含这一节）的课。
+ *
+ * ⚠️ 锚点必须是「已排」：`已上` 的课是账、`已取消` 的课没什么可改的 ——
+ * 两者都从这里**明确报错**，而不是悄悄放过（口径："已上的课不许被这两个方法改"）。
+ */
+function seriesScopeFor(
+  db: Database,
+  input: { lessonId: string; scope: SeriesScope; studentId?: string },
+): SeriesSelection {
+  const anchor = db.lessons.find((item) => item.id === input.lessonId);
+  if (anchor === undefined) throw new Error("这节课不存在（可能已经被删掉）—— 请刷新页面再试。");
+  if (anchor.status !== "已排") {
+    throw new Error(
+      `「${anchor.subject}」这节课现在是「${anchor.status}」，串操作只能从一节「已排（还没上）」的课发起` +
+        (anchor.status === "已上"
+          ? " —— 已经上过的课是账，不许被改写（要改它得先撤销「已上」）。"
+          : "。"),
+    );
+  }
+
+  const sameTrio = (lesson: Lesson): boolean =>
+    lesson.subject.trim() === anchor.subject.trim() &&
+    lesson.form.trim() === anchor.form.trim();
+
+  let candidates: Lesson[];
+  if (input.scope === "single") {
+    candidates = [anchor];
+  } else {
+    const from = new Date(anchor.startsAt).getTime();
+    /*
+     * "同一学生"分两种问法：
+     *   - 只取消某一位学生（`studentId`）：只圈**名单里有 TA** 的课；
+     *   - 整节取消 / 修改：圈**与锚点的学生名单有交集**的课。
+     *     锚点没有学生（咨询占位课 `studentIds: []`）时要求候选也没有学生 ——
+     *     "都没有名单"才是同一批，拿它去圈有学生的课会张冠李戴。
+     */
+    const sameStudents = (lesson: Lesson): boolean =>
+      input.studentId !== undefined
+        ? lesson.studentIds.includes(input.studentId)
+        : anchor.studentIds.length > 0
+          ? lesson.studentIds.some((id) => anchor.studentIds.includes(id))
+          : lesson.studentIds.length === 0;
+    candidates = db.lessons.filter(
+      (lesson) =>
+        sameTrio(lesson) && sameStudents(lesson) && new Date(lesson.startsAt).getTime() >= from,
+    );
+  }
+
+  const byTime = (a: Lesson, b: Lesson) => a.startsAt.localeCompare(b.startsAt);
+  const affected: Lesson[] = [];
+  const completed: Lesson[] = [];
+  const excluded: Array<{ lesson: Lesson; reason: string }> = [];
+  for (const lesson of candidates) {
+    if (lesson.status === "已上") completed.push(lesson);
+    else if (lesson.status === "已取消") excluded.push({ lesson, reason: "已经取消过了" });
+    else affected.push(lesson);
+  }
+  affected.sort(byTime);
+  completed.sort(byTime);
+  excluded.sort((a, b) => byTime(a.lesson, b.lesson));
+
+  if (input.scope === "single" && input.studentId !== undefined) {
+    const only = affected[0];
+    if (only !== undefined && !only.studentIds.includes(input.studentId)) {
+      throw new Error("这位学生不在这节课的名单里 —— 请刷新页面再试。");
+    }
+  }
+
+  return { anchor, affected, completed, excluded };
+}
+
+/**
+ * 算出某一节在串补丁下"改完之后"的字段。
+ *
+ * `startsAt` 是**整体平移**：按"这一节填的新时间 − 锚点原时间"的差量加到每一节上
+ * （不是把每一节都设成同一个时间）。其余字段逐节同值。
+ */
+function seriesNextFor(anchor: Lesson, lesson: Lesson, patch: SeriesPatch): Partial<Lesson> {
+  const next: Partial<Lesson> = {};
+  if (patch.startsAt !== undefined) {
+    const delta = new Date(patch.startsAt).getTime() - new Date(anchor.startsAt).getTime();
+    if (!Number.isFinite(delta)) throw new Error("新的开始时间格式不对。");
+    next.startsAt = new Date(new Date(lesson.startsAt).getTime() + delta).toISOString();
+  }
+  if (patch.teacherId !== undefined) next.teacherId = patch.teacherId;
+  if (patch.classroomId !== undefined) next.classroomId = patch.classroomId;
+  if (patch.durationMinutes !== undefined) {
+    const minutes = Math.trunc(patch.durationMinutes);
+    if (!Number.isFinite(minutes) || minutes < 15) throw new Error("时长至少 15 分钟。");
+    next.durationMinutes = minutes;
+  }
+  if (patch.note !== undefined) next.note = patch.note;
+  return next;
+}
+
+/**
+ * **冲突预演**：把每一节"改完之后"暂时写进内存 → 逐节跑 `conflictsFor` → 恢复原样。
+ *
+ * 为什么要"写进去再问"：批量里别的课也在动，而 `conflictsFor` 只看库里当前的课。
+ * 先全部写进去再逐节问，问到的就是"所有课都改完之后"的真实样子 ——
+ * 既保留了「编辑自己不算冲突」（`conflictsFor` 用 `input.id` 排除自己），
+ * 也顺带算对了"两节都换到同一位老师"这种只在批量里才出现的撞车。
+ *
+ * **恢复是必须的**：`db` 就是读时视图（cache），"改而不落盘"不等于"没改过" ——
+ * 不恢复的话，一次被拒绝的串操作会把内存里的课改成半截。
+ */
+function seriesTrialConflicts(
+  db: Database,
+  entries: Array<{ lesson: Lesson; next: Partial<Lesson> }>,
+): Map<string, string> {
+  const originals = entries.map((entry) => clone(entry.lesson));
+  for (const entry of entries) Object.assign(entry.lesson, entry.next);
+  const result = new Map<string, string>();
+  try {
+    for (const entry of entries) {
+      const after = { ...entry.lesson, ...entry.next } as Lesson;
+      const report = conflictsFor(db, {
+        id: entry.lesson.id,
+        subject: after.subject,
+        form: after.form,
+        teacherId: after.teacherId,
+        classroomId: after.classroomId,
+        studentIds: after.studentIds,
+        startsAt: after.startsAt,
+        durationMinutes: after.durationMinutes,
+        status: after.status,
+        note: after.note,
+        makeupForLessonId: after.makeupForLessonId,
+      });
+      if (report.total > 0) result.set(entry.lesson.id, describeConflicts(db, report));
+    }
+  } finally {
+    entries.forEach((entry, index) => {
+      const original = originals[index];
+      if (original !== undefined) Object.assign(entry.lesson, original);
+    });
+  }
+  return result;
+}
+
+/** 按上面那套口径算出一次串操作的预览（只读）。 */
+function seriesPreviewFor(db: Database, input: SeriesPreviewInput): SeriesPreview {
+  const { anchor, affected, completed, excluded } = seriesScopeFor(db, {
+    lessonId: input.lessonId,
+    scope: input.scope,
+    studentId: input.studentId,
+  });
+
+  /*
+   * 冲突只在 `action: "update"` 上算：**取消不可能造出新冲突** ——
+   * 整节取消是把这节课从时间上拿掉、移除学生是让占用变少，两者都只会让冲突变少。
+   * 反过来若在这里跑完整判定，一间"该时段不开放"的教室会把一次**取消**也拦下来，
+   * 那是拿排课规则为难一件根本不影响排课的事。
+   */
+  let conflicts: Map<string, string>;
+  if (input.action === "update") {
+    conflicts = seriesTrialConflicts(
+      db,
+      affected.map((lesson) => ({
+        lesson,
+        next: seriesNextFor(anchor, lesson, input.patch ?? {}),
+      })),
+    );
+  } else {
+    conflicts = new Map<string, string>();
+  }
+
+  const shared = input.scope === "single" ? affected : [...affected, ...completed];
+  const uniqueOf = (values: string[]): string[] =>
+    [...new Set(values)].filter((value) => value !== "");
+
+  return {
+    scope: input.scope,
+    action: input.action,
+    lessonId: anchor.id,
+    seriesId: anchor.seriesId,
+    seriesSize:
+      anchor.seriesId === ""
+        ? 1
+        : db.lessons.filter((lesson) => lesson.seriesId === anchor.seriesId).length,
+    followingAvailable: anchor.seriesId !== "",
+    followingUnavailableReason:
+      anchor.seriesId !== ""
+        ? ""
+        : "这节课不属于循环串（老数据），只能改/取消这一节；要处理这个学生此后的课，去学生详情页的「这个学生此后的课」。",
+    affected: affected.map(lessonBrief),
+    conflicts: [...conflicts].map(([id, reason]) => {
+      const lesson = db.lessons.find((item) => item.id === id);
+      return {
+        id,
+        dayLabel: lesson === undefined ? id : describeSeriesDate(lesson.startsAt),
+        reason,
+      };
+    }),
+    completed: completed.map(lessonBrief),
+    excluded: excluded.map((entry) => ({
+      id: entry.lesson.id,
+      dayLabel: describeSeriesDate(entry.lesson.startsAt),
+      reason: entry.reason,
+    })),
+    studentIds: uniqueOf(shared.flatMap((lesson) => lesson.studentIds)),
+    teacherIds: uniqueOf(shared.map((lesson) => lesson.teacherId)),
+    classroomIds: uniqueOf(shared.map((lesson) => lesson.classroomId)),
+  };
 }
 
 /**
@@ -4858,7 +5404,12 @@ const localApi = {
         count: 1,
       });
       if (shortage !== null) throw new Error(shortage.message);
-      return lessonCollection.create(input);
+      /*
+       * 单节排课**不属于任何串**（v34）：`seriesId` 缺省空串。
+       * 串身份只有两个来源 —— 按周批量排课（`createSeries`）与咨询「采用」——
+       * 因此这里不猜、也不允许界面顺手塞一个（连带影响串操作的范围）。
+       */
+      return lessonCollection.create({ ...input, seriesId: trimText(input.seriesId) });
     },
 
     /**
@@ -4885,71 +5436,12 @@ const localApi = {
       const lesson = db.lessons.find((item) => item.id === id);
       if (lesson === undefined) return null;
 
-      assertVersion(lesson, options.expectedVersion, `排课「${lesson.subject}」`);
-
-      const wasCompleted = lesson.status === "已上";
-      const becomesNotCompleted =
-        patch.status !== undefined && patch.status !== "已上";
-
       /*
-       * **改课也要过课时这一关**（不只是新建）。
-       *
-       * 不然「课时不足就不排课」有个现成的后门：新建被拦，就把旧课改成想排的
-       * 科目/学生/状态 —— 一样是排了一节课，一样是欠账。这里按**改完之后的样子**
-       * 复核（`{ ...lesson, ...patch }`），并把自己排除（见 `excludeLessonId`）。
-       *
-       * 只在改动**碰到课时三要素**（科目 / 学生 / 状态）时才查：纯粹改备注或改时间
-       * 不该被拒 —— 否则历史遗留的欠账课连备注都改不了，那是拿规则为难人。
+       * 校验与字段覆盖走**与串操作同一处**的写入核心（`writeLessonPatch`）：
+       * 乐观锁、课时复核、版本推进、"撤销已上退课时"只有一份实现。
+       * 这里多出来的只有"落盘 + 记一条日志"（串操作是批量改完只写一条）。
        */
-      const touchesCredits =
-        patch.subject !== undefined || patch.studentIds !== undefined || patch.status !== undefined;
-      if (touchesCredits) {
-        const after = { ...lesson, ...patch };
-        if (after.status === "已排") {
-          const shortage = insufficientLessons(db, {
-            subject: after.subject,
-            studentIds: after.studentIds,
-            count: 1,
-            excludeLessonId: id,
-          });
-          if (shortage !== null) throw new Error(shortage.message);
-        }
-      }
-
-      /*
-       * `{ version: currentVersion }`：patch 里若夹带了 version（运行时不看类型）就用记录
-       * 自己的值盖回去 —— 否则"客户端可以自己定版本号"，乐观锁就成了摆设。
-       */
-      const currentVersion = lesson.version;
-      Object.assign(lesson, patch, { version: currentVersion });
-      // 改课就是一次写入：推进这条课节的版本（别人手上那份排课表单要过期）
-      bumpVersion(lesson);
-
-      if (wasCompleted && becomesNotCompleted) {
-        /*
-         * 撤销「已上」会把课时退回去 —— 这一步改的是**学生**那条记录的课时账，
-         * 因此顺手把那些学生的版本也推进一格（与 markCompleted 同一个道理）。
-         */
-        const refunded = new Set<string>();
-        for (const transaction of db.transactions) {
-          if (
-            transaction.lessonId !== id ||
-            transaction.kind !== "上课" ||
-            transaction.reversedAt !== ""
-          ) {
-            continue;
-          }
-          transaction.reversedAt = nowIso();
-          const enrollment = db.students
-            .flatMap((student) => student.enrollments)
-            .find((item) => item.id === transaction.enrollmentId);
-          if (enrollment !== undefined) {
-            enrollment.usedLessons = Math.max(0, enrollment.usedLessons - 1);
-            refunded.add(transaction.studentId);
-          }
-        }
-        for (const studentId of refunded) touchStudent(db, studentId);
-      }
+      writeLessonPatch(db, lesson, patch, options);
 
       /*
        * 这个方法是**自定义覆盖**了通用集合的 update（为了处理课时撤销），
@@ -5003,6 +5495,11 @@ const localApi = {
      * 把课塞进已被占用的时间，事后要一节节去查；宁可少排一节并说清楚原因。
      *
      * 一次落盘、只写一条日志（与批量导入同一纪律：日志上限 500 条，逐节写会冲掉历史）。
+     *
+     * **这一批课共用一个「串身份」**（v34）：`seriesId` 在循环**外面**生成一次，
+     * 因此串操作（`lessons.updateSeries` / `lessons.cancelSeries`）能认出它们是"一批"。
+     * 注意它**只在真的有课建出来时**才有意义 —— 全被冲突挡掉时不会有人持有这个 id，
+     * 也就不该凭空多出一个空串的串（返回里的 `seriesId` 于是是空串）。
      */
     async createSeries(input: SeriesInput): Promise<SeriesOutcome> {
       await delay();
@@ -5011,6 +5508,7 @@ const localApi = {
 
       const created: Lesson[] = [];
       const skipped: Array<{ startsAt: string; dayLabel: string; reason: string }> = [];
+      const seriesId = nextId("s");
 
       for (const item of plan.items) {
         if (!item.ok) {
@@ -5030,6 +5528,7 @@ const localApi = {
           status: input.status,
           note: input.note,
           makeupForLessonId: "",
+          seriesId,
         };
         db.lessons.push(lesson);
         created.push(lesson);
@@ -5053,6 +5552,283 @@ const localApi = {
         first: created[0]?.startsAt ?? "",
         last: created[created.length - 1]?.startsAt ?? "",
         plan,
+        seriesId: created.length > 0 ? seriesId : "",
+      });
+    },
+
+    /**
+     * **串操作 · 预览**（只读）。机构原话：「**相当于就是 Apple 日历功能的全部复刻**」。
+     *
+     * 回答一个问题：**这一下会影响什么**（机构系统的既有纪律：危险动作要先看得见）。
+     * 界面上的二次确认框显示的就是它：会动到几节、分别是哪几天、牵动哪些学生/教师/教室、
+     * 哪几节撞车、哪几节是「已上」被排除在外。
+     *
+     * 它与 `updateSeries` / `cancelSeries` **共用同一处圈范围的口径**
+     * （`seriesScopeFor`）与**同一处冲突判定**（`conflictsFor`）—— 因此
+     * "预览说会影响 5 节、真做的时候只动了 3 节"不会发生。
+     *
+     * ⚠️ 老数据（`seriesId === ""`）返回 `followingAvailable: false` 与一句原因：
+     * 界面上**不给「此后所有」**，只给「仅此一次」（口径 3）。
+     * 但要处理老课上"这个学生此后的课"，走学生详情页那条入口（见 `Lesson.seriesId`）。
+     */
+    async seriesPreview(input: SeriesPreviewInput): Promise<SeriesPreview> {
+      await delay();
+      return clone(seriesPreviewFor(load(), input));
+    },
+
+    /**
+     * **串操作 · 修改**（`scope: "single" | "following"`）。
+     *
+     * 补丁只有时间 / 教师 / 教室 / 时长 / 备注（见 `SeriesPatch`）——
+     * 科目与学生不在内：它们决定课时账，而串范围正是按它们圈的。
+     *
+     * ## 三条硬约束
+     *
+     * 1. **过去的课一律不动**：范围内「已上」的课**报出来、一节不改**（口径：
+     *    过去的课是账，与"账本只追加"同一条纪律）；锚点本身就是「已上」时直接报错。
+     * 2. **要么全部成功、要么整体不落盘**：
+     *       - 先圈范围、算好每一节的"改完之后"，再用**同一处冲突判定**（`conflictsFor`）
+     *         逐节问一遍（问的时候所有课都是改完之后的样子，因此批量内部撞车也算得出来）；
+     *       - `onConflict: "reject"`（默认）只要有一节撞车就**整体拒绝且零写入**；
+     *         `onConflict: "skip"` 是**显式选择**：只跳过撞车的那几节（迭代到稳定，
+     *         因为"跳过一节"可能让另一节不再撞车）；
+     *       - 写入前留一份快照，任何一节写失败就**整体回滚**（不落盘）。
+     * 3. **每一节都走既有的单条写入路径**（`writeLessonPatch`：乐观锁 + 课时复核 +
+     *    版本推进），不是绕过服务层直接改字段；但批量只**一次落盘、一条日志**
+     *    （逐节 persist 会把日志冲掉，也做不到"整体不落盘"）。
+     */
+    async updateSeries(input: SeriesUpdateInput): Promise<SeriesWriteOutcome> {
+      await delay();
+      const db = load();
+      const mode: SeriesConflictMode = input.onConflict === "skip" ? "skip" : "reject";
+      const patch: SeriesPatch = input.patch ?? {};
+      if (Object.keys(patch).length === 0) {
+        throw new Error("没有要改的内容 —— 至少给一项（时间 / 教师 / 教室 / 时长 / 备注）。");
+      }
+
+      const { anchor, affected, completed } = seriesScopeFor(db, {
+        lessonId: input.lessonId,
+        scope: input.scope,
+      });
+
+      /*
+       * 逐节的"改完之后"。注意**先算完再写**：算不出来的（时间格式错、时长太短）
+       * 在这一步就抛错，此时一个字段都还没动过。
+       */
+      const entries = affected.map((lesson) => ({
+        lesson,
+        next: seriesNextFor(anchor, lesson, patch),
+      }));
+
+      const skipped: Array<{ id: string; dayLabel: string; reason: string }> = [];
+      let keep = entries;
+      if (entries.length > 0) {
+        if (mode === "reject") {
+          const conflicts = seriesTrialConflicts(db, entries);
+          if (conflicts.size > 0) {
+            const listed = entries
+              .filter((entry) => conflicts.has(entry.lesson.id))
+              .map((entry) => ({
+                id: entry.lesson.id,
+                dayLabel: describeSeriesDate(entry.lesson.startsAt),
+                reason: conflicts.get(entry.lesson.id) ?? "",
+              }));
+            throw new Error(
+              `整体没有改动：这一批里有 ${listed.length} 节会撞课 —— ` +
+                listed
+                  .slice(0, 3)
+                  .map((item) => `${item.dayLabel}（${item.reason}）`)
+                  .join("；") +
+                (listed.length > 3 ? `；…另有 ${listed.length - 3} 节` : "") +
+                `。改时间 / 换老师 / 换教室，或明确选择"跳过冲突的那几节"。`,
+            );
+          }
+        } else {
+          /*
+           * 显式跳过：迭代到稳定。
+           *
+           * 为什么不能只算一遍：把撞车的那几节退回原样之后，**别的课可能因此不再撞车**
+           * （原来撞的是"将要被改走的那一节"）；反过来，退回的那一节留在原时间，
+           * 又可能和"改完之后"的另一节撞上。因此每一轮都把当前还留着的课
+           * 全部按"改完之后"试一遍，谁撞车谁出局，直到没有新的出局者。
+           */
+          while (keep.length > 0) {
+            const conflicts = seriesTrialConflicts(db, keep);
+            if (conflicts.size === 0) break;
+            const dropped = keep.filter((entry) => conflicts.has(entry.lesson.id));
+            for (const entry of dropped) {
+              skipped.push({
+                id: entry.lesson.id,
+                dayLabel: describeSeriesDate(entry.lesson.startsAt),
+                reason: conflicts.get(entry.lesson.id) ?? "",
+              });
+            }
+            keep = keep.filter((entry) => !conflicts.has(entry.lesson.id));
+          }
+        }
+      }
+
+      const changed: Lesson[] = [];
+      if (keep.length > 0) {
+        /*
+         * **整体不落盘的保证**：写入前留一份快照（整个数组的深拷贝）。
+         * 正常路径下上面已经把该拒的都拒完了，这里不会抛；但"写了一半"在这类
+         * 批量动作里是**代价最大**的一种失败（机构看到的是"改了 3 节、剩下 4 节没动"，
+         * 而且没有任何提示），因此宁可多留一份快照。
+         */
+        const snapshot = db.lessons.map((lesson) => clone(lesson));
+        try {
+          for (const entry of keep) {
+            /*
+             * 写的是**上面算好的那一份** `entry.next`，不能在这里重算 ——
+             * `seriesNextFor` 的平移差量是"这一节的新时间 − 锚点原时间"，
+             * 而**锚点自己也在这一批里**：写完第一节之后锚点的 `startsAt` 就变了，
+             * 再拿它去算后面几节的差量会得到 0（＝后面几节原地不动），
+             * 而返回里还说"改了 4 节"。这个 bug 是逐页验收抓到的（它比对的是每一节的时间差）。
+             */
+            writeLessonPatch(db, entry.lesson, entry.next);
+            changed.push(entry.lesson);
+          }
+        } catch (cause) {
+          db.lessons = snapshot;
+          throw cause;
+        }
+
+        writeLog(db, {
+          entity: "排课",
+          action: "改一串",
+          targetId: input.lessonId,
+          summary:
+            `修改「${anchor.subject}」${input.scope === "single" ? "仅此一节" : "此后所有"}：` +
+            `共 ${changed.length} 节（${Object.keys(patch).join("、")}）` +
+            (completed.length > 0 ? `；已上 ${completed.length} 节未动` : "") +
+            (skipped.length > 0 ? `；跳过 ${skipped.length} 节：与已有安排冲突` : ""),
+        });
+        persist(db);
+      }
+
+      return clone({
+        seriesId: anchor.seriesId,
+        scope: input.scope,
+        changed: changed.map(lessonBrief),
+        skipped,
+        completed: completed.map((lesson) => ({
+          id: lesson.id,
+          dayLabel: describeSeriesDate(lesson.startsAt),
+        })),
+        cancelled: 0,
+        removedFrom: 0,
+      });
+    },
+
+    /**
+     * **串操作 · 取消**（`scope: "single" | "following"`）。
+     *
+     * ## 两种取消（口径见机构原话与"小组课"那条约定）
+     *
+     *   - **不给 `studentId`**：整节取消（状态改「已取消」，可带 `reason` 记进备注）；
+     *   - **给了 `studentId`**：小组课口径 —— **只把 TA 从名单里移出**；
+     *     若去掉之后一个人都不剩，才把这**整节**标成「已取消」（并保留空名单：
+     *     这节课已经没有学生了）。
+     *
+     * 修改一节小组课的时间是共享的，因此改整节；但"某一个学生不来"只影响 TA 自己 ——
+     * 两条口径分开正是为了不让"取消一位学生"把别人的课也取消掉。
+     *
+     * ## 三条与 `updateSeries` 一样的硬约束
+     *
+     *   1. 「已上」的课一节不动、**报出来**；锚点是「已上」时直接报错；
+     *   2. 要么全成、要么整体不落盘（写入前留快照，失败整体回滚）；
+     *   3. 每节走同一条写入路径（`writeLessonPatch`），批量只一次落盘、一条日志。
+     *
+     * ## 为什么取消**不查冲突**
+     *
+     * 取消只会让占用变少，不可能造出新冲突；而且真按完整判定来，
+     * 一间"该时段不开放"的教室会把一次取消也拦下来 —— 那是拿排课规则为难
+     * 一件根本不影响排课的事（理由同 `seriesPreviewFor`）。
+     *
+     * ## 课时与账本
+     *
+     * 取消**不占课时**、**不动账本**（既有口径，`countLessons` 也把已取消的排除在外）。
+     * 这里改的都是「已排」的课，因此不会触发"撤销已上退课时"那条流水逻辑。
+     */
+    async cancelSeries(input: SeriesWriteInput): Promise<SeriesWriteOutcome> {
+      await delay();
+      const db = load();
+      const reason = (input.reason ?? "").trim();
+      const { anchor, affected, completed } = seriesScopeFor(db, {
+        lessonId: input.lessonId,
+        scope: input.scope,
+        studentId: input.studentId,
+      });
+
+      const changed: Lesson[] = [];
+      let cancelled = 0;
+      let removedFrom = 0;
+
+      if (affected.length > 0) {
+        const snapshot = db.lessons.map((lesson) => clone(lesson));
+        try {
+          for (const lesson of affected) {
+            if (input.studentId !== undefined) {
+              const rest = lesson.studentIds.filter((id) => id !== input.studentId);
+              writeLessonPatch(
+                db,
+                lesson,
+                {
+                  studentIds: rest,
+                  ...(rest.length === 0 ? { status: "已取消" as const } : {}),
+                  ...(reason === "" ? {} : { note: appendCancelReason(lesson.note, reason) }),
+                },
+                {},
+                /*
+                 * **跳过课时不足那道闸**：它是给"把课排上去"用的（多加一个学生＝多占一节），
+                 * 而"移出一个学生"只会让占用变少、不可能造成欠账。不跳过的话，
+                 * 一节历史遗留的欠账课会连"某个学生退出"都改不了。
+                 * 乐观锁、校验、版本推进仍然走同一条路径。
+                 */
+                { skipCreditCheck: true },
+              );
+              if (rest.length === 0) cancelled += 1;
+              else removedFrom += 1;
+            } else {
+              writeLessonPatch(db, lesson, {
+                status: "已取消",
+                ...(reason === "" ? {} : { note: appendCancelReason(lesson.note, reason) }),
+              });
+              cancelled += 1;
+            }
+            changed.push(lesson);
+          }
+        } catch (cause) {
+          db.lessons = snapshot;
+          throw cause;
+        }
+
+        writeLog(db, {
+          entity: "排课",
+          action: "取消一串",
+          targetId: input.lessonId,
+          summary:
+            `取消「${anchor.subject}」${input.scope === "single" ? "仅此一节" : "此后所有"}：` +
+            `整节取消 ${cancelled} 节` +
+            (removedFrom > 0 ? `、把 1 位学生移出名单 ${removedFrom} 节` : "") +
+            (completed.length > 0 ? `；已上 ${completed.length} 节未动` : "") +
+            (reason === "" ? "" : `（原因：${reason}）`),
+        });
+        persist(db);
+      }
+
+      return clone({
+        seriesId: anchor.seriesId,
+        scope: input.scope,
+        changed: changed.map(lessonBrief),
+        skipped: [],
+        completed: completed.map((lesson) => ({
+          id: lesson.id,
+          dayLabel: describeSeriesDate(lesson.startsAt),
+        })),
+        cancelled,
+        removedFrom,
       });
     },
 
@@ -5228,6 +6004,12 @@ const localApi = {
         status: "已排",
         note: input.note.trim() === "" ? "补课" : input.note.trim(),
         makeupForLessonId: original.id,
+        /*
+         * 补课是**单独一节**、不属于任何串（v34）：它跟原课不是"同一批排出来的"，
+         * 时间多半也不是原来的那个（补课常常挪到别的时间）——
+         * 把它挂进原课的串，会让"此后所有"顺手改掉一节补课。
+         */
+        seriesId: "",
       };
 
       db.lessons.push(created);
@@ -6510,6 +7292,12 @@ const localApi = {
       }
 
       const lessonIds: string[] = [];
+      /*
+       * 这一批咨询课**共用一个串身份**（v34）：机构"采用某个方案"排出来的就是
+       * 一串按周重复的课，之后家长说要停，正是"此后所有"最典型的用场。
+       * 与 `createSeries` 一样，id 在循环**外面**生成一次。
+       */
+      const inquirySeriesId = nextId("s");
       for (const date of dates) {
         const startsAt = new Date(
           date.getFullYear(),
@@ -6534,6 +7322,7 @@ const localApi = {
           status: "已排",
           note: `咨询安排 · ${inquiry.studentName}`,
           makeupForLessonId: "",
+          seriesId: inquirySeriesId,
         };
         db.lessons.push(lesson);
         lessonIds.push(lesson.id);
