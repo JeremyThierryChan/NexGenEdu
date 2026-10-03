@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { assetPath } from "@/lib/site/asset-path";
 import type { SiteBrand } from "@/lib/types/site";
 import { cn } from "@/lib/utils/cn";
 
@@ -29,15 +30,21 @@ type LogoProps = {
  */
 export function Logo({ brand, tone = "dark", className }: LogoProps) {
   const mark = (
-    // 静态导出的站点不需要 next/image 的优化管线（next.config 里也是 unoptimized）
+    /*
+     * ⚠️ `src` 必须走 `assetPath()`：线上是子路径部署（`/NexGenEdu/`），
+     * 写死 `/logo.png` 会让浏览器去域名根找 → **线上 404、页头空白**，
+     * 而本地（无前缀）一切正常 —— 这个错正是 2026-10 让 GitHub Pages 白跑两次的那个。
+     * 详见 `lib/site/asset-path.ts` 的文件头。
+     */
+    // 静态导出的站点不走 next/image 的优化管线（next.config 里是 unoptimized）
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src="/logo.png"
+      src={assetPath("/logo.png")}
       alt=""
       width={512}
       height={386}
       className="h-10 w-auto"
-      // 图不大且是页头第一屏元素，优先加载（避免"先说文字、再冒出 logo"的跳动）
+      // 页头第一屏元素，优先加载（避免"先说文字、再冒出 logo"的跳动）
       fetchPriority="high"
     />
   );

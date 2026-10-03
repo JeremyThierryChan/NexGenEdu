@@ -8,6 +8,7 @@ import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
 import { getFeaturedContent } from "@/lib/data/featured";
 import { getCasesContent } from "@/lib/data/pages";
+import { assetPath } from "@/lib/site/asset-path";
 import {
   getHomeContent,
   getHomeSectionHeadings,
@@ -305,7 +306,13 @@ export default function HomePage() {
                   </div>
                 ) : (
                   <Image
-                    src={`/images/${room.value}`}
+                    /*
+                     * `assetPath()` 不能省：线上是子路径部署（`/NexGenEdu/`），
+                     * 而 `next/image` 在 `unoptimized`（本仓库就是）下**不会**加前缀 ——
+                     * 现在这段因为"还没有教室照片"而没渲染出来，一旦机构放了照片，
+                     * 写死的 `/images/…` 在线上就是 404。详见 `lib/site/asset-path.ts`。
+                     */
+                    src={assetPath(`/images/${room.value}`)}
                     alt={room.title}
                     width={640}
                     height={480}

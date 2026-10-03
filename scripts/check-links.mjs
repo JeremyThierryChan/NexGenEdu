@@ -65,12 +65,23 @@ for (const file of files) {
   for (const match of html.matchAll(/href="([^"]+)"/g)) {
     const href = decodeEntities(match[1]);
     if (!href.startsWith("/") || href.startsWith("//")) continue;
+    /*
+     * 路径里可能带**查询串**（Next 给元数据图标自动加的 `?<hash>`，见 `app/icon.png`）
+     * 与**锚点**（`#section`）—— 两者都不是文件名的一部分，**必须先剥掉再判断与解析**。
+     *
+     * 2026-10 的事故（GitHub Pages 因此两次没发布）：原先只剥了 `#`，于是
+     * `icon.png?4ee030f5…` 没能被"静态资源"那条跳过，被当成页面去找 → 186 项假失败
+     * → 流水线最后一步 `Check internal links` 失败 → 产物根本没上传，
+     * 加 logo 的两次提交都没能上线（本地跑 check:links 时没有子路径、也没带哈希，
+     * 所以一直是绿的 —— 这也是"本地全绿 ≠ CI 全绿"的一次实例）。
+     */
+    const [beforeFragment, fragment] = href.split("#");
+    const [rawPath] = beforeFragment.split("?");
     // 静态资源不是页面
-    if (/\.(css|js|m?js|png|jpe?g|svg|ico|webp|txt|xml|json|woff2?)$/.test(href.split("#")[0])) continue;
+    if (/\.(css|js|m?js|png|jpe?g|svg|ico|webp|txt|xml|json|woff2?)$/.test(rawPath)) continue;
 
     checked += 1;
 
-    const [rawPath, fragment] = href.split("#");
     const withoutBase = rawPath.startsWith(basePath) && basePath !== ""
       ? rawPath.slice(basePath.length) || "/"
       : rawPath;

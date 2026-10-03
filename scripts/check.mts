@@ -221,6 +221,7 @@ import {
   type HolidayDay,
 } from "@/lib/backend/holidays";
 import { remainingOf, remainingTotal, subjectsSummary } from "@/lib/backend/enrollment";
+import { assetPath } from "@/lib/site/asset-path";
 import { CURRENT_VERSION, VERSION_NOTES } from "@/lib/backend/version";
 import {
   bandsForTargets,
@@ -16519,6 +16520,83 @@ if (dailySkip !== "") {
     __useDailyBackupFiles(null);
     rmSync(snapDir, { recursive: true, force: true });
   }
+}
+
+console.log(
+  "\n=== 55. 线上是子路径部署：资源地址必须带前缀（机构：「为什么 github pages 上的页面还没有 logo」）===",
+);
+
+/*
+ * ## 事故：加了 logo 之后 GitHub Pages **两次都没发布**
+ *
+ * `Deploy to GitHub Pages` 挂在最后一步 `Check internal links`（186 项失败）→ 产物根本没上传
+ * → 线上一直是加 logo 之前那一版。两个**互相独立**的原因，这一节把两条都钉住：
+ *
+ *   ① `scripts/check-links.mjs` 没剥掉 `?<hash>`：Next 给元数据图标加的
+ *      `icon.png?4ee0…` / `apple-icon.png?6671…` 因此没被"静态资源"那条跳过，
+ *      被当成页面去找 → 186 项**假失败**（每页两次 × 93 页）；
+ *   ② 页头 logo 写死 `/logo.png`（根路径绝对地址）：线上在 `/NexGenEdu/` 子路径下，
+ *      浏览器会去域名根找 → **真 404、页头空白**。这一条**本地永远看不出来**
+ *      （`check` / `build` / `check:links` 都不看 `<img src>`，本地又没有前缀），
+ *      所以只能靠"源码里不许写死根路径"这条扫描兜住。
+ *
+ * 结论：**资源路径前缀只有一处实现**（`lib/site/asset-path.ts` 的 `assetPath`）。
+ * 顺带记下为什么不用 `next/image`：本仓库 `images.unoptimized = true`，
+ * 这个模式下它不走默认加载器、**不会加前缀**（实测产物仍是 `/logo.png` 外加一条同样没前缀的 preload）。
+ */
+{
+  const rootUrl = new URL("../", import.meta.url);
+  const readText = (relative: string): string => readFileSync(new URL(relative, rootUrl), "utf8");
+  /** 剥掉注释再扫：注释里常写着反例（`<img src="/logo.png">`），不能误伤 */
+  const stripComments = (text: string): string =>
+    text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  // ① assetPath 本身：四种形态
+  const savedBasePath = process.env.NEXT_PUBLIC_BASE_PATH;
+  process.env.NEXT_PUBLIC_BASE_PATH = "/NexGenEdu";
+  eq("assetPath：有子路径时要加前缀（线上就是这个形态）", assetPath("/logo.png"), "/NexGenEdu/logo.png");
+  process.env.NEXT_PUBLIC_BASE_PATH = "NexGenEdu/";
+  eq("assetPath：前后斜杠没写全也能归一", assetPath("logo.png"), "/NexGenEdu/logo.png");
+  delete process.env.NEXT_PUBLIC_BASE_PATH;
+  eq("assetPath：没有子路径时原样（本地开发）", assetPath("/logo.png"), "/logo.png");
+  process.env.NEXT_PUBLIC_BASE_PATH = "/";
+  eq('assetPath：只有 "/" 视同没有前缀', assetPath("/logo.png"), "/logo.png");
+  if (savedBasePath === undefined) delete process.env.NEXT_PUBLIC_BASE_PATH;
+  else process.env.NEXT_PUBLIC_BASE_PATH = savedBasePath;
+
+  // ② 全库扫描：组件与页面里不许再出现写死的根路径资源
+  const sources: string[] = [];
+  for (const dir of ["components", "app", "lib/site"]) {
+    for (const entry of readdirSync(new URL(dir, rootUrl), { recursive: true }) as string[]) {
+      const file = `${dir}/${entry}`;
+      if (/\.(tsx?|mts)$/.test(file) && !file.endsWith("lib/site/asset-path.ts")) sources.push(file);
+    }
+  }
+  const offenders: string[] = [];
+  for (const file of sources) {
+    const code = stripComments(readText(file));
+    for (const match of code.matchAll(/src=\{?["`]\//g)) offenders.push(`${file} → ${match[0]}`);
+  }
+  ok(
+    '组件与页面里没有写死的根路径资源（`src="/…"` 这类线上会 404，必须走 assetPath）',
+    offenders.length === 0,
+    offenders.join(" | "),
+  );
+
+  // ③ 页头 logo 与教室照片这两处确实走了 assetPath（不是碰巧躲过扫描）
+  const logoCode = stripComments(readText("components/layout/Logo.tsx"));
+  ok("页头 logo 的 src 走 assetPath", logoCode.includes('assetPath("/logo.png")'));
+  const homeCode = stripComments(readText("app/(site)/page.tsx"));
+  ok(
+    "首页教室照片的 src 走 assetPath（那一段现在虽未渲染，机构一放照片就会用到）",
+    homeCode.includes("assetPath(`/images/"),
+  );
+
+  // ④ 链接校验自己的修正：必须剥掉查询串（否则图标会造成 186 项假失败）
+  ok(
+    "站内链接校验会剥掉 `?<hash>` 再判断与解析（本次事故的直接原因）",
+    readText("scripts/check-links.mjs").includes('.split("?")'),
+  );
 }
 
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
