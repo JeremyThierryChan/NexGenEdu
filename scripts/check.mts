@@ -18720,5 +18720,92 @@ console.log("\n=== 61. 评价卡片也加「任课老师」：与案例同一套
 }
 
 
+console.log("\n=== 62. 评价卡片按内容高度错开：多列布局取代等高 grid（纯样式）===");
+
+/*
+ * 机构原话：
+ *
+ * > 「**每列卡片的高度左右卡片不需要完全相同，可以错开**」
+ *
+ * 指的是 `/cases` 上的**评价卡片**（「学生评价 / 家长评价」两块）。
+ * 现状是 CSS grid：同一行的两张卡被默认拉伸成一样高（`align-items: stretch`），
+ * 长短不一的评价看着别扭。这一版把它换成**多列布局（masonry 效果）**。
+ *
+ * ## 这一节守什么
+ *
+ *   - 容器用**多列**（`sm:columns-2`），不再用等高 grid；
+ *   - 每张卡 `break-inside-avoid`（否则会被从中间劈到下一列）+ `mb-4`
+ *     （多列布局里 `gap` 只管横向，纵向间距必须自己给）；
+ *   - **没有**任何"拉伸等高"的东西（`h-full` / `items-stretch` 都不在）；
+ *   - 卡片内部（署名 / 科目 / 补充 / 任课老师 / 双语切换）与案例那块折叠列表
+ *     **一个字没动**；
+ *   - 注释里写明了**顺序取舍**（列优先：先填满第一列再第二列 —— 第 2 条跑到左列第二条）
+ *     与"更在意行序时"的替代方案（`grid … items-start`）。
+ *
+ * 这是**纯样式**改动：不碰内容文件、不碰数据库、不碰字段，因此没有迁移、没有 §编号里的
+ * "补空串"那一类断言（`site:export -- --check` 也不受影响）。
+ */
+{
+  const root62 = new URL("../", import.meta.url);
+  const read62 = (file: string): string => readFileSync(new URL(file, root62), "utf8");
+  /** 去掉注释再查源码（这一版刻意在注释里写了旧的 grid 写法与取舍说明，那些不算代码）。 */
+  const strip62 = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  const casesSource62 = read62("app/(site)/cases/page.tsx");
+  const casesCode62 = strip62(casesSource62);
+
+  ok("评价卡片容器改成了**多列布局**（`sm:columns-2`）",
+    casesCode62.includes('<div className="mt-4 sm:columns-2 sm:gap-4">'));
+  ok("每张卡 `break-inside-avoid`（否则一张卡会被从中间劈到下一列）",
+    casesCode62.includes("break-inside-avoid"));
+  ok("卡片之间有**纵向**间距（`mb-4` —— 多列布局里 gap 只给横向，纵向必须自己补）",
+    casesCode62.includes('className="mb-4 break-inside-avoid rounded-lg border border-ink-200 bg-white p-5"'));
+  ok("纵向间距是**每张卡统一**的 `mb-4`（不是只给偶数 / 第二张加外边距去造错开）",
+    (casesCode62.match(/className="mb-4 break-inside-avoid /g) ?? []).length === 1 &&
+      !casesCode62.includes("even:") &&
+      !casesCode62.includes("odd:"));
+  ok("**没有**任何「把某一列整体下推 / 只改一张卡」的东西（`first:` / `odd:` / `even:` / "
+      + "`nth-` / `translate-y-*` 都不在）—— 那会把两列顶部弄歪",
+    !casesCode62.includes("first:") &&
+      !casesCode62.includes("odd:") &&
+      !casesCode62.includes("even:") &&
+      !casesCode62.includes("nth-") &&
+      !casesCode62.includes("translate-y-"));
+  ok("**不再**是等高 grid（旧的 `mt-4 grid gap-4 sm:grid-cols-2` 一个字都不剩）",
+    !casesCode62.includes("mt-4 grid gap-4 sm:grid-cols-2") &&
+      !casesCode62.includes("grid gap-4 sm:grid-cols-2"));
+  ok("**没有**把卡片拉伸等高的东西（`h-full` / `items-stretch` / `place-items-stretch` 都不在）",
+    !casesCode62.includes("h-full") &&
+      !casesCode62.includes("items-stretch") &&
+      !casesCode62.includes("place-items-stretch"));
+  ok("窄屏仍是一列（多列只在 `sm:` 断点起效，手机上就是普通堆叠 + `mb-4` 的间距）",
+    casesCode62.includes("sm:columns-2") && !casesCode62.includes("columns-1"));
+  ok("**案例那块折叠列表一个字没动**（仍是单列堆叠 `space-y-4`、每例一个 `<details>`）",
+    casesCode62.includes('contentClassName="space-y-4"') &&
+      (casesCode62.match(/<details\b/g) ?? []).length === 1);
+  ok("卡片内部一样没动（署名 / 科目 / 补充 / 任课老师 / 双语切换都还在）",
+    casesCode62.includes("item.author") &&
+      casesCode62.includes("item.subject") &&
+      casesCode62.includes("item.description") &&
+      casesCode62.includes("item.teacher") &&
+      casesCode62.includes("<ReviewQuote"));
+  ok("两组共用同一处容器写法（源码里只有一处 `sm:columns-2 sm:gap-4`，运行时每组一个容器 —— "
+      + "「学生评价 / 家长评价」都按多列排；家长那组只有 1 条 → 自然单列）",
+    casesCode62.includes("REVIEW_GROUPS.map(") &&
+      (casesCode62.match(/sm:columns-2 sm:gap-4/g) ?? []).length === 1);
+  ok("注释里写明了**顺序取舍**：多列是列优先（先填满第一列、再第二列），"
+      + "第 2 条会跑到左列第二条而不是右列第一条",
+    casesSource62.includes("列优先") && casesSource62.includes("先填满第一列"));
+  ok("注释里给出了「更在意行序」时的替代方案（`grid … items-start`）",
+    casesSource62.includes("items-start"));
+  ok("注释里写明了「**顶部对齐是这套写法的天然结果，不要用偏移去做错开**」"
+      + "（免得以后有人为了错落给第 2、4 张卡加 `mt-*`，把两列顶部弄歪）",
+    casesSource62.includes("顶部对齐是这个写法的天然结果") &&
+      casesSource62.includes("不要用偏移去做错开") &&
+      casesSource62.includes("每一列的第一张卡都从"));
+}
+
+
 console.log(`\n=== 结果：${failures === 0 ? "全部通过" : `${failures} 项失败`} ===`);
 process.exit(failures === 0 ? 0 : 1);
