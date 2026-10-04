@@ -295,8 +295,12 @@ export type ReviewsContent = PageIntro & {
  * 迟早会出现"页面上有这一组、校验不认这个值"这种对不上的情况。
  */
 export const REVIEW_GROUPS = [
-  { key: "家长", label: "家长评价" },
+  /*
+   * 顺序**就是页面上的顺序**（机构 2026-10：「**学生评价放在家长评价之前**」）。
+   * 改这一行会同时改：前台的块顺序、后台下拉的候选顺序 —— 三处口径仍然只此一份。
+   */
   { key: "学生", label: "学生评价" },
+  { key: "家长", label: "家长评价" },
 ] as const;
 
 export type ReviewGroup = (typeof REVIEW_GROUPS)[number]["key"];
