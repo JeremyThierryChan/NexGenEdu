@@ -15,7 +15,7 @@ import path from "node:path";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetDir = path.join(root, "data", "site");
-const names = ["content", "pricing", "faq", "cases", "schedule", "featured"];
+const names = ["content", "pricing", "faq", "cases", "reviews", "schedule", "featured"];
 
 // 独立的同步时间戳文件：每次同步都不同，用于强制打包器重新编译。
 // 放在单独文件且未纳入版本库，避免每次同步都修改内容文件造成提交噪音。

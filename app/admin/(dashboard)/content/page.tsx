@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { PageHeading } from "@/components/ui/PageHeading";
 import { Button } from "@/components/ui/Button";
-import { Panel, TextAreaField, TextField } from "@/components/admin/AdminFields";
+import { Panel, SelectInput, TextAreaField, TextField } from "@/components/admin/AdminFields";
 import { DataNotice } from "@/components/admin/DataNotice";
 import { LoadFailure } from "@/components/admin/LoadFailure";
 import { ActionNoticeView } from "@/components/admin/ActionNotice";
@@ -14,6 +14,7 @@ import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
 import { api, type SiteContent } from "@/lib/backend/api";
 import { SITE_COPY_KEYS, SITE_COPY_LABELS } from "@/lib/backend/site-copy-model";
 import { SiteCopyEditor } from "@/components/admin/SiteCopyEditor";
+import { REVIEW_GROUPS } from "@/lib/types/site";
 import type {
   SiteCase,
   SiteCasesPage,
@@ -23,6 +24,8 @@ import type {
   SiteFaqPage,
   SiteFeaturedCourse,
   SiteFeaturedPage,
+  SiteReview,
+  SiteReviewsPage,
 } from "@/lib/backend/api";
 import { FeaturedCoursesEditor } from "@/components/admin/FeaturedCoursesEditor";
 
@@ -82,6 +85,7 @@ export default function AdminContentPage() {
   const casesPage: SiteCasesPage | null = content?.casesPage ?? null;
   const featuredPage: SiteFeaturedPage | null = content?.featuredPage ?? null;
   const faqPage: SiteFaqPage | null = content?.faqPage ?? null;
+  const reviewsPage: SiteReviewsPage | null = content?.reviewsPage ?? null;
   /** 正在编辑哪一块页面文案（五块共用一套编辑器，用页签切换）。 */
   const [copyKey, setCopyKey] = useState<SiteCopyKey>("brand");
   const copyBlock: SiteCopyBlock | null = content?.copy?.[copyKey] ?? null;
@@ -121,6 +125,60 @@ export default function AdminContentPage() {
   function editFeaturedPage(next: SiteFeaturedPage): void {
     setContent((prev) => (prev === null ? prev : { ...prev, featuredPage: next }));
     notice.clear();
+  }
+
+  /** 改家长 / 学生评价草稿（整份一起交，与案例 / 常见问题同一套做法）。 */
+  function editReviewsPage(next: SiteReviewsPage): void {
+    setContent((prev) => (prev === null ? prev : { ...prev, reviewsPage: next }));
+    notice.clear();
+  }
+
+  /** 改一条评价的某个字段（分组 / 署名 / 科目 / 正文 / 补充）。 */
+  function updateReview(index: number, patch: Partial<SiteReview>): void {
+    if (reviewsPage === null) return;
+    editReviewsPage({
+      ...reviewsPage,
+      reviews: reviewsPage.reviews.map((item, i) => (i === index ? { ...item, ...patch } : item)),
+    });
+  }
+
+  function addReview(): void {
+    if (reviewsPage === null) return;
+    // id 留空：服务端保存时生成；分组给个默认值（下拉里那两个之一）
+    editReviewsPage({
+      ...reviewsPage,
+      reviews: [
+        ...reviewsPage.reviews,
+        { id: "", group: REVIEW_GROUPS[0].key, quote: "", author: "", subject: "", description: "" },
+      ],
+    });
+  }
+
+  function removeReview(index: number): void {
+    if (reviewsPage === null) return;
+    const target = reviewsPage.reviews[index];
+    if (
+      !window.confirm(
+        `删除评价「${target?.author === "" || target === undefined ? "（未填署名）" : target.author}」？`,
+      )
+    ) {
+      return;
+    }
+    editReviewsPage({
+      ...reviewsPage,
+      reviews: reviewsPage.reviews.filter((_item, i) => i !== index),
+    });
+  }
+
+  function moveReview(index: number, delta: -1 | 1): void {
+    if (reviewsPage === null) return;
+    const swap = index + delta;
+    if (swap < 0 || swap >= reviewsPage.reviews.length) return;
+    const next = [...reviewsPage.reviews];
+    const moved = next[index]!;
+    next[index] = next[swap]!;
+    next[swap] = moved;
+    editReviewsPage({ ...reviewsPage, reviews: next });
   }
 
   function updateCase(id: string, patch: Partial<SiteCase>): void {
@@ -182,12 +240,26 @@ export default function AdminContentPage() {
     notice.clear();
     try {
       const saved = await notice.run(async () =>
-        await api.site.saveBlocks({ casesPage, featuredPage, faqPage, copy: content.copy }),
+        await api.site.saveBlocks({
+          casesPage,
+          featuredPage,
+          faqPage,
+          copy: content.copy,
+          /*
+           * 评价块：**后端版本太旧（读不到这一块）时不交上去**。
+           * 旧后端不认识 `reviewsPage`，交上去会被静默忽略 ——
+           * 那正是"看着保存成功、其实没存"的假成功，宁可这一次不保存它，
+           * 页面上也已经写明"读不到评价（后端版本可能太旧）"。
+           */
+          ...(reviewsPage === null ? {} : { reviewsPage }),
+        }),
       );
       if (saved !== null) setContent(saved);
       notice.succeed(
         `已保存学生案例 ${casesPage.cases.length} 条、特色课程 ${countFeatured(featuredPage.courses)} 门、` +
-          `常见问题 ${countFaq(faqPage.groups)} 条。` +
+          `常见问题 ${countFaq(faqPage.groups)} 条` +
+          (reviewsPage === null ? "" : `、家长与学生评价 ${reviewsPage.reviews.length} 条`) +
+          "。" +
           "下一次构站（npm run build，且那台机器连着后端）网站就会按这份内容出。",
       );
     } catch {
@@ -198,7 +270,7 @@ export default function AdminContentPage() {
   const dirtyHint = useMemo(
     () =>
       "保存后网站要**重新构站**才更新（`npm run build`）；构站那台机器连不上后端时，" +
-      "网站整体用 data/site/cases.md 那份模版。",
+      "网站整体用 data/site/*.md 那份模版（案例与评价分别是 cases.md / reviews.md）。",
     [],
   );
 
@@ -429,6 +501,198 @@ export default function AdminContentPage() {
             ，首页下方那块「学生案例」也取自同一份数据。**请勿编造**：写真实的过程与数字，
             姓名用「初二 李同学」这类称呼（页面底部会显示上面那句页脚提示）。
           </p>
+        </div>
+      </Panel>
+
+      {/*
+        家长 / 学生评价（v35 起在库里）：同一页（/cases）里、案例之后那一块。
+        分「家长 / 学生」两组，**页面上不折叠**（评价短，直接看得见更有用）。
+        保存按钮就在这一块上 —— 与案例 / 常见问题等一起提交，服务端各写各的块。
+        ⚠️ 写真实评价（可隐去姓名）：**请勿编造**，页面上会显示下面那句页脚提示。
+      */}
+      <Panel
+        className="mb-8"
+        title="家长与学生评价"
+        description="网站「学生案例」页里那块「家长与学生怎么说」：分家长 / 学生两组，评价短、页面上不折叠。写真实评价（可隐去姓名），请勿编造。"
+        actions={
+          canWrite && reviewsPage !== null ? (
+            <Button variant="outline" size="sm" onClick={addReview}>
+              新增评价
+            </Button>
+          ) : undefined
+        }
+      >
+        <div className="px-4 py-4">
+          {reviewsPage === null ? (
+            <p className="text-sm text-ink-500">
+              读不到评价（后端版本可能太旧）：新增区块要重启后端才会生效，重启后再回到这一页。
+            </p>
+          ) : (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <TextField
+                  label="页眉小字"
+                  value={reviewsPage.heading.eyebrow}
+                  onChange={(event) =>
+                    editReviewsPage({
+                      ...reviewsPage,
+                      heading: { ...reviewsPage.heading, eyebrow: event.target.value },
+                    })
+                  }
+                  disabled={!canWrite}
+                />
+                <TextField
+                  label="区块标题"
+                  value={reviewsPage.heading.title}
+                  onChange={(event) =>
+                    editReviewsPage({
+                      ...reviewsPage,
+                      heading: { ...reviewsPage.heading, title: event.target.value },
+                    })
+                  }
+                  disabled={!canWrite}
+                />
+                <TextField
+                  label="页脚提示"
+                  hint="例如「评价均经家长/学生同意后发布」。留空则不显示"
+                  value={reviewsPage.notice}
+                  onChange={(event) => editReviewsPage({ ...reviewsPage, notice: event.target.value })}
+                  disabled={!canWrite}
+                />
+              </div>
+              <div className="mt-3">
+                <TextAreaField
+                  label="区块说明"
+                  rows={2}
+                  value={reviewsPage.heading.description}
+                  onChange={(event) =>
+                    editReviewsPage({
+                      ...reviewsPage,
+                      heading: { ...reviewsPage.heading, description: event.target.value },
+                    })
+                  }
+                  disabled={!canWrite}
+                />
+              </div>
+
+              <p className="mt-3 text-xs text-ink-500">
+                共 {reviewsPage.reviews.length} 条评价（
+                {REVIEW_GROUPS.map(
+                  (group) =>
+                    `${group.key} ${String(reviewsPage.reviews.filter((item) => item.group === group.key).length)} 条`,
+                ).join(" / ")}
+                ）。一条都没有时，网站上显示「评价整理中」—— 那是正常状态，不要用示例文字凑数。
+              </p>
+
+              {reviewsPage.reviews.length === 0 ? (
+                <p className="mt-3 rounded-md border border-dashed border-ink-300 px-4 py-6 text-sm text-ink-500">
+                  还没有评价。点右上角「新增评价」加一条真实评价（可隐去姓名）——
+                  **请勿编造**：没写过的评价不要挂上去，宁可就先空着。
+                </p>
+              ) : (
+                <ul className="mt-4 space-y-4">
+                  {reviewsPage.reviews.map((item, index) => (
+                    <li
+                      key={item.id === "" ? `new-review-${String(index)}` : item.id}
+                      className="rounded-md border border-ink-200 bg-white px-3 py-3"
+                    >
+                      <div className="flex flex-wrap items-end gap-2">
+                        <div className="min-w-56 flex-1">
+                          <TextField
+                            label="署名"
+                            hint="形如「初二 李同学家长」（可隐去姓名）"
+                            value={item.author}
+                            onChange={(event) => updateReview(index, { author: event.target.value })}
+                            disabled={!canWrite}
+                          />
+                        </div>
+                        <div className="w-40">
+                          <SelectInput
+                            label="分组"
+                            options={REVIEW_GROUPS.map((group) => ({
+                              value: group.key,
+                              label: group.label,
+                            }))}
+                            value={item.group}
+                            onChange={(event) => updateReview(index, { group: event.target.value })}
+                            disabled={!canWrite}
+                          />
+                        </div>
+                        <div className="min-w-40 flex-1">
+                          <TextField
+                            label="科目"
+                            hint="可留空"
+                            value={item.subject}
+                            onChange={(event) => updateReview(index, { subject: event.target.value })}
+                            disabled={!canWrite}
+                          />
+                        </div>
+                        {canWrite && (
+                          <span className="flex items-center gap-1 pb-1">
+                            <button
+                              type="button"
+                              disabled={index === 0}
+                              onClick={() => moveReview(index, -1)}
+                              className="rounded-sm border border-ink-200 px-1.5 py-0.5 text-[11px] text-ink-500 hover:border-ink-300 disabled:opacity-40"
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              disabled={index === reviewsPage.reviews.length - 1}
+                              onClick={() => moveReview(index, 1)}
+                              className="rounded-sm border border-ink-200 px-1.5 py-0.5 text-[11px] text-ink-500 hover:border-ink-300 disabled:opacity-40"
+                            >
+                              ↓
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => removeReview(index)}
+                              className="rounded-sm border border-danger-100 px-1.5 py-0.5 text-[11px] text-danger-600 hover:border-danger-600"
+                            >
+                              删除
+                            </button>
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="mt-3">
+                        <TextAreaField
+                          label="评价正文"
+                          hint="家长 / 学生的原话；一条一段"
+                          rows={3}
+                          value={item.quote}
+                          onChange={(event) => updateReview(index, { quote: event.target.value })}
+                          disabled={!canWrite}
+                        />
+                      </div>
+                      <div className="mt-3">
+                        <TextAreaField
+                          label="补充"
+                          hint="可留空；写了会显示在署名下方"
+                          rows={2}
+                          value={item.description}
+                          onChange={(event) => updateReview(index, { description: event.target.value })}
+                          disabled={!canWrite}
+                        />
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+
+          {canWrite && reviewsPage !== null && (
+            <div className="mt-4 flex items-center gap-3 border-t border-ink-100 pt-4">
+              <Button disabled={notice.pending} onClick={() => void save()}>
+                {notice.pending ? "保存中…" : "保存评价"}
+              </Button>
+              <span className="text-xs text-ink-500">
+                与上面的学生案例、常见问题、特色课程**一起提交**（同一份「网站内容」草稿）。
+              </span>
+            </div>
+          )}
         </div>
       </Panel>
 

@@ -425,6 +425,19 @@ export type SiteContent = {
    * 网站构站时按库出。
    */
   casesPage: SiteCasesPage;
+
+  /**
+   * 家长与学生评价（`/cases` 页里、案例列表之后那一块）。
+   *
+   * 与案例 / 常见问题同一个理由搬进库（v35）：评价是**要经常加、经常改**的对外文案
+   * （机构原话：「添加一些学生和家长的评价的区域，内容手动添加到前端」——
+   * 已确认口径是**进后台**、不是写死在前端代码里）。
+   *
+   * ⚠️ 与案例 / 常见问题的一处**刻意的不同**：迁移给老库补的是
+   * **标题骨架 + 空条目**，不灌内容文件里那几条"体例示例" ——
+   * 那几条是给机构看的写法样例，把样例当评价发到线上就等于编造评价（见 `VERSION_NOTES[35]`）。
+   */
+  reviewsPage: SiteReviewsPage;
 };
 
 /**
@@ -482,6 +495,50 @@ export type SiteFaqItem = {
   id: string;
   question: string;
   answer: string;
+};
+
+/**
+ * 网站「家长与学生评价」块（`/cases` 页里、案例列表之后那一块）。
+ *
+ * 形状与 `SiteCasesPage` / `SiteFaqPage` 完全一致（标题区 + 一条提示 + 一组记录），
+ * 因此保存、导出、取数三处都复用同一套写法。搬进库的理由也同一条：
+ * 机构要自己加评价（v35），留在 `data/site/reviews.md` 里改一次要动文件再构站。
+ *
+ * ⚠️ **绝不能编造**：库里这几条是机构自己填的真实评价（或空着），
+ * 内容文件里那几条是**标注清楚的体例示例**，两者不是一回事。
+ */
+export type SiteReviewsPage = {
+  heading: SiteHeading;
+  /** 页面底部那条提示（例如「评价均经家长/学生同意后发布」）。允许空。 */
+  notice: string;
+  reviews: SiteReview[];
+};
+
+/** 口径里的名字（"块"）；与 `SiteReviewsPage` 是同一个类型。 */
+export type SiteReviewsBlock = SiteReviewsPage;
+
+/** 一条家长 / 学生评价。 */
+export type SiteReview = {
+  /** id：由服务生成，稳定不变（日志、增删、上下移都按它认人）。 */
+  id: string;
+  /** 分组：只能是 `家长` 或 `学生`（取值口径见 `lib/types/site.ts` 的 `REVIEW_GROUPS`）。 */
+  group: string;
+  /** 评价正文（原话）。 */
+  quote: string;
+  /** 署名，例如「初二 李同学家长」。 */
+  author: string;
+  /** 科目；允许空。 */
+  subject: string;
+  /**
+   * 补充说明；允许空。
+   *
+   * ⚠️ **不叫 `note`**：在本项目里 `note` 这个键名专指**内部备注**
+   * （课程备注 / 教师备注），公开数据里有一条断言按精确名禁掉它
+   * （见 `scripts/check.mts` 的「公开数据里没有内部备注字段（note）」）——
+   * 评价的这一栏是**要显示给家长看的公开文案**，因此与
+   * `SiteCopyGroup.description` 用同一个名字、同一个理由。
+   */
+  description: string;
 };
 
 /* ── 页面文案块（五块共用一套模型） ──────────────────────────────────────── */

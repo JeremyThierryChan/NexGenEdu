@@ -80,7 +80,7 @@ lib/backend/api.ts        服务层实现（当前 115 个方法）；数据一�
 | 寒暑假段 | `vacations.list` · `vacations.save` | 机构每年手动录入的假期起止（按学段）。它决定「哪几天按假期作息」= 与周末同一组时段；判定在 `lib/backend/calendar-plan.ts`（优先级：寒暑假 > 调休上班日 > 法定假日 > 周末/工作日）。与维度表一样只做「读整份 + 存整份」 |
 | 开放矩阵 | `offers.list` · `offers.save` | 本机构开放的组合（学科 × 内容模块 × 班型）。**稀疏存储**：只有机构表过态的才有行，因此「开放 / 明确关闭 / 没设过」是三件事。批量勾选（整行 / 整列 / 整个学段）是页面上的纯函数 `applyDecision`，不另设接口 —— 否则「批量」的口径会散在服务端好几处 |
 | 课程分区 | `coursePartitions.list` · `coursePartitions.create` · `coursePartitions.update` · `coursePartitions.reorder` · `coursePartitions.remove` | 课程库的分组结构（栏目 → 子栏目，也是网站课程页的栏目）。删除**有课 / 有子栏目就拒绝**；`reorder` 一次交一组的完整顺序 |
-| 网站内容 | `site.publicContent` · `site.saveContent` · `site.saveBlocks` | `saveContent` 保存课程正文/教师页标题/报价文案（技术管理员）；`saveBlocks` 保存**课程正文以外**的块（目前是学生案例，招生老师也能改）—— 两个方法各写各的块，互不覆盖 |
+| 网站内容 | `site.publicContent` · `site.saveContent` · `site.saveBlocks` | `saveContent` 保存课程正文/教师页标题/报价文案（技术管理员）；`saveBlocks` 保存**课程正文以外**的块（学生案例 / 特色课程 / 常见问题 / **家长与学生评价（保存评价，v35）** / 页面文案，招生老师也能改）—— 两个方法各写各的块，互不覆盖 |
 
 - 服务端用一套 REST 即可：`GET` 列表、`GET` 单项、`POST` 新建、`PATCH` 修改、`DELETE` 删除；
 - **id 由服务端生成**，前端只读；
@@ -300,7 +300,7 @@ v39/v40 又把真源反成"课程库 → 内容文件"，因此"网站来的"不
 | --- | --- |
 | 教师：姓名 / 职务 / 科目 / 教龄 / 简介 / 详细介绍 / 推荐理由 / 顺序 / 类型 / 在职 | 教师**电话**、教师课时费分成（内部成本口径） |
 | 课程：课程名 / 栏目 / 子栏目 / 班型 / 状态 / 卡片路径 / 标签 / 顺序 / 一句话 / 网站形态 | 课程备注（内部备注） |
-| 课程页正文（学科 → 学段小节）、报价页文案 | 学生与家长联系方式、报课记录、课时、收款与退款、课时流水、咨询线索、操作日志 |
+| 课程页正文（学科 → 学段小节）、报价页文案、学生案例、特色课程、常见问题、**家长与学生评价（`reviewsPage`，v35）**、页面文案块 | 学生与家长联系方式、报课记录、课时、收款与退款、课时流水、咨询线索、操作日志 |
 
 为什么按白名单**构造**而不是挑着删：以后给教师加一个字段（比如紧急联系人），
 "挑着删"的写法会**默认漏出去**，"白名单"的写法默认不外泄 —— 失败方向必须是安全的那一个。
@@ -336,6 +336,35 @@ v39/v40 又把真源反成"课程库 → 内容文件"，因此"网站来的"不
 人看到的是"课程也没保存上"，真正的原因却查不到。服务端照旧一律拒。
 「卡片指向哪些小节」的命中规则也只有一份（同文件的 `bandsForTargets` / `cardTargets`），
 后台的两处编辑界面、课程清单上的「网站正文」按钮与 `scripts/check.mts` 的自检都调它。
+
+**改内容（课程正文以外）：`site.saveBlocks(blocks)`**（逐块覆盖）—— 后台「网站内容」页用它，
+`blocks` 是 `Partial<Pick<SiteContent, "casesPage" | "featuredPage" | "faqPage" | "reviewsPage" | "copy">>`，
+**只写这次交上来的块**（没交的块原样保留，因此两个页面各改一块不会互相覆盖）。返回**保存之后的整份网站内容**。
+
+| | |
+| --- | --- |
+| 鉴权 | **技术管理员 + 招生老师**（`lib/auth/roles.ts` 的 `"site.saveBlocks"`；普通教师与财务管理员只能看） |
+| 校验 | 各块各管各的：`validateCasesPage` / `validateFeaturedPage` / `validateFaqPage` / `validateReviewsPage` / `validateCopyBlock`，**都不含** `site.saveContent` 那条"课程正文至少要有一个学科"（否则空库里课程正文还没导入时连一条案例都存不进去） |
+| 日志 | 一次保存写一条操作日志，summary 里逐块报数（`学生案例 N 条 / 特色课程 N 门 / 常见问题 N 条 / 家长与学生评价 N 条 / 页面文案 N 块`） |
+| 乐观锁 | **整块覆盖，没有记录级 `version`**（与案例 / 常见问题同一口径：草稿是整份读出来的，冲突判定按"这一块整体"） |
+
+**保存评价（v35）** 并入的就是这个方法（**没有**另开 `site.saveReviews`）：同一个页面、同一组权限、
+同一套整块覆盖口径 —— 再开一个方法只会多一处"权限要对齐"的地方。
+`reviewsPage` 的形状是 `{ heading: { eyebrow, title, description }, notice, reviews: SiteReview[] }`，
+`SiteReview = { id, group, quote, author, subject, description }`（`id` 留空＝新增，由服务端 `nextId("review")` 生成）。
+
+| 校验（`validateReviewsPage`） | 为什么 |
+| --- | --- |
+| `quote`（正文）非空 | 正文空了页面上就是一张只有署名的空卡片 |
+| `author`（署名）非空 | 署名空了就是"没有人说过的一句话" |
+| `group` ∈ `家长` / `学生`（`lib/types/site.ts` 的 `REVIEW_GROUPS`） | 页面按这两组渲染；认不出的值两边都不进、那条评价凭空消失 |
+| 非空 `id` 不得重名 | 重名会让两条评价在日志 / 删除里认成同一条 |
+
+⚠️ **允许一条评价都没有**（那是机构还没给真实文字的**正确状态**，页面显示「评价整理中」）——
+绝不能拿 `data/site/reviews.md` 里那几条**体例示例**顶上：迁移（v34 → v35）给老库补的也是
+**标题骨架 + 空条目**，不灌示例（灌进去等于机构上线那天就挂出几条没说过、也没同意的"评价"）。
+`description` 这一栏**刻意不叫 `note`**：本项目里 `note` 专指内部备注（课程备注 / 教师备注），
+公开数据里有一条按精确名禁掉它的断言。
 
 ### 6.1 按周批量排课（`lessons.planSeries` / `lessons.createSeries`）
 

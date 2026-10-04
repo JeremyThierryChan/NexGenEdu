@@ -63,6 +63,8 @@ import {
   getCasesContentFromTemplate,
   getFaqContent,
   getFaqContentFromTemplate,
+  getReviewsContent,
+  getReviewsContentFromTemplate,
   getScheduleContent,
 } from "@/lib/data/pages";
 import {
@@ -242,6 +244,7 @@ import {
   backendFaqContent,
   backendFeaturedContent,
   backendPricingData,
+  backendReviewsContent,
   backendSnapshot,
   backendTeachersPage,
   siteContentSource,
@@ -9466,7 +9469,7 @@ console.log("\n=== 27. 特色课程进库（v20：机构要求「特色课程也
     new URL("../app/admin/(dashboard)/content/page.tsx", import.meta.url), "utf8");
   ok("「网站内容」页挂了特色课程编辑器，并且与案例一起保存",
     contentPage.includes("FeaturedCoursesEditor") &&
-    /saveBlocks\(\{ casesPage, featuredPage, faqPage, copy: content.copy \}\)/.test(contentPage));
+    /saveBlocks\(\{[\s\S]*?casesPage,[\s\S]*?featuredPage,[\s\S]*?faqPage,[\s\S]*?copy: content\.copy/.test(contentPage));
 }
 
 console.log("\n=== 28. 常见问题进库（v21）+ 空态口径：骨架在、条目空 ===");
@@ -11909,6 +11912,7 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
         pricing: pricingWithUnavailableLast(getPricingDataFromTemplate()),
         faq: getFaqContentFromTemplate(),
         cases: getCasesContentFromTemplate(),
+        reviews: getReviewsContentFromTemplate(),
         featured: getFeaturedContentFromTemplate(),
       }),
       readSiteCore(exportFiles),
@@ -12024,6 +12028,16 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
     fields: [{ title: "年级", value: "高二" }],
     story: "自检用的案例过程。",
   });
+  // reviews.md（v35）：改一条、加一条
+  mutated.siteContent.reviewsPage.reviews[0]!.quote = "自检改过的评价正文。";
+  mutated.siteContent.reviewsPage.reviews.push({
+    id: "review_selfcheck",
+    group: "学生",
+    quote: "自检加的一条评价。",
+    author: "自检·高二 陈同学",
+    subject: "英语",
+    description: "自检备注。",
+  });
   const featuredFirst = mutated.siteContent.featuredPage.courses[0]!;
   featuredFirst.body = "自检改过的特色课程介绍。";
   featuredFirst.fields[0]!.value = "自检改过的适合对象。";
@@ -12055,6 +12069,7 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
         pricing: backendPricingData(mutated),
         faq: backendFaqContent(mutated),
         cases: backendCasesContent(mutated),
+        reviews: backendReviewsContent(mutated),
         featured: backendFeaturedContent(mutated),
       }),
       readSiteCore(exported.files),
@@ -13958,8 +13973,8 @@ console.log(
   eq("迁移**没有**推学生的 version（乐观锁不被一次数据升级搅动）",
     migratedSourceStudents.map((student) => student.version),
     legacyVersions);
-  eq("迁移后版本就是当前版本（34）", (await api.exportDatabase()).version, 34);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 34);
+  eq("迁移后版本就是当前版本（35）", (await api.exportDatabase()).version, CURRENT_VERSION);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 35);
   ok("版本记录里写着这一步（`VERSION_NOTES[33]`，后来的人不用翻提交历史）",
     (VERSION_NOTES[33] ?? "").includes("来源"));
   ok("而且说明了它与 `Teacher.source` 不是一回事（免得后来的人把两件事混成一件）",
@@ -16700,8 +16715,8 @@ console.log(
    * 「刚被别人改过，请刷新」—— 而其实谁都没改。
    */
   eq("迁移**没有**推课节的 version（乐观锁不被一次数据升级搅动）", migratedLessons.map((l) => l.version), legacyLessonVersions);
-  eq("迁移后版本就是当前版本（34）", (await api.exportDatabase()).version, 34);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 34);
+  eq("迁移后版本就是当前版本（35）", (await api.exportDatabase()).version, CURRENT_VERSION);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 35);
   ok("版本记录里写着这一步（`VERSION_NOTES[34]`，后来的人不用翻提交历史）", (VERSION_NOTES[34] ?? "").includes("串身份"));
   ok("而且写明了「老课不猜串」这条口径", (VERSION_NOTES[34] ?? "").includes("不猜"));
   ok("而且写明了「过去的课是账」这条边界", (VERSION_NOTES[34] ?? "").includes("已排（还没上）"));
@@ -17233,6 +17248,231 @@ console.log(
       ],
       [0, 0, 0, 0]);
   }
+}
+
+
+console.log("\n=== 57. 学生案例折叠 + 家长与学生评价进库（v35）===");
+
+/*
+ * 机构原话：
+ *
+ * > 「**前台网站学生案例部分改成可以折叠。然后添加一些学生和家长的评价的区域，
+ * > 内容手动添加到前端**」
+ *
+ * 已确认的三条口径（这一节按它守）：
+ *
+ *   1. 评价内容**进后台**（像学生案例、常见问题那样在后台「网站内容」页自己增删改）
+ *      —— **不是**写死在前端代码里；
+ *   2. 案例：**全部折叠**（刚打开时每条都收着，点开看详情）；
+ *   3. 评价就放在「学生案例」页里一块，分「家长评价 / 学生评价」两组。
+ *
+ * 这一节守八件事，缺一条这个功能就会以某种方式悄悄做错：
+ *
+ *   ① **迁移**（v34 → v35）：老库补的是**标题骨架 + 空条目** ——
+ *      `reviews.md` 里那几条是**体例示例**，灌进真实库等于机构上线那天就挂出几条
+ *      从没说过、也没同意的「评价」（这是这一版与 v19/v20/v21 刻意不同的一处）；
+ *   ② **空态**：没连后端时标题在、条目空（与 cases / faq 同一口径）；
+ *   ③ **校验**：正文空 / 分组非法 / 署名为空 / 重名 id 一律拒，而且**零写入**；
+ *   ④ **公开快照里有评价**（它是公开内容）；反向断言内部字段仍然不出门；
+ *   ⑤ **导出 ↔ 导入回环**：reviews.md 是**第 7 个文件**，导出后回读逐条一致、反复导出收敛；
+ *   ⑥ **前台源码级**：原生 `<details>` / `<summary>`、**默认全部折叠（没有 open）**、
+ *      每条案例一个 details、summary 里有可判断的短字段、评价区分两组且**不折叠**；
+ *   ⑦ **后台有评价编辑区**（分组下拉 + 增删排序），与既有 `site.saveBlocks` 同一组权限
+ *      —— 不另开一个"保存评价"的方法（那只会多一处权限要对齐的地方）；
+ *   ⑧ **内容文件纪律**：`reviews.md` 写着「请替换为真实评价 / 请勿编造」与导出提醒。
+ */
+{
+  const root57 = new URL("../", import.meta.url);
+  const read57 = (file: string): string => readFileSync(new URL(file, root57), "utf8");
+  /** 去掉注释再查源码（与 §22 / §43 / §56 同一个坑：注释里提到的词不算代码）。 */
+  const strip57 = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  __useStoreForTesting(memory);
+
+  /* ── ① 迁移：v34 老库 → 骨架在、条目空、版本 35 ────────────────────────── */
+  const legacyReviewsDb = JSON.parse(JSON.stringify(seedDb)) as Record<string, unknown> & {
+    siteContent: Record<string, unknown>;
+    version: number;
+  };
+  delete legacyReviewsDb.siteContent.reviewsPage;
+  legacyReviewsDb.version = 34;
+  eq("v34 老库（没有评价块）能升级导入",
+    (await api.importDatabase(JSON.stringify(legacyReviewsDb))).ok, true);
+  const afterReviews = await api.exportDatabase();
+  eq("升级后版本号是当前版本", afterReviews.version, CURRENT_VERSION);
+  eq("迁移把评价块补上了（结构在）", Array.isArray(afterReviews.siteContent.reviewsPage.reviews), true);
+
+  const templateReviews = getReviewsContentFromTemplate();
+  const migratedReviews = afterReviews.siteContent.reviewsPage;
+  eq("迁移的标题文案来自模版骨架（眉题 / 标题 / 说明 / 页脚提示）",
+    [migratedReviews.heading.eyebrow, migratedReviews.heading.title, migratedReviews.heading.description, migratedReviews.notice],
+    [templateReviews.eyebrow, templateReviews.title, templateReviews.description, templateReviews.notice]);
+  ok("骨架不是空的（否则上面那条断言什么都没验）",
+    migratedReviews.heading.title !== "" && migratedReviews.notice !== "");
+  eq("迁移**不灌**内容文件里那几条体例示例（条目为空）", migratedReviews.reviews.length, 0);
+  ok("内容文件里确实有体例示例（否则上面那条断言是空的）", templateReviews.reviews.length >= 2);
+  ok("体例示例自己标着「体例示例」（一眼看不出是样例就等于编造）",
+    templateReviews.reviews.every((item) => item.author.includes("体例示例") && item.quote.includes("体例示例")));
+  ok("体例示例里没有具体的提分数字（不许写成像是真实发生过）",
+    templateReviews.reviews.every((item) => !/\d+\s*分/.test(item.quote)));
+
+  /* ── ② 保存：能改、只动自己那一块、id 由服务端生成 ────────────────────── */
+  const beforeReviews = await api.exportDatabase();
+  const savedReviews = await api.site.saveBlocks({
+    reviewsPage: {
+      heading: { eyebrow: "自检", title: "自检评价", description: "说明" },
+      notice: "评价均经家长/学生同意后发布（自检）。",
+      reviews: [
+        { id: "", group: "家长", quote: "自检用的一条家长评价。", author: "自检·初二 李同学家长", subject: "数学", description: "" },
+        { id: "", group: "学生", quote: "自检用的一条学生评价。", author: "自检·初三 王同学", subject: "", description: "自检备注" },
+      ],
+    },
+  });
+  eq("保存后评价与刚才那一份逐条一致",
+    savedReviews.reviewsPage.reviews.map((item) => [item.group, item.quote, item.author, item.subject, item.description]),
+    [
+      ["家长", "自检用的一条家长评价。", "自检·初二 李同学家长", "数学", ""],
+      ["学生", "自检用的一条学生评价。", "自检·初三 王同学", "", "自检备注"],
+    ]);
+  ok("两条新评价的 id 都由服务端生成",
+    savedReviews.reviewsPage.reviews.every((item) => item.id !== ""));
+  eq("保存评价**不动**课程正文 / 案例 / 常见问题",
+    [
+      JSON.stringify(savedReviews.coursePage) === JSON.stringify(beforeReviews.siteContent.coursePage),
+      JSON.stringify(savedReviews.casesPage) === JSON.stringify(beforeReviews.siteContent.casesPage),
+      JSON.stringify(savedReviews.faqPage) === JSON.stringify(beforeReviews.siteContent.faqPage),
+    ],
+    [true, true, true]);
+
+  /* ── ③ 校验：四条该拒的拒，而且**零写入** ─────────────────────────────── */
+  const refusalReviews = async (page: unknown): Promise<string> => {
+    try {
+      await api.site.saveBlocks({ reviewsPage: page as never });
+      return "";
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause);
+    }
+  };
+  const baseReviews = { heading: { eyebrow: "", title: "t", description: "" }, notice: "", reviews: [] };
+  const oneReview = (patch: Record<string, string>) => ({
+    ...baseReviews,
+    reviews: [{ id: "", group: "家长", quote: "话。", author: "某家长", subject: "", description: "", ...patch }],
+  });
+  ok("正文为空被拒",
+    (await refusalReviews(oneReview({ quote: "  " }))).includes("还没有正文"));
+  ok("分组非法被拒（页面只认「家长 / 学生」两块）",
+    (await refusalReviews(oneReview({ group: "老师" }))).includes("只能填"));
+  ok("署名为空被拒（评价要能看出是谁说的）",
+    (await refusalReviews(oneReview({ author: "" }))).includes("没有署名"));
+  ok("id 重名被拒（两条会被认成同一条）",
+    (await refusalReviews({
+      ...baseReviews,
+      reviews: [
+        { id: "r1", group: "家长", quote: "一。", author: "甲", subject: "", description: "" },
+        { id: "r1", group: "学生", quote: "二。", author: "乙", subject: "", description: "" },
+      ],
+    })).includes("重复了"));
+  const afterRefusal = await api.exportDatabase();
+  eq("上面四次拒绝都是**零写入**（评价块仍是保存成功那一份）",
+    JSON.stringify(afterRefusal.siteContent.reviewsPage),
+    JSON.stringify(savedReviews.reviewsPage));
+
+  /* ── ④ 公开快照里有评价；反向断言内部字段仍然不出门 ───────────────────── */
+  const snapshot57 = buildPublicSite(afterRefusal);
+  eq("公开快照里有评价（它是**公开**内容）", snapshot57.siteContent.reviewsPage.reviews.length, 2);
+  eq("公开快照里的评价逐条与库里一致",
+    snapshot57.siteContent.reviewsPage.reviews.map((item) => [item.group, item.quote, item.author]),
+    savedReviews.reviewsPage.reviews.map((item) => [item.group, item.quote, item.author]));
+  const publicTeacherKeys57 = Object.keys(snapshot57.teachers[0] ?? {});
+  ok("反向：内部字段（employment / source / campus）仍然不在公开快照里",
+    ["employment", "source", "campus"].every((key) => !publicTeacherKeys57.includes(key)) &&
+      !("employment" in (snapshot57.teachers[0] ?? {})));
+
+  /* ── ⑤ 导出 ↔ 导入回环：reviews.md 是第 7 个文件 ──────────────────────── */
+  eq("导出文件清单里有 reviews，而且一共七个",
+    [SITE_EXPORT_FILES.includes("reviews"), SITE_EXPORT_FILES.length], [true, 7]);
+  const exportFiles57 = {} as Record<SiteExportFile, string>;
+  for (const name of SITE_EXPORT_FILES) {
+    exportFiles57[name] = read57(`data/site/${name}.md`);
+  }
+  const exported57 = exportSiteMarkdown({ site: snapshot57, existing: exportFiles57 });
+  ok("导出把评价写进了 reviews.md",
+    exported57.changed.includes("reviews"),
+    `changed=${exported57.changed.join(",")}`);
+  const readBack57 = readSiteCore(exported57.files);
+  eq("导出 → 回读的评价与库里逐条一致",
+    readBack57.reviews.reviews,
+    snapshot57.siteContent.reviewsPage.reviews.map((item) => ({
+      group: item.group,
+      quote: item.quote,
+      author: item.author,
+      subject: item.subject,
+      description: item.description,
+    })));
+  const again57 = exportSiteMarkdown({ site: snapshot57, existing: exported57.files });
+  eq("反复导出收敛（第二次不再改动 reviews.md）",
+    again57.changed.filter((name) => name === "reviews"), []);
+
+  /* ── ⑥ 空态：没连后端 → 标题在、条目空 ────────────────────────────────── */
+  __useBackendSnapshotForTesting(null);
+  __useSiteContentSourceForTesting("blank");
+  const blankReviews = getReviewsContent();
+  eq("没连后端：评价块的标题在、条目为空",
+    [blankReviews.title !== "", blankReviews.description !== "", blankReviews.notice !== "", blankReviews.reviews.length],
+    [true, true, true, 0]);
+  __useSiteContentSourceForTesting("template");
+  eq("显式模版模式：评价用内容文件里那一份（含体例示例）",
+    getReviewsContent().reviews.length, templateReviews.reviews.length);
+  __useSiteContentSourceForTesting(undefined);
+  __useBackendSnapshotForTesting(null);
+
+  await api.restoreBackup();
+
+  /* ── ⑦ 前台源码级断言（折叠的口径全在这里） ───────────────────────────── */
+  const casesCode57 = strip57(read57("app/(site)/cases/page.tsx"));
+  ok("案例用原生 <details>/<summary>（照常见问题页那套写法）",
+    casesCode57.includes("<details") && casesCode57.includes("<summary"));
+  ok("折叠箭头用 group-open:rotate-45（与常见问题页同一个写法）",
+    casesCode57.includes("group-open:rotate-45"));
+  ok("**每条案例一个 <details>**（源码里一处，渲染时每条一个）",
+    (casesCode57.match(/<details\b/g) ?? []).length === 1 && casesCode57.includes("content.cases.map("));
+  const openAttrs57 = [...casesCode57.matchAll(/<details\b([^>]*)>/g)].map((match) => match[1] ?? "");
+  ok("**案例默认全部折叠**：每个 details 上都没有 open 属性",
+    openAttrs57.length === 1 && !openAttrs57.some((attrs) => /\bopen\b/.test(attrs)),
+    openAttrs57.join(" | "));
+  ok("概要行里有可判断的短字段（年级 / 科目 + 入学→当前）",
+    casesCode57.includes('const SUMMARY_FIELDS = ["年级", "科目"]') &&
+      casesCode57.includes("item.from") && casesCode57.includes("item.to"));
+  ok("评价区就在这一页、且在案例列表之后",
+    casesCode57.includes("getReviewsContent") &&
+      casesCode57.indexOf("getReviewsContent") < casesCode57.indexOf("REVIEW_GROUPS"));
+  ok("评价分「家长评价 / 学生评价」两组（用全站同一份 REVIEW_GROUPS 口径）",
+    casesCode57.includes("REVIEW_GROUPS.map(") && casesCode57.includes("group.label"));
+  ok("评价**不做折叠**（整页只有案例那一处 details）",
+    (casesCode57.match(/<details\b/g) ?? []).length === 1);
+  ok("评价区有空态说明（一条都没有时不至于只剩一个标题）",
+    casesCode57.includes("评价整理中"));
+  ok("案例空态照旧在（折叠没把空态弄丢）", casesCode57.includes("案例整理中"));
+
+  /* ── ⑧ 后台编辑区 + 内容文件纪律 ──────────────────────────────────────── */
+  const contentCode57 = strip57(read57("app/admin/(dashboard)/content/page.tsx"));
+  ok("「网站内容」页有评价编辑区（标题字段 + 分组下拉 + 增删排序）",
+    contentCode57.includes("家长与学生评价") && contentCode57.includes("新增评价") &&
+      contentCode57.includes("REVIEW_GROUPS") && contentCode57.includes("moveReview") &&
+      contentCode57.includes("removeReview"));
+  ok("评价与既有 save 方法同一组权限（没有另开一个保存方法）",
+    contentCode57.includes("site.saveBlocks") && !contentCode57.includes("saveReviews"));
+  ok("后端版本太旧（读不到评价块）时不把评价交上去（免得「看着保存成功、其实没存」）",
+    contentCode57.includes("reviewsPage === null ? {} : { reviewsPage }"));
+  const reviewsMd57 = read57("data/site/reviews.md");
+  ok("reviews.md 文件头写明「请替换为真实评价 / 请勿编造」",
+    reviewsMd57.includes("请替换为真实评价") && reviewsMd57.includes("请勿编造"));
+  ok("reviews.md 带导出提醒（后台为准，与其余六个文件同一条）",
+    reviewsMd57.includes("本文件由 `npm run site:export` 从后台导出"));
+  ok("reviews.md 已接进生成管线（data/site/reviews.ts 由 sync-content 产出）",
+    read57("data/site/reviews.ts").includes("reviewsSource") &&
+      read57("scripts/sync-content.mjs").includes('"reviews"'));
 }
 
 

@@ -8,6 +8,7 @@ import { validateVacations } from "./calendar-plan";
 import { danglingOffers, offerId, offersSummary, validateOffers, type OfferKey } from "./offers";
 import {
   emptySiteContent,
+  reviewsPageSkeleton,
   siteContentFromContent,
   validateSiteBlocks,
   validateSiteContent,
@@ -174,6 +175,8 @@ import type {
   SiteFaqGroup,
   SiteFaqItem,
   SiteFaqPage,
+  SiteReview,
+  SiteReviewsPage,
   SiteFeaturedCourse,
   SiteFeaturedPage,
   LessonTransaction,
@@ -1493,6 +1496,35 @@ function migrate(db: Database): Database | null {
     db.version = 34;
   }
 
+  if (db.version === 34) {
+    /*
+     * v34 → v35：**家长与学生评价进库**（`siteContent.reviewsPage`）。
+     *
+     * 机构原话：「**前台网站学生案例部分改成可以折叠。然后添加一些学生和家长的评价的区域，
+     * 内容手动添加到前端**」—— 已确认口径是「**评价内容进后台**」（像学生案例、常见问题那样
+     * 在后台「网站内容」页自己增删改），不是写死在前端代码里。
+     *
+     * ## 老库补的是「标题骨架 + 空条目」，**不灌**内容文件里那几条体例示例
+     *
+     * 这是这一版与 v19 / v20 / v21 三处「从内容文件灌初值」**刻意不同**的一处，理由只有一条：
+     * 那三版搬的是**已经发布出去**的对外文案，空着等于内容消失；
+     * 而评价这一块**从来没有发布过** —— `data/site/reviews.md` 里那几条是
+     * **写给机构看的写法样例**（文件头就写着"请替换为真实评价、或整段删掉"）。
+     * 把样例当初值搬进真实库的后果是：网站上线那天就挂出几条机构从没说过、
+     * 也没征得同意的"评价"—— 正常人一眼看不出那是样例，这正是
+     * 「绝不能编造真实评价」要拦住的那件事。
+     *
+     * 因此升级完的初始状态是：**那一块标题在、里面一条都没有**
+     * （与"没连后端时的空态口径"一致：骨架在、条目空），
+     * 后台「网站内容」页会显示"还没有评价"，机构自己填真实评价（可隐去姓名）。
+     *
+     * 只写 `reviewsPage` 这一块，其余块一个字都不动。
+     */
+    db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
+    db.siteContent.reviewsPage = reviewsPageSkeleton();
+    db.version = 35;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1516,6 +1548,11 @@ function migrate(db: Database): Database | null {
    * 与分区表同一条理由：一份"自称 v19"却缺 `casesPage` 的文件（手改过的导出、
    * 半份恢复、更早版本导出的 JSON）会让网站那侧读到 `undefined` ——
    * 表现是案例区整块消失，而且不报错。缺块一律补**空结构**（不猜内容）。
+   *
+   * v35 的评价块同样在这里兜：一份"自称 v35"却缺 `reviewsPage` 的文件补的是
+   * **空结构**（连标题也没有）—— 而**迁移**（v34 → v35）补的是**标题骨架 + 空条目**。
+   * 两者不一样是有意的：迁移那一步机构还在用那一块（标题是他们认得的），
+   * 而"手改坏了的文件"缺块属于数据损坏，补标题反而是替人编内容。
    */
   db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
 
@@ -6907,6 +6944,8 @@ const localApi = {
         featuredPage: db.siteContent.featuredPage,
         // 常见问题同理
         faqPage: db.siteContent.faqPage,
+        // 家长与学生评价同理（v35：它由「网站内容」页维护）
+        reviewsPage: db.siteContent.reviewsPage,
         // 页面文案块同理（五个块都由「网站内容」页维护）
         copy: db.siteContent.copy,
       };
@@ -6926,13 +6965,14 @@ const localApi = {
     },
 
     /**
-     * **保存网站内容里「课程正文以外」的那些块**（目前只有学生案例）。
+     * **保存网站内容里「课程正文以外」的那些块**
+     * （学生案例 / 特色课程 / 常见问题 / 家长与学生评价 / 页面文案）。
      *
      * ## 为什么与 `site.saveContent` 分开，而不是一个方法管全部
      *
      * 两块内容由**两个页面**维护、责任也不同：课程正文（学科 → 小节）在「课程库」页
-     * （它和卡片靶点、报价在同一张表单里，技术上招生老师），而学生案例在「网站内容」页
-     * （市场营销口径，招生老师也要改）。合成一个方法就有两个后果：
+     * （它和卡片靶点、报价在同一张表单里，技术上招生老师），而学生案例 / 评价这类
+     * 对外文案在「网站内容」页（市场营销口径，招生老师也要改）。合成一个方法就有两个后果：
      *
      *   1. **权限没法分**：`site.saveContent` 是技术管理员专属（它改的是课程页主干），
      *      除非把案例也锁进那一档，否则只能放宽整个方法 —— 那等于顺手给了
@@ -6940,6 +6980,10 @@ const localApi = {
      *   2. **互相覆盖**：两个页面的草稿都带着整份 `siteContent`，谁先保存谁就把对方
      *      读到那一刻的旧值写回去。现在各写各的块：`saveContent` 原样保留案例，
      *      本方法原样保留课程正文 / 教师页 / 报价文案。
+     *
+     * 评价（v35）与案例 / 常见问题**共用这一个写入口**：同一个页面、同一组权限
+     * （技术管理员 + 招生老师）、同一套乐观锁口径（整块覆盖，没有记录级 version）——
+     * 再开一个 `site.saveReviews` 只会多一个"权限要对齐"的地方，而那正是最容易漂的。
      *
      * ## 只校验、只写这次交上来的块
      *
@@ -6950,7 +6994,9 @@ const localApi = {
      * 免得页面上留着一份"我自己的"旧值。
      */
     async saveBlocks(
-      blocks: Partial<Pick<SiteContent, "casesPage" | "featuredPage" | "faqPage" | "copy">>,
+      blocks: Partial<
+        Pick<SiteContent, "casesPage" | "featuredPage" | "faqPage" | "reviewsPage" | "copy">
+      >,
     ): Promise<SiteContent> {
       await delay();
       const db = load();
@@ -7027,6 +7073,29 @@ const localApi = {
         };
       }
 
+      /*
+       * 家长与学生评价：整份一起保存（与案例 / 特色课程 / 常见问题同理）。
+       * id 为空 = 新加的那一条，这里才生成；分组与各字段去空白。
+       */
+      if (blocks.reviewsPage !== undefined) {
+        const incoming = blocks.reviewsPage;
+        db.siteContent = {
+          ...db.siteContent,
+          reviewsPage: {
+            heading: { ...incoming.heading },
+            notice: incoming.notice.trim(),
+            reviews: incoming.reviews.map((item) => ({
+              id: item.id.trim() === "" ? nextId("review") : item.id.trim(),
+              group: item.group.trim(),
+              quote: item.quote.trim(),
+              author: item.author.trim(),
+              subject: item.subject.trim(),
+              description: item.description.trim(),
+            })),
+          },
+        };
+      }
+
       /* 页面文案块：只写这次交上来的那几块（与案例 / 特色课程 / 常见问题同理）。 */
       if (blocks.copy !== undefined) {
         const next = { ...db.siteContent.copy };
@@ -7068,6 +7137,7 @@ const localApi = {
         summary:
           `网站内容：学生案例 ${after.cases.length} 条 / 特色课程 ${featuredNodes} 门 / ` +
           `常见问题 ${String(db.siteContent.faqPage.groups.reduce((sum, group) => sum + group.items.length, 0))} 条 / ` +
+          `家长与学生评价 ${String(db.siteContent.reviewsPage.reviews.length)} 条 / ` +
           `页面文案 ${String(Object.keys(blocks.copy ?? {}).length)} 块` +
           (beforeCases.cases.length === after.cases.length ? "（案例数量未变）" : `（案例原 ${beforeCases.cases.length} 条）`),
       });
@@ -7700,6 +7770,8 @@ export type {
   SiteFaqGroup,
   SiteFaqItem,
   SiteFaqPage,
+  SiteReview,
+  SiteReviewsPage,
   PublicSite,
   SiteContent,
 };

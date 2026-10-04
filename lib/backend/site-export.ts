@@ -94,14 +94,23 @@ import type {
   ElectiveCourse,
   FaqContent,
   FeaturedContent,
+  ReviewsContent,
   SectionHeading,
   Teacher,
 } from "@/lib/types/site";
 
-/* ── 一、六个文件与那句提醒 ─────────────────────────────────────────────── */
+/* ── 一、七个文件与那句提醒 ─────────────────────────────────────────────── */
 
-/** 要导出的六个内容文件（顺序就是打印顺序）。 */
-export const SITE_EXPORT_FILES = ["content", "pricing", "faq", "cases", "featured", "schedule"] as const;
+/** 要导出的七个内容文件（顺序就是打印顺序）。 */
+export const SITE_EXPORT_FILES = [
+  "content",
+  "pricing",
+  "faq",
+  "cases",
+  "reviews",
+  "featured",
+  "schedule",
+] as const;
 
 export type SiteExportFile = (typeof SITE_EXPORT_FILES)[number];
 
@@ -111,6 +120,7 @@ export const SITE_EXPORT_LABELS: Record<SiteExportFile, string> = {
   pricing: "pricing.md（报价）",
   faq: "faq.md（常见问题）",
   cases: "cases.md（学生案例）",
+  reviews: "reviews.md（家长与学生评价）",
   featured: "featured.md（特色课程）",
   schedule: "schedule.md（课程时间安排）",
 };
@@ -1123,6 +1133,40 @@ function casesFile(site: PublicSite, source: string, warnings: Warnings, missing
   return rewriteFile(source, 3, [spec], warnings, missing);
 }
 
+/**
+ * reviews.md：`### 署名` + 字段（分组 / 科目 / 正文 / 补充）。
+ *
+ * 与 `casesFile` 同一套：一条评价一个 `###` 分组，`#### 字段: 值` 是它的信息。
+ * 分组标题用**署名**（文件里的 `### 初二 李同学家长` 一眼能看出是谁说的），
+ * 显示用的署名默认就是它；`#### 署名` 只在需要"标题与署名不一样"时才写
+ * （读回来时优先用它，见 `readReviews`）。
+ */
+function reviewsFile(site: PublicSite, source: string, warnings: Warnings, missing: string[]): string {
+  const page = site.siteContent.reviewsPage;
+  const spec: PageSpec = {
+    name: "家长与学生评价",
+    fields: headingFields(page?.heading, page?.notice),
+    groups: (page?.reviews ?? []).map((item): GroupSpec => {
+      checkName(item.author, "评价署名", warnings);
+      const blocks: string[] = [];
+      const field = (name: string, value: string): void => {
+        const trimmed = text(value).trim();
+        if (trimmed === "") return;
+        if (trimmed.includes("\n")) {
+          warnings.add(`评价「${item.author}」的「${name}」在库里有换行：文件里字段只能写一行（已折成一行）。`);
+        }
+        blocks.push(`#### ${name}: ${trimmed.replace(/\s*\n\s*/g, " ")}`);
+      };
+      field("分组", item.group);
+      field("科目", item.subject);
+      field("正文", item.quote);
+      field("补充", item.description);
+      return { heading: `### ${item.author}`, preserveHead: false, blocks };
+    }),
+  };
+  return rewriteFile(source, 3, [spec], warnings, missing);
+}
+
 /** 特色课程可用的字段（解析器的白名单）。 */
 const FEATURED_FIELDS = ["适合对象", "课程定位", "主要做法", "可以期待"] as const;
 
@@ -1241,6 +1285,7 @@ export function exportSiteMarkdown(input: SiteExportInput): SiteExportResult {
     pricing: [],
     faq: [],
     cases: [],
+    reviews: [],
     featured: [],
     schedule: [],
   };
@@ -1249,9 +1294,28 @@ export function exportSiteMarkdown(input: SiteExportInput): SiteExportResult {
     pricing: pricingFile(site, existing.pricing, notes, warnings, missingPages.pricing),
     faq: faqFile(site, existing.faq, warnings, missingPages.faq),
     cases: casesFile(site, existing.cases, warnings, missingPages.cases),
+    reviews: "",
     featured: featuredFile(site, existing.featured, warnings, missingPages.featured),
     schedule: scheduleFile(site, existing.schedule, warnings, missingPages.schedule),
   };
+
+  /*
+   * 评价块（v35）**可能是后端还没有的那一块**：本程序比在跑的后端新
+   * （机构要自己挑时间重启后端，见 v35 那条说明）时，公开数据里没有 `reviewsPage`。
+   *
+   * 这时**不能把它当成"评价为空"写下去** —— 那等于用"后端不知道这块"这个事实
+   * 去清空文件里那几条体例示例，而升级/重启之后它们本来还在（库里一旦有这一块就是权威）。
+   * 因此这一种情况**原样保留文件**并说明原因，等后端升上来再导出。
+   * "后端有这一块、但里面是空的"是另一回事：那是真实的空，照常写（写出来就是空块）。
+   */
+  if (site.siteContent?.reviewsPage === undefined) {
+    files.reviews = existing.reviews;
+    notes.push(      "后端还没有「家长与学生评价」这一块（服务端版本比本程序旧，需要重启/升级后端）：" +
+        "reviews.md 原样保留，这一次没有写它。",
+    );
+  } else {
+    files.reviews = reviewsFile(site, existing.reviews, warnings, missingPages.reviews);
+  }
 
   // 不展示的教师**不写进文件**：`.md` 表达不了「在后台但不上网站」这个开关，
   // 写进去就等于把他们发到线上（线上读的就是这份文件）。
@@ -1270,9 +1334,16 @@ export function exportSiteMarkdown(input: SiteExportInput): SiteExportResult {
    * 这条护栏是防"一次导出把内容文件抹成两行"的：`## 页面: xxx` 一旦被改坏
    * （或者文件本来就不在），生成出来的是一份没有页面的残骸，而写盘是**静默**的。
    * 宁可让命令停下来，让人先 `git checkout -- data/site/xxx.md` 把文件找回来。
+   *
+   * 唯一的例外是**后端还没有评价块**（v35 之后本程序比在跑的后端新）：
+   * 那一次 reviews.md 本来就一个字都没写（见上面那段说明），
+   * 它"是空的"不构成"一次导出把文件抹了"的风险，因此不拦。
    */
+  const reviewsMissing = site.siteContent?.reviewsPage === undefined;
   const unsafe = SITE_EXPORT_FILES.filter(
-    (name) => existing[name].trim() === "" || missingPages[name].length > 0,
+    (name) =>
+      !(reviewsMissing && name === "reviews") &&
+      (existing[name].trim() === "" || missingPages[name].length > 0),
   ).map((name) => ({
     file: name,
     reason:
@@ -1346,6 +1417,20 @@ export type SiteCore = {
       story: string;
     }>;
   };
+  /** 家长与学生评价：同样**不比 `id`**（文件里的身份是那条 `### 署名`）。 */
+  reviews: {
+    eyebrow: string;
+    title: string;
+    description: string;
+    notice: string;
+    reviews: Array<{
+      group: string;
+      quote: string;
+      author: string;
+      subject: string;
+      description: string;
+    }>;
+  };
   featured: FeaturedContent;
 };
 
@@ -1363,6 +1448,7 @@ export type SiteViews = {
   pricing: PricingData;
   faq: FaqContent;
   cases: CasesContent;
+  reviews: ReviewsContent;
   featured: FeaturedContent;
 };
 
@@ -1421,6 +1507,7 @@ export function readSiteCore(sources: Readonly<Record<SiteExportFile, string>>):
   const content = parseDocument(sources.content);
   const faqDoc = parseDocument(sources.faq);
   const casesDoc = parseDocument(sources.cases);
+  const reviewsDoc = parseDocument(sources.reviews);
   const featuredDoc = parseDocument(sources.featured);
   // 时间安排整块就是"页面文案块"（短字段 + 分组 = 文件全部内容），
   // 因此它不单独进核心：`copy.schedule` 已经把那一页读全了。
@@ -1446,6 +1533,7 @@ export function readSiteCore(sources: Readonly<Record<SiteExportFile, string>>):
     ),
     faq: readFaq(faqDoc.pages.get("常见问题")),
     cases: toCaseCore(readCases(casesDoc.pages.get("学生案例"))),
+    reviews: toReviewsCore(readReviews(reviewsDoc.pages.get("家长与学生评价"))),
     featured: readFeatured(featuredDoc.pages.get("特色课程")),
   };
 }
@@ -1677,6 +1765,51 @@ function toCaseCore(content: CasesContent): SiteCore["cases"] {
   };
 }
 
+/**
+ * 家长与学生评价（回读口径同 `getReviewsContentFromTemplate`）。
+ *
+ * 身份就是那条 `### 署名`：文件里没有 id 这一栏（与案例同一条口径），
+ * 因此回读**不产出 id**，比对时也不比它。
+ */
+function readReviews(page: PageBlock | undefined): ReviewsContent {
+  const reviews = (page?.groups ?? []).map((group) => {
+    const field = (name: string): string => group.items.find((item) => item.title === name)?.value ?? "";
+    return {
+      id: group.name,
+      group: field("分组").trim(),
+      // 「评价正文」是早期手写文件里的写法，一并认（与 `getReviewsContentFromTemplate` 同一口径）
+      quote: (field("正文") || field("评价正文")).trim(),
+      // 署名默认就是分组标题；写了 `#### 署名` 就以它为准
+      author: (field("署名") || group.name).trim(),
+      subject: field("科目").trim(),
+      description: field("补充").trim(),
+    };
+  });
+
+  return {
+    ...headingOf(page),
+    notice: readString(page?.data ?? {}, "notice"),
+    reviews: reviews.filter((item) => item.quote !== "" || item.author !== ""),
+  };
+}
+
+/** 评价视图 → 核心内容（丢掉后台内部的 `id`）。 */
+function toReviewsCore(content: ReviewsContent): SiteCore["reviews"] {
+  return {
+    eyebrow: content.eyebrow,
+    title: content.title,
+    description: content.description,
+    notice: content.notice,
+    reviews: content.reviews.map((item) => ({
+      group: item.group,
+      quote: item.quote,
+      author: item.author,
+      subject: item.subject,
+      description: item.description,
+    })),
+  };
+}
+
 /** 特色课程（回读口径同 `getFeaturedContentFromTemplate`）。 */
 function readFeatured(page: PageBlock | undefined): FeaturedContent {
   const COURSE_FIELDS = ["适合对象", "课程定位", "主要做法", "可以期待"];
@@ -1749,6 +1882,7 @@ export function siteCoreFromViews(views: SiteViews): SiteCore {
     pricing: pricingConfigCore(configFromPricingData(views.pricing, "")),
     faq: views.faq,
     cases: toCaseCore(views.cases),
+    reviews: toReviewsCore(views.reviews),
     featured: views.featured,
   };
 }

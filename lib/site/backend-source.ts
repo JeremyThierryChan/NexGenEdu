@@ -72,6 +72,7 @@ import type {
   SiteFaqItem,
   SiteFeaturedCourse,
   SiteHeading,
+  SiteReview,
   SiteSubject,
 } from "@/lib/backend/types";
 import type {
@@ -98,6 +99,8 @@ import type {
   CourseColumnSubgroup,
   CourseTag,
   ElectiveCourse,
+  ReviewItem,
+  ReviewsContent,
   SectionHeading,
   Teacher,
 } from "@/lib/types/site";
@@ -668,6 +671,39 @@ export function backendCasesContent(snapshot: PublicSite): CasesContent {
     description: text(page?.heading?.description),
     notice: text(page?.notice),
     cases,
+  };
+}
+
+/* ── 家长与学生评价（`/cases` 页里那块） ─────────────────────────────────── */
+
+/**
+ * 评价块：库里的 `siteContent.reviewsPage` → 网站视图模型。
+ *
+ * 与 `backendCasesContent` 同一套口径：字段值原样搬（空值由**页面**决定要不要显示）、
+ * 一条评价都没有时返回**空数组**（页面显示"评价整理中"这类空状态），不回模版 ——
+ * 两态口径见本文件头部：连上后端就以库为准，"暂时没有评价"是机构的真实状态。
+ *
+ * ⚠️ `group` **原样搬**（不在这里"猜"家长还是学生）：它是后台下拉里的一个值，
+ * 校验在保存那一层做（`validateReviewsPage`）；这里猜一次就会让
+ * "页面上分错组"变成一处谁都查不出的静默错误。
+ */
+export function backendReviewsContent(snapshot: PublicSite): ReviewsContent {
+  const page = snapshot.siteContent?.reviewsPage;
+  const reviews: ReviewItem[] = (page?.reviews ?? []).map((item: SiteReview) => ({
+    id: text(item.id).trim() === "" ? text(item.author) : text(item.id),
+    group: text(item.group),
+    quote: text(item.quote),
+    author: text(item.author),
+    subject: text(item.subject),
+    description: text(item.description),
+  }));
+
+  return {
+    eyebrow: text(page?.heading?.eyebrow),
+    title: text(page?.heading?.title),
+    description: text(page?.heading?.description),
+    notice: text(page?.notice),
+    reviews,
   };
 }
 

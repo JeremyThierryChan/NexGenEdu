@@ -22,7 +22,12 @@
  */
 
 import { getCoursesPageFromTemplate, getTeachersPageFromTemplate } from "@/lib/data/site";
-import { getCasesContentFromTemplate, getFaqContentFromTemplate } from "@/lib/data/pages";
+import {
+  getCasesContentFromTemplate,
+  getFaqContentFromTemplate,
+  getReviewsContentFromTemplate,
+} from "@/lib/data/pages";
+import { REVIEW_GROUPS, isReviewGroup } from "@/lib/types/site";
 import { getFeaturedContentFromTemplate } from "@/lib/data/featured";
 import { copyBlocksFromContent } from "./site-copy";
 import { emptyCopyBlock, validateCopyBlock } from "./site-copy-model";
@@ -42,6 +47,8 @@ import type {
   SiteContent,
   SiteCoursePage,
   SitePricingLabels,
+  SiteReview,
+  SiteReviewsPage,
   SiteSubject,
 } from "./types";
 
@@ -119,6 +126,7 @@ export function siteContentFromContent(): SiteContent {
     casesPage: casesFromContent(),
     featuredPage: featuredFromContent(),
     faqPage: faqFromContent(),
+    reviewsPage: reviewsFromContent(),
     copy: copyBlocksFromContent(),
   };
 }
@@ -153,6 +161,94 @@ function faqFromContent(): SiteFaqPage {
 /** 常见问题的空结构。 */
 function emptyFaqPage(): SiteFaqPage {
   return { heading: { eyebrow: "", title: "", description: "" }, notice: "", groups: [] };
+}
+
+/**
+ * 家长 / 学生评价（内容文件 → 库结构）。
+ *
+ * id 与案例同一套：用**署名（= 分组标题）**，反复导入不会漂，后台改了署名也不会换 id。
+ * 重名时后面那条加序号（`validateReviewsPage` 会把重名 id 拒掉，这里先做去重，
+ * 免得内容文件里两条同名评价一导入就是一个存不进库的块）。
+ *
+ * ⚠️ 这里会带上 `reviews.md` 里那几条**体例示例** —— 这是给**空库初始化**
+ * （`createEmptyDatabase()`，见 `initial.ts`）用的：初始库与内容文件必须逐字节一致，
+ * 否则「库 → 文件」的导出回环第一步就不成立（自检 §43 守着这条）。
+ * 而**老库迁移**走的是另一条路（骨架 + 空条目，见 `reviewsPageSkeleton`），
+ * 因为把体例示例灌进一个已经在用的真实库 = 机构凭空多出几条假评价。
+ */
+function reviewsFromContent(): SiteReviewsPage {
+  try {
+    const page = getReviewsContentFromTemplate();
+    const seen = new Set<string>();
+    const reviews: SiteReview[] = page.reviews.map((item) => {
+      const base = item.author.trim();
+      let id = base;
+      let suffix = 2;
+      while (seen.has(id)) {
+        id = `${base}（${String(suffix)}）`;
+        suffix += 1;
+      }
+      seen.add(id);
+      return {
+        id,
+        group: item.group,
+        quote: item.quote,
+        author: base,
+        subject: item.subject,
+        description: item.description,
+      };
+    });
+    return {
+      heading: {
+        eyebrow: page.eyebrow,
+        title: page.title,
+        description: page.description,
+      },
+      notice: page.notice,
+      reviews,
+    };
+  } catch {
+    // 内容坏了就留空结构：后台照常能开，网站那侧会显示"评价整理中"
+    return emptyReviewsPage();
+  }
+}
+
+/**
+ * 家长 / 学生评价的空结构。
+ *
+ * ⚠️ 空结构 = **连标题也没有**。给**老库迁移**用的是下面的 `reviewsPageSkeleton()`
+ * （标题骨架照常、只有条目为空）—— 两者不一样，别混：
+ *   - `emptyReviewsPage()`：收尾归一给"手改坏了的文件"兜底（缺块）；
+ *   - `reviewsPageSkeleton()`：v34 → v35 迁移的那一份（机构口径：骨架在、条目空）。
+ */
+function emptyReviewsPage(): SiteReviewsPage {
+  return { heading: { eyebrow: "", title: "", description: "" }, notice: "", reviews: [] };
+}
+
+/**
+ * v34 → v35 迁移要写进老库的那一份评价块：**标题文案来自模版骨架、条目为空**。
+ *
+ * 为什么老库**不灌** `reviews.md` 里那几条体例示例（与 v19/v20/v21 的做法刻意不同）：
+ * 那几版搬的是**已经发布出去**的对外文案，空着等于内容消失，所以要从文件灌初值；
+ * 而评价这一块**从来没有发布过**（机构还没给真实文字），文件里那三条是
+ * **写给机构看的写法样例**。灌进真实库的后果是：网站上线那天就挂出三条
+ * 机构从没说过、也没同意的"评价"—— 这正是「绝不能编造真实评价」要拦的那件事。
+ *
+ * 因此老库升级完的初始状态是：**那一块标题在、里面一条都没有**，
+ * 后台「网站内容」页会显示"还没有评价"，机构自己填真实评价（可隐去姓名）。
+ */
+export function reviewsPageSkeleton(): SiteReviewsPage {
+  try {
+    const frame = getReviewsContentFromTemplate();
+    return {
+      heading: { eyebrow: frame.eyebrow, title: frame.title, description: frame.description },
+      notice: frame.notice,
+      reviews: [],
+    };
+  } catch {
+    // 内容文件坏了：宁可连标题也空着，也不要在这里编一个标题
+    return emptyReviewsPage();
+  }
 }
 
 /**
@@ -281,6 +377,7 @@ export function emptySiteContent(): SiteContent {
     casesPage: emptyCasesPage(),
     featuredPage: emptyFeaturedPage(),
     faqPage: emptyFaqPage(),
+    reviewsPage: emptyReviewsPage(),
     copy: emptyCopy(),
   };
 }
@@ -342,12 +439,14 @@ export function validateSiteBlocks(blocks: {
   casesPage?: SiteCasesPage;
   featuredPage?: SiteFeaturedPage;
   faqPage?: SiteFaqPage;
+  reviewsPage?: SiteReviewsPage;
   copy?: Partial<Record<SiteCopyKey, SiteCopyBlock>>;
 }): string[] {
   const problems: string[] = [];
   if (blocks.casesPage !== undefined) problems.push(...validateCasesPage(blocks.casesPage));
   if (blocks.featuredPage !== undefined) problems.push(...validateFeaturedPage(blocks.featuredPage));
   if (blocks.faqPage !== undefined) problems.push(...validateFaqPage(blocks.faqPage));
+  if (blocks.reviewsPage !== undefined) problems.push(...validateReviewsPage(blocks.reviewsPage));
   if (blocks.copy !== undefined) {
     for (const [key, block] of Object.entries(blocks.copy)) {
       if (block === undefined) continue;
@@ -387,6 +486,41 @@ export function validateFaqPage(page: SiteFaqPage): string[] {
       }
       questions.add(question);
     }
+  }
+  return problems;
+}
+
+/**
+ * 家长 / 学生评价的校验。
+ *
+ * 四条规则各自对应一次真实的误操作：
+ *   - **正文为空** → 页面上出现一条只有署名、没有话的卡片（家长不知道这条在说什么）；
+ *   - **分组非法** → 页面按「家长 / 学生」两块渲染，认不出的值两边都不进、
+ *     那条评价就此消失（而保存时看起来一切正常）；
+ *   - **署名为空** → 一条"没有人说过"的评价，页面上只挂着一句话；
+ *   - **id 重名** → 两条评价在后台/日志里认成同一条，删一条会删错。
+ *
+ * 允许一条评价都没有：机构还没给真实文字时，"暂时没有评价"是**正确状态**
+ * （页面显示一句空状态），绝不能拿内容文件里的体例示例顶上。
+ */
+export function validateReviewsPage(page: SiteReviewsPage): string[] {
+  const problems: string[] = [];
+  const ids = new Set<string>();
+  for (const item of page.reviews) {
+    const id = item.id.trim();
+    const who = item.author.trim() === "" ? "（未署名）" : item.author.trim();
+    if (item.quote.trim() === "") problems.push(`评价「${who}」还没有正文。`);
+    if (item.author.trim() === "") problems.push("有一条评价没有署名（评价要能看出是谁说的）。");
+    if (!isReviewGroup(item.group.trim())) {
+      problems.push(
+        `评价「${who}」的分组是「${item.group.trim()}」：只能填 ${REVIEW_GROUPS.map((group) => group.key).join(" / ")}。`,
+      );
+    }
+    // 空 id = 新加的那一条（服务端保存时生成），因此只查**非空** id 的重名
+    if (id !== "" && ids.has(id)) {
+      problems.push(`评价「${who}」的 id「${id}」重复了：两条评价会被认成同一条。`);
+    }
+    if (id !== "") ids.add(id);
   }
   return problems;
 }

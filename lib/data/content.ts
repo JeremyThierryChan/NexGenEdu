@@ -2,6 +2,7 @@ import { casesSource } from "@/data/site/cases";
 import { contentSource } from "@/data/site/content";
 import { faqSource } from "@/data/site/faq";
 import { featuredSource } from "@/data/site/featured";
+import { reviewsSource } from "@/data/site/reviews";
 import { scheduleSource } from "@/data/site/schedule";
 import { parseItems, parseMarkdown, readArray, readString } from "@/lib/markdown";
 
@@ -367,6 +368,7 @@ const DOCUMENTS = {
   content: contentSource,
   faq: faqSource,
   cases: casesSource,
+  reviews: reviewsSource,
   schedule: scheduleSource,
   featured: featuredSource,
 } as const;

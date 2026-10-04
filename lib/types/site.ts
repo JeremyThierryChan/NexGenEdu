@@ -263,6 +263,54 @@ export type CasesContent = PageIntro & {
   cases: CaseItem[];
 };
 
+/**
+ * 一条家长 / 学生评价（「学生案例」页里那块「家长与学生怎么说」）。
+ *
+ * 评价短、直接看得见比折叠有用，因此页面上**不做折叠**：正文 + 署名（+ 科目）一行读完。
+ * 页面按 `group` 分成「家长评价 / 学生评价」两组（见 `REVIEW_GROUPS`）。
+ */
+export type ReviewItem = {
+  id: string;
+  /** 分组：`家长` 或 `学生`（后台的表单是这两个值的下拉）。 */
+  group: string;
+  /** 评价正文（原话）。 */
+  quote: string;
+  /** 署名，例如「初二 李同学家长」。 */
+  author: string;
+  /** 科目（可空）。 */
+  subject: string;
+  /** 补充说明（可空）；名字见 `SiteReview.description` 的说明（不叫 `note`）。 */
+  description: string;
+};
+
+export type ReviewsContent = PageIntro & {
+  reviews: ReviewItem[];
+};
+
+/**
+ * 评价的两个分组（家长 / 学生）——**全系统只此一处口径**。
+ *
+ * 页面按它渲染两块（标题用 `label`），后台表单按它给下拉候选，
+ * 服务端校验按 `key` 判合法值。三处各写一遍「家长 / 学生」，
+ * 迟早会出现"页面上有这一组、校验不认这个值"这种对不上的情况。
+ */
+export const REVIEW_GROUPS = [
+  { key: "家长", label: "家长评价" },
+  { key: "学生", label: "学生评价" },
+] as const;
+
+export type ReviewGroup = (typeof REVIEW_GROUPS)[number]["key"];
+
+/** 这个值是不是合法分组（服务端校验用）。 */
+export function isReviewGroup(value: string): value is ReviewGroup {
+  return REVIEW_GROUPS.some((group) => group.key === value);
+}
+
+/** 分组在页面上的标题（`家长` → `家长评价`；认不出的值原样返回）。 */
+export function reviewGroupLabel(key: string): string {
+  return REVIEW_GROUPS.find((group) => group.key === key)?.label ?? key;
+}
+
 export type ScheduleContent = PageIntro & {
   groups: InfoGroup[];
 };
