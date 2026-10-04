@@ -365,6 +365,12 @@ function casesFromContent(): SiteCasesPage {
         title: base,
         fields: item.fields.map((field) => ({ title: field.title, value: field.value })),
         story: item.story,
+        /*
+         * `teacher`（v38 的**公开实名**）**内容文件里有**（`#### 任课老师:`）——
+         * 它是公开内容（要显示在卡片右下角），与评价的 `realName` 恰好相反。
+         * 老文件缺这一栏时读到空串 = 还没填，前台那一行整行不渲染（**不猜**）。
+         */
+        teacher: item.teacher,
       };
     });
     return {
@@ -385,6 +391,34 @@ function casesFromContent(): SiteCasesPage {
 /** 学生案例的空结构。 */
 function emptyCasesPage(): SiteCasesPage {
   return { heading: { eyebrow: "", title: "", description: "" }, notice: "", cases: [] };
+}
+
+/**
+ * 一份学生案例块的**归一**：每条案例都带上 `teacher`（v38 的**公开实名**）。
+ *
+ * 与 `normalizeReviewsPage` 同一套理由：**声称的版本号不是证据** ——
+ * 一份"自称 v38"却缺 `teacher` 的案例（手改过的导出、半份恢复、老版本导出的 JSON）
+ * 照样会出现，读的时候 `item.teacher.trim()` 就是一次 TypeError（整个案例列表读不出来）。
+ *
+ * 补的是**空串**（不猜）：机构从没登记过老案例是谁带的，按"现在全是他"给老案例填名字
+ * 等于替机构记下一条它没说过的事实。空串的语义正好是"还没填"—— 前台那一行**整行不渲染**。
+ * 非字符串（`null` / 数字 / 对象）也一并按空串处理（它们在页面上只会渲染成 "null"）。
+ *
+ * ⚠️ 与评价的 `realName` 恰好相反：那个是**内部**实名（学生 / 家长，三处都不能出现），
+ * 这个是**公开**实名（老师，前台要显示）—— 两者都叫"实名"、性质完全相反，别合。
+ *
+ * 迁移（v37 → v38）与**收尾归一**共用这一个函数，因此"迁移补的"与"兜底补的"
+ * 不可能是两种形状。
+ */
+export function normalizeCasesPage(page: SiteCasesPage): SiteCasesPage {
+  const cases = Array.isArray(page.cases) ? page.cases : [];
+  return {
+    ...page,
+    cases: cases.map((item) => ({
+      ...item,
+      teacher: typeof item.teacher === "string" ? item.teacher : "",
+    })),
+  };
 }
 
 /** 报价页文案的空值（键必须齐全：页面上少一个键就是一个空按钮）。 */
@@ -448,6 +482,11 @@ function emptyCopy(): Record<SiteCopyKey, SiteCopyBlock> {
  *
  * **允许一条案例都没有**：内容文件里就写着"不希望公开就把分组整段删掉，页面会自动适配"，
  * 因此"暂时没有案例"是合法状态（页面会显示一句"案例整理中"之类的话，不报错）。
+ *
+ * ⚠️ **`teacher`（v38 的公开实名）不在这里判**：它是**可选**的（空串＝还没填，
+ * 前台那一行整行不渲染），系统也不该去判断一个老师名字"对不对"
+ * （判不出来 —— 老师可以离职、可以是外部合作老师）。写入闸 trim 前后空白、
+ * **缺键保留库里那一份**（与评价的 `realName` 同一套三态）。
  */
 export function validateCasesPage(page: SiteCasesPage): string[] {
   const problems: string[] = [];

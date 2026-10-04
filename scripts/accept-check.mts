@@ -212,6 +212,7 @@ await check("网站内容", "新增一条案例", async () => {
             { title: "当前水平", value: "88 分（中考）" },
           ],
           story: "验收用的一条案例。\n\n第二段。",
+          teacher: "验收·任课老师",
         },
       ],
     },
@@ -230,7 +231,7 @@ await check("网站内容", "标题为空被拒", async () => {
     await api.site.saveBlocks({
       casesPage: {
         ...content.siteContent.casesPage,
-        cases: [{ id: "", title: "  ", fields: [], story: "" }],
+        cases: [{ id: "", title: "  ", fields: [], story: "", teacher: "" }],
       },
     });
     return "没有被拒绝";

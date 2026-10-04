@@ -124,6 +124,8 @@ export function getCasesContentFromTemplate(): CasesContent {
         .map((part) => part.trim())
         .filter((part) => part !== "")
         .join("\n\n"),
+      // v38 的任课老师（**公开实名**）：老文件没有这一栏 → 空串（前台那一行不渲染）
+      teacher: field("任课老师").trim(),
     };
   });
 

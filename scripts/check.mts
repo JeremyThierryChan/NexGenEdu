@@ -9231,6 +9231,7 @@ console.log("\n=== 26. 学生案例进库（v19：机构要求「学生案例以
             { title: "科目", value: "数学" },
           ],
           story: "第一段。\n\n第二段。",
+          teacher: "自检·任课老师",
         },
       ],
     },
@@ -12035,6 +12036,8 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
     title: "自检案例｜从 0 到 1",
     fields: [{ title: "年级", value: "高二" }],
     story: "自检用的案例过程。",
+    // v38 的任课老师（**公开实名**）：给它一个值，导出 → 回读那一遍就顺带验了来回一致
+    teacher: "自检·任课老师",
   });
   /*
    * reviews.md（v35）：改一条（**有才改**）、加一条。
@@ -13994,8 +13997,8 @@ console.log(
   eq("迁移**没有**推学生的 version（乐观锁不被一次数据升级搅动）",
     migratedSourceStudents.map((student) => student.version),
     legacyVersions);
-  eq("迁移后版本就是当前版本（37）", (await api.exportDatabase()).version, CURRENT_VERSION);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 37);
+  eq("迁移后版本就是当前版本（38）", (await api.exportDatabase()).version, CURRENT_VERSION);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 38);
   ok("版本记录里写着这一步（`VERSION_NOTES[33]`，后来的人不用翻提交历史）",
     (VERSION_NOTES[33] ?? "").includes("来源"));
   ok("而且说明了它与 `Teacher.source` 不是一回事（免得后来的人把两件事混成一件）",
@@ -16736,8 +16739,8 @@ console.log(
    * 「刚被别人改过，请刷新」—— 而其实谁都没改。
    */
   eq("迁移**没有**推课节的 version（乐观锁不被一次数据升级搅动）", migratedLessons.map((l) => l.version), legacyLessonVersions);
-  eq("迁移后版本就是当前版本（37）", (await api.exportDatabase()).version, CURRENT_VERSION);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 37);
+  eq("迁移后版本就是当前版本（38）", (await api.exportDatabase()).version, CURRENT_VERSION);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 38);
   ok("版本记录里写着这一步（`VERSION_NOTES[34]`，后来的人不用翻提交历史）", (VERSION_NOTES[34] ?? "").includes("串身份"));
   ok("而且写明了「老课不猜串」这条口径", (VERSION_NOTES[34] ?? "").includes("不猜"));
   ok("而且写明了「过去的课是账」这条边界", (VERSION_NOTES[34] ?? "").includes("已排（还没上）"));
@@ -18142,6 +18145,272 @@ console.log("\n=== 59. 双语评价卡片：原文是公开内容、可复用的
   eq("收尾：库回到示例数据",
     (await api.exportDatabase()).siteContent.reviewsPage.reviews.length,
     seedDb.siteContent.reviewsPage.reviews.length);
+}
+
+
+console.log("\n=== 60. 学生案例的「任课老师」：卡片右下角的**公开实名**（v38 / E27）===");
+
+/*
+ * 机构原话：
+ *
+ * > 「**在每个学生卡片的右下角写上任课老师，在现在有的内容里全都是陈林维祎老师（显示实名）**」
+ *
+ * （陈林维祎是**老师**的名字，本来就公开挂在教师页上，因此这里直接写出来 ——
+ * 与 §58 那三个**学生 / 家长**的实名不同，那些在本文件里一律用占位写法。）
+ *
+ * ## 这一节最要紧的一句：案例的老师与评价的实名是**两件相反的事**
+ *
+ * 两个字段都叫"实名"，但：
+ *   - `SiteCase.teacher`（v38）：**老师**的名字，机构要求「**显示实名**」→
+ *     **进公开快照、进内容文件、前台源码里用它**；
+ *   - `SiteReview.realName`（v36）：**学生 / 家长**的名字，机构要求「后台实名、前台匿名」→
+ *     **三处都不能出现**（§58 守着）。
+ *
+ * 这一节因此有一条断言专门把这个对比写下来（`VERSION_NOTES[38]` 与 `types.ts` 的注释里
+ * 都点明了），免得以后有人觉得"都是实名"就把两个字段"统一"成一个。
+ *
+ * ## 这一节守八件事
+ *
+ *   ① **迁移**（v37 → v38）：老案例一律补**空串**（不猜），别的字段与别的表一个字不动；
+ *   ② **保存 / 读回一致**：trim、缺键保留库里那一份、显式空串才是清掉；
+ *   ③ **公开快照里有 `teacher`**（它是公开的，与 `realName` 相反）；
+ *   ④ **导出的 `cases.md` 里有 `#### 任课老师:`**，且写在过程描述**之前**（回读靠这条位置约定）；
+ *   ⑤ **导入缺这一栏的旧文件仍能工作**（读成空串 = 前台那一行不渲染）；
+ *   ⑥ **为空时不渲染**（源码级守卫）；**位置在展开区域**（收起时的 `summary` 里没有它）；
+ *   ⑦ 后台每条案例有「任课老师」这一格、提示语写明留空会怎样；
+ *   ⑧ 反向：**`realName` 依然三处不出现**（§58 不被弄坏）。
+ */
+{
+  const root60 = new URL("../", import.meta.url);
+  const read60 = (file: string): string => readFileSync(new URL(file, root60), "utf8");
+  /** 去掉注释再查源码（注释里提到字段名不算"用了它"）。 */
+  const strip60 = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  __useStoreForTesting(memory);
+  await api.importDatabase(serializeDatabase(seedDb));
+
+  /* ── ① 迁移：v37 的老案例补空串、别的字段与别的表一个字没动 ─────────────── */
+  const legacyV37 = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+    siteContent: { casesPage: { cases: Array<Record<string, unknown>> } };
+    version: number;
+  };
+  legacyV37.version = 37;
+  // 造"v37 的案例还没有 teacher 这个键"的形状
+  for (const item of legacyV37.siteContent.casesPage.cases) delete item.teacher;
+  /** 去掉 v38 新加的那个键之后的形状（用来比"其它字段一个字没动"）。 */
+  const withoutTeacher60 = (item: Record<string, unknown>): string => {
+    const copy = { ...item };
+    delete copy.teacher;
+    return JSON.stringify(copy);
+  };
+  const legacyShapes60 = legacyV37.siteContent.casesPage.cases.map(withoutTeacher60);
+  /** 键排序后的规范化 JSON（迁移链末尾的收尾归一可能重建对象、改变键序）。 */
+  const canonical60 = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical60).join(",")}]`;
+    if (value !== null && typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+        a.localeCompare(b),
+      );
+      return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical60(item)}`).join(",")}}`;
+    }
+    return JSON.stringify(value) ?? "null";
+  };
+  ok("夹具确实是「案例里没有 teacher 这个键的 v37 库」",
+    legacyV37.version === 37 &&
+      legacyV37.siteContent.casesPage.cases.length > 0 &&
+      legacyShapes60.every((text) => !text.includes("teacher")));
+
+  const upgraded60 = await api.importDatabase(JSON.stringify(legacyV37));
+  eq("v37 的老库能升级导入", upgraded60.ok, true);
+  const after60 = await api.exportDatabase();
+  eq("迁移后版本号就是当前版本", after60.version, CURRENT_VERSION);
+  eq("v37 → v38 给每条老案例补上空串（一条不落）",
+    after60.siteContent.casesPage.cases.map((item) => item.teacher),
+    legacyShapes60.map(() => ""));
+  ok("迁移**不猜**任课老师：没有哪条老案例被填上一个「看起来像真的」的老师",
+    after60.siteContent.casesPage.cases.every((item) => item.teacher === ""));
+  eq("案例原有的字段逐字节没动（迁移不是「顺手改案例」）",
+    after60.siteContent.casesPage.cases.map((item) =>
+      withoutTeacher60(item as unknown as Record<string, unknown>)),
+    legacyShapes60);
+  const afterRaw60 = JSON.parse(serializeDatabase(after60)) as Record<string, unknown>;
+  const changedTables60 = [
+    ...new Set([...Object.keys(legacyV37), ...Object.keys(afterRaw60)]),
+  ].filter(
+    (key) =>
+      key !== "siteContent" &&
+      key !== "version" &&
+      // `logs` / `updatedAt` 是 `importDatabase` 这个动作自己记的，不是迁移改的业务数据
+      key !== "logs" &&
+      key !== "updatedAt" &&
+      canonical60(legacyV37[key]) !== canonical60(afterRaw60[key]),
+  );
+  eq("别的表一个字没动（案例**没有记录级 `version`**，这一步也不推任何 `version`）",
+    changedTables60, []);
+  ok("v38 确实没有给案例加记录级 `version`（补的是一个空串字段，不是乐观锁）",
+    after60.siteContent.casesPage.cases.every((item) => !("version" in item)));
+  ok("`VERSION_NOTES[38]` 写着这一步，并把「公开实名 / 内部实名」这对相反写清了",
+    (VERSION_NOTES[38] ?? "").includes("任课老师") &&
+      (VERSION_NOTES[38] ?? "").includes("公开实名") &&
+      (VERSION_NOTES[38] ?? "").includes("realName") &&
+      (VERSION_NOTES[38] ?? "").includes("一律补空串"));
+
+  /* ── ② 保存 / 读回一致（trim；缺键保留；显式空串才是清掉） ─────────────── */
+  const savedCase60 = await api.site.saveBlocks({
+    casesPage: {
+      heading: { eyebrow: "自检", title: "自检案例（任课老师）", description: "自检" },
+      notice: "自检用，不发布。",
+      cases: [
+        {
+          id: "",
+          title: "自检·案例甲",
+          fields: [{ title: "年级", value: "初二" }],
+          story: "自检用的一条案例过程。\n\n第二段。",
+          teacher: "  陈林维祎  ",
+        },
+      ],
+    },
+  });
+  eq("保存时 `teacher` 前后空白被 trim 掉（与其它字段同一套）",
+    savedCase60.casesPage.cases.map((item) => item.teacher), ["陈林维祎"]);
+  const blocks60 = await api.site.getBlocks();
+  eq("内部读法（`site.getBlocks`）把任课老师读得回来",
+    blocks60.casesPage.cases.map((item) => item.teacher), ["陈林维祎"]);
+  const keptCase60 = await api.site.saveBlocks({
+    casesPage: {
+      ...blocks60.casesPage,
+      cases: blocks60.casesPage.cases.map((item) => {
+        const copy = { ...item } as Record<string, unknown>;
+        delete copy.teacher; // 老前端 / 老脚本交上来的条目**根本没有这个键**
+        return copy as never;
+      }),
+    },
+  });
+  eq("条目里没有这个键时保留库里那一份（老前端不该把已录的任课老师清掉）",
+    keptCase60.casesPage.cases.map((item) => item.teacher), ["陈林维祎"]);
+  const clearedCase60 = await api.site.saveBlocks({
+    casesPage: {
+      ...blocks60.casesPage,
+      cases: blocks60.casesPage.cases.map((item) => ({ ...item, teacher: "" })),
+    },
+  });
+  eq("**显式**交空串才是「清掉」（两个方向都要能用）",
+    clearedCase60.casesPage.cases.map((item) => item.teacher), [""]);
+  // 放回任课老师，后面几条公开 / 导出断言才有意义
+  await api.site.saveBlocks({ casesPage: blocks60.casesPage });
+
+  /* ── ③ 公开快照里有 `teacher`（**公开实名**，与 realName 相反） ─────────── */
+  const public60 = await api.site.publicContent();
+  const publicCases60 = public60.siteContent.casesPage.cases;
+  eq("公开快照里每条案例带着 `teacher`（它是公开的）",
+    publicCases60.map((item) => item.teacher), ["陈林维祎"]);
+  ok("整份公开快照的 JSON 里有这个老师名字（老师名字本来就公开在教师页上）",
+    JSON.stringify(public60).includes("陈林维祎"));
+  eq("反向对照：**同一份公开快照**里评价那一条仍然没有 `realName` 键（§58 的边界没被弄坏）",
+    public60.siteContent.reviewsPage.reviews
+      .map((item, index) => (Object.prototype.hasOwnProperty.call(item, "realName") ? index : -1))
+      .filter((index) => index >= 0),
+    []);
+
+  /* ── ④ 导出：`cases.md` 里有这一栏，且写在过程描述之前 ─────────────────── */
+  const exportFiles60 = {} as Record<SiteExportFile, string>;
+  for (const name of SITE_EXPORT_FILES) exportFiles60[name] = read60(`data/site/${name}.md`);
+  const built60 = buildPublicSite(await api.exportDatabase());
+  const exported60 = exportSiteMarkdown({ site: built60, existing: exportFiles60 });
+  const exportedCases60 = exported60.files.cases;
+  ok("导出的 cases.md 里有 `#### 任课老师: 陈林维祎`（**公开实名，写得出来也必须写得出来**）",
+    exportedCases60.includes("#### 任课老师: 陈林维祎"));
+  ok("导出把任课老师写在**过程描述之前**（回读靠这条位置约定取故事）",
+    exportedCases60.indexOf("#### 任课老师:") !== -1 &&
+      exportedCases60.indexOf("#### 任课老师:") <
+        exportedCases60.indexOf("自检用的一条案例过程。"));
+  eq("导出 → 回读：任课老师与过程描述都逐字节回来",
+    readSiteCore(exported60.files).cases.cases.map((item) => [item.teacher, item.story]),
+    [["陈林维祎", "自检用的一条案例过程。\n\n第二段。"]]);
+  const again60 = exportSiteMarkdown({ site: built60, existing: exported60.files });
+  eq("反复导出收敛（第二次不再改动 cases.md）",
+    again60.changed.filter((name) => name === "cases"), []);
+  const diskCases60 = read60("data/site/cases.md");
+  ok("仓库里那份 `data/site/cases.md` 里**有**这一栏（真数据，不只是夹具）",
+    diskCases60.includes("#### 任课老师: 陈林维祎"));
+  ok("生成物 `data/site/cases.ts` 里也有（前台不连后端时读的就是它）",
+    read60("data/site/cases.ts").includes("任课老师: 陈林维祎"));
+
+  /* ── ⑤ 导入缺这一栏的旧文件仍能工作（读成空串 = 前台那一行不渲染） ─────── */
+  const oldFile60 = [
+    "# 自检 · 老内容文件",
+    "",
+    "## 页面: 学生案例",
+    "",
+    "---",
+    "eyebrow: 自检",
+    "title: 自检",
+    "description: 自检",
+    "notice: 自检",
+    "---",
+    "",
+    "### 自检·老案例",
+    "",
+    "#### 年级: 初二",
+    "",
+    "老文件里的一条案例过程（没有任课老师这一栏）。",
+    "",
+  ].join("\n");
+  const readOld60 = readSiteCore({ ...exported60.files, cases: oldFile60 });
+  eq("导入缺这一栏的旧文件仍然工作：`teacher` 读成空串（不猜老师）",
+    readOld60.cases.cases.map((item) => [item.title, item.teacher]),
+    [["自检·老案例", ""]]);
+  ok("内容文件建库（`siteContentFromContent`）也读得到这一栏",
+    siteContentFromContent().casesPage.cases.every((item) => item.teacher !== ""));
+
+  /* ── ⑥ 前台：`teacher` 为空时**整行不渲染**；位置在展开区域、右下角 ─────── */
+  const casesCode60 = strip60(read60("app/(site)/cases/page.tsx"));
+  ok("案例卡片里有「任课老师：」这行小字", casesCode60.includes("任课老师："));
+  ok("**为空时整行不渲染**（`item.teacher !== \"\"` 守卫 —— 不留半截「任课老师：」）",
+    casesCode60.includes('item.teacher !== "" && ('));
+  ok("位置在**展开区域**里（在过程描述之后、`</details>` 之前）",
+    casesCode60.indexOf("dangerouslySetInnerHTML") < casesCode60.indexOf("任课老师：") &&
+      casesCode60.indexOf("任课老师：") < casesCode60.indexOf("</details>"));
+  ok("收起时的 `summary` 里没有它（那是「一眼判断」的短字段地盘，机构说的是卡片右下角）",
+    casesCode60.indexOf("</summary>") < casesCode60.indexOf("任课老师："));
+  ok("右对齐 = 卡片右下角（`text-right`）", casesCode60.includes("text-right"));
+  ok("案例的取数那一层（`backendCasesContent`）搬的是公开的那一份（`teacher` 有、`realName` 没有）",
+    strip60(read60("lib/site/backend-source.ts")).includes("item.teacher") &&
+      !strip60(read60("lib/site/backend-source.ts")).includes("realName"));
+
+  /* ── ⑦ 后台：有这一格、提示语写明留空会怎样 ─────────────────────────────── */
+  const contentCode60 = strip60(read60("app/admin/(dashboard)/content/page.tsx"));
+  ok("后台每条案例有「任课老师」这一格",
+    contentCode60.includes('label="任课老师"') &&
+      contentCode60.includes("updateCase(item.id, { teacher:"));
+  ok("提示语写明**留空则这一行不显示**（免得机构以为空着会露出半截文案）",
+    contentCode60.includes("留空则这一行不显示"));
+
+  /* ── ⑧ 反向：`realName` 依然三处不出现（别把 §58 弄坏） ─────────────────── */
+  ok("** `/cases` 前台源码里没有 `realName`**（这一版没有把它带出来）",
+    !casesCode60.includes("realName"));
+  ok("`components` 里非 admin 的那些源码也没有 `realName`",
+    (() => {
+      const offenders: string[] = [];
+      for (const entry of readdirSync(new URL("components", root60), { recursive: true }) as string[]) {
+        if (/\.(tsx?|mts)$/.test(entry) && !entry.startsWith("admin")) {
+          if (strip60(read60(`components/${entry}`)).includes("realName")) offenders.push(entry);
+        }
+      }
+      return offenders.length === 0;
+    })());
+  ok("公开白名单里评价照旧**逐条显式构造**（`reviewsPage: publicReviewsPage(...)`）——"
+      + "案例整块公开、`teacher` 自然跟着出门；而评价的 `realName` 依旧出不去",
+    read60("lib/backend/public-site.ts").includes(
+      "reviewsPage: publicReviewsPage(db.siteContent.reviewsPage)",
+    ));
+
+  /* 收尾：把这一节造的东西摘掉（自检的库不该留下"自检"案例）。 */
+  await api.importDatabase(serializeDatabase(seedDb));
+  eq("收尾：库回到示例数据",
+    (await api.exportDatabase()).siteContent.casesPage.cases.length,
+    seedDb.siteContent.casesPage.cases.length);
 }
 
 

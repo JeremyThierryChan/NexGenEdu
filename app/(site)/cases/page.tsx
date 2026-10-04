@@ -164,6 +164,18 @@ export default function CasesPage() {
                         dangerouslySetInnerHTML={{ __html: renderMarkdown(item.story) }}
                       />
                     )}
+
+                    {/*
+                      任课老师（v38）：机构原话「**在每个学生卡片的右下角写上任课老师**」。
+                      放在展开区域的**最后、右对齐**（text-right）= 卡片右下角；
+                      收起时看不到（那是 `summary` 的地盘，只放"一眼判断要不要展开"的短字段）。
+                      **空串时整行不渲染** —— 不留「任课老师：」这种半截文案。
+                    */}
+                    {item.teacher !== "" && (
+                      <p className="mt-5 text-right text-xs text-ink-400">
+                        任课老师：{item.teacher}
+                      </p>
+                    )}
                   </div>
                 </details>
               );

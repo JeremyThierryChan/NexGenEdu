@@ -663,6 +663,12 @@ export function backendCasesContent(snapshot: PublicSite): CasesContent {
     from: text(field(item, "入学水平")),
     to: text(field(item, "当前水平")),
     story: text(item.story),
+    /*
+     * v38 的任课老师（**公开实名**）：公开快照里就有（`casesPage` 整块公开），
+     * 前台卡片右下角按它渲染。空串时页面**整行不渲染**（不留「任课老师：」这种半截文案）。
+     * 与评价的 `realName` 相反 —— 那一栏公开快照里根本没有（学生 / 家长的内部实名）。
+     */
+    teacher: text(item.teacher),
   }));
 
   return {

@@ -257,6 +257,14 @@ export type CaseItem = {
   to: string;
   /** 过程描述（Markdown 原文）。 */
   story: string;
+  /**
+   * 任课老师（v38，可空）：卡片**右下角**的小字「任课老师：{teacher}」。
+   *
+   * 空串＝还没填 → **整行不渲染**（页面不会留下「任课老师：」这种半截文案）。
+   * ⚠️ 这是**公开实名**（老师的名字本来就在教师页上公开），
+   * 与评价的 `realName`（内部实名，绝不上网站）**是两件相反的事** —— 别合成一个字段。
+   */
+  teacher: string;
 };
 
 export type CasesContent = PageIntro & {

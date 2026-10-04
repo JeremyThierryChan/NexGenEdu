@@ -1107,7 +1107,18 @@ function faqFile(site: PublicSite, source: string, warnings: Warnings, missing: 
   return rewriteFile(source, 2, [spec], warnings, missing);
 }
 
-/** cases.md：`### 案例标题` + 字段 + 过程描述。 */
+/**
+ * cases.md：`### 案例标题` + 字段 + 过程描述。
+ *
+ * ## v38：多一栏 `#### 任课老师:`（**公开实名**）
+ *
+ * 案例的任课老师写在**过程描述之前**（过程描述是最后一个 `####` 条目的正文，
+ * 这条位置约定是回读能取到故事的前提 —— `readCases` 用 `group.items.at(-1)?.body`
+ * 取故事，把 `任课老师` 放在故事后面会把故事算到它头上）。
+ *
+ * ⚠️ 与评价的 `realName` 相反：老师名字是**公开**的（机构明确要求"显示实名"），
+ * 因此照常写进文件。
+ */
 function casesFile(site: PublicSite, source: string, warnings: Warnings, missing: string[]): string {
   const page = site.siteContent.casesPage;
   const spec: PageSpec = {
@@ -1123,6 +1134,9 @@ function casesFile(site: PublicSite, source: string, warnings: Warnings, missing
           }
           return `#### ${field.title}: ${text(field.value).replace(/\s*\n\s*/g, " ")}`;
         });
+      // v38 的任课老师：空串不写（老数据不长出这一栏 = 前台那一行本来也不渲染）
+      const teacher = text(item.teacher).trim().replace(/\s*\n\s*/g, " ");
+      if (teacher !== "") blocks.push(`#### 任课老师: ${teacher}`);
       const story = text(item.story).trim();
       if (story !== "") {
         blocks.push(bodyForFile(story, `案例「${item.title}」的过程描述`, warnings));
@@ -1452,6 +1466,11 @@ export type SiteCore = {
       from: string;
       to: string;
       story: string;
+      /**
+       * v38 的任课老师：**公开实名**，内容文件里写得出来、也必须写得出来
+       * （`#### 任课老师:`）—— 与评价的 `realName`（内部实名，四处都不出现）相反。
+       */
+      teacher: string;
     }>;
   };
   /** 家长与学生评价：同样**不比 `id`**（文件里的身份是那条 `### 署名`）。 */
@@ -1768,6 +1787,11 @@ function readCases(page: PageBlock | undefined): CasesContent {
 
   const cases: CaseItem[] = (page?.groups ?? []).map((group) => {
     const field = (name: string): string => group.items.find((item) => item.title === name)?.value ?? "";
+    /*
+     * 过程描述写在所有 `#### 字段` 之后，因此会被并进**最后一个**条目的正文里。
+     * 导出把 `任课老师` 写在过程描述**之前**（见 `casesFile`），因此最后一个条目
+     * 仍然是"承载故事的那个"（现在它是 `任课老师`，其 `body` 就是故事）。
+     */
     const last = group.items.at(-1);
     return {
       id: group.name,
@@ -1781,6 +1805,8 @@ function readCases(page: PageBlock | undefined): CasesContent {
         .map((part) => part.trim())
         .filter((part) => part !== "")
         .join("\n\n"),
+      // v38 的任课老师（**公开实名**）：老文件没有这一栏 → 空串
+      teacher: field("任课老师").trim(),
     };
   });
 
@@ -1804,6 +1830,7 @@ function toCaseCore(content: CasesContent): SiteCore["cases"] {
       from: item.from,
       to: item.to,
       story: item.story,
+      teacher: item.teacher,
     })),
   };
 }

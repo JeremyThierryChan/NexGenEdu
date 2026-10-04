@@ -255,6 +255,8 @@ export default function AdminContentPage() {
             { title: "主要问题", value: "" },
           ],
           story: "",
+          // v38 的任课老师（公开实名）：新案例也从空串起步（前台那一行不渲染）
+          teacher: "",
         },
       ],
     }));
@@ -537,6 +539,20 @@ export default function AdminContentPage() {
                       rows={4}
                       value={item.story}
                       onChange={(event) => updateCase(item.id, { story: event.target.value })}
+                      disabled={!canWrite}
+                    />
+                  </div>
+                  {/*
+                    v38：**任课老师**（公开实名，显示在卡片右下角）。
+                    与家长/学生评价里那格「真实姓名（只在后台显示）」**恰好相反** ——
+                    老师的名字本来就挂在教师页上，机构要求「显示实名」。
+                  */}
+                  <div className="mt-3">
+                    <TextField
+                      label="任课老师"
+                      hint="显示在卡片右下角的小字「任课老师：陈林维祎」。**留空则这一行不显示**（不会留下半截「任课老师：」）"
+                      value={item.teacher}
+                      onChange={(event) => updateCase(item.id, { teacher: event.target.value })}
                       disabled={!canWrite}
                     />
                   </div>

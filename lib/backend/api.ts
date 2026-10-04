@@ -8,6 +8,7 @@ import { validateVacations } from "./calendar-plan";
 import { danglingOffers, offerId, offersSummary, validateOffers, type OfferKey } from "./offers";
 import {
   emptySiteContent,
+  normalizeCasesPage,
   normalizeReviewsPage,
   reviewsPageSkeleton,
   siteContentFromContent,
@@ -1586,6 +1587,38 @@ function migrate(db: Database): Database | null {
     db.version = 37;
   }
 
+  if (db.version === 37) {
+    /*
+     * v37 → v38：**学生案例增加「任课老师」**（`SiteCase.teacher`，**公开实名**）。
+     *
+     * 机构原话：「**在每个学生卡片的右下角写上任课老师，在现在有的内容里全都是
+     * 陈林维祎老师（显示实名）**」—— 前台卡片展开后右下角多一行小字。
+     *
+     * ## 老案例一律补空串，**不猜**
+     *
+     * 机构说"现在有的内容里全都是陈林维祎老师"，但那说的是**现在**这一版要填的内容；
+     * 系统不该替机构把这句话翻译成"给每一条老案例都写上陈林维祎" ——
+     * 那是替机构记下一条它没登记过的事实（哪条案例是谁带的，只有机构知道）。
+     * 与 v30 / v33 / v34 / v35 / v36 / v37 同一条纪律：**补空串**，
+     * 由机构在后台（或这次录入）一条条填。空串的语义正好是"还没填"：
+     * 前台那一行**整行不渲染**。
+     *
+     * ## 与 v36 评价的 `realName` 恰好相反
+     *
+     * 那个是**学生 / 家长**的内部实名（三处都不能出现）；这个是**老师**的公开实名
+     * （机构明确要求显示，老师名字本来就挂在教师页上）—— 因此它照常进公开快照、
+     * 进内容文件、前台源码里用它。两者都叫"实名"、性质完全相反，别"统一"成一个字段。
+     *
+     * ## 只动这一个字段
+     *
+     * 案例的其余字段一个字不碰；案例**没有记录级 `version`**，因此也没有"推 version"
+     * 这回事 —— 别的表的 `version` 更不该被这一步搅动。
+     */
+    db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
+    db.siteContent.casesPage = normalizeCasesPage(db.siteContent.casesPage);
+    db.version = 38;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1621,9 +1654,14 @@ function migrate(db: Database): Database | null {
    *
    * v37 的 `original` / `originalLanguage`（公开内容）同样在 `normalizeReviewsPage` 里兜：
    * 一份"自称 v37"却缺这两个键的评价补空串 = **单语评价**（前台不显示切换按钮）。
+   *
+   * v38 的 `SiteCase.teacher`（公开实名）在 `normalizeCasesPage` 里兜：
+   * 一份"自称 v38"却缺这个键的案例补空串 = 前台那一行不渲染 —— 不补的话
+   * 前台读 `item.teacher.trim()` 就是一次 TypeError（整个案例列表读不出来）。
    */
   db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
   db.siteContent.reviewsPage = normalizeReviewsPage(db.siteContent.reviewsPage);
+  db.siteContent.casesPage = normalizeCasesPage(db.siteContent.casesPage);
 
   /*
    * 收尾归一：**维度表必须存在**（与分区表、网站内容同一条纪律）。
@@ -7104,21 +7142,38 @@ const localApi = {
       const beforeCases = db.siteContent.casesPage;
       if (blocks.casesPage !== undefined) {
         const incoming = blocks.casesPage;
+        /*
+         * `teacher`（v38 的**公开实名**）：可选，trim 前后空白即可。
+         *
+         * 与评价的 `realName` 一样判**三态**：交上来的条目里**没有这个键**（老前端 / 老脚本）
+         * 时按 id 找回库里那一份 —— 那种请求的意思是"我不知道有这个字段"，不是"请清空它"；
+         * 只有**显式交空串**才是机构把这一条的老师清掉。新加的那一条（id 为空、库里查不到）
+         * 自然落到空串（前台那一行不渲染）。
+         */
+        const teacherById = new Map(
+          db.siteContent.casesPage.cases.map((item) => [item.id, item.teacher] as const),
+        );
         db.siteContent = {
           ...db.siteContent,
           casesPage: {
             heading: { ...incoming.heading },
             notice: incoming.notice.trim(),
-            cases: incoming.cases.map((item) => ({
-              // id 为空 = 新加的案例：这里才生成，页面不需要知道 id 怎么来
-              id: item.id.trim() === "" ? nextId("case") : item.id.trim(),
-              title: item.title.trim(),
-              fields: item.fields.map((field) => ({
-                title: field.title.trim(),
-                value: field.value.trim(),
-              })),
-              story: item.story.trim(),
-            })),
+            cases: incoming.cases.map((item) => {
+              const id = item.id.trim() === "" ? nextId("case") : item.id.trim();
+              return {
+                id,
+                title: item.title.trim(),
+                fields: item.fields.map((field) => ({
+                  title: field.title.trim(),
+                  value: field.value.trim(),
+                })),
+                story: item.story.trim(),
+                teacher:
+                  typeof item.teacher === "string"
+                    ? item.teacher.trim()
+                    : (teacherById.get(id) ?? ""),
+              };
+            }),
           },
         };
       }
