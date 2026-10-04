@@ -1926,6 +1926,178 @@ out/cases/index.html  「家长与学生怎么说」= true   家长评价 / 学�
 - **没有**给评价加"点赞 / 评分 / 头像 / 视频"这类形态 —— 机构要的是"一块能自己填的评价区"，
   加字段要等他们说清楚要哪些。
 
+### E25 续：评价的「真实姓名」—— 后台实名、前台匿名（数据库 v36）
+
+> **编号说明**：**续在 E25 上，不新开编号** —— E25 是「学生案例折叠 + 家长与学生评价进库」
+> 那一节，这一版动的还是**同一块东西**（`siteContent.reviewsPage` 的评价），
+> 只是给它补一个**内部字段**；新开一节会让人以为又多了一块功能。
+>
+> **这一版动了数据库结构**：`CURRENT_VERSION` 35 → **36**（`SiteReview` 新增 `realName`）。
+> 结构改动只加了这一个字段，且老库**一律补空串**（见下"为什么不猜"）。
+
+**机构原话**（2026-10-04）：
+
+> 「**王同学是〔学生实名〕，王同学家长是〔学生实名〕妈妈，刘同学是〔另一位学生实名〕，
+> 后台实名但是前台的话就显示 X 同学和 X 同学家长**」
+
+> ⚠️ **原话里那三个实名在这里被替换成了占位写法**（`〔学生实名〕`），这不是笔误：
+> 这一份 `PROJECT.md` **在仓库里**，仓库会跟着公开（与 `data/site/*.md` 一样）——
+> 而这一版整件事就是"**实名不进任何会公开的地方**"。机构自己要的那句原话已经逐字记在
+> 当轮对话与后台数据库里；这里只保留口径。**要核对名字请到后台「网站内容」→「家长与学生评价」**。
+
+#### 一、为什么实名**必须**是独立字段
+
+机构要两件看起来相反、其实不冲突的事：
+
+1. **后台能对上这条评价是谁的**（哪天要回访、要核对、要征得同意）；
+2. **网站前台仍然匿名**（`author` 那栏保留姓氏的写法：「王同学」「王同学家长」）。
+
+把实名塞进 `author` → 前台当场露出全名；把匿名塞进一个"内部备注" → 又对不上人。
+**因此是两个字段**：`author`（公开、照旧）与 `realName`（内部、新加）。
+
+#### 二、三处**绝不能泄漏**（每一处都有反向断言）
+
+这是这一版唯一的重点。`realName` 与 `Teacher.employment` / `Teacher.source` /
+`Classroom.campus` 同一档纪律（内部信息不上网站），但它多一层麻烦：
+**内容文件也在仓库里**，而这一版的字段恰好是"人名"。
+
+| 绝不能出现的地方 | 为什么 | 谁在守 |
+| --- | --- | --- |
+| 公开快照（`site.publicContent()` / `/api/public/site`） | 匿名访客与构站脚本都拿得到 | `public-site.ts` 里**逐条显式构造** `PublicReviewsPage`；公开的那条评价类型 `PublicSiteReview` 用 `Omit<SiteReview, "realName">` **从类型上就没有这个键**；自检 §58 逐条 + 整份 JSON 两个方向断言 |
+| `data/site/reviews.md`（导出产物） | **这个文件在仓库里 = 会跟着公开仓库 / Pages 公开** | `site-export.ts` 的 `reviewsFile()` 只写四个字段（分组 / 科目 / 正文 / 补充）；它拿到的类型里根本没有 `realName`，想写都写不出来；自检 §58 读文件断言 |
+| `data/site/reviews.ts`（`sync-content` 生成物） | 它是 `reviews.md` 的逐字嵌入，一样在仓库里 | 同上；自检 §58 读生成物断言 |
+| 前台源码（`app/(site)/cases/page.tsx` 那条匿名口径） | 页面只该显示 `author` | 自检 §58 对 `app/(site)` / `lib/site` / `lib/data` / `lib/types` 与 `components`（非 admin）**去掉注释后**全量扫描 `realName` |
+
+#### 三、一个**被迫的**新方法：`site.getBlocks`（值得记下来）
+
+后台「网站内容」页原先读的是 `site.publicContent()`（公开快照）—— 那里面**没有**实名。
+于是出现一个死结：**读公开快照 → 后台永远看不到实名 → 一保存还把库里已录的清掉**
+（草稿里没有这个键）。解法只有一条：给后台一个**内部读法**。
+
+- `site.getBlocks()`：读那五块（案例 / 特色课程 / 常见问题 / **评价** / 页面文案），
+  返回**库里那一份**（含实名）；与 `site.saveBlocks` **同一组权限**（技术管理员 + 招生老师），
+  两者读写的是同一批块（形状共用 `SiteContentBlocks`）；
+- 它与公开快照的差别**只有一条**：出不出去。因此 `docs/后台API约定.md` 里那一行也把它与
+  `publicContent` 写在同一格里并说明区别；
+- 后台拿不到它时（后端比程序旧 / 没权限）**回落到公开快照渲染其余四块**，
+  评价块置 `null` → 页面照旧显示"读不到评价"，并且**不把评价交上去**（老口径一字未改）。
+
+**一条顺手补的安全阀**（不这么做就会"编辑一次 = 丢一次实名"）：保存时如果某条评价**没有带
+`realName` 这个键**（老前端 / 老脚本），服务端**保留库里那一份**；只有**显式交空串**
+才是"清掉"。判据是三态，不是两态（自检 §58 两个方向都断言）。
+
+#### 四、老库一律补空串（**不猜**）
+
+与 v30 给教师补用工性质、v33 给学生补"来源"、v34 给课节补串身份同一条纪律：
+**库里那条「王同学」到底是谁，系统的任何其它字段都推不出来**。
+猜一个名字的后果不是"某个字段空着"，而是把一条**真的实名**记到**错误的人**头上 ——
+机构拿它去回访会找到别人。因此 v35 → v36 迁移只做一件事：给每条老评价补 `realName: ""`，
+**别的字段一个字不动**；收尾归一也兜一次（"自称 v36 却缺这个键"的文件照样会出现）。
+
+#### 五、这一版实际改了哪些文件
+
+| 改动 | 说明 |
+| --- | --- |
+| `lib/backend/types.ts` | `SiteReview.realName`（内部字段，注释写全了为什么 / 三条不泄漏 / 不猜）、新增 `SiteContentBlocks` |
+| `lib/backend/version.ts` | `CURRENT_VERSION` 35 → 36、`VERSION_NOTES[36]` |
+| `lib/backend/site-content.ts` | `reviewsFromContent` 补空串（内容文件没有这一栏）、导出 `normalizeReviewsPage` 供迁移与收尾归一**共用**、`validateReviewsPage` 说明"实名不在这里判" |
+| `lib/backend/api.ts` | 迁移 35 → 36、收尾归一、**新增 `site.getBlocks`**、`saveBlocks` 写 `realName`（trim + 缺键保留） |
+| `lib/backend/public-site.ts` | `PublicSiteReview` / `PublicReviewsPage` / `PublicSiteContent`（**类型上就没有实名**）、`publicReviewsPage()` 逐条构造、`siteContentFromPublic()`（给不碰评价的页面用） |
+| `lib/backend/site-export.ts` | `reviewsFile()` 明确**不导出**实名（附理由） |
+| `lib/site/backend-source.ts` | 搬的是 `PublicSiteReview`（没有实名可搬） |
+| `lib/auth/roles.ts` / `lib/backend/contract.ts` | `site.getBlocks` 登记（技术管理员 + 招生老师），契约里写明它与公开快照的区别 |
+| `app/admin/(dashboard)/content/page.tsx` | 每条评价多一格「真实姓名（只在后台显示）」+ 署名旁的小字 + 提示语写明"前台不会显示它"；加载改走 `site.getBlocks`（拿不到时回落公开快照，评价块不交上去） |
+| `components/admin/CoursesLedgerPanel.tsx` / `scripts/accept-check.mts` / `scripts/check.mts` | 走 `siteContentFromPublic()`（它们只碰课程正文，不碰评价） |
+| `scripts/check.mts` | 新增 **§58**（35 条）；两处写死的版本号（§50 / §56）改成 36；`site.getBlocks` 进契约后文档计数 115 → 116 |
+| `docs/使用手册.md` / `docs/内容维护手册.md` / `docs/后台API约定.md` / `PROJECT.md` | 怎么填实名、为什么前台看不到（"它在后台 / 库里，不上网站"）、内容文件里**没有**实名是**有意的**、`SiteReview` 字段表与内部读法、本节 |
+
+#### 六、为什么另起 §58 而不是并进 §57
+
+§57 守的是 v35 那一件事（"评价进库"），已经有 42 条断言、编号 ①–⑧；
+v36 只加一个内部字段，重点全在"**绝不上网站**"这条边界（三个反向断言），
+而且它逼出了一个新方法（`site.getBlocks`）。并进 §57 会让"评价怎么进库"与
+"实名怎么不出门"混进同一张编号表 —— 这两件事的失败形态完全不同
+（前者是"页面空着"，后者是"把学生真名贴到公网上"）。
+
+#### 七、这一轮的门禁结果（真实跑过的）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `npm run check` | **全部通过**，退出码 0（2837 条断言；新增 **§58 共 35 条**） |
+| `npm run check:both`（内存 + 真实 HTTP 两种后端跑同一份 check.mts） | **两种后端都全部通过**（退出码 0） |
+| `npm run build` | 退出码 0，`✓ Generating static pages (96/96)`，`out/` 里 93 个 `.html` |
+| `npm run check:404` / `check:links` | 全过（站内链接 2834 个、问题 0 个） |
+| `npm run site:export -- --check` | 退出码 0：七个文件**一致、没动** |
+| `npx tsc --noEmit` | 退出码 0 |
+| `npm run lint` | 退出码 0 |
+| 3000 / 4000 实测 | 3000 上 `SITE_LIVE=1 npm run dev`（**只有一个** dev）`/`、`/cases/`、`/admin/` 都 **200**；4000 `/health` **200**；dev 日志错误数 **0** |
+
+#### 八、⚠️ 一处**偏离 E25 先例**的地方：这一版**重启了 4000**（经机构同意）
+
+E25 那一版按纪律**没有**重启后端，结果"新字段要重启才生效"这件事留给了下一位执行者。
+这一版不同：**实名必须真的落进库里**（否则"后台实名"就是一句空话），
+而 4000 上跑的旧代码（v35）的 `saveBlocks` 是**逐字段显式映射**，会把 `realName` 静默丢掉；
+又不允许"另起一个进程写同一个库"（`server/db-lock.mts` 是单写者锁，且 `api.ts` 的
+`load()` 有模块级 cache、写操作整份快照覆盖）。因此**经机构明确同意后**：
+
+1. 按端口取 PID（`lsof -nP -iTCP:4000 -sTCP:LISTEN`，**不用** `pgrep -f` 宽匹配）→ 停掉；
+2. `nohup npm run server > /tmp/nexgenedu-server.log 2>&1 < /dev/null & disown`；
+3. 实测 `/health` **200**，并且**第一条数据请求打进来时 v35 → v36 迁移已跑**：
+   重启后库里快照 `version = 36`、三条老评价的 `realName` 都是 `""`。
+
+**这也说明一件事**：旧代码的 `publicSite()` 是**整块**把 `reviewsPage` 丢出去的 ——
+如果绕开重启、用别的路径把实名塞进库，`/api/public/site` 会**当场泄漏**实名。
+所以"重启"在这里不只是"让新字段生效"，也是**避免一个真实的泄漏窗口**。
+
+#### 九、端到端证据（2026-10-04 实跑）
+
+**① 重启后迁移**（直接读 SQLite 里那份快照）：
+
+```
+snapshot version = 35   ← 重启前（还没人请求过，迁移没跑）
+snapshot version = 36   ← 第一条数据请求之后
+reviews: [{"id":"review_mutm93oycs1s","author":"王同学","realName":""},
+          {"id":"review_mutoaubigxrk","author":"王同学家长","realName":""},
+          {"id":"review_mutp844axwtn","author":"刘同学","realName":""}]
+```
+
+**② 实名录入（经真后端 HTTP：`POST /api/login` → `POST /api/call {method:"site.saveBlocks", args:[…]}`）**：
+
+```
+写前 realName： ["","",""]
+写后 realName： ["〔学生实名〕","〔该学生〕妈妈","〔另一位学生实名〕",""]   ← 第四条「邱同学」机构还没给实名，留空
+heading / notice 未变： true
+前三条的前台字段未变： true                             ← author / quote / subject / description 一个没动
+saveBlocks 返回值与 getBlocks 一致： true
+```
+
+> 原话里的实名只写进了**数据库**；`PROJECT.md` / 源码 / 内容文件里都是占位写法
+> （这一节开头那段"为什么原话被遮蔽"说的就是这件事）。
+
+**③ 三处不泄漏（原始输出）**：
+
+```
+GET /api/public/site（逐条键）：[["id","group","quote","author","subject","description"], ×4]
+含 realName 的条数 = 0        整份 JSON 含 "realName" = false      含实名值 = []
+署名 = ["王同学","王同学家长","刘同学","邱同学"]
+
+data/site/reviews.md ：无「真实姓名」/ realName / 实名值；署名仍是 ### 王同学 / ### 王同学家长 / ### 刘同学 / ### 邱同学
+data/site/reviews.ts ：实名相关命中 0
+
+GET http://127.0.0.1:3000/cases/ ：王同学 ×3、王同学家长 ×2、刘同学 ×2、邱同学 ×2；
+                                    三个实名（按它们逐字 grep）都 0、realName 0、真实姓名 0
+```
+
+**④ 导出回环**：`npm run site:export` 只改了一个文件（`reviews.md`：加了第四条「邱同学」），
+`--check` 随后七个文件**一致**；`reviews.md` / `reviews.ts` 里都没有实名。
+
+#### 十、这一轮**没有**做的事
+
+- **没有**把任何一条实名写进仓库里会公开的文件（`data/site/reviews.md` / `reviews.ts` /
+  前台源码 / 后台源码 / 本文件的原话都做了遮蔽或占位）—— 这正是这一版的目的；
+- **没有**把实名加进任何"导出 / 报表"（导出不是这一版的范围，机构没提）；
+- **没有**动 `知识库/`、没有 `git commit` / `git push`；
+
 ### E23：排课串 —— 「仅此一次 / 此后所有」（数据库 v34）
 
 > **编号说明**：这一节取 **E23** —— **E22 与「E22 续」**都已落地（备份能在后台恢复 / 升级前快照

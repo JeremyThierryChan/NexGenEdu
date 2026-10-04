@@ -13,6 +13,8 @@
 import { api } from "../lib/backend/api.ts";
 // 教室名的唯一显示口径（「校区·教室名」，v31）—— 逐页验收要按用户看到的样子核对
 import { classroomLabel } from "../lib/backend/classrooms.ts";
+// 公开快照 → 内部形状（评价的内部实名只在内部那一份里，见 public-site.ts）
+import { siteContentFromPublic } from "../lib/backend/public-site.ts";
 // 教材的唯一显示口径（`学科·模块名`，v32）
 import { textbookSummary } from "../lib/backend/textbooks.ts";
 import { applyDecision, offerKey, offersByKey, resolveOffer } from "../lib/backend/offers.ts";
@@ -238,7 +240,12 @@ await check("网站内容", "标题为空被拒", async () => {
 }, (text: string) => text === "已拒绝");
 await check("网站内容", "保存课程正文不会冲掉案例", async () => {
   const content = await api.site.publicContent();
-  await api.site.saveContent(content.siteContent);
+  /*
+   * 公开快照里没有评价的内部实名（v36），而 `site.saveContent` 要的是 `SiteContent`：
+   * 走 `siteContentFromPublic` 补成那个形状（运行时不带 `realName` 键）。
+   * 这一页保存的是**课程正文**，服务端会原样保留评价块 —— 实名安全。
+   */
+  await api.site.saveContent(siteContentFromPublic(content.siteContent));
   const after = await api.site.publicContent();
   return after.siteContent.casesPage.cases.some((item) => item.id === casesPageId);
 });

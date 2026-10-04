@@ -26,7 +26,15 @@ import type {
   PricingStage,
   PricingTrial,
 } from "./pricing";
-import type { Course, CourseTag, Database, SiteContent, Teacher } from "./types";
+import type {
+  Course,
+  CourseTag,
+  Database,
+  SiteContent,
+  SiteReview,
+  SiteReviewsPage,
+  Teacher,
+} from "./types";
 import { syncClassTypes } from "./class-types";
 
 /** 公开的教师资料（**不含电话**）。 */
@@ -99,6 +107,30 @@ export type PublicPricing = {
   otherItems: PricingOtherItem[];
 };
 
+/**
+ * 公开的一条评价：**没有 `realName`**。
+ *
+ * 机构要"后台实名、前台匿名"（见 `SiteReview.realName` 的说明），因此公开的这一份
+ * 用 `Omit` 把那个键**从类型上拿掉** —— 不是"构造时记得别写"，而是
+ * **写不出来**（`reviewsFile()` 那边同理：导出器拿到的就是没有这个键的类型）。
+ */
+export type PublicSiteReview = Omit<SiteReview, "realName">;
+
+/** 公开的评价块（标题骨架与条目都在，条目里没有实名）。 */
+export type PublicReviewsPage = Omit<SiteReviewsPage, "reviews"> & {
+  reviews: PublicSiteReview[];
+};
+
+/**
+ * 公开的网站内容：除评价块外与 `SiteContent` 逐字段相同。
+ *
+ * 评价**必须单独一行显式构造**（不能整块丢出去）：`SiteReview.realName` 是内部字段，
+ * 整块出门就是三条实名当场泄漏 —— 这正是本文件头"按白名单构造"要拦的那类事。
+ */
+export type PublicSiteContent = Omit<SiteContent, "reviewsPage"> & {
+  reviewsPage: PublicReviewsPage;
+};
+
 /** 公开数据整体（网站构站时拿到的就是这一份）。 */
 export type PublicSite = {
   /** 数据格式版本：网站那侧据此判断"这份数据我读得懂吗"。 */
@@ -109,7 +141,7 @@ export type PublicSite = {
   courses: PublicCourse[];
   /** 课程分区：课程页的「栏目 → 子栏目」由它和 `courses` 一起决定。 */
   partitions: PublicCoursePartition[];
-  siteContent: SiteContent;
+  siteContent: PublicSiteContent;
   pricing: PublicPricing;
 };
 
@@ -130,6 +162,28 @@ function publicTeacher(teacher: Teacher): PublicTeacher {
   };
 }
 
+/**
+ * 评价：**逐条只用公开的那五个字段重新构造**（`realName` 不写进去）。
+ *
+ * 与 `publicTeacher` / `publicCourse` 同一个写法与同一个理由：
+ * **新增字段必须在这里显式写一行，忘了就是没给出去** —— 失败方向是安全的那个。
+ * `id` 也照给：网站那侧按它认人（渲染 key / 分组的稳定标识），它本身不是敏感信息。
+ */
+function publicReviewsPage(page: SiteReviewsPage): PublicReviewsPage {
+  return {
+    heading: { ...page.heading },
+    notice: page.notice,
+    reviews: page.reviews.map((item) => ({
+      id: item.id,
+      group: item.group,
+      quote: item.quote,
+      author: item.author,
+      subject: item.subject,
+      description: item.description,
+    })),
+  };
+}
+
 /** 课程：卡片所需的全部字段（备注 `note` 是内部备注，不公开）。 */
 function publicCourse(course: Course): PublicCourse {
   return {
@@ -144,6 +198,35 @@ function publicCourse(course: Course): PublicCourse {
     intro: course.intro,
     siteKind: course.siteKind,
   };
+}
+
+/**
+ * 公开的网站内容 → **内部形状**（补上 `SiteContent` 要求的实名那一栏）。
+ *
+ * ## 只给**不碰评价**的地方用
+ *
+ * 课程库页（`CoursesLedgerPanel`）读公开快照只为**课程正文**，保存走的是
+ * `site.saveContent` —— 那个方法在服务端**原样保留评价块**，因此它根本不关心实名。
+ * 它只是需要一个 `SiteContent` 类型，于是走这一个函数。
+ *
+ * ## 为什么返回的对象里**真的没有** `realName` 键（不是补空串）
+ *
+ * 补空串会造成一种很隐蔽的破坏：那是一句"请把实名清空"，而不是"我不知道"。
+ * 这里返回的评价条目**不带这个键**，万一有人后来把 `reviewsPage` 又写回
+ * `site.saveBlocks`，服务端的写入闸认得出"这个键不在"并**保留库里那一份**
+ * （见 `api.ts` 的 `saveBlocks`）—— 失败方向是"没改到"，不是"改没了"。
+ * 类型上那一句 `as` 骗过的只是一个编译期要求，运行时形状是刻意的。
+ *
+ * 需要**真**实名的地方（后台「网站内容」页）走 `site.getBlocks`，不要用这一个。
+ */
+export function siteContentFromPublic(content: PublicSiteContent): SiteContent {
+  return {
+    ...content,
+    reviewsPage: {
+      ...content.reviewsPage,
+      reviews: content.reviewsPage.reviews.map((item) => ({ ...item })),
+    },
+  } as SiteContent;
 }
 
 /** 组装公开数据。 */
@@ -173,7 +256,9 @@ export function publicSite(db: Database): PublicSite {
       // 常见问题（v21）：机构要求"以后端内容为主，前端只根据后端"
       faqPage: db.siteContent.faqPage,
       // 家长与学生评价（v35）：对外文案，与案例同一块页面（/cases），因此跟着出门
-      reviewsPage: db.siteContent.reviewsPage,
+      // ⚠️ 但**逐条显式构造**（`publicReviewsPage`）：`SiteReview.realName` 是内部实名，
+      // 整块丢出去就是三条实名当场泄漏（v36）—— 这里绝不能改回 `db.siteContent.reviewsPage`
+      reviewsPage: publicReviewsPage(db.siteContent.reviewsPage),
       // 页面文案块（v22）：品牌与联系方式 / 首页 / 关于 / 联系我们 / 时间安排
       copy: db.siteContent.copy,
     },

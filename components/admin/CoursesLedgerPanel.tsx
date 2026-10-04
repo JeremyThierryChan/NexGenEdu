@@ -21,6 +21,7 @@ import {
   type SiteContent,
 } from "@/lib/backend/api";
 import { isCourseLinked, opennessHint } from "@/lib/backend/course-dimensions";
+import { siteContentFromPublic } from "@/lib/backend/public-site";
 import { sortedStages } from "@/lib/backend/catalog";
 import { stableByAvailability, unavailableLast } from "@/lib/backend/availability-order";
 import {
@@ -440,7 +441,14 @@ export function CoursesLedgerPanel() {
       setContentLoadError("");
       // 有未保存的正文改动时不覆盖草稿：刷新走的是"重读数据"，不该吃掉人刚打的字
       if (!contentDirtyRef.current) {
-        setSiteContent(site);
+        /*
+         * 这一页只关心**课程正文**，写的是 `site.saveContent`（服务端原样保留评价块）。
+         * 读的是**公开快照**（`site.publicContent`）—— 它里面没有评价的内部实名
+         * （v36：`SiteReview.realName` 是内部字段），因此这里走
+         * `siteContentFromPublic` 补成 `SiteContent` 的形状：
+         * 运行时不带那个键，万一被写回也不会把实名清掉（见那个函数的说明）。
+         */
+        setSiteContent(siteContentFromPublic(site));
         // 整份换掉了 → 让卡片里那块按新的正文重算"在编小节"（见 bandSlots 的说明）
         setContentStamp((value) => value + 1);
       }

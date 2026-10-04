@@ -8,12 +8,13 @@ import { validateVacations } from "./calendar-plan";
 import { danglingOffers, offerId, offersSummary, validateOffers, type OfferKey } from "./offers";
 import {
   emptySiteContent,
+  normalizeReviewsPage,
   reviewsPageSkeleton,
   siteContentFromContent,
   validateSiteBlocks,
   validateSiteContent,
 } from "./site-content";
-import type { SiteContent } from "./types";
+import type { SiteContent, SiteContentBlocks } from "./types";
 import { publicSite } from "./public-site";
 import type { PublicSite } from "./public-site";
 import { describeSeriesDate, generateSeriesDates } from "./recurrence";
@@ -1525,6 +1526,35 @@ function migrate(db: Database): Database | null {
     db.version = 35;
   }
 
+  if (db.version === 35) {
+    /*
+     * v35 → v36：**评价增加「真实姓名」**（`SiteReview.realName`，内部字段）。
+     *
+     * 机构原话：「**王同学是〔学生实名〕，王同学家长是〔本学生〕妈妈，刘同学是〔另一位学生实名〕，
+     * 后台实名但是前台的话就显示 X 同学和 X 同学家长**」——
+     * （原话里那三个实名**不抄进本文件**：源码在仓库里、会跟着公开 ——
+     * 实名只该存在于后台数据库，这正是这一版要守的事。）
+     * 后台要能对上这条评价是谁的，前台继续匿名（`author` 一个字不动）。
+     *
+     * ## 老评价一律补空串，**不猜**
+     *
+     * 这是这一版唯一能做对的选择：库里那条「王同学」到底是谁，系统的任何其它字段
+     * 都推不出来（`author` 是匿名的，`quote` 只提到老师）。猜一个名字的后果不是
+     * "某个字段空着"，而是把一条**真的实名**记到**错误的人**头上 —— 机构拿它去回访
+     * 或者去征得同意时会找到别人（与 v30 给教师补用工性质、v33 给学生补来源、
+     * v34 给课节补串身份同一条纪律：**声称的版本号不是证据，人的事实也不能靠推断**）。
+     *
+     * ## 只动这一个字段
+     *
+     * 其余字段一个字不碰（机构已经在库里录了三条真实评价）；
+     * 评价**没有记录级 `version`**，因此也没有"推 version"这回事 ——
+     * 别的表的 `version` 更不该被这一步搅动（与 v30 / v33 / v34 同一条纪律）。
+     */
+    db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
+    db.siteContent.reviewsPage = normalizeReviewsPage(db.siteContent.reviewsPage);
+    db.version = 36;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1553,8 +1583,13 @@ function migrate(db: Database): Database | null {
    * **空结构**（连标题也没有）—— 而**迁移**（v34 → v35）补的是**标题骨架 + 空条目**。
    * 两者不一样是有意的：迁移那一步机构还在用那一块（标题是他们认得的），
    * 而"手改坏了的文件"缺块属于数据损坏，补标题反而是替人编内容。
+   *
+   * v36 的 `realName` 也在这里兜（`normalizeReviewsPage`）：一份"自称 v36"却缺这个键的
+   * 评价，读的时候 `item.realName.trim()` 就是一次 TypeError —— 与分区表、维度表同一条
+   * "声称的版本号不是证据"的纪律。补**空串**（**不猜**：实名是人的事实，系统推不出来）。
    */
   db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
+  db.siteContent.reviewsPage = normalizeReviewsPage(db.siteContent.reviewsPage);
 
   /*
    * 收尾归一：**维度表必须存在**（与分区表、网站内容同一条纪律）。
@@ -6894,6 +6929,39 @@ const localApi = {
     },
 
     /**
+     * **后台内部的**那五块网站内容（学生案例 / 特色课程 / 常见问题 /
+     * 家长与学生评价 / 页面文案）—— 与 `saveBlocks` 读写同一批块。
+     *
+     * ## 为什么必须有它（v36 的「真实姓名」逼出来的）
+     *
+     * `site.publicContent()` 是**公开快照**（服务端把它挂在 `/api/public/site`，
+     * 匿名可读），它的字段白名单里**故意没有** `SiteReview.realName`（内部实名）——
+     * 那是机构要的"后台实名、前台匿名"。
+     *
+     * 可是后台「网站内容」页要**看见并编辑**这个实名。如果它继续读公开快照：
+     * 实名字段在后台永远是空的，而一按保存就把库里已经录好的实名**清掉**
+     * （草稿里没有这个键）—— 那是"编辑一次 = 丢一次数据"，比看不到更糟。
+     *
+     * 因此后台那一页读**这一个**方法：与 `saveBlocks` 同一批块、**同一组权限**
+     * （技术管理员 + 招生老师，见 `lib/auth/roles.ts`），返回的是**库里那一份**（含实名）。
+     * 它与公开快照的分工只有一条：**出不出去**（这里不上网，公开快照要上网）。
+     *
+     * 读不到（没登录 / 没权限 / 后端比程序旧）时后台就照旧显示"读不到评价"，
+     * **绝不回落到公开快照** —— 那又会退回"看着能编辑、其实抄的是匿名版"。
+     */
+    async getBlocks(): Promise<SiteContentBlocks> {
+      await delay();
+      const db = load();
+      return clone({
+        casesPage: db.siteContent.casesPage,
+        featuredPage: db.siteContent.featuredPage,
+        faqPage: db.siteContent.faqPage,
+        reviewsPage: db.siteContent.reviewsPage,
+        copy: db.siteContent.copy,
+      });
+    },
+
+    /**
      * **保存网站内容**（课程页正文 / 教师页标题 / 报价页文案）。
      *
      * 整份覆盖（与「信息采集表」同一套做法）：调用方传完整对象，服务端校验后整体替换。
@@ -6993,11 +7061,7 @@ const localApi = {
      * 返回**保存之后的整份网站内容**：页面拿它替换草稿（与 `site.saveContent` 一致），
      * 免得页面上留着一份"我自己的"旧值。
      */
-    async saveBlocks(
-      blocks: Partial<
-        Pick<SiteContent, "casesPage" | "featuredPage" | "faqPage" | "reviewsPage" | "copy">
-      >,
-    ): Promise<SiteContent> {
+    async saveBlocks(blocks: Partial<SiteContentBlocks>): Promise<SiteContent> {
       await delay();
       const db = load();
       const problems = validateSiteBlocks(blocks);
@@ -7076,22 +7140,45 @@ const localApi = {
       /*
        * 家长与学生评价：整份一起保存（与案例 / 特色课程 / 常见问题同理）。
        * id 为空 = 新加的那一条，这里才生成；分组与各字段去空白。
+       *
+       * `realName`（v36 的内部实名）：**可选**，去空白即可，不设必填（与 `subject` /
+       * `description` 同一档）—— 机构可以一直匿名发评价，那是合法状态。
+       *
+       * ## 为什么"缺这个键"时要**保留库里那一份**，而不是清空
+       *
+       * 这个键是新加的：一个还没刷新的后台页面、或一段早先写好的脚本交上来的评价里
+       * **根本没有它**。那种请求的语义是"我不知道有这个字段"，**不是**"请清空它" ——
+       * 按空串写下去就成了"编辑一次评价 = 丢一次实名，而且看不出丢了"。
+       * 因此判据是**三态**：
+       *   - `realName` 是字符串（含空串）→ 那就是机构的意思（空串＝主动清掉）；
+       *   - 不是字符串（`undefined` / `null` / 数字…）→ 按 id 找回库里那一条的实名。
+       * 新加的那一条（id 为空、库里查不到）自然落到空串。
        */
       if (blocks.reviewsPage !== undefined) {
         const incoming = blocks.reviewsPage;
+        const realNamesById = new Map(
+          db.siteContent.reviewsPage.reviews.map((item) => [item.id, item.realName] as const),
+        );
         db.siteContent = {
           ...db.siteContent,
           reviewsPage: {
             heading: { ...incoming.heading },
             notice: incoming.notice.trim(),
-            reviews: incoming.reviews.map((item) => ({
-              id: item.id.trim() === "" ? nextId("review") : item.id.trim(),
-              group: item.group.trim(),
-              quote: item.quote.trim(),
-              author: item.author.trim(),
-              subject: item.subject.trim(),
-              description: item.description.trim(),
-            })),
+            reviews: incoming.reviews.map((item) => {
+              const id = item.id.trim() === "" ? nextId("review") : item.id.trim();
+              return {
+                id,
+                group: item.group.trim(),
+                quote: item.quote.trim(),
+                author: item.author.trim(),
+                subject: item.subject.trim(),
+                description: item.description.trim(),
+                realName:
+                  typeof item.realName === "string"
+                    ? item.realName.trim()
+                    : (realNamesById.get(id) ?? ""),
+              };
+            }),
           },
         };
       }
@@ -7772,6 +7859,7 @@ export type {
   SiteFaqPage,
   SiteReview,
   SiteReviewsPage,
+  SiteContentBlocks,
   PublicSite,
   SiteContent,
 };

@@ -64,6 +64,7 @@ import type {
   PublicCourse,
   PublicCoursePartition,
   PublicSite,
+  PublicSiteReview,
   PublicTeacher,
 } from "@/lib/backend/public-site";
 import type {
@@ -72,7 +73,6 @@ import type {
   SiteFaqItem,
   SiteFeaturedCourse,
   SiteHeading,
-  SiteReview,
   SiteSubject,
 } from "@/lib/backend/types";
 import type {
@@ -689,7 +689,12 @@ export function backendCasesContent(snapshot: PublicSite): CasesContent {
  */
 export function backendReviewsContent(snapshot: PublicSite): ReviewsContent {
   const page = snapshot.siteContent?.reviewsPage;
-  const reviews: ReviewItem[] = (page?.reviews ?? []).map((item: SiteReview) => ({
+  /*
+   * ⚠️ 逐条搬的是 `PublicSiteReview`（公开的那一份）—— **没有 `realName`**。
+   * 这里绝不能改成读库里的 `SiteReview`：那条路上带着内部实名，
+   * 一旦搬进视图模型，它就会顺着页面渲染出去（v36 的命门）。
+   */
+  const reviews: ReviewItem[] = (page?.reviews ?? []).map((item: PublicSiteReview) => ({
     id: text(item.id).trim() === "" ? text(item.author) : text(item.id),
     group: text(item.group),
     quote: text(item.quote),

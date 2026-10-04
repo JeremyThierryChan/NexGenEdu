@@ -11,7 +11,7 @@ import { ActionNoticeView } from "@/components/admin/ActionNotice";
 import { useActionNotice } from "@/components/admin/useActionNotice";
 import { rolesOrAll, useAuth } from "@/components/admin/AuthContext";
 import { canCallMethod, methodOwnerText } from "@/lib/auth/roles";
-import { api, type SiteContent } from "@/lib/backend/api";
+import { api, type SiteContentBlocks } from "@/lib/backend/api";
 import { SITE_COPY_KEYS, SITE_COPY_LABELS } from "@/lib/backend/site-copy-model";
 import { SiteCopyEditor } from "@/components/admin/SiteCopyEditor";
 import { REVIEW_GROUPS } from "@/lib/types/site";
@@ -28,6 +28,18 @@ import type {
   SiteReviewsPage,
 } from "@/lib/backend/api";
 import { FeaturedCoursesEditor } from "@/components/admin/FeaturedCoursesEditor";
+
+/**
+ * 「网站内容」页的草稿。
+ *
+ * 与 `SiteContentBlocks` 只差一处：**评价块可能读不到**（后端比程序旧、不认识
+ * `site.getBlocks`，或这一页拿到了公开快照那份——不能编辑实名）。
+ * 那种情况下它是 `null`，页面显示"读不到评价"并**不把评价交上去**
+ * （交上去等于用"我读不到"去覆盖库里那份，正是这一页最不该做的事）。
+ */
+type ContentDraft = Omit<SiteContentBlocks, "reviewsPage"> & {
+  reviewsPage: SiteReviewsPage | null;
+};
 
 /**
  * 网站内容（宣传网站上那些**对外文案**）。
@@ -52,7 +64,7 @@ import { FeaturedCoursesEditor } from "@/components/admin/FeaturedCoursesEditor"
  * —— 这是全站统一的两态口径，不是这一页的特殊行为。
  */
 export default function AdminContentPage() {
-  const [content, setContent] = useState<SiteContent | null>(null);
+  const [content, setContent] = useState<ContentDraft | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   /** 读不到的原因（读不到就整块说明 + 重试，而不是停在一行"加载中…"）。 */
@@ -67,8 +79,33 @@ export default function AdminContentPage() {
     if (options.quiet === true) setRefreshing(true);
     else setLoading(true);
     try {
-      const data = await api.site.publicContent();
-      setContent(data.siteContent);
+      /*
+       * 读的是**后台内部**那一份（`site.getBlocks`），不是公开快照。
+       *
+       * v36 的「真实姓名」是内部字段：公开快照（`site.publicContent`，匿名也能读）
+       * 的白名单里**故意没有**它。这一页要能看见并编辑实名，因此必须走内部读法 ——
+       * 读公开快照的话实名永远是空的，一保存还会把库里已录的清掉。
+       *
+       * 内部读法拿不到时（后端比程序旧 / 没权限）**回落到公开快照**：
+       * 其余四块照常能编，评价块置 `null`（页面显示"读不到评价"，且不交上去）。
+       * 这样"后端旧"只影响评价这一块，不会让整页打不开。
+       */
+      let draft: ContentDraft;
+      try {
+        const blocks = await api.site.getBlocks();
+        draft = blocks;
+      } catch {
+        const data = await api.site.publicContent();
+        draft = {
+          casesPage: data.siteContent.casesPage,
+          featuredPage: data.siteContent.featuredPage,
+          faqPage: data.siteContent.faqPage,
+          copy: data.siteContent.copy,
+          // 公开快照里评价是**匿名版**：不拿它当草稿（会把实名清掉），宁可说读不到
+          reviewsPage: null,
+        };
+      }
+      setContent(draft);
       setLoadError("");
     } catch (cause) {
       setLoadError(cause instanceof Error ? cause.message : "读不到网站内容。");
@@ -133,7 +170,7 @@ export default function AdminContentPage() {
     notice.clear();
   }
 
-  /** 改一条评价的某个字段（分组 / 署名 / 科目 / 正文 / 补充）。 */
+  /** 改一条评价的某个字段（分组 / 署名 / 科目 / 正文 / 补充 / 真实姓名）。 */
   function updateReview(index: number, patch: Partial<SiteReview>): void {
     if (reviewsPage === null) return;
     editReviewsPage({
@@ -145,11 +182,20 @@ export default function AdminContentPage() {
   function addReview(): void {
     if (reviewsPage === null) return;
     // id 留空：服务端保存时生成；分组给个默认值（下拉里那两个之一）
+    // `realName` 从空串起步：它是**内部实名**（只在后台显示），机构可以以后慢慢补
     editReviewsPage({
       ...reviewsPage,
       reviews: [
         ...reviewsPage.reviews,
-        { id: "", group: REVIEW_GROUPS[0].key, quote: "", author: "", subject: "", description: "" },
+        {
+          id: "",
+          group: REVIEW_GROUPS[0].key,
+          quote: "",
+          author: "",
+          subject: "",
+          description: "",
+          realName: "",
+        },
       ],
     });
   }
@@ -509,11 +555,12 @@ export default function AdminContentPage() {
         分「家长 / 学生」两组，**页面上不折叠**（评价短，直接看得见更有用）。
         保存按钮就在这一块上 —— 与案例 / 常见问题等一起提交，服务端各写各的块。
         ⚠️ 写真实评价（可隐去姓名）：**请勿编造**，页面上会显示下面那句页脚提示。
+        v36：每条多一格**真实姓名**（内部实名，只在后台与库里；前台一个字都不显示）。
       */}
       <Panel
         className="mb-8"
         title="家长与学生评价"
-        description="网站「学生案例」页里那块「家长与学生怎么说」：分家长 / 学生两组，评价短、页面上不折叠。写真实评价（可隐去姓名），请勿编造。"
+        description="网站「学生案例」页里那块「家长与学生怎么说」：分家长 / 学生两组，评价短、页面上不折叠。写真实评价（可隐去姓名），请勿编造。「真实姓名」只给后台自己看，前台不会显示它。"
         actions={
           canWrite && reviewsPage !== null ? (
             <Button variant="outline" size="sm" onClick={addReview}>
@@ -606,6 +653,15 @@ export default function AdminContentPage() {
                             disabled={!canWrite}
                           />
                         </div>
+                        {/*
+                          列表上就能看出实名有没有填（v36）：署名旁边一行小字 ——
+                          实名是内部信息，**只在这里显示**，前台一个字都不显示。
+                        */}
+                        <span className="pb-2.5 text-[11px] text-ink-500">
+                          {item.realName.trim() === ""
+                            ? "后台实名未填（前台照旧匿名）"
+                            : `后台实名：${item.realName.trim()}`}
+                        </span>
                         <div className="w-40">
                           <SelectInput
                             label="分组"
@@ -624,6 +680,19 @@ export default function AdminContentPage() {
                             hint="可留空"
                             value={item.subject}
                             onChange={(event) => updateReview(index, { subject: event.target.value })}
+                            disabled={!canWrite}
+                          />
+                        </div>
+                        <div className="min-w-40 flex-1">
+                          {/*
+                            v36：**真实姓名**（内部实名）。提示语里必须写明"前台不会显示它" ——
+                            机构填的时候最怕的就是"填了会不会把全名挂到网站上"。
+                          */}
+                          <TextField
+                            label="真实姓名（只在后台显示）"
+                            hint="机构的内部实名，例：某某某／某某某妈妈。**前台不会显示它**（前台照旧显示上面那行署名）"
+                            value={item.realName}
+                            onChange={(event) => updateReview(index, { realName: event.target.value })}
                             disabled={!canWrite}
                           />
                         </div>

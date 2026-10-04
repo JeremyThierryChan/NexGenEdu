@@ -233,7 +233,7 @@ import {
   coursesReferencingAnchor,
   uniqueBandAnchor,
 } from "@/lib/backend/site-bands";
-import { publicSite as buildPublicSite } from "@/lib/backend/public-site";
+import { publicSite as buildPublicSite, siteContentFromPublic } from "@/lib/backend/public-site";
 import type { PublicSite } from "@/lib/backend/public-site";
 import {
   __useBackendSnapshotForTesting,
@@ -293,7 +293,7 @@ import {
   validateOffers,
 } from "@/lib/backend/offers";
 import type { Catalog, CatalogOffer } from "@/lib/backend/types";
-import { validateFeaturedPage } from "@/lib/backend/site-content";
+import { siteContentFromContent, validateFeaturedPage } from "@/lib/backend/site-content";
 import {
   childPartitions,
   partitionDeleteRefusal,
@@ -2977,7 +2977,7 @@ await api.restoreBackup();
  */
 {
   // 起点回到夹具（上一块末尾把内容存回了原样，这里再确认一次口径一致）
-  const before = (await api.site.publicContent()).siteContent;
+  const before = siteContentFromPublic((await api.site.publicContent()).siteContent);
   const subjects = before.coursePage.subjects;
   const subjectIndex = subjects.findIndex((item) => item.bands.length > 0);
   ok("夹具里有带小节的学科（否则这一组等于在空数组上通过）", subjectIndex >= 0);
@@ -13983,8 +13983,8 @@ console.log(
   eq("迁移**没有**推学生的 version（乐观锁不被一次数据升级搅动）",
     migratedSourceStudents.map((student) => student.version),
     legacyVersions);
-  eq("迁移后版本就是当前版本（35）", (await api.exportDatabase()).version, CURRENT_VERSION);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 35);
+  eq("迁移后版本就是当前版本（36）", (await api.exportDatabase()).version, CURRENT_VERSION);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 36);
   ok("版本记录里写着这一步（`VERSION_NOTES[33]`，后来的人不用翻提交历史）",
     (VERSION_NOTES[33] ?? "").includes("来源"));
   ok("而且说明了它与 `Teacher.source` 不是一回事（免得后来的人把两件事混成一件）",
@@ -16725,8 +16725,8 @@ console.log(
    * 「刚被别人改过，请刷新」—— 而其实谁都没改。
    */
   eq("迁移**没有**推课节的 version（乐观锁不被一次数据升级搅动）", migratedLessons.map((l) => l.version), legacyLessonVersions);
-  eq("迁移后版本就是当前版本（35）", (await api.exportDatabase()).version, CURRENT_VERSION);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 35);
+  eq("迁移后版本就是当前版本（36）", (await api.exportDatabase()).version, CURRENT_VERSION);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 36);
   ok("版本记录里写着这一步（`VERSION_NOTES[34]`，后来的人不用翻提交历史）", (VERSION_NOTES[34] ?? "").includes("串身份"));
   ok("而且写明了「老课不猜串」这条口径", (VERSION_NOTES[34] ?? "").includes("不猜"));
   ok("而且写明了「过去的课是账」这条边界", (VERSION_NOTES[34] ?? "").includes("已排（还没上）"));
@@ -17361,8 +17361,8 @@ console.log("\n=== 57. 学生案例折叠 + 家长与学生评价进库（v35）
       heading: { eyebrow: "自检", title: "自检评价", description: "说明" },
       notice: "评价均经家长/学生同意后发布（自检）。",
       reviews: [
-        { id: "", group: "家长", quote: "自检用的一条家长评价。", author: "自检·初二 李同学家长", subject: "数学", description: "" },
-        { id: "", group: "学生", quote: "自检用的一条学生评价。", author: "自检·初三 王同学", subject: "", description: "自检备注" },
+        { id: "", group: "家长", quote: "自检用的一条家长评价。", author: "自检·初二 李同学家长", subject: "数学", description: "", realName: "" },
+        { id: "", group: "学生", quote: "自检用的一条学生评价。", author: "自检·初三 王同学", subject: "", description: "自检备注", realName: "" },
       ],
     },
   });
@@ -17510,6 +17510,257 @@ console.log("\n=== 57. 学生案例折叠 + 家长与学生评价进库（v35）
   ok("reviews.md 已接进生成管线（data/site/reviews.ts 由 sync-content 产出）",
     read57("data/site/reviews.ts").includes("reviewsSource") &&
       read57("scripts/sync-content.mjs").includes('"reviews"'));
+}
+
+
+console.log("\n=== 58. 评价的「真实姓名」：只在后台与库里，绝不上网站（v36）===");
+
+/*
+ * 机构原话：
+ *
+ * > 「**王同学是……，王同学家长是……妈妈，刘同学是……，
+ * > 后台实名但是前台的话就显示 X 同学和 X 同学家长**」
+ *
+ * （原话里那三个实名**不抄进本文件**：这句注释与这一节的断言都在**仓库里**，
+ * 而仓库会公开 —— 实名只该存在于后台数据库。断言因此一律用 `自检·…` 夹具名核对。）
+ *
+ * 口径：机构要"**后台能对上这条评价是谁的**"，而**网站前台仍然匿名**
+ * （`author` 那栏保留姓氏的写法，一个字不动）。因此实名必须是**独立字段**
+ * （`SiteReview.realName`，内部），而不是塞进 `author`。
+ *
+ * ## 为什么另起 §58，而不是并进 §57
+ *
+ * §57 守的是 v35 那一件事（"评价进库"），它已经有 42 条断言、编号 ①–⑧；
+ * 而 v36 只加一个**内部字段**，它的重点全在"**绝不上网站**"这条边界上（三个反向断言），
+ * 并且它逼出了一个**新的内部读方法**（`site.getBlocks`）——并进 §57 会让
+ * "评价怎么进库"与"实名怎么不出门"混进同一张编号表，而这两件事的失败形态完全不同。
+ * 另外这一节要自己造一份"v35、评价里没有 realName"的老库夹具，独立一节才说得清。
+ *
+ * 这一节守八件事：
+ *
+ *   ① **迁移**（v35 → v36）：老评价一律补**空串**（**不猜** —— 库里那条「王同学」是谁，
+ *      系统的任何其它字段都推不出来），别的字段一个字不动；
+ *   ② **保存 / 读回**：经 `site.getBlocks` 读得回实名、且 `author` 一个字没变；
+ *   ③ **缺键保留**：交上来的条目里没有 `realName`（老前端）→ 保留库里那一份；
+ *      显式交空串才是"清掉"；
+ *   ④ **公开快照里没有 `realName` 键**（逐条 + 整份 JSON 都查；含 `site.publicContent`
+ *      这一条真路径，也就是 `/api/public/site`）；
+ *   ⑤ **导出的 `data/site/reviews.md` 里没有实名**（读文件断言）；
+ *   ⑥ **生成的 `data/site/reviews.ts` 里也没有**；
+ *   ⑦ **导入缺字段的文件仍能工作**（内容文件 / CI 的模版模式里没有这一栏 → 建库空串）；
+ *   ⑧ **后台编辑器有这一格**（源码级）；**前台源码里没有 `realName`**（反向断言）。
+ */
+{
+  const root58 = new URL("../", import.meta.url);
+  const read58 = (file: string): string => readFileSync(new URL(file, root58), "utf8");
+  /** 去掉注释再查源码（注释里提到 `realName` 不算"前台用了它"）。 */
+  const strip58 = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  __useStoreForTesting(memory);
+  await api.importDatabase(serializeDatabase(seedDb));
+
+  /* ── ① 迁移：v35 的老评价一律补空串、别的字段一个字没动 ─────────────────── */
+  const legacyRealDb = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+    siteContent: {
+      reviewsPage: { reviews: Array<Record<string, unknown>> };
+    };
+    version: number;
+  };
+  legacyRealDb.version = 35;
+  /*
+   * 造"库里已经有两条真实评价、但这一版还没有 `realName` 这个键"的形状。
+   * 署名用机构口径里那两条**匿名**写法（前台看到的就长这样）—— 实名此时谁也不知道。
+   */
+  legacyRealDb.siteContent.reviewsPage.reviews = [
+    { id: "rev-a", group: "学生", quote: "第一条自检评价。", author: "王同学", subject: "高中物理", description: "" },
+    { id: "rev-b", group: "家长", quote: "第二条自检评价。", author: "王同学家长", subject: "高中物理", description: "" },
+  ];
+  /** 去掉 `realName` 之后的形状（用来比"其它字段一个字没动"）。 */
+  const withoutRealName58 = (item: Record<string, unknown>): string => {
+    const copy = { ...item };
+    delete copy.realName;
+    return JSON.stringify(copy);
+  };
+  const legacyReviewShapes = legacyRealDb.siteContent.reviewsPage.reviews.map(withoutRealName58);
+  eq("夹具确实是「评价里没有 realName 这个键的 v35 库」",
+    [legacyRealDb.version, legacyReviewShapes.every((text) => !text.includes("realName"))],
+    [35, true]);
+
+  const upgradedReal58 = await api.importDatabase(JSON.stringify(legacyRealDb));
+  eq("v35 的老库能升级导入", upgradedReal58.ok, true);
+  const afterReal58 = await api.exportDatabase();
+  eq("迁移后版本号是当前版本", afterReal58.version, CURRENT_VERSION);
+  eq("v35 → v36 给每条老评价补上空串（一条不落）",
+    afterReal58.siteContent.reviewsPage.reviews.map((item) => item.realName),
+    ["", ""]);
+  ok("迁移**不猜**实名：没有哪条老评价被塞进一个「看起来像真的」的名字",
+    afterReal58.siteContent.reviewsPage.reviews.every((item) => item.realName === ""));
+  eq("评价的其它字段逐字节没动（迁移不是「顺手改评价」）",
+    afterReal58.siteContent.reviewsPage.reviews.map((item) =>
+      withoutRealName58(item as unknown as Record<string, unknown>)),
+    legacyReviewShapes);
+  ok("而且没有把实名写进任何别的表（`VERSION_NOTES[36]` 里说清了这一步只补空串）",
+    (VERSION_NOTES[36] ?? "").includes("一律补空串"));
+
+  /* ── ② 保存 / 读回：实名存得进读得回，author 一个字没变 ──────────────────── */
+  const realNames58 = ["自检·实名甲", "自检·实名乙"];
+  const savedReal58 = await api.site.saveBlocks({
+    reviewsPage: {
+      heading: { eyebrow: "自检", title: "自检实名", description: "说明" },
+      notice: "评价均经同意后发布（自检）。",
+      reviews: [
+        { id: "rev-a", group: "学生", quote: "第一条自检评价。", author: "王同学", subject: "高中物理", description: "", realName: `  ${realNames58[0]}  ` },
+        { id: "rev-b", group: "家长", quote: "第二条自检评价。", author: "王同学家长", subject: "高中物理", description: "", realName: realNames58[1]! },
+      ],
+    },
+  });
+  eq("保存时 `realName` 前后空白被 trim 掉（与其它字段同一套）",
+    savedReal58.reviewsPage.reviews.map((item) => item.realName), realNames58);
+  const readBlocks58 = await api.site.getBlocks();
+  eq("内部读法（`site.getBlocks`）把实名读得回来",
+    readBlocks58.reviewsPage.reviews.map((item) => [item.id, item.realName]),
+    [["rev-a", realNames58[0]], ["rev-b", realNames58[1]]]);
+  eq("**`author` 一个字没变**（前台那条匿名口径没有被实名污染）",
+    readBlocks58.reviewsPage.reviews.map((item) => item.author), ["王同学", "王同学家长"]);
+  eq("同一批块经 `saveBlocks` 读回也与库里一致",
+    (await api.exportDatabase()).siteContent.reviewsPage.reviews.map((item) => item.realName),
+    realNames58);
+
+  /* ── ③ 缺键保留：老前端交上来的条目里没有这个键 → 保留库里那一份 ─────────── */
+  const dropRealName58 = (): unknown[] =>
+    readBlocks58.reviewsPage.reviews.map((item) => {
+      const copy = { ...item } as Record<string, unknown>;
+      delete copy.realName; // 老前端 / 老脚本交上来的条目**根本没有这个键**
+      return copy;
+    });
+  const keptReal58 = await api.site.saveBlocks({
+    reviewsPage: { ...readBlocks58.reviewsPage, reviews: dropRealName58() as never },
+  });
+  eq("条目里**没有** `realName` 这个键时保留库里那一份（老前端不该把已录的实名清掉）",
+    keptReal58.reviewsPage.reviews.map((item) => item.realName), realNames58);
+  const clearedReal58 = await api.site.saveBlocks({
+    reviewsPage: {
+      ...readBlocks58.reviewsPage,
+      reviews: readBlocks58.reviewsPage.reviews.map((item) => ({ ...item, realName: "" })),
+    },
+  });
+  eq("**显式**交空串才是「清掉」（两个方向都要能用）",
+    clearedReal58.reviewsPage.reviews.map((item) => item.realName), ["", ""]);
+  // 放回实名，后面几条反泄漏断言才有意义（否则验的是"库里本来就没有"）
+  await api.site.saveBlocks({ reviewsPage: readBlocks58.reviewsPage });
+
+  /* ── ④ 公开快照里**没有** `realName` 键（逐条 + 整份 JSON） ──────────────── */
+  const storedReal58 = (await api.exportDatabase()).siteContent.reviewsPage.reviews;
+  ok("库里那两条**确实有**实名（否则下面那几条断言什么都没验）",
+    storedReal58.length === 2 && storedReal58.every((item) => item.realName !== ""),
+    storedReal58.map((item) => item.realName).join(" / "));
+
+  const publicViaApi58 = await api.site.publicContent();
+  const publicReviews58 = publicViaApi58.siteContent.reviewsPage.reviews;
+  eq("公开快照里评价条数照旧（它是公开内容，不该被这一版弄少）", publicReviews58.length, 2);
+  eq("**逐条**检查：公开快照的评价里没有 `realName` 键",
+    publicReviews58
+      .map((item, index) => (Object.prototype.hasOwnProperty.call(item, "realName") ? index : -1))
+      .filter((index) => index >= 0),
+    []);
+  ok("整份公开快照的 JSON 里连 `realName` 这个词都没有（不只是「值空着」）",
+    !JSON.stringify(publicViaApi58).includes("realName"));
+  ok("公开快照里的实名夹具值一个都没漏（拿**值**再验一遍，不只验键名）",
+    realNames58.every((name) => !JSON.stringify(publicViaApi58).includes(name)));
+  const builtSnapshot58 = buildPublicSite(await api.exportDatabase());
+  eq("直接构站（`publicSite()`）出来的那一份同样没有 `realName`",
+    builtSnapshot58.siteContent.reviewsPage.reviews
+      .map((item, index) => (Object.prototype.hasOwnProperty.call(item, "realName") ? index : -1))
+      .filter((index) => index >= 0),
+    []);
+
+  /* ── ⑤ 导出的 `reviews.md` 里没有实名 ───────────────────────────────────── */
+  const exportFiles58 = {} as Record<SiteExportFile, string>;
+  for (const name of SITE_EXPORT_FILES) exportFiles58[name] = read58(`data/site/${name}.md`);
+  const exported58 = exportSiteMarkdown({ site: builtSnapshot58, existing: exportFiles58 });
+  const exportedReviewsMd58 = exported58.files.reviews;
+  ok(
+    "导出的 `data/site/reviews.md` 里没有实名字段 —— **这个文件在仓库里 = 会跟着公开仓库 / " +
+      "GitHub Pages 一起公开**，实名写进去就是把它贴到公网上（机构要的「前台匿名」当场作废）",
+    !exportedReviewsMd58.includes("真实姓名") &&
+      !exportedReviewsMd58.includes("realName") &&
+      realNames58.every((name) => !exportedReviewsMd58.includes(name)),
+  );
+  ok("导出的 reviews.md 里仍然有那两条评价的匿名署名（不是把整块删掉蒙过去的）",
+    exportedReviewsMd58.includes("### 王同学") && exportedReviewsMd58.includes("### 王同学家长"));
+  const onDiskReviewsMd58 = read58("data/site/reviews.md");
+  ok("仓库里那份 `data/site/reviews.md` 本身也没有实名字段（同一条理由：它在仓库里 = 会公开）",
+    !onDiskReviewsMd58.includes("真实姓名") && !onDiskReviewsMd58.includes("realName"));
+
+  /* ── ⑥ 生成物 `data/site/reviews.ts` 里也没有 ───────────────────────────── */
+  const generatedReviewsTs58 = read58("data/site/reviews.ts");
+  ok("生成物 `data/site/reviews.ts` 里也没有实名（它是 reviews.md 的逐字嵌入，md 干净它就干净）",
+    !generatedReviewsTs58.includes("真实姓名") &&
+      !generatedReviewsTs58.includes("realName") &&
+      realNames58.every((name) => !generatedReviewsTs58.includes(name)));
+  ok("生成物确实嵌着 reviews.md 的内容（否则上面那条断言验的是个空文件）",
+    generatedReviewsTs58.includes("reviewsSource") &&
+      generatedReviewsTs58.includes("家长与学生怎么说"));
+
+  /* ── ⑦ 导入缺字段的文件仍能工作（老文件 / CI 的模版模式） ─────────────────── */
+  const fromContent58 = siteContentFromContent();
+  ok("从内容文件建库（空库初始化 / 导入老文件）时，评价一律补空串（文件里没有这一栏，不猜）",
+    fromContent58.reviewsPage.reviews.every((item) => item.realName === ""));
+  ok("内容文件的读法（`getReviewsContentFromTemplate`）里根本没有 `realName` 这一栏",
+    getReviewsContentFromTemplate().reviews.every((item) => !("realName" in item)));
+  const readBackFromFile58 = readSiteCore(exported58.files);
+  ok("内容文件读回来的评价也没有实名（导入那一侧不需要认识这个字段）",
+    readBackFromFile58.reviews.reviews.every((item) => !("realName" in item)));
+
+  /* 收尾：把这一节造的东西摘掉（自检的库不该留下"自检"评价）。 */
+  await api.importDatabase(serializeDatabase(seedDb));
+  eq("收尾：库回到示例数据",
+    (await api.exportDatabase()).siteContent.reviewsPage.reviews.length,
+    seedDb.siteContent.reviewsPage.reviews.length);
+
+  /* ── ⑧ 后台有这一格；前台源码里没有它 ───────────────────────────────────── */
+  const contentCode58 = strip58(read58("app/admin/(dashboard)/content/page.tsx"));
+  ok("「网站内容」页每条评价有「真实姓名（只在后台显示）」这一格",
+    contentCode58.includes("真实姓名（只在后台显示）") &&
+      contentCode58.includes("updateReview(index, { realName:"));
+  ok("提示语里写明**前台不会显示它**（机构填的时候最怕的就是「会不会挂到网站上」）",
+    contentCode58.includes("前台不会显示它"));
+  ok("列表上也能看出来（署名旁边那行小字）",
+    contentCode58.includes("后台实名未填") && contentCode58.includes("后台实名："));
+  ok("后台读的是**内部**那一份（`site.getBlocks`）—— 公开快照里没有实名，拿它当草稿一保存就会清空",
+    contentCode58.includes("api.site.getBlocks()") &&
+      !contentCode58.includes("setContent(data.siteContent)"));
+
+  /*
+   * 反向断言：**前台的源码里不许出现 `realName`**。
+   *
+   * 判据放在"公开那半边"的源码上（app/(site) / lib/site / lib/data / lib/types 与
+   * components 里非 admin 的那些）。查之前**去注释**：这一版刻意在几处注释里写了
+   * "这里没有 realName / 不要搬它"，那种说明不算"用了它"。
+   */
+  const publicCodeDir58 = ["app/(site)", "lib/site", "lib/data", "lib/types"];
+  const publicCodeFiles58: string[] = [];
+  for (const dir of publicCodeDir58) {
+    for (const entry of readdirSync(new URL(dir, root58), { recursive: true }) as string[]) {
+      if (/\.(tsx?|mts)$/.test(entry)) publicCodeFiles58.push(`${dir}/${entry}`);
+    }
+  }
+  for (const entry of readdirSync(new URL("components", root58), { recursive: true }) as string[]) {
+    if (/\.(tsx?|mts)$/.test(entry) && !entry.startsWith("admin")) {
+      publicCodeFiles58.push(`components/${entry}`);
+    }
+  }
+  const publicRealNameOffenders58 = publicCodeFiles58.filter((file) =>
+    strip58(read58(file)).includes("realName"));
+  ok("**前台源码里没有 `realName`**（匿名口径不许被它污染；查的是公开那半边、且去掉注释）",
+    publicRealNameOffenders58.length === 0, publicRealNameOffenders58.join(" | "));
+
+  const casesCode58 = strip58(read58("app/(site)/cases/page.tsx"));
+  ok("`/cases` 那条匿名口径一个字没动（署名照旧取 `author`，页面上没有实名这一栏）",
+    casesCode58.includes("item.author") && !casesCode58.includes("realName"));
+  ok("前台取数那一层（`backendReviewsContent`）搬的是公开的那一份（没有实名可搬）",
+    !strip58(read58("lib/site/backend-source.ts")).includes("realName"));
 }
 
 

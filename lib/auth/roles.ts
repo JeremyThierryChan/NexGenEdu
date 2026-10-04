@@ -289,6 +289,15 @@ export const METHOD_ACCESS: Record<string, Role[]> = {
   "site.saveContent": ["技术管理员"],
   // 学生案例这类对外文案：招生老师也要能改（见 PAGE_ACCESS 里 /admin/content 的说明）
   "site.saveBlocks": ["技术管理员", "招生老师"],
+  /*
+   * 「网站内容」页的**内部读法**（v36）：与 `site.saveBlocks` 同一批块、同一组角色。
+   *
+   * 为什么它不是"公开"的：它返回**库里那一份**，含评价的内部实名 `SiteReview.realName`。
+   * 公开快照那边（`site.publicContent`）白名单里没有这个字段 —— 机构要"后台实名、前台匿名"。
+   * 因此这一条**必须**登记成与写方法一样的角色；**不能**落到 `dashboards` 组的默认
+   * （那会让四类角色都能读到实名）。
+   */
+  "site.getBlocks": ["技术管理员", "招生老师"],
 };
 
 /** 只读方法的判据（`crud` / `query` 里"只是看一眼"的那些）。 */

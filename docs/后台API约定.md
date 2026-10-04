@@ -11,7 +11,7 @@
 ```
 页面（app/admin/**，客户端组件）
    ↓ 只调用这一层，签名与 HTTP 接口一致
-lib/backend/api.ts        服务层实现（当前 115 个方法）；数据一律经 KeyValueStore 落地
+lib/backend/api.ts        服务层实现（当前 116 个方法）；数据一律经 KeyValueStore 落地
    ├─ 未设置 NEXT_PUBLIC_API_BASE（线上产物的情形）：直接用下面这份本地实现
    │    ↓
    │  lib/backend/storage.ts  KeyValueStore：浏览器里是 localStorage，Node 里是内存（自检用）
@@ -42,7 +42,7 @@ lib/backend/api.ts        服务层实现（当前 115 个方法）；数据一�
   `lib/backend/seed.ts` 的示例数据只是自检/演示夹具（要 `NEXGENEDU_ALLOW_SEED=1`）；
   历史：早期「存储为空就自动灌示例学生」，那会让员工把示例数据当成自己录的。
 
-## 二、接口分组（当前 115 个方法）
+## 二、接口分组（当前 116 个方法）
 
 分组的意义在于「服务端的做法完全不同」，不是罗列。
 完整清单见 `lib/backend/contract.ts`，`npm run check` 会逐项校验它与代码一致。
@@ -80,7 +80,7 @@ lib/backend/api.ts        服务层实现（当前 115 个方法）；数据一�
 | 寒暑假段 | `vacations.list` · `vacations.save` | 机构每年手动录入的假期起止（按学段）。它决定「哪几天按假期作息」= 与周末同一组时段；判定在 `lib/backend/calendar-plan.ts`（优先级：寒暑假 > 调休上班日 > 法定假日 > 周末/工作日）。与维度表一样只做「读整份 + 存整份」 |
 | 开放矩阵 | `offers.list` · `offers.save` | 本机构开放的组合（学科 × 内容模块 × 班型）。**稀疏存储**：只有机构表过态的才有行，因此「开放 / 明确关闭 / 没设过」是三件事。批量勾选（整行 / 整列 / 整个学段）是页面上的纯函数 `applyDecision`，不另设接口 —— 否则「批量」的口径会散在服务端好几处 |
 | 课程分区 | `coursePartitions.list` · `coursePartitions.create` · `coursePartitions.update` · `coursePartitions.reorder` · `coursePartitions.remove` | 课程库的分组结构（栏目 → 子栏目，也是网站课程页的栏目）。删除**有课 / 有子栏目就拒绝**；`reorder` 一次交一组的完整顺序 |
-| 网站内容 | `site.publicContent` · `site.saveContent` · `site.saveBlocks` | `saveContent` 保存课程正文/教师页标题/报价文案（技术管理员）；`saveBlocks` 保存**课程正文以外**的块（学生案例 / 特色课程 / 常见问题 / **家长与学生评价（保存评价，v35）** / 页面文案，招生老师也能改）—— 两个方法各写各的块，互不覆盖 |
+| 网站内容 | `site.publicContent` · `site.saveContent` · `site.getBlocks` · `site.saveBlocks` | `saveContent` 保存课程正文/教师页标题/报价文案（技术管理员）；`getBlocks` / `saveBlocks` 读写**课程正文以外**的那五块（学生案例 / 特色课程 / 常见问题 / **家长与学生评价** / 页面文案，技术管理员 + 招生老师）。`publicContent` 是**公开快照**（匿名可读，评价里**没有**内部实名 `realName`），`getBlocks` 是给后台用的**内部读法**（含实名）—— 两者读的是同一批块，差别只有"出不出去" |
 
 - 服务端用一套 REST 即可：`GET` 列表、`GET` 单项、`POST` 新建、`PATCH` 修改、`DELETE` 删除；
 - **id 由服务端生成**，前端只读；
@@ -338,20 +338,39 @@ v39/v40 又把真源反成"课程库 → 内容文件"，因此"网站来的"不
 后台的两处编辑界面、课程清单上的「网站正文」按钮与 `scripts/check.mts` 的自检都调它。
 
 **改内容（课程正文以外）：`site.saveBlocks(blocks)`**（逐块覆盖）—— 后台「网站内容」页用它，
-`blocks` 是 `Partial<Pick<SiteContent, "casesPage" | "featuredPage" | "faqPage" | "reviewsPage" | "copy">>`，
+`blocks` 是 `Partial<SiteContentBlocks>`，而
+`SiteContentBlocks = Pick<SiteContent, "casesPage" | "featuredPage" | "faqPage" | "reviewsPage" | "copy">`，
 **只写这次交上来的块**（没交的块原样保留，因此两个页面各改一块不会互相覆盖）。返回**保存之后的整份网站内容**。
+
+**读同一批块：`site.getBlocks()`**（v36）—— 后台「网站内容」页的**加载**用它。
+它与 `saveBlocks` 是同一批块、**同一组权限**（技术管理员 + 招生老师），返回的是库里那一份。
+**不要拿 `site.publicContent` 当它的读法**：那一个是**公开快照**（匿名挂在 `/api/public/site`），
+字段白名单里**故意没有** `SiteReview.realName`（内部实名）—— 后台读它的话，实名永远是空的，
+而一保存就会把库里已经录好的实名清掉。两者读的是同一批块，唯一的差别是"出不出去"。
 
 | | |
 | --- | --- |
-| 鉴权 | **技术管理员 + 招生老师**（`lib/auth/roles.ts` 的 `"site.saveBlocks"`；普通教师与财务管理员只能看） |
+| 鉴权 | **技术管理员 + 招生老师**（`lib/auth/roles.ts` 的 `"site.saveBlocks"` / `"site.getBlocks"`；普通教师与财务管理员只能看） |
 | 校验 | 各块各管各的：`validateCasesPage` / `validateFeaturedPage` / `validateFaqPage` / `validateReviewsPage` / `validateCopyBlock`，**都不含** `site.saveContent` 那条"课程正文至少要有一个学科"（否则空库里课程正文还没导入时连一条案例都存不进去） |
 | 日志 | 一次保存写一条操作日志，summary 里逐块报数（`学生案例 N 条 / 特色课程 N 门 / 常见问题 N 条 / 家长与学生评价 N 条 / 页面文案 N 块`） |
 | 乐观锁 | **整块覆盖，没有记录级 `version`**（与案例 / 常见问题同一口径：草稿是整份读出来的，冲突判定按"这一块整体"） |
 
 **保存评价（v35）** 并入的就是这个方法（**没有**另开 `site.saveReviews`）：同一个页面、同一组权限、
 同一套整块覆盖口径 —— 再开一个方法只会多一处"权限要对齐"的地方。
+（v36 另开了 `site.getBlocks` 作为它的**读法**，理由见上：公开快照里没有实名。）
 `reviewsPage` 的形状是 `{ heading: { eyebrow, title, description }, notice, reviews: SiteReview[] }`，
-`SiteReview = { id, group, quote, author, subject, description }`（`id` 留空＝新增，由服务端 `nextId("review")` 生成）。
+`SiteReview = { id, group, quote, author, subject, description, realName }`
+（`id` 留空＝新增，由服务端 `nextId("review")` 生成）。
+
+| 字段 | 口径 |
+| --- | --- |
+| `id` | 服务端生成，稳定不变（日志 / 增删 / 上下移按它认人） |
+| `group` | `家长` / `学生`（`lib/types/site.ts` 的 `REVIEW_GROUPS`） |
+| `quote` | 评价正文（家长 / 学生的原话） |
+| `author` | **前台显示的署名**，形如「初二 李同学家长」（保留姓氏的匿名写法） |
+| `subject` | 科目；可空 |
+| `description` | 补充说明；可空 |
+| `realName` | **内部字段**（v36）：这条评价的**真实姓名**。只在后台与库里出现 —— **不进** `site.publicContent` 的公开快照（`PublicSiteReview` 类型里根本没有这个键）、**不写进** `data/site/reviews.md` 与其生成物 `reviews.ts`（那两个文件在仓库里 = 会跟着公开）、前台源码里也不出现。**可选**（空串＝还没填，不设必填）；写入时 trim 前后空白；**交上来的条目里没有这个键时保留库里那一份**（老前端不该把已录的实名清掉），显式交空串才是"清掉" |
 
 | 校验（`validateReviewsPage`） | 为什么 |
 | --- | --- |
@@ -359,6 +378,9 @@ v39/v40 又把真源反成"课程库 → 内容文件"，因此"网站来的"不
 | `author`（署名）非空 | 署名空了就是"没有人说过的一句话" |
 | `group` ∈ `家长` / `学生`（`lib/types/site.ts` 的 `REVIEW_GROUPS`） | 页面按这两组渲染；认不出的值两边都不进、那条评价凭空消失 |
 | 非空 `id` 不得重名 | 重名会让两条评价在日志 / 删除里认成同一条 |
+
+`realName` **不在这张表里**：它是内部字段、可选，系统也不该去判断一个真名"对不对"
+（判不出来）。
 
 ⚠️ **允许一条评价都没有**（那是机构还没给真实文字的**正确状态**，页面显示「评价整理中」）——
 绝不能拿 `data/site/reviews.md` 里那几条**体例示例**顶上：迁移（v34 → v35）给老库补的也是
@@ -1069,7 +1091,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 2. 它会进入 `API_CONTRACT` —— 而自检要求"服务层每个方法都必须在契约里"，
    于是契约里出现一个"只有服务端才有意义"的方法，契约就不再是"页面对服务层的形状"了。
 
-**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 115 个方法，
+**因此方法数没有变化**：契约与 `API_CONTRACT` 里仍然是那 116 个方法，
 这四条路由**刻意不登记**（它们不是服务层方法）；页面的客户端是 `lib/auth/accounts.ts`，
 与 `lib/auth/session.ts` 调 `/api/login`、`/api/session` 是同一个做法。
 自检里对它们的要求写在 `scripts/check-auth.mts` 的 [10] 节（真实 HTTP、真实写盘），
@@ -1127,7 +1149,7 @@ localStorage 那份实现），而**账号表是服务端进程里的一个文�
 
 与账号管理同一处理由（见 §7.1）：抓取要**走外网**、写的是**服务端机器上的文件**
 （`data/holidays/<年>.json`），浏览器里那份 `api` 做不了这件事；做成服务层方法只会让
-契约里出现一个"只有服务端才有意义"的方法。**方法数仍然没变**（还是 115 个），
+契约里出现一个"只有服务端才有意义"的方法。**方法数仍然没变**（还是 116 个），
 页面的客户端是 `lib/backend/holidays-client.ts`。
 
 #### 数据与校验（这是这个功能的核心）

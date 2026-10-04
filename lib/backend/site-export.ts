@@ -1140,6 +1140,18 @@ function casesFile(site: PublicSite, source: string, warnings: Warnings, missing
  * 分组标题用**署名**（文件里的 `### 初二 李同学家长` 一眼能看出是谁说的），
  * 显示用的署名默认就是它；`#### 署名` 只在需要"标题与署名不一样"时才写
  * （读回来时优先用它，见 `readReviews`）。
+ *
+ * ## ⚠️ **不导出 `realName`**（v36 的内部实名）
+ *
+ * 写出的是**四个字段：分组 / 科目 / 正文 / 补充** —— 里面**没有**「真实姓名」这一栏。
+ * 这不是"忘了写"，是这一版最要紧的一条纪律：
+ * `data/site/reviews.md` **在仓库里**，它会被提交、会跟着公开仓库与 GitHub Pages 一起公开
+ * （`data/site/reviews.ts` 是它的生成物，一字不差地嵌着同一份文本）——
+ * 把实名写进去等于把「王同学 = 〔该学生的真名〕」贴到公网上，机构要的"前台匿名"就当场作废。
+ *
+ * 这一层是**编译期**兜住的：`site` 是 `PublicSite`，它的 `reviewsPage.reviews` 类型是
+ * `PublicSiteReview`（`Omit<SiteReview, "realName">`，见 `public-site.ts`）——
+ * 这里想写 `item.realName` 都写不出来。`scripts/check.mts` §58 另有一条**读文件**的断言。
  */
 function reviewsFile(site: PublicSite, source: string, warnings: Warnings, missing: string[]): string {
   const page = site.siteContent.reviewsPage;
