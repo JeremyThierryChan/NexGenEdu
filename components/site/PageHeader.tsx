@@ -21,7 +21,12 @@ export function PageHeader({ eyebrow, title, description, children }: PageHeader
           {description !== undefined && (
             <p className="mt-5 text-base leading-relaxed text-ink-600">{description}</p>
           )}
-          {children !== undefined && <div className="mt-7">{children}</div>}
+          {/*
+           * `!= null`（而不是 `!== undefined`）：调用方写成 `{cond ? <p/> : null}` 时
+           * children 会是 `null` —— 那时**不要**渲染这个带 `mt-7` 的包裹层，
+           * 否则标题区底下会留一块 28px 的空白（学生案例页的声明就是这么传进来的）。
+           */}
+          {children != null && <div className="mt-7">{children}</div>}
         </div>
       </Container>
     </div>

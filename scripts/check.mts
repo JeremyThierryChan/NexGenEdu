@@ -12028,8 +12028,18 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
     fields: [{ title: "年级", value: "高二" }],
     story: "自检用的案例过程。",
   });
-  // reviews.md（v35）：改一条、加一条
-  mutated.siteContent.reviewsPage.reviews[0]!.quote = "自检改过的评价正文。";
+  /*
+   * reviews.md（v35）：改一条（**有才改**）、加一条。
+   *
+   * ⚠️ 这里必须判空：机构很可能**一条评价都还没填**（"内容手动添加到前端"，真实评价由他自己录），
+   * 那时 `reviews` 是空数组，直接 `reviews[0]!.quote = …` 会崩 —— 而**"一条都没有是允许的"
+   * 是仓库既有纪律**（案例页与常见问题页都有同样的空态断言）。
+   * 2026-10 就是这么崩过一次：`site:export`（后台为准）把文件里那几条示例覆盖掉之后，
+   * 自检在这一行 TypeError，而产品与页面其实是好的。
+   */
+  if (mutated.siteContent.reviewsPage.reviews.length > 0) {
+    mutated.siteContent.reviewsPage.reviews[0]!.quote = "自检改过的评价正文。";
+  }
   mutated.siteContent.reviewsPage.reviews.push({
     id: "review_selfcheck",
     group: "学生",
@@ -17311,7 +17321,19 @@ console.log("\n=== 57. 学生案例折叠 + 家长与学生评价进库（v35）
   ok("骨架不是空的（否则上面那条断言什么都没验）",
     migratedReviews.heading.title !== "" && migratedReviews.notice !== "");
   eq("迁移**不灌**内容文件里那几条体例示例（条目为空）", migratedReviews.reviews.length, 0);
-  ok("内容文件里确实有体例示例（否则上面那条断言是空的）", templateReviews.reviews.length >= 2);
+  /*
+   * ⚠️ 内容文件里**允许一条示例都没有** —— 这一点是这一版踩出来的：
+   * `data/site/reviews.md` 是**"后台为准"的镜像**（`npm run site:export` 由后台写出），
+   * 机构一条真实评价都还没录时，导出会把"只写在文件里的体例示例"冲掉。那**不是缺陷**：
+   * 页面显示「评价整理中」（§57 有专门的空态断言）。而**手工把示例写回文件**又会与后台不一致
+   * （`site:export -- --check` 会红）—— 所以"示例常驻内容文件"这个前提本身站不住。
+   * 现在改成：**有示例就验它不是空口（下面两条 `every` 断言对空数组自然为真），没有就显式接受**。
+   */
+  ok(
+    "内容文件要么有体例示例、要么就是空的（两种都是合法状态；空＝机构还没录真实评价）",
+    templateReviews.reviews.length === 0 || templateReviews.reviews.length >= 2,
+    `当前 ${String(templateReviews.reviews.length)} 条`,
+  );
   ok("体例示例自己标着「体例示例」（一眼看不出是样例就等于编造）",
     templateReviews.reviews.every((item) => item.author.includes("体例示例") && item.quote.includes("体例示例")));
   ok("体例示例里没有具体的提分数字（不许写成像是真实发生过）",

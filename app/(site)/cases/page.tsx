@@ -51,13 +51,24 @@ export default function CasesPage() {
   const content = getCasesContent();
   const reviews = getReviewsContent();
 
+  /*
+   * 声明（「案例均经家长同意后发布，学生姓名已做隐去处理。」）放在**页面最上面**：
+   * 机构看到它孤零零跟在案例列表后面、与列表之间空出 64–80px（`Section` 自带的
+   * `py-16 sm:py-20` 两段相叠），要求「**这部分直接放到页面第一部分以小字的形式吧**」。
+   * 于是挪进 `PageHeader` 的 children 槽位（它渲染在说明文字下方，间距 28px），用 `text-xs` 小字；
+   * 没有内容时传 `null` —— `PageHeader` 那边用 `!= null` 判断，不会留下空的间距块。
+   */
   return (
     <>
       <PageHeader
         eyebrow={content.eyebrow}
         title={content.title}
         description={content.description}
-      />
+      >
+        {content.notice !== "" ? (
+          <p className="text-xs leading-relaxed text-ink-500">{content.notice}</p>
+        ) : null}
+      </PageHeader>
 
       <Container>
         {/* 没有案例时说话（标题区照常显示）：见教师页同一处说明 */}
@@ -156,14 +167,6 @@ export default function CasesPage() {
                 </details>
               );
             })}
-          </Section>
-        )}
-
-        {content.notice !== "" && (
-          <Section className="pt-0">
-            <p className="max-w-2xl rounded-md bg-ink-50 px-4 py-3 text-xs leading-relaxed text-ink-500">
-              {content.notice}
-            </p>
           </Section>
         )}
 
