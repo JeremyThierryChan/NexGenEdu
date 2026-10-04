@@ -163,11 +163,18 @@ function publicTeacher(teacher: Teacher): PublicTeacher {
 }
 
 /**
- * 评价：**逐条只用公开的那五个字段重新构造**（`realName` 不写进去）。
+ * 评价：**逐条只用公开的字段重新构造**（`realName` 不写进去）。
  *
  * 与 `publicTeacher` / `publicCourse` 同一个写法与同一个理由：
  * **新增字段必须在这里显式写一行，忘了就是没给出去** —— 失败方向是安全的那个。
  * `id` 也照给：网站那侧按它认人（渲染 key / 分组的稳定标识），它本身不是敏感信息。
+ *
+ * ## v37：`original` / `originalLanguage` 是**公开内容**，必须在这里写一行
+ *
+ * 双语评价卡片要显示原文并给一个切换按钮（见 `components/site/ReviewQuote.tsx`），
+ * 因此这两个字段**必须**进公开快照 —— 与 `realName`（内部实名，**绝不能**写进来）
+ * 恰好相反。这一对"公开 / 内部"的对照就是本文件存在意义的样板：
+ * 不是"新增字段一律不给"，而是"**逐条问它会不会显示在网站上**"。
  */
 function publicReviewsPage(page: SiteReviewsPage): PublicReviewsPage {
   return {
@@ -180,6 +187,8 @@ function publicReviewsPage(page: SiteReviewsPage): PublicReviewsPage {
       author: item.author,
       subject: item.subject,
       description: item.description,
+      original: item.original,
+      originalLanguage: item.originalLanguage,
     })),
   };
 }

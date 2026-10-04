@@ -1,4 +1,4 @@
-import { getPage, pageString } from "@/lib/data/content";
+import { getPage, itemFieldText, pageString } from "@/lib/data/content";
 import { backendCasesContent, backendFaqContent, backendReviewsContent, backendSnapshot, siteContentSource } from "@/lib/site/backend-source";
 import { copySourceFor } from "@/lib/data/site";
 import type { CopySource } from "@/lib/backend/site-copy-model";
@@ -177,8 +177,15 @@ export function getReviewsContentFromTemplate(): ReviewsContent {
 
   const reviews: ReviewItem[] = page.groups
     .map((group) => {
-      const field = (name: string): string =>
-        group.items.find((item) => item.title === name)?.value ?? "";
+      /*
+       * 字段值走 `itemFieldText`（而不是直接读 `item.value`）：v37 起
+       * **正文 / 原文可以多段** —— 第一段在 `#### 字段:` 行上、其余段落写在下面，
+       * 由它拼回 `\n\n`（见 `lib/data/content.ts` 的说明）。
+       */
+      const field = (name: string): string => {
+        const item = group.items.find((entry) => entry.title === name);
+        return item === undefined ? "" : itemFieldText(item);
+      };
       const base = group.name.trim();
       // id 用署名（= 分组标题）：与内容文件一一对应，反复导入不会漂
       let id = base;
@@ -197,6 +204,9 @@ export function getReviewsContentFromTemplate(): ReviewsContent {
         author: (field("署名") || base).trim(),
         subject: field("科目").trim(),
         description: field("补充").trim(),
+        // v37 的原文与原文语言（**公开内容**）：老文件没有这两栏 → 空串 = 单语评价
+        original: field("原文").trim(),
+        originalLanguage: field("原文语言").trim(),
       };
     })
     // 一条评价连"谁说的、说了什么"都没有就不产出条目（与案例同一条口径）

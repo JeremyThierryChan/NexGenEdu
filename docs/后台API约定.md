@@ -359,18 +359,26 @@ v39/v40 又把真源反成"课程库 → 内容文件"，因此"网站来的"不
 同一套整块覆盖口径 —— 再开一个方法只会多一处"权限要对齐"的地方。
 （v36 另开了 `site.getBlocks` 作为它的**读法**，理由见上：公开快照里没有实名。）
 `reviewsPage` 的形状是 `{ heading: { eyebrow, title, description }, notice, reviews: SiteReview[] }`，
-`SiteReview = { id, group, quote, author, subject, description, realName }`
+`SiteReview = { id, group, quote, author, subject, description, original, originalLanguage, realName }`
 （`id` 留空＝新增，由服务端 `nextId("review")` 生成）。
 
 | 字段 | 口径 |
 | --- | --- |
 | `id` | 服务端生成，稳定不变（日志 / 增删 / 上下移按它认人） |
 | `group` | `家长` / `学生`（`lib/types/site.ts` 的 `REVIEW_GROUPS`） |
-| `quote` | 评价正文（家长 / 学生的原话） |
+| `quote` | 评价正文（家长 / 学生的原话）——**双语评价里这是「译文」**，卡片默认显示它 |
 | `author` | **前台显示的署名**，形如「初二 李同学家长」（保留姓氏的匿名写法） |
 | `subject` | 科目；可空 |
 | `description` | 补充说明；可空 |
+| `original` | **公开字段**（v37）：这条评价的**原文**（例如外籍学生的法语原文）。**空串＝单语评价** —— 前台不显示切换按钮、也不加任何前缀。非空时前台卡片默认显示 `quote`（前缀「（译文）」）、点「看原文」切到它（前缀「（{originalLanguage}原文）」）。**进** `site.publicContent` 的公开快照，**写进** `data/site/reviews.md`（`#### 原文:`）与其生成物 `reviews.ts`。可选；写入时 trim 前后空白；**交上来的条目里没有这个键时保留库里那一份**（与 `realName` 同一套三态） |
+| `originalLanguage` | **公开字段**（v37）：`original` 是哪一种语言，例如 `法语`。**空串**时前台前缀退化成「（原文）」（不写语言也不至于空着）。同样进公开快照与内容文件（`#### 原文语言:`）。可选；trim；缺键保留 |
 | `realName` | **内部字段**（v36）：这条评价的**真实姓名**。只在后台与库里出现 —— **不进** `site.publicContent` 的公开快照（`PublicSiteReview` 类型里根本没有这个键）、**不写进** `data/site/reviews.md` 与其生成物 `reviews.ts`（那两个文件在仓库里 = 会跟着公开）、前台源码里也不出现。**可选**（空串＝还没填，不设必填）；写入时 trim 前后空白；**交上来的条目里没有这个键时保留库里那一份**（老前端不该把已录的实名清掉），显式交空串才是"清掉" |
+
+> ⚠️ **`original` / `originalLanguage` 与 `realName` 恰好相反**，这条对照值得记住：
+> 判断一个新字段该怎么处理，先问**"它会不会显示在网站上"** ——
+> 会（原文）→ 进公开快照、进内容文件、前台源码里用它；
+> 不会（实名）→ 三处都不出现，各有一条反向断言盯着
+> （见 `scripts/check.mts` §58 与 §59）。
 
 | 校验（`validateReviewsPage`） | 为什么 |
 | --- | --- |
@@ -380,7 +388,9 @@ v39/v40 又把真源反成"课程库 → 内容文件"，因此"网站来的"不
 | 非空 `id` 不得重名 | 重名会让两条评价在日志 / 删除里认成同一条 |
 
 `realName` **不在这张表里**：它是内部字段、可选，系统也不该去判断一个真名"对不对"
-（判不出来）。
+（判不出来）。`original` / `originalLanguage`（v37）**同样不在这张表里**：两者都可选、
+空串都合法（单语评价 / 前缀退化成「（原文）」），系统也无从判断一段文字是不是法语。
+这四个字段里**只有 `quote` / `author` / `group` / `id` 是"不能为空 / 不能重名"的内容规则**。
 
 ⚠️ **允许一条评价都没有**（那是机构还没给真实文字的**正确状态**，页面显示「评价整理中」）——
 绝不能拿 `data/site/reviews.md` 里那几条**体例示例**顶上：迁移（v34 → v35）给老库补的也是

@@ -67,7 +67,7 @@
  * **写文件那条路（`exportSiteMarkdown`）一个字都没动** —— 排序是显示规则，
  * 不能因此改变导出到 `data/site/*.md` 的内容。
  */
-import { parseDocument, type PageBlock, type Section } from "@/lib/data/content";
+import { itemFieldText, parseDocument, type PageBlock, type Section } from "@/lib/data/content";
 import {
   DEFAULT_TEACHER_SHARE_RULES,
   parsePricingSource,
@@ -1134,7 +1134,7 @@ function casesFile(site: PublicSite, source: string, warnings: Warnings, missing
 }
 
 /**
- * reviews.md：`### 署名` + 字段（分组 / 科目 / 正文 / 补充）。
+ * reviews.md：`### 署名` + 字段（分组 / 科目 / 正文 / 补充 / 原文 / 原文语言）。
  *
  * 与 `casesFile` 同一套：一条评价一个 `###` 分组，`#### 字段: 值` 是它的信息。
  * 分组标题用**署名**（文件里的 `### 初二 李同学家长` 一眼能看出是谁说的），
@@ -1143,7 +1143,7 @@ function casesFile(site: PublicSite, source: string, warnings: Warnings, missing
  *
  * ## ⚠️ **不导出 `realName`**（v36 的内部实名）
  *
- * 写出的是**四个字段：分组 / 科目 / 正文 / 补充** —— 里面**没有**「真实姓名」这一栏。
+ * 写出的字段里**没有**「真实姓名」这一栏。
  * 这不是"忘了写"，是这一版最要紧的一条纪律：
  * `data/site/reviews.md` **在仓库里**，它会被提交、会跟着公开仓库与 GitHub Pages 一起公开
  * （`data/site/reviews.ts` 是它的生成物，一字不差地嵌着同一份文本）——
@@ -1152,6 +1152,17 @@ function casesFile(site: PublicSite, source: string, warnings: Warnings, missing
  * 这一层是**编译期**兜住的：`site` 是 `PublicSite`，它的 `reviewsPage.reviews` 类型是
  * `PublicSiteReview`（`Omit<SiteReview, "realName">`，见 `public-site.ts`）——
  * 这里想写 `item.realName` 都写不出来。`scripts/check.mts` §58 另有一条**读文件**的断言。
+ *
+ * ## v37：**导出 `#### 原文:` 与 `#### 原文语言:`**（它们是公开内容）
+ *
+ * 双语评价卡片要显示原文并给一个切换按钮，因此这两个字段**必须**写进文件
+ * —— 与 `realName` 恰好相反。内容文件里它们与其余字段同形（`#### 名字: 值`）。
+ *
+ * ## 多段文本（译文 / 原文）
+ *
+ * `正文` / `原文` 在库里是多段的（段间空行），而字段行只有一行：约定是
+ * **第一段留在字段行上、其余段落写在下面**（与 `lib/data/content.ts` 的
+ * `itemFieldText` 配对，读回来拼成 `\n\n`）。折成一行会把段落挤成一坨。
  */
 function reviewsFile(site: PublicSite, source: string, warnings: Warnings, missing: string[]): string {
   const page = site.siteContent.reviewsPage;
@@ -1164,15 +1175,29 @@ function reviewsFile(site: PublicSite, source: string, warnings: Warnings, missi
       const field = (name: string, value: string): void => {
         const trimmed = text(value).trim();
         if (trimmed === "") return;
-        if (trimmed.includes("\n")) {
-          warnings.add(`评价「${item.author}」的「${name}」在库里有换行：文件里字段只能写一行（已折成一行）。`);
+        const lines = trimmed.split("\n");
+        if (lines.length === 1) {
+          blocks.push(`#### ${name}: ${lines[0] ?? ""}`);
+          return;
         }
-        blocks.push(`#### ${name}: ${trimmed.replace(/\s*\n\s*/g, " ")}`);
+        /*
+         * 多段：第一段写在字段行上，其余段落写在下面（段间空行照原样保留）。
+         * 领头空行去掉（正文块由下面的 `renderGroups` 用空行隔开，多留会变成两行空行）。
+         * 段落以 `#` 开头会被解析成一个新的标题（把后面的内容吃掉），因此先警告。
+         */
+        const rest = lines.slice(1).join("\n").replace(/^\n+/, "");
+        if (rest.split("\n").some((line) => /^\s*#{1,6}\s/.test(line))) {
+          warnings.add(`评价「${item.author}」的「${name}」有一段以井号开头：内容文件里会被当成标题。`);
+        }
+        blocks.push(`#### ${name}: ${lines[0] ?? ""}\n\n${rest}`);
       };
       field("分组", item.group);
       field("科目", item.subject);
       field("正文", item.quote);
       field("补充", item.description);
+      // v37 的两栏（公开内容）：老数据是空串，field() 会自动跳过 → 单语评价的文件不长出这两栏
+      field("原文", item.original);
+      field("原文语言", item.originalLanguage);
       return { heading: `### ${item.author}`, preserveHead: false, blocks };
     }),
   };
@@ -1441,6 +1466,12 @@ export type SiteCore = {
       author: string;
       subject: string;
       description: string;
+      /**
+       * v37 的原文与原文语言：**公开内容**，内容文件里写得出来、也必须写得出来
+       * （见 `reviewsFile()`）—— 与 `realName`（内部实名，四处都不出现）相反。
+       */
+      original: string;
+      originalLanguage: string;
     }>;
   };
   featured: FeaturedContent;
@@ -1782,10 +1813,17 @@ function toCaseCore(content: CasesContent): SiteCore["cases"] {
  *
  * 身份就是那条 `### 署名`：文件里没有 id 这一栏（与案例同一条口径），
  * 因此回读**不产出 id**，比对时也不比它。
+ *
+ * 字段值走 `itemFieldText`：v37 起**正文 / 原文可以多段**（第一段在字段行上、
+ * 其余段落写在下面），由它拼回 `\n\n` —— 与网站自己的读法（`lib/data/pages.ts`）
+ * 共用同一个函数，两边不会漂。
  */
 function readReviews(page: PageBlock | undefined): ReviewsContent {
   const reviews = (page?.groups ?? []).map((group) => {
-    const field = (name: string): string => group.items.find((item) => item.title === name)?.value ?? "";
+    const field = (name: string): string => {
+      const item = group.items.find((entry) => entry.title === name);
+      return item === undefined ? "" : itemFieldText(item);
+    };
     return {
       id: group.name,
       group: field("分组").trim(),
@@ -1795,6 +1833,9 @@ function readReviews(page: PageBlock | undefined): ReviewsContent {
       author: (field("署名") || group.name).trim(),
       subject: field("科目").trim(),
       description: field("补充").trim(),
+      // v37 的原文与原文语言（**公开内容**）：老文件没有这两栏 → 空串 = 单语评价
+      original: field("原文").trim(),
+      originalLanguage: field("原文语言").trim(),
     };
   });
 
@@ -1818,6 +1859,8 @@ function toReviewsCore(content: ReviewsContent): SiteCore["reviews"] {
       author: item.author,
       subject: item.subject,
       description: item.description,
+      original: item.original,
+      originalLanguage: item.originalLanguage,
     })),
   };
 }

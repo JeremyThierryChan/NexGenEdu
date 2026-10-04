@@ -281,6 +281,17 @@ export type ReviewItem = {
   subject: string;
   /** 补充说明（可空）；名字见 `SiteReview.description` 的说明（不叫 `note`）。 */
   description: string;
+  /**
+   * 原文（v37，可空）：这条评价的原文正文（例如法语那一份）。
+   *
+   * 空串＝**单语评价**：前台不显示切换按钮、也不加任何前缀（卡片保持干净）。
+   * 非空时前台默认显示 `quote`（译文，前缀「（译文）」），点按钮切到这一份
+   * （前缀「（{originalLanguage}原文）」）。与 `SiteReview.original` 同一栏、
+   * **公开内容**（不是 `realName` 那种内部字段）。
+   */
+  original: string;
+  /** 原文语言（v37，可空），例如「法语」；空串时前台前缀退化成「（原文）」。 */
+  originalLanguage: string;
 };
 
 export type ReviewsContent = PageIntro & {

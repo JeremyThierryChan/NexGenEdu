@@ -2098,6 +2098,187 @@ GET http://127.0.0.1:3000/cases/ ：王同学 ×3、王同学家长 ×2、刘同
 - **没有**把实名加进任何"导出 / 报表"（导出不是这一版的范围，机构没提）；
 - **没有**动 `知识库/`、没有 `git commit` / `git push`；
 
+### E26：双语评价卡片 + 可复用的语言切换按钮（数据库 v37）
+
+> **编号说明**：这一版取 **E26**（**新能力，不续 E25**）—— E25 / E25 续 是「评价进库」
+> 与「后台实名、前台匿名」；这一版是**面向访客的新交互**（一张卡片上放两种语言的正文 +
+> 一个切换按钮），失败形态与那两版完全不同：那两版怕的是「内容丢 / 实名泄漏」，
+> 这一版怕的是「访客看到一堆挤成一坨、读不懂的外语」。
+>
+> **这一版动了数据库结构**：`CURRENT_VERSION` 36 → **37**（`SiteReview` 新增
+> `original` 与 `originalLanguage`）。老库**一律补空串**（= 单语评价，见下）。
+
+**机构原话**（2026-10-04）：
+
+> 「这是外籍学生 〔学生实名〕 来自法国洛里昂 学习汉语 的评价原文以及译文，
+> **我需要卡片上展示译文，但是能加一个小按钮切换到原文（后续这个按钮会复用）**，
+> **如果是原文，就在段落前面加（法语原文），如果是译文就加（译文）**」
+
+> ⚠️ 实名同样用占位写法（`〔学生实名〕`）—— 理由与 E25 续 一字不差：
+> 本文件在仓库里、会跟着公开；要核对请到后台「网站内容」→「家长与学生评价」的
+> 「真实姓名」那一格。
+
+**机构追问后定的两条口径**：
+
+1. 卡片署名只显示**名**（`Milan`）；实名只存后台 —— 沿用 v36 的 `realName`；
+2. 「（译文）」/「（法语原文）」这两个前缀**只加在"有原文"的双语卡片上**；
+   单语评价保持干净（**不加前缀、不显示按钮**）。
+
+#### 一、这一版最要紧的一句：原文与实名**恰好相反**
+
+| | `original` / `originalLanguage`（v37） | `realName`（v36） |
+| --- | --- | --- |
+| 访客会不会看到 | **会**（卡片上要显示，还有那行小字前缀） | 不会 |
+| 公开快照（`/api/public/site`） | **必须进**（`publicReviewsPage()` 显式搬） | **绝不能进**（`PublicSiteReview` 里没这个键） |
+| `data/site/reviews.md`（仓库里的文件） | **必须写**（`#### 原文:` / `#### 原文语言:`） | **绝不能写** |
+| 前台源码 | 用它（`ReviewQuote` 按它决定显不显示按钮） | 不出现 |
+| 老库补什么 | 空串（＝单语评价） | 空串（＝还没填） |
+| 谁在守 | 自检 **§59**（要求"出门"） | 自检 **§58**（要求"不出门"） |
+
+**判断一个新字段怎么处理，先问一句「它会不会显示在网站上」** ——
+这条样板写进了 `lib/backend/types.ts` 的字段注释里，也写进了 §59 的开场注释，
+给后来加字段的人一眼就能定性。
+
+#### 二、为什么按钮做成**通用组件**
+
+机构原话里明确说了「**后续这个按钮会复用**」。因此不是往 `/cases` 里塞一段 `useState`，
+而是分成两层：
+
+- `components/site/ReviewQuote.tsx`（`"use client"`）：props 就三个
+  `{ text, original?, originalLanguage? }`，只管「画正文 + 记住当前停在谁身上 + 画按钮」；
+- `components/site/review-quote-view.ts` 的**纯函数**
+  `reviewQuoteView(input, showOriginal)` → `{ body, prefix, showToggle, toggleLabel, toggleAriaLabel }`。
+
+好处有二：① 以后教师简介 / 课程介绍也要双语，把两份文字传进来就能复用同一套交互与无障碍；
+② **自检 §59 直接 import 这个纯函数**把三态逐字段验一遍 —— 页面与断言读的是**同一份判据**，
+不会出现"断言验的是一套、页面跑的是另一套"。
+
+三态（就是机构要的那三种）：
+
+| 情况 | 正文 | 段落前的**小字前缀** | 按钮 |
+| --- | --- | --- | --- |
+| `original` 为空（**单语**） | `text` | **无** | **不显示** |
+| 有原文 · 默认 | `text`（译文） | 「（译文）」 | 「看原文」 |
+| 有原文 · 切过去 | `original` | 「（{originalLanguage}原文）」，语言留空则「（原文）」 | 「看译文」 |
+
+无障碍：原生 `<button type="button">`（键盘可 Tab / 回车）、`aria-pressed` 说出"现在停在哪一份"、
+`aria-label` 说清按了会变成哪一份（例：`查看法语原文`）。
+**不记住状态**（只 `useState`，不落 localStorage / URL）：刷新回默认译文 ——
+「看的方式」不是数据，机构也没要求刷新后还停在原文。
+
+#### 三、内容文件里的**多段文本**（一个必须解决的细节）
+
+译文与原文都是**多段**，而 `#### 字段: 值` 只有一行。原先导出遇到换行会**折成一行并报警告**，
+但这里折了就是"把段落挤成一坨"（前台用 `whitespace-pre-line` 渲染，挤成一坨等于一句话读到底，
+而且 `data/site/reviews.ts` 是线上 Pages 读的那一份）。因此定了约定：
+
+> **第一段写在 `#### 正文:` / `#### 原文:` 那一行上，其余段落写在下面（段与段之间空一行）。**
+
+读回由 `lib/data/content.ts` 新增的 `itemFieldText()` 把「字段行的值」与「标题下方的正文」
+拼成 `\n\n`；网站自己的读法（`lib/data/pages.ts`）与导出器（`site-export.ts` 的 `readReviews`）
+**共用这一个函数**，两边不会漂。导出那一侧是它的逆运算（不再对这两个字段报"已折成一行"）。
+
+#### 四、这一版实际改了哪些文件
+
+| 改动 | 说明 |
+| --- | --- |
+| `lib/backend/types.ts` | `SiteReview.original` / `originalLanguage`（**公开内容**，注释里写清与 `realName` 的对比、老库补空串） |
+| `lib/backend/version.ts` | `CURRENT_VERSION` 36 → 37、`VERSION_NOTES[37]` |
+| `lib/backend/api.ts` | 迁移 36 → 37（只补两个空串）、收尾归一复用 `normalizeReviewsPage`、`saveBlocks` 写这两个字段（trim + **缺键保留**，与 `realName` 同一套三态） |
+| `lib/backend/site-content.ts` | `normalizeReviewsPage` 补两个空串、`reviewsFromContent` 从内容文件读这两栏、`validateReviewsPage` 说明"这两栏不在这里判" |
+| `lib/backend/public-site.ts` | `publicReviewsPage()` **显式搬** `original` / `originalLanguage`（它们必须出门；`realName` 照旧不搬） |
+| `lib/backend/site-export.ts` | `reviewsFile()` 导出 `#### 原文:` / `#### 原文语言:`、支持多段；`readReviews` / `toReviewsCore` / `SiteCore` 同步 |
+| `lib/data/content.ts` | 新增 `itemFieldText()`（多段字段的读法，导出器的逆运算） |
+| `lib/data/pages.ts` / `lib/types/site.ts` | 视图模型 `ReviewItem` 与模版读法带上这两栏 |
+| `lib/site/backend-source.ts` | 从公开快照搬这两栏（`realName` 照旧搬不到） |
+| `components/site/ReviewQuote.tsx` / `review-quote-view.ts` | **新组件**（`"use client"` + 可测纯函数），见 §二 |
+| `app/(site)/cases/page.tsx` | 评价正文改用 `<ReviewQuote>`；**其余部分一字未动**（尤其上一版刚定的匿名署名与「学生评价在前」的分组顺序） |
+| `app/admin/(dashboard)/content/page.tsx` | 每条评价多两格「原文（可选）」「原文语言」+ 列表上那行小字（「单语（没有原文）」/「原文：法语」）；**没动** `realName` 那一格 |
+| `data/site/reviews.md`（导出产物） | 多两条 `#### 原文:` / `#### 原文语言: 法语`，并把"多段写法"与三态口径写进文件头说明 |
+| `scripts/check.mts` | 新增 **§59**（53 条）；§57 一条回读比对补两栏、§58 的夹具形状比对去掉 v36/v37 新键；两处写死的版本号（§50 / §56 那一批）改成 37 |
+| `docs/使用手册.md` / `docs/内容维护手册.md` / `docs/后台API约定.md` / `PROJECT.md` | 怎么录双语评价、前台怎么切换、为什么默认译文、内容文件里**有**原文栏而**没有**实名栏、`SiteReview` 字段表、本节 |
+
+#### 五、自检 §59（53 条）守什么
+
+① 迁移补空串（`original` / `originalLanguage`，**不推任何 version**、别的表一个字没动）；
+② 保存 / 读回一致（trim、缺键保留库里那一份）；
+③ **公开快照里有两个字段**，**同一批条目里没有 `realName`**（把这对"相反"写进断言）；
+④ **导出文件里有原文与语言、没有实名**（两条并列断言）；⑤ 导入缺这两栏的旧文件仍能工作；
+⑥ **多段来回一致**（导出 → 回读逐字节，反复导出收敛）；
+⑦ **前台源码级**：`/cases` 用了通用组件、组件是 `"use client"`、有 `<button type="button">` +
+`aria-pressed`、前缀文案对、**`original` 为空时不渲染按钮**（这一条由组件层**纯函数**逐字段说清）；
+⑧ 后台有这两格；反向：`realName` 依然三处不出现（§58 的 35 条继续全绿）。
+
+> 为什么另起 §59 而不并进 §58：§58 守的是"内部字段绝不出门"，§59 守的是它的**反面**
+> ——"公开字段必须出门"。并成一节会让两者共用一张编号表，而**失败形态正好相反**
+> （一个是把学生真名贴到公网，一个是访客看不到原文）。
+
+#### 六、门禁（真实跑过的）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `npm run check` | **全部通过**（新增 **§59 共 53 条**；§58 的 35 条一字未改、继续全绿） |
+| `npm run check:both`（内存 + 真实 HTTP 两种后端跑同一份 check.mts） | **两种后端都全部通过**，并附「真实凭证 / 账号表 / 备份目录未被改动」三条 |
+| `npm run build` | 退出码 0，`✓ Generating static pages (96/96)`，`out/` 里 93 个 `.html` |
+| `npm run check:404` / `check:links` | 全过（站内链接 2834 个、问题 0 个） |
+| `npm run site:export -- --check` | 退出码 0：七个文件**一致、没动** |
+| `npx tsc --noEmit` | 退出码 0 |
+| `npm run lint` | 退出码 0 |
+| 3000 / 4000 实测 | 3000 上 `SITE_LIVE=1 npm run dev`（**只有一个** dev）`/`、`/cases/`、`/admin/` 都 **200**；4000 `/health` **200**；dev 日志错误数 **0** |
+
+#### 七、端到端证据（2026-10-04 实跑）
+
+**① 重启 4000 让 v37 生效**（新字段必须重启，与 E25 续 同一条经验）：按端口
+`lsof -nP -iTCP:4000 -sTCP:LISTEN` 取 PID → 停 → `nohup npm run server …` →
+`/health` 200 → 第一条数据请求后迁移已跑：老四条评价的 `original` / `originalLanguage`
+都是 `""`（**不猜**：机构从没登记过它们的原文）。
+
+**② 录入那条双语评价**（经**真后端 HTTP**：`POST /api/login` →
+`POST /api/call {method:"site.getBlocks"}` 读出整块 → 尾部 append →
+`POST /api/call {method:"site.saveBlocks", args:[{reviewsPage: …}]}`）：
+
+```
+写后 5 条；第五条：author=Milan  group=学生  subject=汉语  description=来自法国洛里昂
+                  originalLanguage=法语  realName=〔学生实名〕
+                  quote 与 sent 的译文逐字节一致（4 段）
+                  original 与 sent 的法语原文逐字节一致（4 段，撇号 ’ 与重音都在）
+heading / notice 未变： true
+前四条的每个字段值都未变： true     ← 仅对象键的序列化顺序被 saveBlocks 规范化（值全等）
+其余四块（casesPage / featuredPage / faqPage / copy）：未变
+```
+
+**③ 导出**：`npm run site:export` 只改了 `reviews.md`（＋26 行），随后 `--check` 七个文件一致。
+
+```
+data/site/reviews.md ：#### 原文: Jeremy (professeur Chen) est un excellent professeur…（4 段，段间空行都在）
+                       #### 原文语言: 法语
+                       实名相关命中 0（“真实姓名”/ realName / 〔学生实名〕都没有）
+data/site/reviews.ts ：同上（有原文与原文语言、无实名）
+```
+
+**④ 前台（构建产物里的实际文本，`out/cases/index.html`）**：
+
+```
+双语那张卡片：<blockquote class="whitespace-pre-line …"><span class="mr-1 text-xs text-ink-400">（译文）</span>Jeremy（陈老师）是一位非常优秀的老师…</blockquote>
+              <button type="button" aria-pressed="false" aria-label="查看法语原文" …>看原文</button>
+整页计数：    「（译文）」×1、「看原文」×1、aria-pressed ×1（只有这一张卡片有按钮与前缀）
+单语卡片：    <blockquote class="whitespace-pre-line …">很负责的老师，上课的时候讲解很透彻…</blockquote>
+              —— **没有前缀 span、没有按钮**（4 张单语卡片都是这样）
+实名：        整份 out/ 里 “真实姓名” / realName / 姓名的任何片段 命中 0
+```
+
+**⑤ 三态的行为**（点一下之后会怎样）由源码级 + 纯函数断言说清（§59 ⑦）：
+默认 `showOriginal=false` → 「（译文）」+「看原文」+ `aria-pressed=false`；
+切过去 `true` → 「（法语原文）」+「看译文」+ `aria-pressed=true`；
+`original` 为空 → `showToggle=false`，组件里那一行 `{view.showToggle && (…)}` 直接不渲染按钮。
+
+#### 八、这一轮**没有**做的事
+
+- **没有**把实名写进任何会公开的地方（`data/site/reviews.md` / `reviews.ts` / 前台与后台源码 /
+  本文件的原话都用占位或遮蔽）—— 与 E25 续 同一档纪律；
+- **没有**把「看原文」按钮做成"记住上次选择"（刷新回默认译文，理由见 §二）；
+- **没有**动 `知识库/`、没有 `git commit` / `git push`。
+
 ### E23：排课串 —— 「仅此一次 / 此后所有」（数据库 v34）
 
 > **编号说明**：这一节取 **E23** —— **E22 与「E22 续」**都已落地（备份能在后台恢复 / 升级前快照

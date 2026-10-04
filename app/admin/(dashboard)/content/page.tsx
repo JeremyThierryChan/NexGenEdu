@@ -170,7 +170,7 @@ export default function AdminContentPage() {
     notice.clear();
   }
 
-  /** 改一条评价的某个字段（分组 / 署名 / 科目 / 正文 / 补充 / 真实姓名）。 */
+  /** 改一条评价的某个字段（分组 / 署名 / 科目 / 正文 / 补充 / 原文 / 原文语言 / 真实姓名）。 */
   function updateReview(index: number, patch: Partial<SiteReview>): void {
     if (reviewsPage === null) return;
     editReviewsPage({
@@ -194,6 +194,9 @@ export default function AdminContentPage() {
           author: "",
           subject: "",
           description: "",
+          // v37 的原文与原文语言：新条目从空串起步 = 单语评价（要双语就自己填原文）
+          original: "",
+          originalLanguage: "",
           realName: "",
         },
       ],
@@ -556,11 +559,13 @@ export default function AdminContentPage() {
         保存按钮就在这一块上 —— 与案例 / 常见问题等一起提交，服务端各写各的块。
         ⚠️ 写真实评价（可隐去姓名）：**请勿编造**，页面上会显示下面那句页脚提示。
         v36：每条多一格**真实姓名**（内部实名，只在后台与库里；前台一个字都不显示）。
+        v37：每条再多两格**原文**与**原文语言**（这两栏**是公开内容**，与真实姓名相反：
+        填了原文，前台卡片就多一个「看原文 / 看译文」按钮，默认显示译文）。
       */}
       <Panel
         className="mb-8"
         title="家长与学生评价"
-        description="网站「学生案例」页里那块「家长与学生怎么说」：分家长 / 学生两组，评价短、页面上不折叠。写真实评价（可隐去姓名），请勿编造。「真实姓名」只给后台自己看，前台不会显示它。"
+        description="网站「学生案例」页里那块「家长与学生怎么说」：分家长 / 学生两组，评价短、页面上不折叠。写真实评价（可隐去姓名），请勿编造。「真实姓名」只给后台自己看，前台不会显示它；「原文」与「原文语言」则是公开的 —— 填了原文，前台卡片会多一个「看原文 / 看译文」按钮。"
         actions={
           canWrite && reviewsPage !== null ? (
             <Button variant="outline" size="sm" onClick={addReview}>
@@ -662,6 +667,15 @@ export default function AdminContentPage() {
                             ? "后台实名未填（前台照旧匿名）"
                             : `后台实名：${item.realName.trim()}`}
                         </span>
+                        {/*
+                          列表上也能看出**有没有原文**（v37）：有原文的评价在前台会多一个
+                          「看原文 / 看译文」按钮，列表上给一行小字就不必逐条点开看。
+                        */}
+                        <span className="pb-2.5 text-[11px] text-ink-500">
+                          {item.original.trim() === ""
+                            ? "单语（没有原文）"
+                            : `原文：${item.originalLanguage.trim() === "" ? "未写语言" : item.originalLanguage.trim()}`}
+                        </span>
                         <div className="w-40">
                           <SelectInput
                             label="分组"
@@ -742,6 +756,33 @@ export default function AdminContentPage() {
                           rows={2}
                           value={item.description}
                           onChange={(event) => updateReview(index, { description: event.target.value })}
+                          disabled={!canWrite}
+                        />
+                      </div>
+                      {/*
+                        v37：**原文**（可选）与**原文语言**。这两栏是**公开内容**
+                        （与上面那格「真实姓名」恰好相反）：填了原文，前台评价卡片就会
+                        多一个「看原文 / 看译文」按钮，默认显示译文、点一下看原文。
+                        留空 = 单语评价：前台不显示按钮、也不加任何前缀。
+                      */}
+                      <div className="mt-3">
+                        <TextAreaField
+                          label="原文（可选）"
+                          hint="这条评价的原文（如法语）。填了它，前台卡片会多一个「看原文 / 看译文」按钮；留空 = 单语评价（卡片保持干净，不加任何前缀）"
+                          rows={3}
+                          value={item.original}
+                          onChange={(event) => updateReview(index, { original: event.target.value })}
+                          disabled={!canWrite}
+                        />
+                      </div>
+                      <div className="mt-3">
+                        <TextField
+                          label="原文语言"
+                          hint="如 法语；留空则前台显示「（原文）」"
+                          value={item.originalLanguage}
+                          onChange={(event) =>
+                            updateReview(index, { originalLanguage: event.target.value })
+                          }
                           disabled={!canWrite}
                         />
                       </div>

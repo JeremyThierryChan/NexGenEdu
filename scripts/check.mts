@@ -294,6 +294,14 @@ import {
 } from "@/lib/backend/offers";
 import type { Catalog, CatalogOffer } from "@/lib/backend/types";
 import { siteContentFromContent, validateFeaturedPage } from "@/lib/backend/site-content";
+/*
+ * §59：双语评价卡片那三态的**纯逻辑**（`components/site/review-quote-view.ts`）。
+ *
+ * 它是**值**（不是类型）：前台组件（`ReviewQuote.tsx`）与这一节的自检读的是
+ * **同一份判据**，因此"断言验的是一套、页面跑的是另一套"这种事不会发生。
+ * 只 import 那个不依赖 React 的纯函数文件，不 import `.tsx`。
+ */
+import { reviewQuoteView } from "@/components/site/review-quote-view";
 import {
   childPartitions,
   partitionDeleteRefusal,
@@ -12047,6 +12055,9 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
     author: "自检·高二 陈同学",
     subject: "英语",
     description: "自检备注。",
+    // v37 的原文与原文语言（**公开内容**）：这条自检评价是单语的，两栏都是空串
+    original: "",
+    originalLanguage: "",
   });
   const featuredFirst = mutated.siteContent.featuredPage.courses[0]!;
   featuredFirst.body = "自检改过的特色课程介绍。";
@@ -13983,8 +13994,8 @@ console.log(
   eq("迁移**没有**推学生的 version（乐观锁不被一次数据升级搅动）",
     migratedSourceStudents.map((student) => student.version),
     legacyVersions);
-  eq("迁移后版本就是当前版本（36）", (await api.exportDatabase()).version, CURRENT_VERSION);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 36);
+  eq("迁移后版本就是当前版本（37）", (await api.exportDatabase()).version, CURRENT_VERSION);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 37);
   ok("版本记录里写着这一步（`VERSION_NOTES[33]`，后来的人不用翻提交历史）",
     (VERSION_NOTES[33] ?? "").includes("来源"));
   ok("而且说明了它与 `Teacher.source` 不是一回事（免得后来的人把两件事混成一件）",
@@ -16725,8 +16736,8 @@ console.log(
    * 「刚被别人改过，请刷新」—— 而其实谁都没改。
    */
   eq("迁移**没有**推课节的 version（乐观锁不被一次数据升级搅动）", migratedLessons.map((l) => l.version), legacyLessonVersions);
-  eq("迁移后版本就是当前版本（36）", (await api.exportDatabase()).version, CURRENT_VERSION);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 36);
+  eq("迁移后版本就是当前版本（37）", (await api.exportDatabase()).version, CURRENT_VERSION);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 37);
   ok("版本记录里写着这一步（`VERSION_NOTES[34]`，后来的人不用翻提交历史）", (VERSION_NOTES[34] ?? "").includes("串身份"));
   ok("而且写明了「老课不猜串」这条口径", (VERSION_NOTES[34] ?? "").includes("不猜"));
   ok("而且写明了「过去的课是账」这条边界", (VERSION_NOTES[34] ?? "").includes("已排（还没上）"));
@@ -17361,8 +17372,8 @@ console.log("\n=== 57. 学生案例折叠 + 家长与学生评价进库（v35）
       heading: { eyebrow: "自检", title: "自检评价", description: "说明" },
       notice: "评价均经家长/学生同意后发布（自检）。",
       reviews: [
-        { id: "", group: "家长", quote: "自检用的一条家长评价。", author: "自检·初二 李同学家长", subject: "数学", description: "", realName: "" },
-        { id: "", group: "学生", quote: "自检用的一条学生评价。", author: "自检·初三 王同学", subject: "", description: "自检备注", realName: "" },
+        { id: "", group: "家长", quote: "自检用的一条家长评价。", author: "自检·初二 李同学家长", subject: "数学", description: "", original: "", originalLanguage: "", realName: "" },
+        { id: "", group: "学生", quote: "自检用的一条学生评价。", author: "自检·初三 王同学", subject: "", description: "自检备注", original: "", originalLanguage: "", realName: "" },
       ],
     },
   });
@@ -17446,6 +17457,9 @@ console.log("\n=== 57. 学生案例折叠 + 家长与学生评价进库（v35）
       author: item.author,
       subject: item.subject,
       description: item.description,
+      // v37 起回读也带这两栏（**公开内容**；§57 的夹具是单语，因此都是空串）
+      original: item.original,
+      originalLanguage: item.originalLanguage,
     })));
   const again57 = exportSiteMarkdown({ site: snapshot57, existing: exported57.files });
   eq("反复导出收敛（第二次不再改动 reviews.md）",
@@ -17576,13 +17590,21 @@ console.log("\n=== 58. 评价的「真实姓名」：只在后台与库里，绝
     { id: "rev-a", group: "学生", quote: "第一条自检评价。", author: "王同学", subject: "高中物理", description: "" },
     { id: "rev-b", group: "家长", quote: "第二条自检评价。", author: "王同学家长", subject: "高中物理", description: "" },
   ];
-  /** 去掉 `realName` 之后的形状（用来比"其它字段一个字没动"）。 */
-  const withoutRealName58 = (item: Record<string, unknown>): string => {
+  /**
+   * 去掉**后续版本新加的字段**之后的形状（用来比"其它字段一个字没动"）。
+   *
+   * `realName` 是 v36 加的、`original` / `originalLanguage` 是 v37 加的 —— 夹具是
+   * v35 的形状，这三个键本来就没有；迁移之后它们会被补上空串。
+   * 因此比对时**两边都先把它们摘掉**，验的是"评价原有的那六个字段逐字节没动"。
+   */
+  const withoutAddedFields58 = (item: Record<string, unknown>): string => {
     const copy = { ...item };
     delete copy.realName;
+    delete copy.original;
+    delete copy.originalLanguage;
     return JSON.stringify(copy);
   };
-  const legacyReviewShapes = legacyRealDb.siteContent.reviewsPage.reviews.map(withoutRealName58);
+  const legacyReviewShapes = legacyRealDb.siteContent.reviewsPage.reviews.map(withoutAddedFields58);
   eq("夹具确实是「评价里没有 realName 这个键的 v35 库」",
     [legacyRealDb.version, legacyReviewShapes.every((text) => !text.includes("realName"))],
     [35, true]);
@@ -17598,7 +17620,7 @@ console.log("\n=== 58. 评价的「真实姓名」：只在后台与库里，绝
     afterReal58.siteContent.reviewsPage.reviews.every((item) => item.realName === ""));
   eq("评价的其它字段逐字节没动（迁移不是「顺手改评价」）",
     afterReal58.siteContent.reviewsPage.reviews.map((item) =>
-      withoutRealName58(item as unknown as Record<string, unknown>)),
+      withoutAddedFields58(item as unknown as Record<string, unknown>)),
     legacyReviewShapes);
   ok("而且没有把实名写进任何别的表（`VERSION_NOTES[36]` 里说清了这一步只补空串）",
     (VERSION_NOTES[36] ?? "").includes("一律补空串"));
@@ -17610,8 +17632,8 @@ console.log("\n=== 58. 评价的「真实姓名」：只在后台与库里，绝
       heading: { eyebrow: "自检", title: "自检实名", description: "说明" },
       notice: "评价均经同意后发布（自检）。",
       reviews: [
-        { id: "rev-a", group: "学生", quote: "第一条自检评价。", author: "王同学", subject: "高中物理", description: "", realName: `  ${realNames58[0]}  ` },
-        { id: "rev-b", group: "家长", quote: "第二条自检评价。", author: "王同学家长", subject: "高中物理", description: "", realName: realNames58[1]! },
+        { id: "rev-a", group: "学生", quote: "第一条自检评价。", author: "王同学", subject: "高中物理", description: "", original: "", originalLanguage: "", realName: `  ${realNames58[0]}  ` },
+        { id: "rev-b", group: "家长", quote: "第二条自检评价。", author: "王同学家长", subject: "高中物理", description: "", original: "", originalLanguage: "", realName: realNames58[1]! },
       ],
     },
   });
@@ -17761,6 +17783,365 @@ console.log("\n=== 58. 评价的「真实姓名」：只在后台与库里，绝
     casesCode58.includes("item.author") && !casesCode58.includes("realName"));
   ok("前台取数那一层（`backendReviewsContent`）搬的是公开的那一份（没有实名可搬）",
     !strip58(read58("lib/site/backend-source.ts")).includes("realName"));
+}
+
+
+console.log("\n=== 59. 双语评价卡片：原文是公开内容、可复用的「看原文 / 看译文」按钮（v37 / E26）===");
+
+/*
+ * 机构原话：
+ *
+ * > 「这是外籍学生 〔实名见后台〕 来自法国洛里昂 学习汉语 的评价原文以及译文，
+ * > **我需要卡片上展示译文，但是能加一个小按钮切换到原文（后续这个按钮会复用）**，
+ * > **如果是原文，就在段落前面加（法语原文），如果是译文就加（译文）**」
+ *
+ * （实名同样**不抄进本文件**：源码在仓库里、会跟着公开；要核对请到后台。）
+ *
+ * 机构追问后定的两条口径：
+ *   1. 卡片署名只显示**名**（`Milan`）；实名只存后台 —— 沿用 v36 的 `realName`；
+ *   2. 「（译文）」/「（法语原文）」这两个前缀**只加在有原文的双语卡片上**，
+ *      单语评价保持干净（不加前缀、不显示按钮）。
+ *
+ * ## 这一节守的是什么（与 §58 是一对）
+ *
+ * §58 守的是「**内部字段绝不出门**」（`realName`，三处反向断言）；这一节守的是它的**反面**：
+ * `original` / `originalLanguage` 是**公开内容**，**必须出门**（公开快照、内容文件、前台）。
+ * 这一对"公开 / 内部"写在同一条注释里，是给后来的字段定性的样板：
+ * **先问"它会不会显示在网站上"，再决定它进不进白名单与内容文件。**
+ *
+ * ## 为什么另起 §59
+ *
+ * v37 是一件**新能力**（双语卡片 + 可复用组件），不是 v36 的续：§58 的 35 条断言
+ * 全部留在原地继续跑（"别把上一版的边界弄坏"），而这一节要新造一份"v36、评价里没有
+ * 这两个键"的老库夹具，并直接 import 前台那个纯函数把三态逐字段验一遍。
+ *
+ * 这一节守八件事：
+ *
+ *   ① **迁移**（v36 → v37）：老评价一律补**空串**（不猜原文），别的字段与别的表一个字不动；
+ *   ② **保存 / 读回一致**：原文与原文语言 trim 后读得回；缺键保留库里那一份；
+ *   ③ **公开快照里有这两个字段**（逐条 + 整份 JSON），**同一批条目里没有 `realName`**（对照）；
+ *   ④ **导出的 `data/site/reviews.md` 里有原文与原文语言**、**没有实名**（两条并列断言）；
+ *   ⑤ **导入缺这两栏的旧文件仍能工作**（读成空串 = 单语评价）；
+ *   ⑥ **多段来回一致**（译文 / 原文都是多段，导出不被折成一行）；
+ *   ⑦ **前台源码级**：`/cases` 用那个通用组件、组件是 `"use client"`、有按钮与 `aria-pressed`、
+ *      前缀文案对、**`original` 为空时不渲染按钮**（用组件层**可测纯函数**说清三态）；
+ *   ⑧ **后台有这两格**、反向：`realName` 依然三处不出现（不把 §58 弄坏）。
+ */
+{
+  const root59 = new URL("../", import.meta.url);
+  const read59 = (file: string): string => readFileSync(new URL(file, root59), "utf8");
+  /** 去掉注释再查源码（注释里提到字段名不算"用了它"）。 */
+  const strip59 = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  __useStoreForTesting(memory);
+  await api.importDatabase(serializeDatabase(seedDb));
+
+  /* ── ① 迁移：v36 的老评价补空串、别的字段与别的表一个字没动 ─────────────── */
+  const legacyV36 = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+    siteContent: { reviewsPage: { reviews: Array<Record<string, unknown>> } };
+    version: number;
+  };
+  legacyV36.version = 36;
+  /*
+   * 造"库里已经有两条真实评价、但这一版还没有 `original` / `originalLanguage`"的形状
+   * （v36 有 `realName`）。声明里的实名同样用 `自检·…` 夹具名。
+   */
+  legacyV36.siteContent.reviewsPage.reviews = [
+    { id: "rev-a", group: "学生", quote: "第一条自检评价。", author: "自检·王同学", subject: "高中物理", description: "", realName: "自检·实名甲" },
+    { id: "rev-b", group: "家长", quote: "第二条自检评价。", author: "自检·王同学家长", subject: "高中物理", description: "", realName: "自检·实名乙" },
+  ];
+  /** 去掉 v37 新加的两个键之后的形状（用来比"其它字段一个字没动"）。 */
+  const withoutOriginal59 = (item: Record<string, unknown>): string => {
+    const copy = { ...item };
+    delete copy.original;
+    delete copy.originalLanguage;
+    return JSON.stringify(copy);
+  };
+  const legacyShapes59 = legacyV36.siteContent.reviewsPage.reviews.map(withoutOriginal59);
+  /**
+   * 键排序后的规范化 JSON（比"别的表没被动过"）。
+   *
+   * 为什么不用原样的 `JSON.stringify`：迁移链末尾的收尾归一（分区 / 维度表 / 网站内容）
+   * 会把对象**重建**一遍，键的先后顺序可能与手写夹具不同 —— 那是序列化顺序，不是数据。
+   */
+  const canonical59 = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical59).join(",")}]`;
+    if (value !== null && typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+        a.localeCompare(b),
+      );
+      return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical59(item)}`).join(",")}}`;
+    }
+    return JSON.stringify(value) ?? "null";
+  };
+  ok("夹具确实是「评价里没有 original / originalLanguage 这两个键的 v36 库」",
+    legacyV36.version === 36 &&
+      legacyShapes59.every((text) => !text.includes("original")) &&
+      legacyShapes59.every((text) => text.includes("realName")));
+
+  const upgraded59 = await api.importDatabase(JSON.stringify(legacyV36));
+  eq("v36 的老库能升级导入", upgraded59.ok, true);
+  const after59 = await api.exportDatabase();
+  eq("迁移后版本号就是当前版本", after59.version, CURRENT_VERSION);
+  eq("v36 → v37 给每条老评价补上空串（original / originalLanguage 一条不落）",
+    after59.siteContent.reviewsPage.reviews.map((item) => [item.original, item.originalLanguage]),
+    [["", ""], ["", ""]]);
+  ok("迁移**不猜**原文：没有哪条老评价被塞进一段「看起来像原文」的文字",
+    after59.siteContent.reviewsPage.reviews.every(
+      (item) => item.original === "" && item.originalLanguage === "",
+    ));
+  eq("评价原有的字段逐字节没动（迁移不是「顺手改评价」）",
+    after59.siteContent.reviewsPage.reviews.map((item) =>
+      withoutOriginal59(item as unknown as Record<string, unknown>)),
+    legacyShapes59);
+  const afterRaw59 = JSON.parse(serializeDatabase(after59)) as Record<string, unknown>;
+  const untouchedKeys59 = new Set([
+    ...Object.keys(legacyV36),
+    ...Object.keys(afterRaw59),
+  ]);
+  const changedTables59 = [...untouchedKeys59].filter(
+    (key) =>
+      key !== "siteContent" &&
+      key !== "version" &&
+      // `logs` 与 `updatedAt` 是 `importDatabase` 这个动作自己记的（一条导入日志 + 一次
+      // 时间戳），不是迁移改了业务数据 —— 带着它们比会把正常行为误判成"乱动"
+      key !== "logs" &&
+      key !== "updatedAt" &&
+      canonical59(legacyV36[key]) !== canonical59(afterRaw59[key]),
+  );
+  eq("别的表一个字没动（评价**没有记录级 `version`**，这一步也不推任何 `version`）",
+    changedTables59, []);
+  ok("v37 确实没有给评价加记录级 `version`（补的是两个空串字段，不是乐观锁）",
+    after59.siteContent.reviewsPage.reviews.every((item) => !("version" in item)));
+  ok("`VERSION_NOTES[37]` 写着这一步（后来的人不用翻提交历史）",
+    (VERSION_NOTES[37] ?? "").includes("原文") &&
+      (VERSION_NOTES[37] ?? "").includes("公开内容") &&
+      (VERSION_NOTES[37] ?? "").includes("一律补空串"));
+
+  /* ── ② 保存 / 读回一致（trim；缺键保留库里那一份） ─────────────────────── */
+  const original59 = "Bonjour,\n\nmerci beaucoup.\n\nAu revoir !";
+  const quote59 = "你好，\n\n非常感谢。\n\n再见！";
+  const savedBilingual59 = await api.site.saveBlocks({
+    reviewsPage: {
+      heading: { eyebrow: "自检", title: "自检双语", description: "说明" },
+      notice: "自检（双语评价）。",
+      reviews: [
+        {
+          id: "rev-a",
+          group: "学生",
+          quote: quote59,
+          author: "自检·王同学",
+          subject: "法语",
+          description: "自检",
+          original: `  ${original59}  `,
+          originalLanguage: "  法语  ",
+          realName: "",
+        },
+      ],
+    },
+  });
+  eq("保存时 original / originalLanguage 前后空白被 trim 掉（与其它字段同一套）",
+    savedBilingual59.reviewsPage.reviews.map((item) => [item.original, item.originalLanguage]),
+    [[original59, "法语"]]);
+  const blocks59 = await api.site.getBlocks();
+  eq("内部读法（`site.getBlocks`）把原文与原文语言读得回来（段间换行也在）",
+    blocks59.reviewsPage.reviews.map((item) => [item.original, item.originalLanguage]),
+    [[original59, "法语"]]);
+  const keptOriginal59 = await api.site.saveBlocks({
+    reviewsPage: {
+      ...blocks59.reviewsPage,
+      reviews: blocks59.reviewsPage.reviews.map((item) => {
+        const copy = { ...item } as Record<string, unknown>;
+        delete copy.original; // 老前端 / 老脚本交上来的条目**根本没有这两个键**
+        delete copy.originalLanguage;
+        return copy as never;
+      }),
+    },
+  });
+  eq("条目里没有这两个键时保留库里那一份（老前端不该把已录的原文清掉）",
+    keptOriginal59.reviewsPage.reviews.map((item) => [item.original, item.originalLanguage]),
+    [[original59, "法语"]]);
+
+  /* ── ③ 公开快照里**有**这两个字段，同一批条目里**没有** `realName`（对照） ── */
+  const public59 = await api.site.publicContent();
+  const publicReviews59 = public59.siteContent.reviewsPage.reviews;
+  eq("公开快照里逐条带着 original / originalLanguage（**它们是公开内容**）",
+    publicReviews59.map((item) => [item.original, item.originalLanguage]),
+    [[original59, "法语"]]);
+  ok("整份公开快照的 JSON 里有那段原文（原文必须出门 —— 与实名恰好相反）",
+    JSON.stringify(public59).includes("Au revoir"));
+  eq("**同一批条目**里没有 `realName` 键（公开 / 内部这一对相反，一眼能看懂哪些字段能出门）",
+    publicReviews59
+      .map((item, index) => (Object.prototype.hasOwnProperty.call(item, "realName") ? index : -1))
+      .filter((index) => index >= 0),
+    []);
+
+  /* ── ④ 导出：文件里有原文与语言、**没有**实名（两条并列断言） ───────────── */
+  const exportFiles59 = {} as Record<SiteExportFile, string>;
+  for (const name of SITE_EXPORT_FILES) exportFiles59[name] = read59(`data/site/${name}.md`);
+  const built59 = buildPublicSite(await api.exportDatabase());
+  const exported59 = exportSiteMarkdown({ site: built59, existing: exportFiles59 });
+  const exportedReviews59 = exported59.files.reviews;
+  ok("导出的 reviews.md 里有那段原文与语言 —— **原文是公开内容，写得出来也必须写得出来**",
+    exportedReviews59.includes("#### 原文:") &&
+      exportedReviews59.includes("#### 原文语言: 法语") &&
+      exportedReviews59.includes("Au revoir"));
+  ok("导出**没有**把多段原文折成一行（段间空行还在 —— 折了就是把段落挤成一坨）",
+    exportedReviews59.includes("Bonjour,\n\nmerci beaucoup.\n\nAu revoir !"));
+  ok("**并列的反向断言**：导出的 reviews.md 里一个实名都没有（`realName` / 「真实姓名」/ 夹具值）",
+    !exportedReviews59.includes("realName") &&
+      !exportedReviews59.includes("真实姓名") &&
+      !exportedReviews59.includes("自检·实名甲"));
+  const diskReviews59 = read59("data/site/reviews.md");
+  ok("仓库里那份 `data/site/reviews.md` 里**有**原文与原文语言（真数据，不只是夹具）",
+    diskReviews59.includes("#### 原文:") && diskReviews59.includes("#### 原文语言: 法语"));
+  ok("仓库里那份 `data/site/reviews.md` 里**没有**实名（这个文件在仓库里 = 会跟着公开）",
+    !diskReviews59.includes("真实姓名") && !diskReviews59.includes("realName"));
+  ok("生成物 `data/site/reviews.ts` 同样「有原文、无实名」",
+    read59("data/site/reviews.ts").includes("原文语言: 法语") &&
+      !read59("data/site/reviews.ts").includes("realName") &&
+      !read59("data/site/reviews.ts").includes("真实姓名"));
+
+  /* ── ⑤ 导入缺这两栏的旧文件仍能工作（读成空串 = 单语评价） ─────────────── */
+  const oldFile59 = [
+    "# 自检 · 老内容文件",
+    "",
+    "## 页面: 家长与学生评价",
+    "",
+    "---",
+    "eyebrow: 自检",
+    "title: 自检",
+    "description: 自检",
+    "notice: 自检",
+    "---",
+    "",
+    "### 自检·王同学",
+    "",
+    "#### 分组: 学生",
+    "",
+    "#### 科目: 法语",
+    "",
+    "#### 正文: 老文件里的一条评价（没有原文这两栏）。",
+    "",
+  ].join("\n");
+  const readOld59 = readSiteCore({ ...exported59.files, reviews: oldFile59 });
+  eq("导入缺这两栏的旧文件仍然工作：原文按空串读回（= 单语评价，不猜原文）",
+    readOld59.reviews.reviews.map((item) => [item.author, item.original, item.originalLanguage]),
+    [["自检·王同学", "", ""]]);
+
+  /* ── ⑥ 多段来回一致：导出 → 回读逐字节，反复导出收敛 ───────────────────── */
+  eq("导出 → 回读：多段译文与原文逐字节回来（段落没被折成一行）",
+    readSiteCore(exported59.files).reviews.reviews.map((item) => [
+      item.quote,
+      item.original,
+      item.originalLanguage,
+    ]),
+    [[quote59, original59, "法语"]]);
+  const again59 = exportSiteMarkdown({ site: built59, existing: exported59.files });
+  eq("反复导出收敛（第二次不再改动 reviews.md）",
+    again59.changed.filter((name) => name === "reviews"), []);
+  eq("内容文件读回来的评价带着原文（`getReviewsContentFromTemplate` 也能读到，不只是导出器）",
+    getReviewsContentFromTemplate().reviews.every(
+      (item) => typeof item.original === "string" && typeof item.originalLanguage === "string",
+    ),
+    true);
+
+  /* ── ⑦ 前台：组件层可测纯函数说清三态（默认译文 / 切到原文 / 单语） ─────── */
+  const single59 = reviewQuoteView({ text: "只有译文。", original: "", originalLanguage: "" }, false);
+  eq("**单语评价**：不加任何前缀（机构口径：单语保持干净）", single59.prefix, "");
+  eq("**单语评价**：正文照旧显示", single59.body, "只有译文。");
+  ok("**单语评价：不渲染按钮**（这一条就是「original 为空时不显示按钮」的判据本身）",
+    single59.showToggle === false);
+  const biDefault59 = reviewQuoteView(
+    { text: "译文。", original: "Original.", originalLanguage: "法语" },
+    false,
+  );
+  eq("**双语 · 默认**：显示译文，段落前加「（译文）」",
+    [biDefault59.prefix, biDefault59.body], ["（译文）", "译文。"]);
+  ok("**双语 · 默认**：显示按钮、按钮字是「看原文」、aria-pressed 为 false",
+    biDefault59.showToggle && biDefault59.toggleLabel === "看原文");
+  const biOriginal59 = reviewQuoteView(
+    { text: "译文。", original: "Original.", originalLanguage: "法语" },
+    true,
+  );
+  eq("**双语 · 切到原文**：显示原文，前缀变成「（法语原文）」",
+    [biOriginal59.prefix, biOriginal59.body], ["（法语原文）", "Original."]);
+  ok("**双语 · 切到原文**：按钮字变成「看译文」、aria-pressed 为 true",
+    biOriginal59.showToggle && biOriginal59.toggleLabel === "看译文");
+  eq("原文语言留空时前缀退化成「（原文）」",
+    reviewQuoteView({ text: "译文。", original: "Original.", originalLanguage: "" }, true).prefix,
+    "（原文）");
+  ok("按钮的无障碍标签说清「按了会变成哪一份」（法语卡片上只写「看原文」不够具体）",
+    biDefault59.toggleAriaLabel.includes("法语原文") &&
+      biOriginal59.toggleAriaLabel.includes("译文"));
+
+  const quoteComponent59 = read59("components/site/ReviewQuote.tsx");
+  const quoteCode59 = strip59(quoteComponent59);
+  ok("组件是**客户端组件**（`\"use client\"`，因为它要点按钮切状态）",
+    quoteComponent59.trimStart().startsWith('"use client"'));
+  ok("组件把判定交给那个**可测纯函数**（判据只此一份，断言与页面读同一套）",
+    quoteCode59.includes("reviewQuoteView("));
+  ok("切换用 `<button type=\"button\">` + `aria-pressed`（键盘可 Tab、可回车，原生按钮）",
+    quoteCode59.includes("<button") &&
+      quoteCode59.includes('type="button"') &&
+      quoteCode59.includes("aria-pressed={showOriginal}"));
+  ok("按钮有说清后果的 `aria-label`", quoteCode59.includes("aria-label={view.toggleAriaLabel}"));
+  ok("**只有有原文时才渲染按钮**（`showToggle` 守卫 —— 单语评价页面上不会多一个按钮）",
+    quoteCode59.includes("{view.showToggle && ("));
+  ok("状态**不记住**（只用 `useState(false)`，不落 localStorage / URL）—— 刷新回默认译文",
+    quoteCode59.includes("useState(false)") &&
+      !quoteCode59.includes("localStorage") &&
+      !quoteCode59.includes("searchParams"));
+  ok("换行保留（`whitespace-pre-line`），多段不会被挤成一坨",
+    quoteCode59.includes("whitespace-pre-line"));
+  const quoteViewSource59 = read59("components/site/review-quote-view.ts");
+  ok("前缀文案含「（译文）」与「原文）」两种形态",
+    quoteViewSource59.includes("（译文）") && quoteViewSource59.includes("原文）"));
+
+  /* ── ⑦b `/cases` 真的用了它，且没碰匿名口径与分组顺序 ───────────────────── */
+  const casesCode59 = strip59(read59("app/(site)/cases/page.tsx"));
+  ok("`/cases` 评价卡片用的是那个**通用**组件",
+    casesCode59.includes("<ReviewQuote") &&
+      casesCode59.includes('from "@/components/site/ReviewQuote"'));
+  ok("把这条评价的三样数据交给组件（译文 / 原文 / 原文语言）",
+    casesCode59.includes("text={item.quote}") &&
+      casesCode59.includes("original={item.original}") &&
+      casesCode59.includes("originalLanguage={item.originalLanguage}"));
+  ok("**没有**把 `realName` 交给前台组件（§58 那条匿名口径继续绿）",
+    !casesCode59.includes("realName"));
+  ok("分组顺序与两组口径一个字没动（上一版刚定的「学生评价在前」）",
+    casesCode59.includes("REVIEW_GROUPS.map(") && casesCode59.includes("group.label"));
+  const backendSourceCode59 = strip59(read59("lib/site/backend-source.ts"));
+  ok("前台取数那一层搬的是公开的那一份（`original` 有、`realName` 没有）",
+    backendSourceCode59.includes("item.original") &&
+      backendSourceCode59.includes("item.originalLanguage") &&
+      !backendSourceCode59.includes("realName"));
+  const publicSiteCode59 = strip59(read59("lib/backend/public-site.ts"));
+  ok("公开白名单**显式搬**了 original / originalLanguage（忘了写就是没给出去）",
+    publicSiteCode59.includes("original: item.original") &&
+      publicSiteCode59.includes("originalLanguage: item.originalLanguage"));
+
+  /* ── ⑧ 后台：有这两格；`realName` 那一格没有被这一版动过 ────────────────── */
+  const contentCode59 = strip59(read59("app/admin/(dashboard)/content/page.tsx"));
+  ok("后台每条评价有「原文（可选）」与「原文语言」两格",
+    contentCode59.includes('label="原文（可选）"') &&
+      contentCode59.includes('label="原文语言"') &&
+      contentCode59.includes("updateReview(index, { original:") &&
+      contentCode59.includes("updateReview(index, { originalLanguage:"));
+  ok("原文语言的提示语写明「留空则前台显示（原文）」这件事",
+    contentCode59.includes("留空则前台显示「（原文）」"));
+  ok("**列表上**能看出这条有没有原文（小字，不用逐条点开）",
+    contentCode59.includes("单语（没有原文）") && contentCode59.includes("原文："));
+  ok("v36 的「真实姓名（只在后台显示）」那一格一个字没动（不把 §58 弄坏）",
+    contentCode59.includes('label="真实姓名（只在后台显示）"') &&
+      contentCode59.includes("updateReview(index, { realName:"));
+
+  /* 收尾：把这一节造的东西摘掉（自检的库不该留下"自检"评价）。 */
+  await api.importDatabase(serializeDatabase(seedDb));
+  eq("收尾：库回到示例数据",
+    (await api.exportDatabase()).siteContent.reviewsPage.reviews.length,
+    seedDb.siteContent.reviewsPage.reviews.length);
 }
 
 

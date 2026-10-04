@@ -701,6 +701,13 @@ export function backendReviewsContent(snapshot: PublicSite): ReviewsContent {
     author: text(item.author),
     subject: text(item.subject),
     description: text(item.description),
+    /*
+     * v37 的原文与原文语言是**公开内容**（公开快照里就有，`PublicSiteReview` 带着它们），
+     * 前台的双语评价卡片按它们决定"显不显示切换按钮、前缀写哪种语言"。
+     * 与 `realName` 相反：那一栏公开快照里根本没有，这里也搬不到。
+     */
+    original: text(item.original),
+    originalLanguage: text(item.originalLanguage),
   }));
 
   return {

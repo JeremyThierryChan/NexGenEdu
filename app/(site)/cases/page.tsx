@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { PageHeader } from "@/components/site/PageHeader";
+import { ReviewQuote } from "@/components/site/ReviewQuote";
 import { Container } from "@/components/ui/Container";
 import { Section } from "@/components/ui/Section";
 import { getCasesContent, getReviewsContent } from "@/lib/data/pages";
@@ -212,9 +213,16 @@ export default function CasesPage() {
                         key={item.id}
                         className="flex h-full flex-col justify-between rounded-lg border border-ink-200 bg-white p-5"
                       >
-                        <blockquote className="whitespace-pre-line text-sm leading-relaxed text-ink-700">
-                          {item.quote}
-                        </blockquote>
+                        {/*
+                          评价正文走通用的双语卡片组件（v37）：有原文时多一个
+                          「看原文 / 看译文」小按钮，没有原文时**不加前缀、不显示按钮**。
+                          组件是 `"use client"`，因此这一页其余部分不受影响。
+                        */}
+                        <ReviewQuote
+                          text={item.quote}
+                          original={item.original}
+                          originalLanguage={item.originalLanguage}
+                        />
                         <figcaption className="mt-4 border-t border-ink-100 pt-3 text-xs text-ink-500">
                           <span className="text-ink-700">{item.author}</span>
                           {item.subject !== "" && <span className="ml-2">· {item.subject}</span>}

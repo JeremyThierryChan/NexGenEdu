@@ -1555,6 +1555,37 @@ function migrate(db: Database): Database | null {
     db.version = 36;
   }
 
+  if (db.version === 36) {
+    /*
+     * v36 → v37：**评价增加「原文」与「原文语言」**（`SiteReview.original` /
+     * `SiteReview.originalLanguage`，**公开内容**）。
+     *
+     * 机构原话：「这是外籍学生 〔实名〕 来自法国洛里昂 学习汉语 的评价原文以及译文，
+     * **我需要卡片上展示译文，但是能加一个小按钮切换到原文（后续这个按钮会复用）**，
+     * **如果是原文，就在段落前面加（法语原文），如果是译文就加（译文）**」。
+     *
+     * ## 老评价一律补空串，**不猜**
+     *
+     * 库里那几条评价从没登记过原文（它们本来就是中文单语），系统的任何其它字段
+     * 都推不出一份"像是原文"的文字 —— 猜一段等于替机构编了一句它没说过的话
+     * （与 v30 / v33 / v34 / v35 / v36 同一条纪律）。补空串的语义正好就是
+     * **单语评价**：前台不显示切换按钮、也不加任何前缀。
+     *
+     * ## 与 v36 的 `realName` 恰好相反
+     *
+     * `realName` 是内部实名（三处都不能出现）；这两个字段是**公开内容**，
+     * 因此这一版另外还要改公开白名单与导出器（见 §59）。迁移这一步只做"补空串"。
+     *
+     * ## 只动这两个字段
+     *
+     * 其余字段一个字不碰（机构已经在库里录了真实评价）；评价**没有记录级 `version`**，
+     * 因此也没有"推 version"这回事 —— 别的表的 `version` 更不该被这一步搅动。
+     */
+    db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
+    db.siteContent.reviewsPage = normalizeReviewsPage(db.siteContent.reviewsPage);
+    db.version = 37;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1587,6 +1618,9 @@ function migrate(db: Database): Database | null {
    * v36 的 `realName` 也在这里兜（`normalizeReviewsPage`）：一份"自称 v36"却缺这个键的
    * 评价，读的时候 `item.realName.trim()` 就是一次 TypeError —— 与分区表、维度表同一条
    * "声称的版本号不是证据"的纪律。补**空串**（**不猜**：实名是人的事实，系统推不出来）。
+   *
+   * v37 的 `original` / `originalLanguage`（公开内容）同样在 `normalizeReviewsPage` 里兜：
+   * 一份"自称 v37"却缺这两个键的评价补空串 = **单语评价**（前台不显示切换按钮）。
    */
   db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
   db.siteContent.reviewsPage = normalizeReviewsPage(db.siteContent.reviewsPage);
@@ -7144,20 +7178,35 @@ const localApi = {
        * `realName`（v36 的内部实名）：**可选**，去空白即可，不设必填（与 `subject` /
        * `description` 同一档）—— 机构可以一直匿名发评价，那是合法状态。
        *
+       * `original` / `originalLanguage`（v37 的**公开**原文与原文语言）：同样可选，
+       * trim 前后空白即可（`original` 空串＝单语评价；`originalLanguage` 空串时前台
+       * 前缀退化成「（原文）」）。校验那一层（`validateReviewsPage`）**不新增必填**
+       * —— 内容上对不对（这段文字是不是法语）系统无从判断。
+       *
        * ## 为什么"缺这个键"时要**保留库里那一份**，而不是清空
        *
-       * 这个键是新加的：一个还没刷新的后台页面、或一段早先写好的脚本交上来的评价里
-       * **根本没有它**。那种请求的语义是"我不知道有这个字段"，**不是**"请清空它" ——
-       * 按空串写下去就成了"编辑一次评价 = 丢一次实名，而且看不出丢了"。
-       * 因此判据是**三态**：
-       *   - `realName` 是字符串（含空串）→ 那就是机构的意思（空串＝主动清掉）；
-       *   - 不是字符串（`undefined` / `null` / 数字…）→ 按 id 找回库里那一条的实名。
+       * 这几个键是新加的：一个还没刷新的后台页面、或一段早先写好的脚本交上来的评价里
+       * **根本没有它们**。那种请求的语义是"我不知道有这个字段"，**不是**"请清空它" ——
+       * 按空串写下去就成了"编辑一次评价 = 丢一次实名 / 丢一次原文，而且看不出丢了"。
+       * 因此判据是**三态**（三个字段各判一次）：
+       *   - 是字符串（含空串）→ 那就是机构的意思（空串＝主动清掉）；
+       *   - 不是字符串（`undefined` / `null` / 数字…）→ 按 id 找回库里那一条的值。
        * 新加的那一条（id 为空、库里查不到）自然落到空串。
        */
       if (blocks.reviewsPage !== undefined) {
         const incoming = blocks.reviewsPage;
-        const realNamesById = new Map(
-          db.siteContent.reviewsPage.reviews.map((item) => [item.id, item.realName] as const),
+        const previousById = new Map(
+          db.siteContent.reviewsPage.reviews.map(
+            (item) =>
+              [
+                item.id,
+                {
+                  realName: item.realName,
+                  original: item.original,
+                  originalLanguage: item.originalLanguage,
+                },
+              ] as const,
+          ),
         );
         db.siteContent = {
           ...db.siteContent,
@@ -7166,6 +7215,10 @@ const localApi = {
             notice: incoming.notice.trim(),
             reviews: incoming.reviews.map((item) => {
               const id = item.id.trim() === "" ? nextId("review") : item.id.trim();
+              const previous = previousById.get(id);
+              /** 三态：字符串（含空串）按机构的意思；缺键/非字符串则保留库里那一份。 */
+              const keepIfMissing = (incoming: unknown, fallback: string): string =>
+                typeof incoming === "string" ? incoming.trim() : fallback;
               return {
                 id,
                 group: item.group.trim(),
@@ -7173,10 +7226,12 @@ const localApi = {
                 author: item.author.trim(),
                 subject: item.subject.trim(),
                 description: item.description.trim(),
-                realName:
-                  typeof item.realName === "string"
-                    ? item.realName.trim()
-                    : (realNamesById.get(id) ?? ""),
+                original: keepIfMissing(item.original, previous?.original ?? ""),
+                originalLanguage: keepIfMissing(
+                  item.originalLanguage,
+                  previous?.originalLanguage ?? "",
+                ),
+                realName: keepIfMissing(item.realName, previous?.realName ?? ""),
               };
             }),
           },
