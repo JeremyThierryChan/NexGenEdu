@@ -219,46 +219,11 @@ export default function CasesPage() {
                       : `暂时没有${group.label}。`}
                   </p>
                 ) : (
-                  /*
-                   * 评价卡片：**多列布局（masonry 效果）**，不再用等高 grid（v40）。
-                   *
-                   * 机构原话：「**每列卡片的高度左右卡片不需要完全相同，可以错开**」。
-                   *
-                   * 为什么不用 grid：`grid sm:grid-cols-2` 的同一行两张卡被默认拉伸成
-                   * **一样高**（`align-items: stretch`），长短不一的评价看着别扭。
-                   * 多列布局（`columns-2`）里每张卡按**自己的内容高度**排，左右自然错开。
-                   *
-                   * ⚠️ **两处必须自己补的东西**（多列布局不自动给）：
-                   *   1. **纵向间距** —— `gap-4` 在多列布局里只变成 `column-gap`，
-                   *      卡片之间不会有上下间距，因此每张卡带 `mb-4`；
-                   *   2. **`break-inside-avoid`** —— 否则一张卡会被从中间劈到下一列。
-                   *
-                   * ⚠️ **顺序的取舍（机构要知道）**：多列布局是**列优先**填充 ——
-                   * 先填满第一列、再填第二列；而 grid 是**行优先**（左→右、再下一行）。
-                   * 也就是说切过来之后**第 2 条会跑到左列第二条**，而不是右列第一条。
-                   * 这是这个效果的固有代价；若机构更在意行序，改回
-                   * `grid gap-4 sm:grid-cols-2 items-start`（卡片各自高度、每行顶对齐）即可。
-                   * 另外：多列的高度是浏览器**按内容平衡**算出来的，因此分列点由各卡高度决定，
-                   * 不一定是"正好一半"。
-                   *
-                   * ⚠️ **顶部对齐是这个写法的天然结果，不要用偏移去做错开**（机构：
-                   * 「**但是最上面的卡片顶部得对齐**」）。多列布局里**每一列的第一张卡都从
-                   * 列顶开始**，两列顶部天然齐平；错开只发生在下面的卡片之间（各自高度不同）。
-                   * 因此这里刻意**没有** `first:mt-*` / `odd:mt-*` / `translate-y-*` 之类的
-                   * "造错开"手段 —— 一旦有人为了"更错落"给第 2、4 张卡加偏移，顶部就歪了。
-                   * 卡片间距是**每张卡统一的 `mb-4`**（不是只给偶数张加）。
-                   */
-                  <div className="mt-4 sm:columns-2 sm:gap-4">
+                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
                     {items.map((item) => (
                       <figure
                         key={item.id}
-                        /*
-                         * 卡片内容与内部样式不变；只把"拉伸等高"的那三个工具类去掉
-                         * （`flex h-full flex-col justify-between` 存在的唯一目的就是
-                         * 把同行的卡拉到一样高、把署名行压到底部 —— 正是这一版要去掉的效果），
-                         * 换成多列布局要的两样：`break-inside-avoid` + `mb-4`（纵向间距）。
-                         */
-                        className="mb-4 break-inside-avoid rounded-lg border border-ink-200 bg-white p-5"
+                        className="flex h-full flex-col justify-between rounded-lg border border-ink-200 bg-white p-5"
                       >
                         {/*
                           评价正文走通用的双语卡片组件（v37）：有原文时多一个
