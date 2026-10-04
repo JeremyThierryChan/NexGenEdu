@@ -1619,6 +1619,35 @@ function migrate(db: Database): Database | null {
     db.version = 38;
   }
 
+  if (db.version === 38) {
+    /*
+     * v38 → v39：**评价也增加「任课老师」**（`SiteReview.teacher`，**公开实名**）。
+     *
+     * 机构答：「**评价卡片也加**」—— v38 只加在学生案例卡片上，这一版把同一件事
+     * 延伸到评价（机构另确认「**保持实名**」：评价正文里「陈老师」那个呼称一个字不动）。
+     *
+     * ## 老评价一律补空串，**不猜**
+     *
+     * 与 v38 给老案例补空串同一条纪律：机构说"现有内容全是他"说的是**这一版要填的内容**，
+     * 不是"给每条老评价都写上陈林维祎" —— 那是替机构记下一条它没登记过的事实。
+     * 空串的语义正好是"还没填"：前台那一行**整行不渲染**。
+     *
+     * ## 与同一条记录上的 `realName` 恰好相反
+     *
+     * 同一个 `SiteReview` 上现在有两个和"名字"有关的字段：`teacher` 是**老师**的公开实名
+     * （机构要求显示，老师名字本来就公开在教师页上）；`realName` 是**学生 / 家长**的内部实名
+     * （机构要求前台匿名，三处都不能出现）。两者都叫"实名"、性质完全相反，别"统一"。
+     *
+     * ## 只动这一个字段
+     *
+     * 评价的其余字段一个字不碰；评价**没有记录级 `version`**，因此也没有"推 version"
+     * 这回事 —— 别的表的 `version` 更不该被这一步搅动。
+     */
+    db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
+    db.siteContent.reviewsPage = normalizeReviewsPage(db.siteContent.reviewsPage);
+    db.version = 39;
+  }
+
   /*
    * 收尾归一：分区表**必须是一个数组**。
    *
@@ -1658,6 +1687,9 @@ function migrate(db: Database): Database | null {
    * v38 的 `SiteCase.teacher`（公开实名）在 `normalizeCasesPage` 里兜：
    * 一份"自称 v38"却缺这个键的案例补空串 = 前台那一行不渲染 —— 不补的话
    * 前台读 `item.teacher.trim()` 就是一次 TypeError（整个案例列表读不出来）。
+   *
+   * v39 的 `SiteReview.teacher`（公开实名）同样在 `normalizeReviewsPage` 里兜：
+   * 缺这个键的评价补空串 = 前台那一行不渲染（与 `original` / `originalLanguage` 同一档）。
    */
   db.siteContent = { ...emptySiteContent(), ...(db.siteContent ?? {}) };
   db.siteContent.reviewsPage = normalizeReviewsPage(db.siteContent.reviewsPage);
@@ -7238,12 +7270,15 @@ const localApi = {
        * 前缀退化成「（原文）」）。校验那一层（`validateReviewsPage`）**不新增必填**
        * —— 内容上对不对（这段文字是不是法语）系统无从判断。
        *
+       * `teacher`（v39 的**公开实名**）：可选，trim 即可（与案例的 `SiteCase.teacher`
+       * 同一套口径）。空串 = 前台那一行不渲染。
+       *
        * ## 为什么"缺这个键"时要**保留库里那一份**，而不是清空
        *
        * 这几个键是新加的：一个还没刷新的后台页面、或一段早先写好的脚本交上来的评价里
        * **根本没有它们**。那种请求的语义是"我不知道有这个字段"，**不是**"请清空它" ——
-       * 按空串写下去就成了"编辑一次评价 = 丢一次实名 / 丢一次原文，而且看不出丢了"。
-       * 因此判据是**三态**（三个字段各判一次）：
+       * 按空串写下去就成了"编辑一次评价 = 丢一次实名 / 丢一次原文 / 丢一次老师，而且看不出丢了"。
+       * 因此判据是**三态**（四个字段各判一次）：
        *   - 是字符串（含空串）→ 那就是机构的意思（空串＝主动清掉）；
        *   - 不是字符串（`undefined` / `null` / 数字…）→ 按 id 找回库里那一条的值。
        * 新加的那一条（id 为空、库里查不到）自然落到空串。
@@ -7259,6 +7294,7 @@ const localApi = {
                   realName: item.realName,
                   original: item.original,
                   originalLanguage: item.originalLanguage,
+                  teacher: item.teacher,
                 },
               ] as const,
           ),
@@ -7286,6 +7322,8 @@ const localApi = {
                   item.originalLanguage,
                   previous?.originalLanguage ?? "",
                 ),
+                // v39 的公开实名（老师在卡片右下角）：与案例的 teacher 同一套三态
+                teacher: keepIfMissing(item.teacher, previous?.teacher ?? ""),
                 realName: keepIfMissing(item.realName, previous?.realName ?? ""),
               };
             }),

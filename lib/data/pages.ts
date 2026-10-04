@@ -209,6 +209,8 @@ export function getReviewsContentFromTemplate(): ReviewsContent {
         // v37 的原文与原文语言（**公开内容**）：老文件没有这两栏 → 空串 = 单语评价
         original: field("原文").trim(),
         originalLanguage: field("原文语言").trim(),
+        // v39 的任课老师（**公开实名**，与案例同一套）：老文件没有这一栏 → 空串
+        teacher: field("任课老师").trim(),
       };
     })
     // 一条评价连"谁说的、说了什么"都没有就不产出条目（与案例同一条口径）

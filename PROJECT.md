@@ -2413,8 +2413,130 @@ heading / notice 未变： true
 
 #### 八、这一轮**没有**做的事
 
-- **没有**把任课老师加到**评价卡片**上（机构还在考虑，口径里明确"先不做"）；
+- **没有**把任课老师加到**评价卡片**上（当时机构还在考虑，口径里明确"先不做"）——
+  **这一条后来被机构推翻**：机构答「评价卡片也加」，见下面的 **E27 续**（v39）；
 - **没有**给老案例猜一个老师（一律补空串，由机构在后台或这次录入填）；
+- **没有**动 `知识库/`、没有 `git commit` / `git push`。
+
+### E27 续：评价卡片也加「任课老师」—— 同一套公开实名（数据库 v39）
+
+> **编号说明**：**续在 E27 上，不新开编号** —— E27 是"案例卡片右下角写任课老师"，
+> 这一版动的还是**同一件事**（机构答「**评价卡片也加**」），只是把它从案例延伸到评价；
+> 新开一节会让人以为又多了一个功能。两者的字段名相同（`teacher`）、口径完全相同。
+>
+> **这一版动了数据库结构**：`CURRENT_VERSION` 38 → **39**（`SiteReview` 新增 `teacher`）。
+> 老库**一律补空串**（= 还没填，前台那一行不渲染）。
+
+**机构答复**（2026-10-04，接 E27 的追问）：
+
+> 「**评价卡片也加**」（任课老师）
+>
+> 另确认「**保持实名**」：评价正文里「陈老师」那个呼称**一个字不动**。
+
+口径（与 E27 **完全对称**）：`SiteReview.teacher`（**公开**：进公开快照、进内容文件、
+前台显示、后台可编辑）；位置在**评价卡片右下角**小字「任课老师：陈林维祎」；
+**为空时整行不渲染**；**现有五条评价统一填「陈林维祎」**。
+
+#### 一、两个 `teacher` 是**一个口径**，`realName` 是它们的反面
+
+| | `SiteCase.teacher`（v38） | `SiteReview.teacher`（v39） | `SiteReview.realName`（v36） |
+| --- | --- | --- | --- |
+| 是谁的名字 | 老师 | 老师 | **学生 / 家长** |
+| 机构要求 | 显示实名 | 显示实名 | 后台实名、前台匿名 |
+| 公开快照 / 内容文件 / 前台 | **有** | **有** | **没有** |
+| 谁在守 | §60 | §61 | §58 |
+
+⚠️ **同一个 `SiteReview` 上现在同时有 `teacher` 与 `realName`** —— 这是本项目最容易
+被"统一"错的地方：两个键都叫"（实名相关）"，一个必须出门、一个绝不出门。
+`VERSION_NOTES[38]` / `VERSION_NOTES[39]`、`SiteReview.teacher` 的注释、
+`docs/后台API约定.md` 的对照表与 §61 第八组断言都把这句话写死了。
+
+#### 二、内容文件的位置约定**与案例那边相反**（一个容易照抄错的坑）
+
+同样的"任课老师"栏，`cases.md` 与 `reviews.md` 的**正确位置是相反的**：
+
+| | 正文（多段）挂在哪 | `#### 任课老师:` 写在哪 | 为什么 |
+| --- | --- | --- | --- |
+| `cases.md`（v38） | **最后一个** `####` 条目的正文 | **过程描述之前** | 写在后面会被算成"老师这一栏的正文"，故事整段丢 |
+| `reviews.md`（v39） | `正文` / `原文` 各自被**后面那个字段标题**收尾 | **所有字段之后** | 放在最后不会吞掉任何正文 |
+
+`reviewsFile()` 与 `casesFile()` 各按各的约定生成；§61 有一条断言盯着"任课老师写在补充之后"，
+并且"导出 → 回读"验了多段正文没被吞掉。
+
+#### 三、这一版实际改了哪些文件
+
+| 改动 | 说明 |
+| --- | --- |
+| `lib/backend/types.ts` | `SiteReview.teacher`（**公开实名**；注释里写清与 `realName` 的对比、不猜、空串语义） |
+| `lib/backend/version.ts` | `CURRENT_VERSION` 38 → 39、`VERSION_NOTES[39]` |
+| `lib/backend/api.ts` | 迁移 38 → 39（只补空串）、收尾归一复用 `normalizeReviewsPage`、`saveBlocks` 写 `teacher`（trim + **缺键保留**；与 `realName` / `original` 各判各的三态） |
+| `lib/backend/site-content.ts` | `normalizeReviewsPage` 补 `teacher`、`reviewsFromContent` 从内容文件读这一栏、`validateReviewsPage` 说明"这一栏不在这里判" |
+| `lib/backend/public-site.ts` | `publicReviewsPage()` 逐条搬 `teacher`（它必须出门；`realName` 照旧不搬） |
+| `lib/backend/site-export.ts` | `reviewsFile()` 导出 `#### 任课老师:`（写在所有字段**之后**）、`readReviews` / `toReviewsCore` / `SiteCore` 同步 |
+| `lib/data/pages.ts` / `lib/types/site.ts` | 模版读法与视图模型 `ReviewItem` 带上 `teacher` |
+| `lib/site/backend-source.ts` | 从公开快照搬 `teacher`（空串时页面不渲染那一行） |
+| `app/(site)/cases/page.tsx` | 评价卡片 `figcaption` 里多一行右下角小字（`item.teacher !== ""` 守卫）；**`ReviewQuote` 的双语逻辑、分组顺序、匿名署名口径一字未动** |
+| `app/admin/(dashboard)/content/page.tsx` | 每条评价多一格「任课老师」（与案例那格并存，提示语写明留空则不显示） |
+| `data/site/reviews.md`（导出产物） | 五条评价各多一行 `#### 任课老师: 陈林维祎`；文件头写明位置约定与"空着不显示" |
+| `scripts/check.mts` | 新增 **§61**（43 条）；§57 回读比对、§58 夹具形状、§59 夹具形状补上 v39 的新键；两处写死的版本号改成 39 |
+| `docs/使用手册.md` / `docs/内容维护手册.md` / `docs/后台API约定.md` / `PROJECT.md` | 评价也能填任课老师、内容文件那一栏与位置约定、`SiteReview` 字段表与「老师公开 / 实名内部」对照、本节 |
+
+#### 四、自检 §61（43 条）守什么
+
+① 迁移补空串（不猜老师、**不推任何 version**、别的表一个字没动）；
+② 保存 / 读回一致（trim、缺键保留、显式空串才是清掉），**且同一条记录上的 `realName` 不受影响**；
+③ **公开快照里有 `teacher`**；④ **导出的 `reviews.md` 里有这一栏**且**不吞多段正文**；
+⑤ 导入缺这一栏的旧文件仍能工作；⑥ **为空时不渲染**、位置在 `figcaption`（卡片底部）、右对齐；
+⑦ 后台**每条评价**也多了一格（与案例那格并存）；
+⑧ **三人对照**：案例 `teacher` 与评价 `teacher` 同属公开口径，`realName` 仍是内部（反向：三处不出现）。
+
+> 为什么另起 §61 而不并进 §60：§60 守的是"案例卡片那一行"（内容文件的位置约定与它**相反**），
+> 而这一版新增的是"评价卡片那一行" + 一个**同记录上的公开 / 内部对照**。
+> 两节的失败形态不同（一个是案例故事被吞，一个是评价正文被吞 / 实名被带出去）。
+
+#### 五、门禁（真实跑过的）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `npm run check` | **全部通过**（新增 **§61 共 43 条**；§58 的 35 条、§59 的 53 条、§60 的 36 条继续全绿） |
+| `npm run check:both`（内存 + 真实 HTTP） | **两种后端都全部通过** |
+| `npm run build` | 退出码 0，`✓ Generating static pages (96/96)`，`out/` 里 93 个 `.html` |
+| `npm run check:404` / `check:links` | 全过 |
+| `npm run site:export -- --check` | 退出码 0：七个文件**一致、没动** |
+| `npx tsc --noEmit` / `npm run lint` | 均退出码 0 |
+| 3000 / 4000 实测 | 3000 上**只有一个** `SITE_LIVE=1 npm run dev`，`/`、`/cases/`、`/admin/` 都 **200**；4000 `/health` **200**；dev 日志错误数 **0** |
+
+#### 六、端到端证据（2026-10-04 实跑）
+
+**① 重启 4000 让 v39 生效**：按端口取 PID → 停 → `nohup npm run server …` → `/health` 200 →
+迁移已跑：五条评价的 `teacher` 都是 `""`（**不猜**）。
+
+**② 录入**（真后端 HTTP：`POST /api/login` → `site.getBlocks` 读整块 →
+五条设 `teacher = 陈林维祎` → `site.saveBlocks` 整块写回）：
+
+```
+五条 teacher：["","","","",""] → ["陈林维祎" × 5]
+heading / notice 未变： true
+五条除 teacher 外逐字段未变（id / group / quote / author / subject / description /
+                              original / originalLanguage / realName）： true
+其余四块（casesPage / featuredPage / faqPage / copy）：未变
+```
+
+**③ 导出**：`npm run site:export` 只改了 `reviews.md`（＋10 行），随后 `--check` 七个文件一致：
+
+```
+#### 任课老师: 陈林维祎     ← 五条评价各一行，都写在所有字段之后（没有吞掉多段原文）
+```
+
+**④ 前台（构建产物里的实际文本）**：评价卡片 `figcaption` 里多一行
+`<p class="mt-2 text-right text-xs text-ink-400">任课老师：<!-- -->陈林维祎</p>`（右对齐 = 右下角），
+在署名 / 科目 / 补充之后；`teacher` 为空的评价那一行整行不出现（§61 的源码守卫断言）。
+
+#### 七、这一轮**没有**做的事
+
+- **没有**动评价正文里「陈老师」那个呼称（机构确认「保持实名」，正文一个字没改）；
+- **没有**动 `ReviewQuote` 的双语切换、分组顺序、匿名署名口径；
+- **没有**给老评价猜一个老师（一律补空串，由机构在后台或这次录入填）；
 - **没有**动 `知识库/`、没有 `git commit` / `git push`。
 
 ### E23：排课串 —— 「仅此一次 / 此后所有」（数据库 v34）

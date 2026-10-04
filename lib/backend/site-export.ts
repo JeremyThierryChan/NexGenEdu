@@ -1148,7 +1148,7 @@ function casesFile(site: PublicSite, source: string, warnings: Warnings, missing
 }
 
 /**
- * reviews.md：`### 署名` + 字段（分组 / 科目 / 正文 / 补充 / 原文 / 原文语言）。
+ * reviews.md：`### 署名` + 字段（分组 / 科目 / 正文 / 补充 / 原文 / 原文语言 / 任课老师）。
  *
  * 与 `casesFile` 同一套：一条评价一个 `###` 分组，`#### 字段: 值` 是它的信息。
  * 分组标题用**署名**（文件里的 `### 初二 李同学家长` 一眼能看出是谁说的），
@@ -1163,6 +1163,8 @@ function casesFile(site: PublicSite, source: string, warnings: Warnings, missing
  * （`data/site/reviews.ts` 是它的生成物，一字不差地嵌着同一份文本）——
  * 把实名写进去等于把「王同学 = 〔该学生的真名〕」贴到公网上，机构要的"前台匿名"就当场作废。
  *
+ * ⚠️ **但「任课老师」（v39）是另一回事、要写**：那是**老师**的名字（本来就公开在教师页上），
+ * 机构明确要求"显示实名"。同一个 `SiteReview` 上两个和名字有关的字段，一个出、一个不出 ——
  * 这一层是**编译期**兜住的：`site` 是 `PublicSite`，它的 `reviewsPage.reviews` 类型是
  * `PublicSiteReview`（`Omit<SiteReview, "realName">`，见 `public-site.ts`）——
  * 这里想写 `item.realName` 都写不出来。`scripts/check.mts` §58 另有一条**读文件**的断言。
@@ -1171,6 +1173,12 @@ function casesFile(site: PublicSite, source: string, warnings: Warnings, missing
  *
  * 双语评价卡片要显示原文并给一个切换按钮，因此这两个字段**必须**写进文件
  * —— 与 `realName` 恰好相反。内容文件里它们与其余字段同形（`#### 名字: 值`）。
+ *
+ * ## v39：**导出 `#### 任课老师:`**（公开实名），写在所有字段之后
+ *
+ * 评价卡片右下角要显示「任课老师：…」。这一栏**放在最后**是安全的：正文 / 原文是多段，
+ * 各自被**后面那个 `####` 字段标题**收尾，因此最后这一栏不会吞掉任何正文 ——
+ * 与 `cases.md` 那边（正文挂在**最后一个**条目上、任课老师必须写在正文之前）恰好相反。
  *
  * ## 多段文本（译文 / 原文）
  *
@@ -1212,6 +1220,15 @@ function reviewsFile(site: PublicSite, source: string, warnings: Warnings, missi
       // v37 的两栏（公开内容）：老数据是空串，field() 会自动跳过 → 单语评价的文件不长出这两栏
       field("原文", item.original);
       field("原文语言", item.originalLanguage);
+      /*
+       * v39 的任课老师（**公开实名**，与案例的 `SiteCase.teacher` 同一套口径）。
+       *
+       * ⚠️ **写在所有字段的最后**，位置是安全的：正文 / 原文是多段，它们各自被**后面那个
+       * `####` 字段标题**收尾（`原文` 后面是 `原文语言`、`原文语言` 后面是这一栏），
+       * 因此这一栏放在最后不会把任何一段正文算到自己头上 ——
+       * 这与 `cases.md` 那边（正文挂在最后一个条目上）**恰好相反**，别照抄案例那边的结论。
+       */
+      field("任课老师", item.teacher);
       return { heading: `### ${item.author}`, preserveHead: false, blocks };
     }),
   };
@@ -1491,6 +1508,11 @@ export type SiteCore = {
        */
       original: string;
       originalLanguage: string;
+      /**
+       * v39 的任课老师：同样是**公开实名**（与 `SiteCase.teacher` 同一套口径），
+       * 内容文件里写得出来（`#### 任课老师:`）—— 而 `realName` 依旧不出现。
+       */
+      teacher: string;
     }>;
   };
   featured: FeaturedContent;
@@ -1863,6 +1885,8 @@ function readReviews(page: PageBlock | undefined): ReviewsContent {
       // v37 的原文与原文语言（**公开内容**）：老文件没有这两栏 → 空串 = 单语评价
       original: field("原文").trim(),
       originalLanguage: field("原文语言").trim(),
+      // v39 的任课老师（**公开实名**，与案例同一套口径）：老文件没有这一栏 → 空串
+      teacher: field("任课老师").trim(),
     };
   });
 
@@ -1888,6 +1912,7 @@ function toReviewsCore(content: ReviewsContent): SiteCore["reviews"] {
       description: item.description,
       original: item.original,
       originalLanguage: item.originalLanguage,
+      teacher: item.teacher,
     })),
   };
 }

@@ -197,6 +197,8 @@ export default function AdminContentPage() {
           // v37 的原文与原文语言：新条目从空串起步 = 单语评价（要双语就自己填原文）
           original: "",
           originalLanguage: "",
+          // v39 的任课老师：新条目也从空串起步（前台那一行不渲染）
+          teacher: "",
           realName: "",
         },
       ],
@@ -799,6 +801,21 @@ export default function AdminContentPage() {
                           onChange={(event) =>
                             updateReview(index, { originalLanguage: event.target.value })
                           }
+                          disabled={!canWrite}
+                        />
+                      </div>
+                      {/*
+                        v39：**任课老师**（公开实名，显示在评价卡片右下角）。
+                        机构答「**评价卡片也加**」—— 与上面学生案例那一格**同一套口径**；
+                        与下面的「真实姓名（只在后台显示）」**恰好相反**：
+                        老师名字本来就挂在教师页上（公开），学生 / 家长的实名只在后台。
+                      */}
+                      <div className="mt-3">
+                        <TextField
+                          label="任课老师"
+                          hint="显示在评价卡片右下角的小字「任课老师：陈林维祎」。**留空则这一行不显示**（不会留下半截「任课老师：」）"
+                          value={item.teacher}
+                          onChange={(event) => updateReview(index, { teacher: event.target.value })}
                           disabled={!canWrite}
                         />
                       </div>

@@ -241,6 +241,18 @@ export default function CasesPage() {
                           {item.description !== "" && (
                             <span className="mt-1 block text-ink-400">{item.description}</span>
                           )}
+                          {/*
+                            任课老师（v39）：机构答「**评价卡片也加**」—— 与学生案例卡片
+                            同一套口径（v38），显示在卡片**右下角**的小字。
+                            放成署名那一行**之后单独一行、右对齐**：既不挤乱署名 / 科目 / 补充，
+                            又正好落在卡片底部右下角（figcaption 是这张卡片的最后一块）。
+                            **空串时整行不渲染** —— 不留「任课老师：」这种半截文案。
+                          */}
+                          {item.teacher !== "" && (
+                            <p className="mt-2 text-right text-xs text-ink-400">
+                              任课老师：{item.teacher}
+                            </p>
+                          )}
                         </figcaption>
                       </figure>
                     ))}

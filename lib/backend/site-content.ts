@@ -205,6 +205,12 @@ function reviewsFromContent(): SiteReviewsPage {
         original: item.original,
         originalLanguage: item.originalLanguage,
         /*
+         * `teacher`（v39 的任课老师）**内容文件里有**（`#### 任课老师:`）——
+         * 它也是**公开内容**（要显示在评价卡片右下角，与案例的 `SiteCase.teacher`
+         * 同一套口径）。老文件缺这一栏时读到空串 = 还没填，前台那一行不渲染（**不猜**）。
+         */
+        teacher: item.teacher,
+        /*
          * `realName` **内容文件里没有**（它是内部实名，`reviews.md` 是仓库里的文件、
          * 会跟着公开仓库 / Pages 一起公开 —— 见 `SiteReview.realName` 的说明）。
          * 因此这里补空串：导入老文件、空库初始化、CI 的模版模式都照常工作，
@@ -267,20 +273,20 @@ export function reviewsPageSkeleton(): SiteReviewsPage {
 }
 
 /**
- * 一份评价块的**归一**：每一条都带上 `realName`（v36 的内部实名）与
- * `original` / `originalLanguage`（v37 的公开原文与原文语言）。
+ * 一份评价块的**归一**：每一条都带上 `realName`（v36 的内部实名）、
+ * `original` / `originalLanguage`（v37 的公开原文与原文语言）与 `teacher`（v39 的公开任课老师）。
  *
  * 与分区表 / 网站内容块的收尾归一同一套理由：**声称的版本号不是证据** ——
- * 一份"自称 v37"却缺 `realName` 或 `original` 的文件（手改过的导出、半份恢复、
- * 老版本导出的 JSON）照样会出现，读的时候 `item.realName.trim()` 就是一次
- * TypeError（整块读不出来）。
+ * 一份"自称 v39"却缺某个键的文件（手改过的导出、半份恢复、老版本导出的 JSON）
+ * 照样会出现，读的时候 `item.realName.trim()` 就是一次 TypeError（整块读不出来）。
  *
- * 补的是**空串**（不猜）：实名是**人的事实**，系统推不出来 —— 与迁移那一步同一条纪律；
+ * 补的是**空串**（不猜）：实名 / 老师都是**人的事实**，系统推不出来 —— 与迁移那一步同一条纪律；
  * `original` 空串的语义正好是**单语评价**（前台不显示切换按钮），`originalLanguage`
- * 空串时前缀退化成「（原文）」。非字符串（`null` / 数字 / 对象）也一并按空串处理：
- * 它们在页面与导出里只会渲染成 "null" 这种一看就是坏数据的东西。
+ * 空串时前缀退化成「（原文）」，`teacher` 空串时前台**那一行整行不渲染**。
+ * 非字符串（`null` / 数字 / 对象）也一并按空串处理：它们在页面与导出里只会渲染成
+ * "null" 这种一看就是坏数据的东西。
  *
- * 迁移（v35 → v36、v36 → v37）与**收尾归一**共用这一个函数，因此"迁移补的"与
+ * 迁移（v35 → v36、v36 → v37、v38 → v39）与**收尾归一**共用这一个函数，因此"迁移补的"与
  * "兜底补的"不可能是两种形状（两处各写一遍迟早会漂）。
  */
 export function normalizeReviewsPage(page: SiteReviewsPage): SiteReviewsPage {
@@ -291,6 +297,7 @@ export function normalizeReviewsPage(page: SiteReviewsPage): SiteReviewsPage {
       ...item,
       original: typeof item.original === "string" ? item.original : "",
       originalLanguage: typeof item.originalLanguage === "string" ? item.originalLanguage : "",
+      teacher: typeof item.teacher === "string" ? item.teacher : "",
       realName: typeof item.realName === "string" ? item.realName : "",
     })),
   };
@@ -596,6 +603,10 @@ export function validateFaqPage(page: SiteFaqPage): string[] {
  * `original` 空串 = 单语评价（前台不显示切换按钮），`originalLanguage` 空串 = 前缀
  * 退化成「（原文）」—— 两者都是合法状态；内容上对不对（这段文字真的是法语吗）
  * 系统无从判断。写入闸 trim 前后空白、缺键保留库里那一份。
+ *
+ * ⚠️ **`teacher`（v39 的公开任课老师）同样不在这里判**：空串＝还没填（前台那一行整行不渲染），
+ * 非空时也不该判断一个老师名字"对不对"（老师会离职、也可能是外部合作老师）。
+ * 写入闸 trim、缺键保留 —— 与案例的 `SiteCase.teacher` 同一套。
  *
  * 与「不能为空」「不能重名」那些内容规则同一套判据的**只有 `quote` / `author` / `group` / `id`
  * 四条**，不新增必填。

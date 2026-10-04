@@ -714,6 +714,12 @@ export function backendReviewsContent(snapshot: PublicSite): ReviewsContent {
      */
     original: text(item.original),
     originalLanguage: text(item.originalLanguage),
+    /*
+     * v39 的任课老师（**公开实名**）：公开快照里就有，前台评价卡片右下角按它渲染。
+     * 空串时页面**整行不渲染**（不留「任课老师：」半截文案）。
+     * ⚠️ 与 `realName`（学生 / 家长的内部实名）相反：那一栏公开快照里根本没有，这里也搬不到。
+     */
+    teacher: text(item.teacher),
   }));
 
   return {

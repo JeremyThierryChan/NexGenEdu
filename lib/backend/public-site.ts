@@ -175,6 +175,12 @@ function publicTeacher(teacher: Teacher): PublicTeacher {
  * 因此这两个字段**必须**进公开快照 —— 与 `realName`（内部实名，**绝不能**写进来）
  * 恰好相反。这一对"公开 / 内部"的对照就是本文件存在意义的样板：
  * 不是"新增字段一律不给"，而是"**逐条问它会不会显示在网站上**"。
+ *
+ * ## v39：`teacher` 也是**公开内容**（与 v38 的 `SiteCase.teacher` 同一套）
+ *
+ * 评价卡片右下角要显示「任课老师：…」。⚠️ 它与同一条记录上的 `realName` **恰好相反**：
+ * 一个是老师的公开实名（机构要求显示），一个是学生 / 家长的内部实名（绝不能出门）——
+ * 这一行加错方向就是一次真实的泄漏，因此它与 `realName` 谁进谁不进，必须一眼能看出来。
  */
 function publicReviewsPage(page: SiteReviewsPage): PublicReviewsPage {
   return {
@@ -189,6 +195,7 @@ function publicReviewsPage(page: SiteReviewsPage): PublicReviewsPage {
       description: item.description,
       original: item.original,
       originalLanguage: item.originalLanguage,
+      teacher: item.teacher,
     })),
   };
 }

@@ -359,7 +359,7 @@ v39/v40 又把真源反成"课程库 → 内容文件"，因此"网站来的"不
 同一套整块覆盖口径 —— 再开一个方法只会多一处"权限要对齐"的地方。
 （v36 另开了 `site.getBlocks` 作为它的**读法**，理由见上：公开快照里没有实名。）
 `reviewsPage` 的形状是 `{ heading: { eyebrow, title, description }, notice, reviews: SiteReview[] }`，
-`SiteReview = { id, group, quote, author, subject, description, original, originalLanguage, realName }`
+`SiteReview = { id, group, quote, author, subject, description, original, originalLanguage, teacher, realName }`
 （`id` 留空＝新增，由服务端 `nextId("review")` 生成）。
 
 | 字段 | 口径 |
@@ -372,13 +372,23 @@ v39/v40 又把真源反成"课程库 → 内容文件"，因此"网站来的"不
 | `description` | 补充说明；可空 |
 | `original` | **公开字段**（v37）：这条评价的**原文**（例如外籍学生的法语原文）。**空串＝单语评价** —— 前台不显示切换按钮、也不加任何前缀。非空时前台卡片默认显示 `quote`（前缀「（译文）」）、点「看原文」切到它（前缀「（{originalLanguage}原文）」）。**进** `site.publicContent` 的公开快照，**写进** `data/site/reviews.md`（`#### 原文:`）与其生成物 `reviews.ts`。可选；写入时 trim 前后空白；**交上来的条目里没有这个键时保留库里那一份**（与 `realName` 同一套三态） |
 | `originalLanguage` | **公开字段**（v37）：`original` 是哪一种语言，例如 `法语`。**空串**时前台前缀退化成「（原文）」（不写语言也不至于空着）。同样进公开快照与内容文件（`#### 原文语言:`）。可选；trim；缺键保留 |
+| `teacher` | **公开字段**（v39）：这条评价的**任课老师**，例：`陈林维祎`。前台显示在评价卡片**右下角**小字「任课老师：{teacher}」。**进** `site.publicContent` 的公开快照（`publicReviewsPage()` 逐条显式搬）、**写进** `data/site/reviews.md`（`#### 任课老师:`，写在所有字段**之后**）。与案例的 `SiteCase.teacher` **同一套公开口径**。**可选**：空串＝还没填，**前台那一行整行不渲染**；trim；缺键保留 |
 | `realName` | **内部字段**（v36）：这条评价的**真实姓名**。只在后台与库里出现 —— **不进** `site.publicContent` 的公开快照（`PublicSiteReview` 类型里根本没有这个键）、**不写进** `data/site/reviews.md` 与其生成物 `reviews.ts`（那两个文件在仓库里 = 会跟着公开）、前台源码里也不出现。**可选**（空串＝还没填，不设必填）；写入时 trim 前后空白；**交上来的条目里没有这个键时保留库里那一份**（老前端不该把已录的实名清掉），显式交空串才是"清掉" |
 
-> ⚠️ **`original` / `originalLanguage` 与 `realName` 恰好相反**，这条对照值得记住：
+> ⚠️ **同一个 `SiteReview` 上，「任课老师」与「真实姓名」是两件相反的事**（最容易"统一"错的一对）：
+>
+> | | `teacher`（v39） | `realName`（v36） |
+> | --- | --- | --- |
+> | 是谁的名字 | **老师**（本就公开在教师页上） | **学生 / 家长** |
+> | 机构要求 | 「显示实名」（与案例卡片同一口径） | 「后台实名、前台匿名」 |
+> | 公开快照 / 内容文件 | **有** | **没有** |
+> | 前台源码 | 用它（卡片右下角） | 不出现 |
+>
+> 而 `original` / `originalLanguage`（v37）**同属公开那一侧**。一条通用判据：
 > 判断一个新字段该怎么处理，先问**"它会不会显示在网站上"** ——
-> 会（原文）→ 进公开快照、进内容文件、前台源码里用它；
-> 不会（实名）→ 三处都不出现，各有一条反向断言盯着
-> （见 `scripts/check.mts` §58 与 §59）。
+> 会（原文 / 老师）→ 进公开快照、进内容文件、前台源码里用它；
+> 不会（学生 / 家长的实名）→ 三处都不出现，有反向断言盯着
+> （见 `scripts/check.mts` §58 / §59 / §60 / §61）。
 
 | 校验（`validateReviewsPage`） | 为什么 |
 | --- | --- |

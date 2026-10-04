@@ -300,6 +300,14 @@ export type ReviewItem = {
   original: string;
   /** 原文语言（v37，可空），例如「法语」；空串时前台前缀退化成「（原文）」。 */
   originalLanguage: string;
+  /**
+   * 任课老师（v39，可空）：评价卡片**右下角**的小字「任课老师：{teacher}」。
+   *
+   * 空串＝还没填 → **整行不渲染**（不留「任课老师：」这种半截文案）。
+   * ⚠️ 与案例的 `CaseItem.teacher`（v38）是**同一套公开口径**；
+   * 与同一张记录上的 `realName`（内部实名，绝不上网站）**是两件相反的事** —— 别合。
+   */
+  teacher: string;
 };
 
 export type ReviewsContent = PageIntro & {

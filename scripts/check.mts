@@ -12061,6 +12061,8 @@ console.log("\n=== 43. 网站内容导出：库 → data/site/*.md（npm run sit
     // v37 的原文与原文语言（**公开内容**）：这条自检评价是单语的，两栏都是空串
     original: "",
     originalLanguage: "",
+    // v39 的任课老师（**公开实名**）：给它一个值，导出 → 回读那一遍就顺带验了来回一致
+    teacher: "自检·任课老师",
   });
   const featuredFirst = mutated.siteContent.featuredPage.courses[0]!;
   featuredFirst.body = "自检改过的特色课程介绍。";
@@ -13997,8 +13999,8 @@ console.log(
   eq("迁移**没有**推学生的 version（乐观锁不被一次数据升级搅动）",
     migratedSourceStudents.map((student) => student.version),
     legacyVersions);
-  eq("迁移后版本就是当前版本（38）", (await api.exportDatabase()).version, CURRENT_VERSION);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 38);
+  eq("迁移后版本就是当前版本（39）", (await api.exportDatabase()).version, CURRENT_VERSION);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 39);
   ok("版本记录里写着这一步（`VERSION_NOTES[33]`，后来的人不用翻提交历史）",
     (VERSION_NOTES[33] ?? "").includes("来源"));
   ok("而且说明了它与 `Teacher.source` 不是一回事（免得后来的人把两件事混成一件）",
@@ -16739,8 +16741,8 @@ console.log(
    * 「刚被别人改过，请刷新」—— 而其实谁都没改。
    */
   eq("迁移**没有**推课节的 version（乐观锁不被一次数据升级搅动）", migratedLessons.map((l) => l.version), legacyLessonVersions);
-  eq("迁移后版本就是当前版本（38）", (await api.exportDatabase()).version, CURRENT_VERSION);
-  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 38);
+  eq("迁移后版本就是当前版本（39）", (await api.exportDatabase()).version, CURRENT_VERSION);
+  eq("而且等于 `CURRENT_VERSION`", CURRENT_VERSION, 39);
   ok("版本记录里写着这一步（`VERSION_NOTES[34]`，后来的人不用翻提交历史）", (VERSION_NOTES[34] ?? "").includes("串身份"));
   ok("而且写明了「老课不猜串」这条口径", (VERSION_NOTES[34] ?? "").includes("不猜"));
   ok("而且写明了「过去的课是账」这条边界", (VERSION_NOTES[34] ?? "").includes("已排（还没上）"));
@@ -17375,8 +17377,8 @@ console.log("\n=== 57. 学生案例折叠 + 家长与学生评价进库（v35）
       heading: { eyebrow: "自检", title: "自检评价", description: "说明" },
       notice: "评价均经家长/学生同意后发布（自检）。",
       reviews: [
-        { id: "", group: "家长", quote: "自检用的一条家长评价。", author: "自检·初二 李同学家长", subject: "数学", description: "", original: "", originalLanguage: "", realName: "" },
-        { id: "", group: "学生", quote: "自检用的一条学生评价。", author: "自检·初三 王同学", subject: "", description: "自检备注", original: "", originalLanguage: "", realName: "" },
+        { id: "", group: "家长", quote: "自检用的一条家长评价。", author: "自检·初二 李同学家长", subject: "数学", description: "", original: "", originalLanguage: "", teacher: "", realName: "" },
+        { id: "", group: "学生", quote: "自检用的一条学生评价。", author: "自检·初三 王同学", subject: "", description: "自检备注", original: "", originalLanguage: "", teacher: "", realName: "" },
       ],
     },
   });
@@ -17460,9 +17462,10 @@ console.log("\n=== 57. 学生案例折叠 + 家长与学生评价进库（v35）
       author: item.author,
       subject: item.subject,
       description: item.description,
-      // v37 起回读也带这两栏（**公开内容**；§57 的夹具是单语，因此都是空串）
+      // v37 / v39 起回读也带这几栏（**公开内容**；§57 的夹具这些栏都是空串）
       original: item.original,
       originalLanguage: item.originalLanguage,
+      teacher: item.teacher,
     })));
   const again57 = exportSiteMarkdown({ site: snapshot57, existing: exported57.files });
   eq("反复导出收敛（第二次不再改动 reviews.md）",
@@ -17596,8 +17599,8 @@ console.log("\n=== 58. 评价的「真实姓名」：只在后台与库里，绝
   /**
    * 去掉**后续版本新加的字段**之后的形状（用来比"其它字段一个字没动"）。
    *
-   * `realName` 是 v36 加的、`original` / `originalLanguage` 是 v37 加的 —— 夹具是
-   * v35 的形状，这三个键本来就没有；迁移之后它们会被补上空串。
+   * `realName` 是 v36 加的、`original` / `originalLanguage` 是 v37 加的、
+   * `teacher` 是 v39 加的 —— 夹具是 v35 的形状，这些键本来就没有；迁移之后会被补上空串。
    * 因此比对时**两边都先把它们摘掉**，验的是"评价原有的那六个字段逐字节没动"。
    */
   const withoutAddedFields58 = (item: Record<string, unknown>): string => {
@@ -17605,6 +17608,8 @@ console.log("\n=== 58. 评价的「真实姓名」：只在后台与库里，绝
     delete copy.realName;
     delete copy.original;
     delete copy.originalLanguage;
+    // v39 的任课老师也是"夹具里没有、迁移会补"的那一类（v35 的库当然没有它）
+    delete copy.teacher;
     return JSON.stringify(copy);
   };
   const legacyReviewShapes = legacyRealDb.siteContent.reviewsPage.reviews.map(withoutAddedFields58);
@@ -17635,8 +17640,8 @@ console.log("\n=== 58. 评价的「真实姓名」：只在后台与库里，绝
       heading: { eyebrow: "自检", title: "自检实名", description: "说明" },
       notice: "评价均经同意后发布（自检）。",
       reviews: [
-        { id: "rev-a", group: "学生", quote: "第一条自检评价。", author: "王同学", subject: "高中物理", description: "", original: "", originalLanguage: "", realName: `  ${realNames58[0]}  ` },
-        { id: "rev-b", group: "家长", quote: "第二条自检评价。", author: "王同学家长", subject: "高中物理", description: "", original: "", originalLanguage: "", realName: realNames58[1]! },
+        { id: "rev-a", group: "学生", quote: "第一条自检评价。", author: "王同学", subject: "高中物理", description: "", original: "", originalLanguage: "", teacher: "", realName: `  ${realNames58[0]}  ` },
+        { id: "rev-b", group: "家长", quote: "第二条自检评价。", author: "王同学家长", subject: "高中物理", description: "", original: "", originalLanguage: "", teacher: "", realName: realNames58[1]! },
       ],
     },
   });
@@ -17859,6 +17864,8 @@ console.log("\n=== 59. 双语评价卡片：原文是公开内容、可复用的
     const copy = { ...item };
     delete copy.original;
     delete copy.originalLanguage;
+    // v39 的任课老师也是夹具里没有、迁移（v38 → v39）会补的那一个
+    delete copy.teacher;
     return JSON.stringify(copy);
   };
   const legacyShapes59 = legacyV36.siteContent.reviewsPage.reviews.map(withoutOriginal59);
@@ -17939,6 +17946,8 @@ console.log("\n=== 59. 双语评价卡片：原文是公开内容、可复用的
           description: "自检",
           original: `  ${original59}  `,
           originalLanguage: "  法语  ",
+          // v39 的任课老师：§59 不验它，给空串（= 前台那一行不渲染）
+          teacher: "",
           realName: "",
         },
       ],
@@ -18411,6 +18420,303 @@ console.log("\n=== 60. 学生案例的「任课老师」：卡片右下角的**�
   eq("收尾：库回到示例数据",
     (await api.exportDatabase()).siteContent.casesPage.cases.length,
     seedDb.siteContent.casesPage.cases.length);
+}
+
+
+console.log("\n=== 61. 评价卡片也加「任课老师」：与案例同一套**公开实名**（v39 / E27 续）===");
+
+/*
+ * 机构答：
+ *
+ * > 「**评价卡片也加**」任课老师 —— 上一版（v38）只加在**学生案例卡片**上。
+ *
+ * 机构另确认「**保持实名**」：评价正文里「陈老师」那个呼称**一个字不动**
+ * （这一节也不碰评价正文的任何字）。
+ *
+ * ## 这一节与 §60 是一对：`teacher` 是一个口径，`realName` 是它的反面
+ *
+ *   - `SiteCase.teacher`（v38）与 `SiteReview.teacher`（v39）：**同一套公开口径**
+ *     （老师名字，机构要求「显示实名」）→ 进公开快照、进内容文件、前台源码里用它；
+ *   - `SiteReview.realName`（v36）：**学生 / 家长**的内部实名 → 三处都不能出现（§58 守着）。
+ *
+ * 同一个 `SiteReview` 上现在**同时**有 `teacher` 与 `realName`，这是最容易被"统一"错的地方，
+ * 因此这一节有一条断言专门把三者摆在一起比（§八）。
+ *
+ * ## 与前几节的一处**关键不同**（内容文件的位置约定）
+ *
+ * `cases.md` 那边正文挂在**最后一个** `####` 条目上，所以任课老师必须写在正文**之前**；
+ * `reviews.md` 这边正文 / 原文是多段、各自被**后面那个字段标题**收尾，
+ * 因此任课老师写在**所有字段之后**才是安全的（不会吞掉正文）。两处结论相反，别照抄。
+ *
+ * 这一节守八件事：
+ *
+ *   ① **迁移**（v38 → v39）：老评价一律补**空串**（不猜），别的字段与别的表一个字不动；
+ *   ② **保存 / 读回**：trim、缺键保留、显式空串才是清掉；**同一条记录上的 `realName` 不受影响**；
+ *   ③ **公开快照里有 `teacher`**（它是公开的）；
+ *   ④ **导出的 `reviews.md` 里有 `#### 任课老师:`**，且**不吞正文**（多段原文照样读得回）；
+ *   ⑤ **导入缺这一栏的旧文件仍能工作**（读成空串）；
+ *   ⑥ **为空时不渲染**（源码级守卫）；评价卡片的这一行在 `figcaption`（卡片底部）、右对齐；
+ *   ⑦ 后台**每条评价**也多了一格（与案例那格并存）；⑧ 三人对照：
+ *      **案例 teacher / 评价 teacher 同属公开，`realName` 仍是内部**（反向：三处不出现）。
+ */
+{
+  const root61 = new URL("../", import.meta.url);
+  const read61 = (file: string): string => readFileSync(new URL(file, root61), "utf8");
+  const strip61 = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const hasOwn61 = (value: object, key: string): boolean =>
+    Object.prototype.hasOwnProperty.call(value, key);
+
+  __useStoreForTesting(memory);
+  await api.importDatabase(serializeDatabase(seedDb));
+
+  /* ── ① 迁移：v38 的老评价补空串、别的字段与别的表一个字没动 ─────────────── */
+  const legacyV38 = JSON.parse(serializeDatabase(seedDb)) as Record<string, unknown> & {
+    siteContent: { reviewsPage: { reviews: Array<Record<string, unknown>> } };
+    version: number;
+  };
+  legacyV38.version = 38;
+  for (const item of legacyV38.siteContent.reviewsPage.reviews) delete item.teacher;
+  const legacyReviews61 = legacyV38.siteContent.reviewsPage.reviews;
+  /** 去掉 v39 新加的那个键之后的形状（用来比"其它字段一个字没动"）。 */
+  const withoutTeacher61 = (item: Record<string, unknown>): string => {
+    const copy = { ...item };
+    delete copy.teacher;
+    return JSON.stringify(copy);
+  };
+  const legacyShapes61 = legacyReviews61.map(withoutTeacher61);
+  const canonical61 = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical61).join(",")}]`;
+    if (value !== null && typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+        a.localeCompare(b),
+      );
+      return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical61(item)}`).join(",")}}`;
+    }
+    return JSON.stringify(value) ?? "null";
+  };
+  ok("夹具确实是「评价里没有 teacher 这个键的 v38 库」",
+    legacyV38.version === 38 &&
+      legacyReviews61.length > 0 &&
+      legacyShapes61.every((text) => !text.includes("teacher")));
+
+  const upgraded61 = await api.importDatabase(JSON.stringify(legacyV38));
+  eq("v38 的老库能升级导入", upgraded61.ok, true);
+  const after61 = await api.exportDatabase();
+  eq("迁移后版本号就是当前版本", after61.version, CURRENT_VERSION);
+  eq("v38 → v39 给每条老评价补上空串（一条不落）",
+    after61.siteContent.reviewsPage.reviews.map((item) => item.teacher),
+    legacyShapes61.map(() => ""));
+  ok("迁移**不猜**任课老师：没有哪条老评价被填上一个「看起来像真的」的老师",
+    after61.siteContent.reviewsPage.reviews.every((item) => item.teacher === ""));
+  eq("评价原有的字段逐字节没动（迁移不是「顺手改评价」）",
+    after61.siteContent.reviewsPage.reviews.map((item) =>
+      withoutTeacher61(item as unknown as Record<string, unknown>)),
+    legacyShapes61);
+  const afterRaw61 = JSON.parse(serializeDatabase(after61)) as Record<string, unknown>;
+  const changedTables61 = [
+    ...new Set([...Object.keys(legacyV38), ...Object.keys(afterRaw61)]),
+  ].filter(
+    (key) =>
+      key !== "siteContent" &&
+      key !== "version" &&
+      // `logs` / `updatedAt` 是 `importDatabase` 这个动作自己记的，不是迁移改的业务数据
+      key !== "logs" &&
+      key !== "updatedAt" &&
+      canonical61(legacyV38[key]) !== canonical61(afterRaw61[key]),
+  );
+  eq("别的表一个字没动（评价**没有记录级 `version`**，这一步也不推任何 `version`）",
+    changedTables61, []);
+  ok("v39 确实没有给评价加记录级 `version`（补的是一个空串字段，不是乐观锁）",
+    after61.siteContent.reviewsPage.reviews.every((item) => !("version" in item)));
+  ok("`VERSION_NOTES[39]` 写着这一步，并把「与案例同一套公开口径 / 与 realName 相反」写清了",
+    (VERSION_NOTES[39] ?? "").includes("任课老师") &&
+      (VERSION_NOTES[39] ?? "").includes("公开实名") &&
+      (VERSION_NOTES[39] ?? "").includes("realName") &&
+      (VERSION_NOTES[39] ?? "").includes("一律补空串"));
+
+  /* ── ② 保存 / 读回一致（trim；缺键保留；显式空串才是清掉；realName 不受影响） ── */
+  const probeRealName61 = "自检·实名丙";
+  const savedReview61 = await api.site.saveBlocks({
+    reviewsPage: {
+      heading: { eyebrow: "自检", title: "自检评价（任课老师）", description: "自检" },
+      notice: "自检用，不发布。",
+      reviews: [
+        {
+          id: "rev-a",
+          group: "学生",
+          quote: "自检用的一条评价正文。",
+          author: "自检·王同学",
+          subject: "数学",
+          description: "自检",
+          original: "",
+          originalLanguage: "",
+          teacher: "  陈林维祎  ",
+          realName: probeRealName61,
+        },
+      ],
+    },
+  });
+  eq("保存时 `teacher` 前后空白被 trim 掉（与其它字段同一套）",
+    savedReview61.reviewsPage.reviews.map((item) => item.teacher), ["陈林维祎"]);
+  eq("同一条记录上的 `realName`（内部实名）照旧存得进去、没被这一版搅乱",
+    savedReview61.reviewsPage.reviews.map((item) => item.realName), [probeRealName61]);
+  const blocks61 = await api.site.getBlocks();
+  eq("内部读法（`site.getBlocks`）把任课老师读得回来",
+    blocks61.reviewsPage.reviews.map((item) => item.teacher), ["陈林维祎"]);
+  const keptReview61 = await api.site.saveBlocks({
+    reviewsPage: {
+      ...blocks61.reviewsPage,
+      reviews: blocks61.reviewsPage.reviews.map((item) => {
+        const copy = { ...item } as Record<string, unknown>;
+        delete copy.teacher; // 老前端 / 老脚本交上来的条目**根本没有这个键**
+        return copy as never;
+      }),
+    },
+  });
+  eq("条目里没有这个键时保留库里那一份（老前端不该把已录的任课老师清掉）",
+    keptReview61.reviewsPage.reviews.map((item) => item.teacher), ["陈林维祎"]);
+  eq("而且**没有顺手把 `realName` 也弄丢**（两个字段各判各的三态）",
+    keptReview61.reviewsPage.reviews.map((item) => item.realName), [probeRealName61]);
+  const clearedReview61 = await api.site.saveBlocks({
+    reviewsPage: {
+      ...blocks61.reviewsPage,
+      reviews: blocks61.reviewsPage.reviews.map((item) => ({ ...item, teacher: "" })),
+    },
+  });
+  eq("**显式**交空串才是「清掉」（两个方向都要能用）",
+    clearedReview61.reviewsPage.reviews.map((item) => item.teacher), [""]);
+  // 放回任课老师（也放回库里那一条的实名），后面几条公开 / 导出断言才有意义
+  await api.site.saveBlocks({ reviewsPage: blocks61.reviewsPage });
+
+  /* ── ③ 公开快照里有 `teacher`（**公开实名**） ──────────────────────────── */
+  const public61 = await api.site.publicContent();
+  const publicReviews61 = public61.siteContent.reviewsPage.reviews;
+  eq("公开快照里每条评价带着 `teacher`（它是公开的）",
+    publicReviews61.map((item) => item.teacher), ["陈林维祎"]);
+  ok("整份公开快照的 JSON 里有这个老师名字（老师名字本来就公开在教师页上）",
+    JSON.stringify(public61).includes("陈林维祎"));
+
+  /* ── ④ 导出：`reviews.md` 里有这一栏，且**不吞正文** ───────────────────── */
+  const exportFiles61 = {} as Record<SiteExportFile, string>;
+  for (const name of SITE_EXPORT_FILES) exportFiles61[name] = read61(`data/site/${name}.md`);
+  const built61 = buildPublicSite(await api.exportDatabase());
+  const exported61 = exportSiteMarkdown({ site: built61, existing: exportFiles61 });
+  const exportedReviews61 = exported61.files.reviews;
+  ok("导出的 reviews.md 里有 `#### 任课老师: 陈林维祎`（**公开实名，写得出来也必须写得出来**）",
+    exportedReviews61.includes("#### 任课老师: 陈林维祎"));
+  ok("导出把任课老师写在**所有字段之后**（写在这里不会吞掉多段正文 / 原文）",
+    exportedReviews61.lastIndexOf("#### 任课老师:") >
+      exportedReviews61.lastIndexOf("#### 补充:"));
+  eq("导出 → 回读：任课老师与正文都逐字节回来（正文没被算成老师那一栏的）",
+    readSiteCore(exported61.files).reviews.reviews.map((item) => [item.teacher, item.quote]),
+    [["陈林维祎", "自检用的一条评价正文。"]]);
+  const again61 = exportSiteMarkdown({ site: built61, existing: exported61.files });
+  eq("反复导出收敛（第二次不再改动 reviews.md）",
+    again61.changed.filter((name) => name === "reviews"), []);
+  const diskReviews61 = read61("data/site/reviews.md");
+  ok("仓库里那份 `data/site/reviews.md` 里**有**这一栏（真数据：五条评价各一行）",
+    (diskReviews61.match(/^#### 任课老师: 陈林维祎$/gm) ?? []).length === 5);
+  ok("生成物 `data/site/reviews.ts` 里也有（前台不连后端时读的就是它）",
+    read61("data/site/reviews.ts").includes("任课老师: 陈林维祎"));
+  ok("**并列的反向断言**：导出的 reviews.md 里一个实名都没有（`realName` / 「真实姓名」）",
+    !exportedReviews61.includes("realName") && !exportedReviews61.includes("真实姓名"));
+  ok("仓库里那份 reviews.md 与生成物也没有（老师公开、学生实名内部，这一对没被写反）",
+    !diskReviews61.includes("realName") &&
+      !diskReviews61.includes("真实姓名") &&
+      !read61("data/site/reviews.ts").includes("realName") &&
+      !read61("data/site/reviews.ts").includes("真实姓名"));
+
+  /* ── ⑤ 导入缺这一栏的旧文件仍能工作（读成空串 = 前台那一行不渲染） ─────── */
+  const oldFile61 = [
+    "# 自检 · 老内容文件",
+    "",
+    "## 页面: 家长与学生评价",
+    "",
+    "---",
+    "eyebrow: 自检",
+    "title: 自检",
+    "description: 自检",
+    "notice: 自检",
+    "---",
+    "",
+    "### 自检·老评价",
+    "",
+    "#### 分组: 学生",
+    "",
+    "#### 正文: 老文件里的一条评价（没有任课老师这一栏）。",
+    "",
+  ].join("\n");
+  const readOld61 = readSiteCore({ ...exported61.files, reviews: oldFile61 });
+  eq("导入缺这一栏的旧文件仍然工作：`teacher` 读成空串（不猜老师）",
+    readOld61.reviews.reviews.map((item) => [item.author, item.teacher]),
+    [["自检·老评价", ""]]);
+  ok("内容文件建库（`siteContentFromContent`）也读得到这一栏（真数据五条都有）",
+    siteContentFromContent().reviewsPage.reviews.every((item) => item.teacher !== ""));
+
+  /* ── ⑥ 前台：为空时**整行不渲染**；评价卡片里在 figcaption、右对齐 ───────── */
+  const casesCode61 = strip61(read61("app/(site)/cases/page.tsx"));
+  const figcaption61 = casesCode61.slice(
+    casesCode61.indexOf("<figcaption"),
+    casesCode61.indexOf("</figcaption>"),
+  );
+  ok("评价卡片（`figcaption` = 卡片底部）里有「任课老师：」这行小字",
+    figcaption61.includes("任课老师："));
+  ok("**为空时整行不渲染**（`item.teacher !== \"\"` 守卫 —— 不留半截「任课老师：」）",
+    figcaption61.includes('item.teacher !== "" && ('));
+  ok("右对齐 = 卡片右下角（`text-right`）", figcaption61.includes("text-right"));
+  ok("**两张卡片**都有这一行（案例 v38 + 评价 v39 用的是同一套写法）",
+    (casesCode61.match(/item\.teacher !== "" && \(/g) ?? []).length === 2);
+  ok("署名 / 科目 / 补充那几行一个字没动（`item.author` / `item.subject` / `item.description` 照旧）",
+    casesCode61.includes("item.author") &&
+      casesCode61.includes("item.subject") &&
+      casesCode61.includes("item.description"));
+  ok("**双语切换逻辑没被动**（照旧用 `<ReviewQuote>` + `original` / `originalLanguage`）",
+    casesCode61.includes("<ReviewQuote") &&
+      casesCode61.includes("original={item.original}") &&
+      casesCode61.includes("originalLanguage={item.originalLanguage}"));
+  ok("分组顺序也没被动（「学生评价在前」的口径照旧只在 `REVIEW_GROUPS` 一处）",
+    casesCode61.includes("REVIEW_GROUPS.map("));
+  ok("评价取数那一层（`backendReviewsContent`）搬的是公开的那一份（`teacher` 有、`realName` 没有）",
+    strip61(read61("lib/site/backend-source.ts")).includes("item.teacher") &&
+      !strip61(read61("lib/site/backend-source.ts")).includes("realName"));
+
+  /* ── ⑦ 后台：每条评价也多了一格（与案例那格并存） ───────────────────────── */
+  const contentCode61 = strip61(read61("app/admin/(dashboard)/content/page.tsx"));
+  ok("后台「任课老师」这一格在**案例与评价**两处都在（各自绑定各自的 update）",
+    (contentCode61.match(/label="任课老师"/g) ?? []).length === 2 &&
+      contentCode61.includes("updateCase(item.id, { teacher:") &&
+      contentCode61.includes("updateReview(index, { teacher:"));
+  ok("两处提示语都写明**留空则这一行不显示**",
+    (contentCode61.match(/留空则这一行不显示/g) ?? []).length === 2);
+  ok("v36 的「真实姓名（只在后台显示）」那一格一个字没动（§58 的口径照旧）",
+    contentCode61.includes('label="真实姓名（只在后台显示）"') &&
+      contentCode61.includes("updateReview(index, { realName:"));
+
+  /* ── ⑧ 三人对照：两个 teacher 同属公开口径，`realName` 仍是内部 ─────────── */
+  eq("**同一份公开快照**：评价带 `teacher` 键、**不带** `realName` 键；案例也带 `teacher`",
+    [
+      publicReviews61.map((item) => hasOwn61(item, "teacher")),
+      publicReviews61.map((item) => hasOwn61(item, "realName")),
+      public61.siteContent.casesPage.cases.map((item) => hasOwn61(item, "teacher")),
+      public61.siteContent.casesPage.cases.every((item) => item.teacher !== ""),
+    ],
+    [[true], [false], [true, true, true], true]);
+  ok("公开白名单里**逐条显式搬**了评价的 `teacher`（与 `original` / `originalLanguage` 同一行区域）",
+    read61("lib/backend/public-site.ts").includes("teacher: item.teacher,"));
+  ok("而 `PublicSiteReview` 依旧是 `Omit<SiteReview, \"realName\">`（类型上就写不出实名）",
+    read61("lib/backend/public-site.ts").includes('Omit<SiteReview, "realName">'));
+  ok("`VERSION_NOTES[38]`（案例）与 `VERSION_NOTES[39]`（评价）都点明「与 realName 相反」"
+      + "—— 两个 teacher 是一个口径，实名是它的反面",
+    (VERSION_NOTES[38] ?? "").includes("公开实名") &&
+      (VERSION_NOTES[39] ?? "").includes("公开实名") &&
+      (VERSION_NOTES[39] ?? "").includes("SiteCase.teacher"));
+
+  /* 收尾：把这一节造的东西摘掉（自检的库不该留下"自检"评价）。 */
+  await api.importDatabase(serializeDatabase(seedDb));
+  eq("收尾：库回到示例数据",
+    (await api.exportDatabase()).siteContent.reviewsPage.reviews.length,
+    seedDb.siteContent.reviewsPage.reviews.length);
 }
 
 
