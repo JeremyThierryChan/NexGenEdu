@@ -17322,22 +17322,37 @@ console.log("\n=== 57. 学生案例折叠 + 家长与学生评价进库（v35）
     migratedReviews.heading.title !== "" && migratedReviews.notice !== "");
   eq("迁移**不灌**内容文件里那几条体例示例（条目为空）", migratedReviews.reviews.length, 0);
   /*
-   * ⚠️ 内容文件里**允许一条示例都没有** —— 这一点是这一版踩出来的：
-   * `data/site/reviews.md` 是**"后台为准"的镜像**（`npm run site:export` 由后台写出），
-   * 机构一条真实评价都还没录时，导出会把"只写在文件里的体例示例"冲掉。那**不是缺陷**：
-   * 页面显示「评价整理中」（§57 有专门的空态断言）。而**手工把示例写回文件**又会与后台不一致
-   * （`site:export -- --check` 会红）—— 所以"示例常驻内容文件"这个前提本身站不住。
-   * 现在改成：**有示例就验它不是空口（下面两条 `every` 断言对空数组自然为真），没有就显式接受**。
+   * ⚠️ **真实评价 ≠ 体例示例** —— 这一版之前，下面三条断的是"内容文件里只有体例示例"，
+   * 于是机构录进第一条**真实**评价时全红。根因是把两种东西当成了一种：
+   *
+   *   - `data/site/reviews.md` 是**"后台为准"的镜像**（`npm run site:export` 由后台写出）：
+   *     机构录了几条就是几条，一条都还没录时是空的（页面显示「评价整理中」）。
+   *     因此**条数不写死**，"正好一条真实评价"同样是合法状态 ——
+   *     旧断言 `length === 0 || length >= 2` 恰好把这一种判红。
+   *   - **分数在真实评价里是正常的**：机构给的案例原话里就有「78 分 → 95 分」，
+   *     旧断言 `!/\d+\s*分/` 拿"示例不许写成真事"的尺子去卡真实评价，方向就错了。
+   *
+   * 现在按"空态合法 + 真实评价是常态"重写，关注点拆成三条：
+   *   1. **每条评价都要完整**（正文与署名都非空）：这是页面上"一张只有署名的空卡片 /
+   *      一句没有人说过的话"的防线；空数组也通过（机构可能还没录），条数不写死。
+   *   2. **自称示例的条目必须自曝身份**：只挑那些自己就带「示例」二字的条目（署名或正文里），
+   *      它们必须显式写着「体例示例」——一眼看不出是样例就等于编造。
+   *      **不**要求真实评价长这样（真实评价本来就不该带「示例」）。
+   *   3. **体例示例里不写具体提分数字**：同样只看自称示例的条目，真实评价不受这条约束。
    */
   ok(
-    "内容文件要么有体例示例、要么就是空的（两种都是合法状态；空＝机构还没录真实评价）",
-    templateReviews.reviews.length === 0 || templateReviews.reviews.length >= 2,
+    "内容文件里的每一条评价都是完整的（正文与署名都非空；空数组也通过 —— 评价条数不写死）",
+    templateReviews.reviews.every((item) => item.quote.trim() !== "" && item.author.trim() !== ""),
     `当前 ${String(templateReviews.reviews.length)} 条`,
   );
-  ok("体例示例自己标着「体例示例」（一眼看不出是样例就等于编造）",
-    templateReviews.reviews.every((item) => item.author.includes("体例示例") && item.quote.includes("体例示例")));
-  ok("体例示例里没有具体的提分数字（不许写成像是真实发生过）",
-    templateReviews.reviews.every((item) => !/\d+\s*分/.test(item.quote)));
+  const sampleReviews = templateReviews.reviews.filter(
+    (item) => item.author.includes("示例") || item.quote.includes("示例"),
+  );
+  ok("自称示例的条目必须显式写着「体例示例」（一眼看不出是样例就等于编造；真实评价不受这条要求）",
+    sampleReviews.every((item) => item.author.includes("体例示例") && item.quote.includes("体例示例")),
+    `自称示例的条目 ${String(sampleReviews.length)} 条`);
+  ok("体例示例里没有具体的提分数字（不许写成像是真实发生过；**真实评价可以有分数**）",
+    sampleReviews.every((item) => !/\d+\s*分/.test(item.quote)));
 
   /* ── ② 保存：能改、只动自己那一块、id 由服务端生成 ────────────────────── */
   const beforeReviews = await api.exportDatabase();
